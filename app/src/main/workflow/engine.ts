@@ -27,6 +27,7 @@ import { mergeSkillCatalog } from '../skills/catalog'
 import { classifyIntent } from './intent'
 import { decideAuto } from './permission'
 import { ToolStreamParser, type ParsedTool } from './toolStream'
+import { ReasoningStripper, stripReasoningTags } from './reasoning'
 
 /** Sink the engine emits events to (wired to IPC in workflow-ipc.ts). */
 export type EventSink = (event: WorkflowEvent) => void
@@ -90,6 +91,21 @@ CRITICAL — how to deliver code (this is the rule models most often break):
 - Reserve plain Markdown fences for tiny inline illustration only (a shell one-liner or a
   1–2 line snippet) that is NOT meant to become a file.
 
+HOW YOU COMMUNICATE (this is what separates a polished assistant from a noisy one):
+- Do your thinking SILENTLY. What you show the user is only the result: a brief note
+  on what you're doing, the tool block(s), and a short confirmation. Reason as much as
+  you need to internally — but the visible reply is the clean, finished answer, not a
+  transcript of how you got there.
+- NEVER narrate your private deliberation or self-corrections out loud. Lines like
+  "Wait — let me reconsider…", "Ugh, that won't work…", "Actually, I'll rewrite…",
+  "Hmm, the rings need centering…", "No — better to…" are internal thoughts. Keep them
+  to yourself and show only the decision you landed on.
+- If you change your mind, just emit the corrected result. Do not show the wrong
+  attempt first and then walk it back — the user only wants the final version.
+- No filler, no thinking-out-loud, no meta-commentary about your own process. State
+  conclusions, not the path you took to reach them. Write the way Claude Code does:
+  calm, terse, and final.
+
 Be concise, correct, and grounded in the provided project context.`
 
 /**
@@ -108,7 +124,9 @@ In Cowork mode you:
 
 If the user wants you to actually read their project, edit files, run commands, or build and preview something in a folder, tell them to switch to "Code" mode using the Cowork/Code toggle by the message box — that's where you act on a project.
 
-Be warm, concise, and genuinely helpful. Use Markdown for structure and keep every code block correct and runnable.`
+Be warm, concise, and genuinely helpful. Use Markdown for structure and keep every code block correct and runnable.
+
+Think before you write, but keep that thinking to yourself: reply with the clean, final answer only. Do not narrate your private reasoning or self-corrections ("Wait…", "Actually, let me redo that…", "Hmm, no…") — just give the polished result, the way a sharp senior colleague would.`
 
 /**
  * A directive appended to the system prompt reflecting the composer's reasoning
@@ -121,14 +139,16 @@ function effortDirective(effort: ReasoningEffort): string {
       return '\n\nReasoning effort: LOW. Answer directly and briefly. Do not over-explain.'
     case 'high':
       return (
-        '\n\nReasoning effort: HIGH. Think through the problem step by step before you act. ' +
-        'Understand what the user actually wants first, then respond.'
+        '\n\nReasoning effort: HIGH. Think carefully before you answer — understand what the ' +
+        'user actually wants first — but keep that reasoning to yourself. The reply is the clean, ' +
+        'final result, not a play-by-play of your thinking.'
       )
     case 'max':
       return (
-        '\n\nReasoning effort: MAXIMUM. Deliberate thoroughly and methodically. Work the problem ' +
-        'in clear, ordered steps, consider edge cases, and verify your reasoning before answering. ' +
-        'Do not skip steps.'
+        '\n\nReasoning effort: MAXIMUM. Deliberate thoroughly and PRIVATELY: consider edge cases ' +
+        'and verify your approach before you commit to it. Then show only the polished result — ' +
+        'never your step-by-step scratchpad, dead ends, or self-corrections. More effort means ' +
+        'more careful thinking, not more words on screen.'
       )
     default:
       return ''
@@ -139,7 +159,7 @@ function effortDirective(effort: ReasoningEffort): string {
  * A directive appended to the system prompt reflecting the *intent* of the turn,
  * so the model's behavior matches what the user actually wants:
  * - `chat` → converse; never scan the project or propose tools for small talk.
- * - `question` → answer, reasoning step by step; only act if explicitly asked.
+ * - `question` → answer directly with the conclusion, thinking privately; only act if explicitly asked.
  * - `edit` → act like Claude Code: one short sentence, then IMMEDIATELY emit the
  *   write_file block(s) — never end on a promise with no tool. Keeps builds moving
  *   instead of stalling on an "I'll create…" intro.
@@ -155,9 +175,9 @@ function intentDirective(kind: IntentKind): string {
       )
     case 'question':
       return (
-        '\n\nThe user is asking a question. Answer it directly and clearly, reasoning step by step ' +
-        'where that helps. Propose a file edit or command ONLY if the user is explicitly asking you ' +
-        'to change something.'
+        '\n\nThe user is asking a question. Work it out privately, then answer directly and ' +
+        'clearly with the conclusion — do not narrate your reasoning or think out loud. Propose a ' +
+        'file edit or command ONLY if the user is explicitly asking you to change something.'
       )
     case 'edit':
       return (
@@ -499,18 +519,21 @@ export async function runWorkflow(
       const outbound: ChatMessage[] = [{ role: 'system', content: system }, ...messages]
 
       const parser = new ToolStreamParser()
+      const think = new ReasoningStripper()
       await provider.streamCompletion(
         settings.modelId,
         outbound,
         (chunk) => {
           if (!chunk.delta) return
           const prose = parser.push(chunk.delta)
-          if (prose) emit({ type: 'delta', runId, text: prose })
+          if (!prose) return
+          const shown = think.push(prose)
+          if (shown) emit({ type: 'delta', runId, text: shown })
         },
         controller.signal
       )
       if (controller.signal.aborted) return
-      const tail = parser.flush()
+      const tail = think.push(parser.flush()) + think.flush()
       if (tail) emit({ type: 'delta', runId, text: tail })
 
       // Cowork never executes tools or records memory: the parser runs only as a
@@ -736,6 +759,7 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     // raw text (prose + blocks) so the assistant turn can be replayed verbatim,
     // and the prose alone so we can detect a raw-code dump (see the nudge below).
     const parser = new ToolStreamParser()
+    const think = new ReasoningStripper()
     let raw = ''
     let proseText = ''
     await provider.streamCompletion(
@@ -745,19 +769,25 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
         if (!chunk.delta) return
         raw += chunk.delta
         const prose = parser.push(chunk.delta)
-        if (prose) {
-          proseText += prose
-          emit({ type: 'delta', runId, text: prose })
+        if (!prose) return
+        const shown = think.push(prose)
+        if (shown) {
+          proseText += shown
+          emit({ type: 'delta', runId, text: shown })
         }
       },
       signal
     )
     if (signal.aborted) return report
-    const tail = parser.flush()
+    const tail = think.push(parser.flush()) + think.flush()
     if (tail) {
       proseText += tail
       emit({ type: 'delta', runId, text: tail })
     }
+    // Some models inline their chain-of-thought as `<think>…</think>` in the
+    // content channel; it's stripped from the shown prose above. Strip it from the
+    // verbatim turn too, so a stray trace never re-primes the model on the next step.
+    raw = stripReasoningTags(raw)
     // The last non-empty prose is the agent's conclusion — its report to the lead.
     if (proseText.trim()) report = proseText.trim()
 
