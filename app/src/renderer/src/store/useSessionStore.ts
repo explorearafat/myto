@@ -140,6 +140,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   remove: async (id) => {
+    // Stop that chat's background run first: the row is about to disappear, and a
+    // run left pointing at it would keep working with no way to reach it.
+    useChatStore.getState().cancelSession(id)
     await window.sylor.sessions.remove(id)
     if (get().activeSessionId === id) {
       // The open session was deleted: reopen the next most-recent, or start fresh.

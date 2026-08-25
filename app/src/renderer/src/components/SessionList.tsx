@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useSessionStore } from '../store/useSessionStore'
+import { useChatStore } from '../store/useChatStore'
 
 /**
  * Sessions flyout (Phase 5): a sidebar overlay listing past sessions newest-first.
@@ -14,6 +15,8 @@ export function SessionList() {
   const rename = useSessionStore((s) => s.rename)
   const remove = useSessionStore((s) => s.remove)
   const setListOpen = useSessionStore((s) => s.setListOpen)
+  // Sessions whose run is still going (possibly off-screen) — see ConversationRail.
+  const liveSessionIds = useChatStore((s) => s.liveSessionIds)
 
   const [renaming, setRenaming] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -83,6 +86,7 @@ export function SessionList() {
             sessions.map((s) => {
               const isActive = s.id === activeSessionId
               const isRenaming = renaming === s.id
+              const isRunning = liveSessionIds.includes(s.id)
               return (
                 <div
                   key={s.id}
@@ -113,8 +117,10 @@ export function SessionList() {
                       <div className={'truncate text-[12px] font-medium ' + (isActive ? 'text-primary' : 'text-text')}>
                         {s.title}
                       </div>
-                      <div className="text-[10px] text-muted">
-                        {s.messageCount} message{s.messageCount === 1 ? '' : 's'} · {relativeTime(s.updatedAt)}
+                      <div className={'text-[10px] ' + (isRunning ? 'text-primary' : 'text-muted')}>
+                        {isRunning
+                          ? 'Working…'
+                          : `${s.messageCount} message${s.messageCount === 1 ? '' : 's'} · ${relativeTime(s.updatedAt)}`}
                       </div>
                     </button>
                   )}

@@ -274,6 +274,14 @@ export interface ChatState {
   sessionId: string | null
   /** Project the active session is filed under (drives per-project instructions). */
   projectId: string | null
+  /**
+   * Ids of every session with a run still in flight — including runs owned by
+   * conversations that are NOT on screen. A reactive mirror of the module-level
+   * {@link liveRuns} map, which React can't subscribe to. Without it, background
+   * runs were invisible: opening a New Chat mid-task left no trace of the old one
+   * anywhere in the UI, so a run that was still going looked paused or lost.
+   */
+  liveSessionIds: string[]
 
   /**
    * Send a user turn and start a workflow run. No-op while already running or
@@ -287,6 +295,13 @@ export interface ChatState {
   cancel: () => void
   /** Clear the whole conversation (cancels any active run first). */
   clear: () => void
+  /**
+   * Cancel the background run owned by `sessionId`, whichever conversation is on
+   * screen. Used before deleting a chat: otherwise its run kept going against a
+   * row that no longer exists — still spending tokens and still writing files —
+   * with nowhere left in the UI to stop it. A no-op when that session has no run.
+   */
+  cancelSession: (sessionId: string) => void
   /**
    * Toggle a local like/dislike reaction on a message. Clicking the same value
    * again clears it. Local-only (persisted for reload, never transmitted).
@@ -480,6 +495,19 @@ function projectLiveRun(
  * that session — when the user switches away (background processing).
  */
 export const useChatStore = create<ChatState>((set, get) => {
+  /**
+   * Publish the current {@link liveRuns} keys to `liveSessionIds` so the rail can
+   * badge chats that are still working. Called at every point the map is mutated.
+   * Bails when the key list is unchanged, so this never triggers a re-render on
+   * its own (it runs on the same paths as run start/finish, which are frequent).
+   */
+  const syncLiveSessions = (): void => {
+    const next = [...liveRuns.keys()]
+    const prev = get().liveSessionIds
+    if (prev.length === next.length && next.every((id, i) => prev[i] === id)) return
+    set({ liveSessionIds: next })
+  }
+
   /**
    * Launch a workflow run that streams into the assistant message `assistantId`,
    * feeding the engine `history`. Shared by `send` (fresh user turn) and
@@ -761,6 +789,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           flush()
           run.disposer() // detach the listener (cancel is a no-op post-completion)
           if (ownerSessionId) liveRuns.delete(ownerSessionId)
+          syncLiveSessions()
           if (ownerSessionId) {
             window.sylor.sessions.appendMessage(ownerSessionId, {
               id: assistantId,
@@ -791,6 +820,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           flush()
           run.disposer()
           if (ownerSessionId) liveRuns.delete(ownerSessionId)
+          syncLiveSessions()
           const content = run.content || '_Request failed._'
           run.content = content
           if (ownerSessionId) {
@@ -842,6 +872,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     )
     run.disposer = disposer
     if (ownerSessionId) liveRuns.set(ownerSessionId, run)
+    syncLiveSessions()
 
     set({ runId, disposer })
   }
@@ -869,6 +900,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     // run being cancelled is the on-screen one).
     ;(run?.disposer ?? get().disposer)?.()
     if (sessionId) liveRuns.delete(sessionId)
+    syncLiveSessions()
   }
 
   return {
@@ -884,6 +916,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     disposer: null,
     sessionId: null,
     projectId: null,
+    liveSessionIds: [],
 
     send: (text, attachments = []) => {
       const trimmed = text.trim()
@@ -1003,6 +1036,30 @@ export const useChatStore = create<ChatState>((set, get) => {
         runId: null,
         disposer: null
       })
+    },
+
+    cancelSession: (sessionId) => {
+      // Guarded on `has`: disposeRun falls back to the *visible* run when the id
+      // owns none, which would kill the wrong task. Only act on a real live run.
+      if (!liveRuns.has(sessionId)) return
+      disposeRun(sessionId)
+      // If that run was the one on screen, clear the transient view state too.
+      if (get().sessionId === sessionId) {
+        set((state) => ({
+          messages: state.messages.map((m) => (m.pending ? { ...m, pending: false } : m)),
+          tools: state.tools.map((t) =>
+            t.status === 'awaiting' ? { ...t, status: 'complete' } : t
+          ),
+          agents: state.agents.map((a) =>
+            a.status === 'running' ? { ...a, status: 'complete' } : a
+          ),
+          running: false,
+          status: null,
+          activity: [],
+          runId: null,
+          disposer: null
+        }))
+      }
     },
 
     setFeedback: (messageId, feedback) => {

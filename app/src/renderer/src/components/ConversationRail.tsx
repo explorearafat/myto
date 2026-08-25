@@ -3,6 +3,7 @@ import type { Project, SessionSummary } from '@shared/types'
 import { useAppStore } from '@renderer/store/useAppStore'
 import { useSessionStore } from '@renderer/store/useSessionStore'
 import { useProjectStore } from '@renderer/store/useProjectStore'
+import { useChatStore } from '@renderer/store/useChatStore'
 import { ProjectDialog } from '@renderer/components/ProjectDialog'
 import { SylorLogo } from '@renderer/components/SylorLogo'
 
@@ -95,6 +96,10 @@ export function ConversationRail() {
   const removeProject = useProjectStore((s) => s.remove)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const toggleRail = useAppStore((s) => s.toggleRail)
+  // Chats with a run still in flight — including ones started here and left behind
+  // by a New Chat. Badging them is what makes background work visible; without it
+  // a still-running task read as paused the moment it left the screen.
+  const liveSessionIds = useChatStore((s) => s.liveSessionIds)
 
   const [query, setQuery] = useState('')
   const [renaming, setRenaming] = useState<string | null>(null)
@@ -157,6 +162,7 @@ export function ConversationRail() {
   const renderRow = (s: SessionSummary): ReactNode => {
     const isActive = s.id === activeSessionId
     const isRenaming = renaming === s.id
+    const isRunning = liveSessionIds.includes(s.id)
     return (
       <div
         key={s.id}
@@ -180,14 +186,28 @@ export function ConversationRail() {
           />
         ) : (
           <button type="button" onClick={() => void open(s.id)} className="min-w-0 flex-1 text-left">
-            <div
-              className={
-                'truncate text-[12px] ' + (isActive ? 'font-medium text-primary' : 'text-text')
-              }
-            >
-              {s.title}
+            <div className="flex min-w-0 items-center gap-1.5">
+              {isRunning && (
+                <span
+                  title="Still working in this chat"
+                  aria-label="Still working in this chat"
+                  className="relative grid h-2 w-2 shrink-0 place-items-center"
+                >
+                  <span className="absolute h-2 w-2 animate-ping rounded-full bg-primary/60" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+                </span>
+              )}
+              <span
+                className={
+                  'truncate text-[12px] ' + (isActive ? 'font-medium text-primary' : 'text-text')
+                }
+              >
+                {s.title}
+              </span>
             </div>
-            <div className="text-[10px] text-muted">{relativeTime(s.updatedAt)}</div>
+            <div className={'text-[10px] ' + (isRunning ? 'text-primary' : 'text-muted')}>
+              {isRunning ? 'Working…' : relativeTime(s.updatedAt)}
+            </div>
           </button>
         )}
         {!isRenaming && (

@@ -172,5 +172,74 @@ describe('useChatStore assistant persistence', () => {
   })
 })
 
+/**
+ * Background runs must stay *visible* while they work.
+ *
+ * A run started in one chat keeps going when the user opens another (the store
+ * tracks runs by owner session, not by what's on screen) — but nothing in the UI
+ * said so, so opening a New Chat mid-task looked exactly like the old task had
+ * been paused or thrown away. `liveSessionIds` is the reactive mirror the rail
+ * reads to badge those chats.
+ */
+describe('useChatStore background run visibility', () => {
+  /** Start a run in `sessionId` and hand back its event sink. */
+  function startRunIn(sessionId: string, prompt = 'long task'): (e: WorkflowEvent) => void {
+    let captured: ((e: WorkflowEvent) => void) | null = null
+    const runMock = window.sylor.workflow.run as unknown as ReturnType<typeof vi.fn>
+    runMock.mockImplementationOnce((_input: unknown, cb: unknown) => {
+      captured = cb as (e: WorkflowEvent) => void
+      return () => {}
+    })
+    useChatStore.getState().applyLoaded(loadedSession(sessionId))
+    useChatStore.getState().send(prompt)
+    return captured!
+  }
+
+  it('still lists a run as live after a New Chat, and clears it on done', () => {
+    const emit = startRunIn('sess-bg-1')
+    const runId = useChatStore.getState().runId!
+    expect(useChatStore.getState().liveSessionIds).toContain('sess-bg-1')
+
+    // New Chat. The run must survive the switch and stay listed, while the fresh
+    // conversation itself reports idle.
+    useChatStore.getState().resetTo('sess-bg-2')
+    expect(useChatStore.getState().running).toBe(false)
+    expect(useChatStore.getState().liveSessionIds).toContain('sess-bg-1')
+
+    // It finishes in the background — the badge clears without the user going back.
+    emit({ type: 'done', runId })
+    expect(useChatStore.getState().liveSessionIds).not.toContain('sess-bg-1')
+  })
+
+  it('cancelSession stops only the named chat, leaving the on-screen run alone', () => {
+    // Two live runs: one in the chat about to be deleted, one currently visible.
+    startRunIn('sess-doomed')
+    startRunIn('sess-visible')
+    expect(useChatStore.getState().liveSessionIds).toEqual(
+      expect.arrayContaining(['sess-doomed', 'sess-visible'])
+    )
+    expect(useChatStore.getState().running).toBe(true)
+
+    useChatStore.getState().cancelSession('sess-doomed')
+
+    expect(useChatStore.getState().liveSessionIds).not.toContain('sess-doomed')
+    // The visible run is untouched — disposeRun's fallback must not have fired.
+    expect(useChatStore.getState().liveSessionIds).toContain('sess-visible')
+    expect(useChatStore.getState().running).toBe(true)
+  })
+
+  it('cancelSession is a no-op for a chat with no run', () => {
+    startRunIn('sess-solo')
+    expect(useChatStore.getState().running).toBe(true)
+
+    // The dangerous case: an id that owns nothing must not fall through to the
+    // visible run's disposer and kill the task the user is watching.
+    useChatStore.getState().cancelSession('sess-never-ran')
+
+    expect(useChatStore.getState().liveSessionIds).toContain('sess-solo')
+    expect(useChatStore.getState().running).toBe(true)
+  })
+})
+
 /** Comfortably exceeds useChatStore's DELTA_FLUSH_MS (66) so the flush timer fires. */
 const DELTA_FLUSH_INTERVAL_MS = 200
