@@ -192,14 +192,61 @@ export function deleteSession(id: string): void {
   getDb().prepare(`DELETE FROM sessions WHERE id = ?`).run(id)
 }
 
-/** The id of the most-recently-updated session for a project root, or null. */
+/**
+ * The session to reopen on startup for a project root, or null when there are
+ * none.
+ *
+ * Prefers the most-recently-updated session that actually has messages. A blank
+ * session — the one the New Chat button creates, then left unused — carries a
+ * fresh `updated_at` and would otherwise win, booting the user into an empty
+ * chat and making the work they left behind look deleted. Falls back to the
+ * newest session of any kind so a genuinely empty history still opens something.
+ */
 export function mostRecentSession(projectRoot: string): string | null {
-  const row = getDb()
+  const withMessages = getDb()
+    .prepare(
+      `SELECT s.id FROM sessions s
+       WHERE s.project_root = ?
+         AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)
+       ORDER BY s.updated_at DESC LIMIT 1`
+    )
+    .get(projectRoot) as { id: string } | undefined
+  if (withMessages) return withMessages.id
+
+  const newest = getDb()
     .prepare(
       `SELECT id FROM sessions WHERE project_root = ? ORDER BY updated_at DESC LIMIT 1`
     )
     .get(projectRoot) as { id: string } | undefined
-  return row?.id ?? null
+  return newest?.id ?? null
+}
+
+/** Shown on an assistant turn whose run never finished (see {@link reconcileInterruptedRuns}). */
+export const INTERRUPTED_NOTE =
+  'Interrupted — Sylor closed while this reply was still being written. Press Rewrite to run it again.'
+
+/**
+ * Tag assistant turns left empty by a run that never finished.
+ *
+ * Called once at startup, before any window exists — so no run can be in flight
+ * and every empty assistant row is, by definition, the residue of a task cut off
+ * by an app quit or crash. Untagged, such a row renders as a blank bubble that
+ * looks permanently stuck, and because the message action bar requires content
+ * or an error to show, it has no Rewrite button either: a dead end the user
+ * can't recover from. Writing the note both explains the gap and brings the
+ * Rewrite (resume) action back.
+ *
+ * Returns how many turns were tagged. Idempotent — `error IS NULL` skips rows
+ * already tagged or already carrying a real error.
+ */
+export function reconcileInterruptedRuns(): number {
+  const info = getDb()
+    .prepare(
+      `UPDATE messages SET error = ?
+       WHERE role = 'assistant' AND error IS NULL AND (content IS NULL OR content = '')`
+    )
+    .run(INTERRUPTED_NOTE)
+  return Number(info.changes ?? 0)
 }
 
 /** Bump a session's updated_at (called on every child write). */

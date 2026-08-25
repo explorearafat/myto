@@ -10,9 +10,11 @@ import {
   appendToolOp,
   createSession,
   deleteSession,
+  INTERRUPTED_NOTE,
   listSessions,
   loadSession,
   mostRecentSession,
+  reconcileInterruptedRuns,
   renameSession,
   resetMessageForRegenerate,
   searchSessions,
@@ -252,6 +254,53 @@ describe('sessions CRUD', () => {
     const b = createSession(ROOT, 'B', tick())
     expect(mostRecentSession(ROOT)).toBe(b.id)
     expect(mostRecentSession('/nothing/here')).toBeNull()
+  })
+
+  it('mostRecent skips a newer EMPTY session in favour of one with messages', () => {
+    // Regression: clicking New Chat creates a blank session with a fresh
+    // updated_at. Booting into it made the user's actual work look deleted.
+    const work = createSession(ROOT, 'Real work', tick())
+    appendMessage(work.id, { id: 'msg-1', role: 'user', content: 'build me a thing' }, tick())
+    const blank = createSession(ROOT, 'New session', tick())
+
+    expect(blank.updatedAt).toBeGreaterThan(work.updatedAt)
+    expect(mostRecentSession(ROOT)).toBe(work.id)
+  })
+})
+
+describe('reconcileInterruptedRuns', () => {
+  it('tags an assistant turn left empty by a killed run, and is idempotent', () => {
+    const s = createSession(ROOT, 'Interrupted', tick())
+    appendMessage(s.id, { id: 'msg-1', role: 'user', content: 'big task' }, tick())
+    // The up-front assistant row, still empty because the app died mid-run.
+    appendMessage(s.id, { id: 'msg-2', role: 'assistant', content: '' }, tick())
+
+    expect(reconcileInterruptedRuns()).toBe(1)
+
+    const loaded = loadSession(s.id)
+    expect(loaded?.messages[1].error).toBe(INTERRUPTED_NOTE)
+    // The user's prompt must be untouched.
+    expect(loaded?.messages[0].content).toBe('big task')
+    expect(loaded?.messages[0].error).toBeUndefined()
+
+    // Running again on the same DB tags nothing further.
+    expect(reconcileInterruptedRuns()).toBe(0)
+  })
+
+  it('leaves completed replies and real errors alone', () => {
+    const s = createSession(ROOT, 'Fine', tick())
+    appendMessage(s.id, { id: 'msg-1', role: 'assistant', content: 'a full answer' }, tick())
+    appendMessage(
+      s.id,
+      { id: 'msg-2', role: 'assistant', content: '', error: 'Provider refused' },
+      tick()
+    )
+
+    expect(reconcileInterruptedRuns()).toBe(0)
+
+    const loaded = loadSession(s.id)
+    expect(loaded?.messages[0].error).toBeUndefined()
+    expect(loaded?.messages[1].error).toBe('Provider refused')
   })
 })
 

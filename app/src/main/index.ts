@@ -17,6 +17,7 @@ import { stopPreview } from './preview/server'
 import { mcpManager } from './mcp/manager'
 import { contextManager } from './context/manager'
 import { closeDb, setDbPath } from './db/db'
+import { reconcileInterruptedRuns } from './db/sessions'
 import { getSettings } from './settings'
 
 /** Registers window-control IPC handlers used by the custom title bar. */
@@ -44,10 +45,48 @@ function registerWindowControls(): void {
   })
 }
 
+/*
+ * Single-instance lock.
+ *
+ * Without this, relaunching Sylor while it's already running starts a SECOND
+ * process that opens the same sqlite file and the same workspace. The two fight
+ * over the DB (the loser's writes hit SQLITE_BUSY and are swallowed by the IPC
+ * `safe()` wrapper), and the newcomer shows a fresh, empty chat while the real
+ * one — with the in-flight run — is still alive behind it. That reads exactly
+ * like "I reopened the app and my task/prompt vanished".
+ *
+ * The second instance exits immediately and hands focus to the original, so
+ * there is always exactly one owner of the DB and of any running task.
+ */
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    // A relaunch attempt: surface the existing window instead of opening a new app.
+    const [existing] = BrowserWindow.getAllWindows()
+    if (existing) {
+      if (existing.isMinimized()) existing.restore()
+      existing.show()
+      existing.focus()
+    }
+  })
+}
+
 app.whenReady().then(() => {
   // Inject the DB path here (not inside db.ts) so the DB layer stays electron-free
   // and unit-testable. Local-only, outside any OneDrive-synced project dir.
   setDbPath(join(app.getPath('userData'), 'sylor.db'))
+
+  // Tag any assistant turn left empty by a run that died with the previous
+  // process, so it explains itself and offers Rewrite instead of rendering as a
+  // blank, permanently-stuck bubble. Must run before the window loads a session.
+  try {
+    const tagged = reconcileInterruptedRuns()
+    if (tagged > 0) console.log(`[sylor] tagged ${tagged} interrupted assistant turn(s)`)
+  } catch (error) {
+    // Never let a startup housekeeping query block the app from opening.
+    console.error('[sylor] failed to reconcile interrupted runs:', error)
+  }
 
   // Restore the persisted working folder (requirement A) before any window or
   // subsystem reads the root, so the engine/preview/MCP/skills all start scoped
