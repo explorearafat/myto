@@ -1,10 +1,95 @@
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  renameSync,
+  copyFileSync,
+  openSync,
+  fsyncSync,
+  closeSync,
+  existsSync,
+  unlinkSync
+} from 'node:fs'
 import { dirname, join } from 'node:path'
 import { app } from 'electron'
 import { DEFAULT_PROVIDER_SETTINGS } from '../shared/defaults'
-import type { AuthSchema, ProviderKind, ProviderSettings, ReasoningEffort, Theme, WorkMode } from '../shared/types'
+import type {
+  AuthSchema,
+  ProviderKind,
+  ProviderSettings,
+  ReasoningEffort,
+  Theme,
+  WorkMode
+} from '../shared/types'
 function settingsPath(): string {
   return join(app.getPath('userData'), 'sylor-settings.json')
+}
+
+/**
+ * Crash-safe JSON persistence.
+ *
+ * A plain `writeFileSync` is NOT atomic: it truncates the target, then writes. If
+ * the process dies in that window — an Electron crash, a Task-Manager kill after
+ * the window went blank — the file is left empty or half-written. Every reader
+ * here is defensive (`catch → defaults`), so a truncated file silently degraded
+ * into "factory fresh": API key, model, and chosen folder all gone. That is the
+ * "restart erased everything" bug.
+ *
+ * The fix is write-temp → fsync → rename, plus a `.bak` of the last known-good
+ * file. `rename` is atomic on both Windows (MoveFileEx with REPLACE_EXISTING) and
+ * POSIX, so a reader sees either the whole old file or the whole new one — never a
+ * torn one. If the primary is somehow still unreadable, {@link readJsonFile} falls
+ * back to the backup before it gives up and returns defaults.
+ */
+function writeJsonAtomic(path: string, data: unknown): void {
+  mkdirSync(dirname(path), { recursive: true })
+  const tmp = `${path}.tmp`
+  const text = JSON.stringify(data, null, 2)
+  // Flush to the device before the rename, so a power loss can't leave a renamed
+  // but empty file (the rename can otherwise land before the data does).
+  const fd = openSync(tmp, 'w')
+  try {
+    writeFileSync(fd, text, 'utf-8')
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+  // Keep the previous good copy as the fallback, then swap the new one in.
+  try {
+    if (existsSync(path)) copyFileSync(path, `${path}.bak`)
+  } catch {
+    // A missing/locked backup must never block saving the real file.
+  }
+  renameSync(tmp, path)
+}
+
+/**
+ * Reads and parses a JSON file, transparently falling back to its `.bak` when the
+ * primary is missing, empty, or corrupt. Returns `undefined` only when neither
+ * copy is usable — the one case where callers should fall back to defaults.
+ */
+function readJsonFile<T>(path: string): T | undefined {
+  for (const candidate of [path, `${path}.bak`]) {
+    try {
+      const text = readFileSync(candidate, 'utf-8')
+      if (!text.trim()) continue
+      const parsed = JSON.parse(text) as T
+      // A recovered backup becomes the primary, so the next crash has a fresh
+      // fallback and the corrupt file stops being re-read.
+      if (candidate !== path) {
+        try {
+          writeJsonAtomic(path, parsed)
+          unlinkSync(`${path}.bak`)
+        } catch {
+          // Recovery is best-effort; we already have the value in hand.
+        }
+      }
+      return parsed
+    } catch {
+      // Try the backup next; if that also fails the caller uses defaults.
+    }
+  }
+  return undefined
 }
 
 const VALID_PROVIDERS: ProviderKind[] = ['ollama', 'gateway']
@@ -26,7 +111,9 @@ export function normalise(raw: unknown): ProviderSettings {
   const ui = (o.ui ?? {}) as Partial<ProviderSettings['ui']>
 
   const activeProvider =
-    o.activeProvider && VALID_PROVIDERS.includes(o.activeProvider) ? o.activeProvider : d.activeProvider
+    o.activeProvider && VALID_PROVIDERS.includes(o.activeProvider)
+      ? o.activeProvider
+      : d.activeProvider
   const authSchema =
     gateway.authSchema && VALID_SCHEMAS.includes(gateway.authSchema)
       ? gateway.authSchema
@@ -63,20 +150,15 @@ export function normalise(raw: unknown): ProviderSettings {
 let cache: ProviderSettings | null = null
 export function getSettings(): ProviderSettings {
   if (cache) return cache
-  try {
-    const text = readFileSync(settingsPath(), 'utf-8')
-    cache = normalise(JSON.parse(text))
-  } catch {
-    cache = normalise(undefined)
-  }
+  // `readJsonFile` already recovers from a torn primary via the `.bak`, so this
+  // only reaches `normalise(undefined)` on a genuine first launch.
+  cache = normalise(readJsonFile<unknown>(settingsPath()))
   return cache
 }
 
 export function saveSettings(settings: ProviderSettings): ProviderSettings {
   const normalised = normalise(settings)
-  const file = settingsPath()
-  mkdirSync(dirname(file), { recursive: true })
-  writeFileSync(file, JSON.stringify(normalised, null, 2), 'utf-8')
+  writeJsonAtomic(settingsPath(), normalised)
   cache = normalised
   return normalised
 }
@@ -117,25 +199,14 @@ function toStringSet(value: unknown): Set<string> {
 
 /** Reads an override file; a missing/garbage file yields empty sets (defensive). */
 function readOverrides(path: string): EnableOverrides {
-  try {
-    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as {
-      enabled?: unknown
-      disabled?: unknown
-    }
-    return { enabled: toStringSet(parsed.enabled), disabled: toStringSet(parsed.disabled) }
-  } catch {
-    return { enabled: new Set(), disabled: new Set() }
-  }
+  const parsed = readJsonFile<{ enabled?: unknown; disabled?: unknown }>(path)
+  if (!parsed) return { enabled: new Set(), disabled: new Set() }
+  return { enabled: toStringSet(parsed.enabled), disabled: toStringSet(parsed.disabled) }
 }
 
 /** Persists an override file as `{ "disabled": [...], "enabled": [...] }`. */
 function writeOverrides(path: string, o: EnableOverrides): void {
-  mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(
-    path,
-    JSON.stringify({ disabled: [...o.disabled], enabled: [...o.enabled] }, null, 2),
-    'utf-8'
-  )
+  writeJsonAtomic(path, { disabled: [...o.disabled], enabled: [...o.enabled] })
 }
 
 /** Resolves effective enabled state: an explicit override wins over the default. */

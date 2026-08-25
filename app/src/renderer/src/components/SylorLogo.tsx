@@ -38,6 +38,18 @@ interface SylorLogoProps {
   title?: string
 }
 
+/**
+ * The 48-grid was laid out so the bubbles (which reach x≈42.5, y≈5) fit; the body
+ * alone occupies only x:10–32, y:7–36, so its optical center is (21, 21.5) — up and
+ * to the left of the box center (24, 24). Rendering the bubble-less mark on the full
+ * grid therefore parks the octopus off-center inside its square, which is what made
+ * the title bar and chat avatar look misaligned against the "Sylor" text beside it.
+ * With bubbles hidden we tighten the viewBox onto the body's own center instead;
+ * with bubbles shown the full grid is still correct (they're part of the artwork).
+ */
+const BODY_ONLY_VIEWBOX = '6 6.5 30 30'
+const FULL_VIEWBOX = '0 0 48 48'
+
 export function SylorLogo({
   size = 24,
   showBubbles = true,
@@ -49,7 +61,7 @@ export function SylorLogo({
     <svg
       width={size}
       height={size}
-      viewBox="0 0 48 48"
+      viewBox={showBubbles ? FULL_VIEWBOX : BODY_ONLY_VIEWBOX}
       fill="none"
       role="img"
       aria-label={title}

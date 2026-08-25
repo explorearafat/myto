@@ -320,13 +320,31 @@ function StatusLine({
 
   const stage = status?.stage ?? 'understanding'
   const message = status?.message ?? 'Thinking…'
+  // While the engine is waiting out a retry backoff, the whole line drops to a
+  // low opacity (requirement: "retrying … low opacity text diye") and the phase
+  // icon stops pulsing — a quiet "holding, will resume" state rather than the
+  // active shimmer, so a stalled request reads as paused, not working.
+  const retrying = status?.retrying === true
 
   return (
-    <div className="mt-1.5 flex items-center gap-2 text-[12px]" aria-live="polite">
-      <span className="sylor-blink grid h-5 w-5 shrink-0 place-items-center rounded bg-primary/12 text-primary">
+    <div
+      className={`mt-1.5 flex items-center gap-2 text-[12px] transition-opacity ${
+        retrying ? 'opacity-45' : ''
+      }`}
+      aria-live="polite"
+    >
+      <span
+        className={`grid h-5 w-5 shrink-0 place-items-center rounded bg-primary/12 text-primary ${
+          retrying ? '' : 'sylor-blink'
+        }`}
+      >
         <StageIcon stage={stage} />
       </span>
-      <span className="sylor-thinking min-w-0 truncate font-medium">{message}</span>
+      <span
+        className={`min-w-0 truncate font-medium ${retrying ? 'text-muted' : 'sylor-thinking'}`}
+      >
+        {message}
+      </span>
       <span className="ml-0.5 flex shrink-0 items-center gap-1.5 text-[11px] text-muted">
         <span className="tabular-nums">{formatElapsed(elapsed)}</span>
         {tokens > 0 && (
@@ -639,12 +657,43 @@ function interleave(
   return out
 }
 
-/** Display metadata per subagent role (requirement B). */
-const ROLE_META: Record<AgentRole, { label: string; icon: string }> = {
+/**
+ * Display metadata per subagent role (requirement B). The orchestrator can spawn
+ * any role from the engine's extensible registry (backend, frontend, database,
+ * security, …), so this map is INCOMPLETE by design — a `Partial` keyed lookup
+ * that must go through {@link roleMeta}, never `ROLE_META[role]` directly. A raw
+ * index for an unregistered role returns `undefined`, and reading `.icon`/`.label`
+ * off it throws — with no error boundary that blanked the whole window mid-plan.
+ */
+const ROLE_META: Partial<Record<AgentRole, { label: string; icon: string }>> = {
   lead: { label: 'Lead', icon: '◆' },
   planner: { label: 'Planner', icon: '✐' },
   builder: { label: 'Builder', icon: '⚒' },
-  reviewer: { label: 'Reviewer', icon: '✓' }
+  reviewer: { label: 'Reviewer', icon: '✓' },
+  'project-analyst': { label: 'Analyst', icon: '🔍' },
+  frontend: { label: 'Frontend', icon: '🎨' },
+  backend: { label: 'Backend', icon: '⚙' },
+  database: { label: 'Database', icon: '🗄' },
+  security: { label: 'Security', icon: '🛡' },
+  research: { label: 'Researcher', icon: '📚' },
+  devops: { label: 'DevOps', icon: '🚀' },
+  testing: { label: 'Testing', icon: '🧪' },
+  docs: { label: 'Docs', icon: '📝' },
+  integration: { label: 'Integration', icon: '🔗' }
+}
+
+/**
+ * Total lookup for a role's UI metadata. Falls back to a title-cased label + a
+ * neutral dot for any role not in {@link ROLE_META}, so a newly-added specialist
+ * renders sensibly instead of crashing the renderer.
+ */
+function roleMeta(role: AgentRole): { label: string; icon: string } {
+  return (
+    ROLE_META[role] ?? {
+      label: role.charAt(0).toUpperCase() + role.slice(1).replace(/[-_]/g, ' '),
+      icon: '●'
+    }
+  )
 }
 
 /**
@@ -655,7 +704,7 @@ const ROLE_META: Record<AgentRole, { label: string; icon: string }> = {
  * visible "agents communicating": lead → task in, subagent → work + report out.
  */
 function AgentCard({ agent, tools }: { agent: AgentCardUI; tools: ToolCardUI[] }) {
-  const meta = ROLE_META[agent.role]
+  const meta = roleMeta(agent.role)
   const running = agent.status === 'running'
   const blocks = useMemo(
     () =>
@@ -976,14 +1025,7 @@ function UserMessage({ message, attachments }: MessageProps) {
  * An assistant turn: left-aligned with avatar, and a body that interleaves prose,
  * lead tool cards, and nested subagent cards (requirement B) in stream order.
  */
-function AssistantMessage({
-  message,
-  isActive,
-  status,
-  cards,
-  agents,
-  agentTools
-}: MessageProps) {
+function AssistantMessage({ message, isActive, status, cards, agents, agentTools }: MessageProps) {
   // Backstop: never show raw sylor-tool JSON if a fence leaked past the extractor.
   const displayContent = useMemo(
     () => message.content.replace(TOOL_FENCE_RE, '').trimEnd(),
@@ -1025,7 +1067,14 @@ function AssistantMessage({
     <div className="flex gap-3">
       <Avatar role="assistant" />
       <div className="min-w-0 flex-1">
-        <div className="mb-1 text-[11px] font-medium text-muted">Sylor</div>
+        {/* The name row is given the avatar's exact height (h-7) and centers its
+            text, so "Sylor" sits dead-center against the mark instead of riding
+            above it — and whatever comes next (the live status line on a fresh
+            turn, or the prose) starts cleanly below the avatar rather than
+            hanging off its bottom corner. */}
+        <div className="flex h-7 items-center text-[11px] font-medium leading-none text-muted">
+          Sylor
+        </div>
 
         {message.error && (
           <div className="mb-1.5 rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-300">
@@ -1055,9 +1104,7 @@ function AssistantMessage({
           </div>
         )}
 
-        {isActive && message.pending && (
-          <StatusLine status={status} tokens={tokenEstimate} />
-        )}
+        {isActive && message.pending && <StatusLine status={status} tokens={tokenEstimate} />}
 
         {!message.pending && (displayContent.length > 0 || message.error != null) && (
           <MessageActions message={message} />
@@ -1151,7 +1198,7 @@ function PermissionBar({
       </div>
       <div className="max-h-40 overflow-y-auto">
         {awaiting.map((card) => {
-          const role = card.agentRole ? ROLE_META[card.agentRole] : null
+          const role = card.agentRole ? roleMeta(card.agentRole) : null
           const icon =
             card.proposal.kind === 'write_file'
               ? '✎'

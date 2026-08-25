@@ -1,6 +1,25 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { useChatStore } from './useChatStore'
-import type { PersistedSession } from '@shared/types'
+import type { PersistedSession, WorkflowEvent } from '@shared/types'
+
+/** A freshly-loaded, empty session bound to `id` (sets the store's sessionId). */
+function loadedSession(id: string): PersistedSession {
+  return {
+    session: {
+      id,
+      title: 'S',
+      projectRoot: '/test',
+      projectId: null,
+      createdAt: 0,
+      updatedAt: 0,
+      messageCount: 0
+    },
+    messages: [],
+    tools: [],
+    terminal: [],
+    attachments: []
+  }
+}
 
 describe('useChatStore hydration', () => {
   it('reconciles id counters past the highest rehydrated msg/run id', () => {
@@ -63,3 +82,95 @@ describe('useChatStore hydration', () => {
     expect(runNum).toBeGreaterThan(3)
   })
 })
+
+/**
+ * Durability of the assistant turn (regression for "all data lost on reopen").
+ *
+ * Tool ops were always saved the instant each completed, but the assistant's
+ * prose was written only once, on `done`. A run interrupted before it finished —
+ * app reopened, new session started, crash — therefore lost the entire reply
+ * while its tool ops survived, so the reloaded session looked wiped. The fix
+ * persists the assistant row up-front and checkpoints the streaming prose.
+ */
+describe('useChatStore assistant persistence', () => {
+  it('persists the assistant row up-front, not only on done', () => {
+    useChatStore.getState().applyLoaded(loadedSession('sess-persist-1'))
+
+    const appendMessage = window.sylor.sessions.appendMessage as unknown as ReturnType<
+      typeof vi.fn
+    >
+    appendMessage.mockClear()
+
+    useChatStore.getState().send('hi')
+
+    // Both the user turn AND an assistant turn are persisted immediately — before
+    // any streaming or `done` — so an interruption can't orphan the reply.
+    const persisted = appendMessage.mock.calls.map((c) => c[1] as { id: string; role: string })
+    const assistantId = useChatStore.getState().messages.at(-1)!.id
+    expect(persisted.some((m) => m.role === 'user')).toBe(true)
+    expect(persisted.some((m) => m.role === 'assistant' && m.id === assistantId)).toBe(true)
+  })
+
+  it('checkpoints streamed prose before done, so an interrupted run keeps its reply', () => {
+    vi.useFakeTimers()
+    try {
+      let capturedOnEvent: ((e: WorkflowEvent) => void) | null = null
+      const runMock = window.sylor.workflow.run as unknown as ReturnType<typeof vi.fn>
+      runMock.mockImplementationOnce((_input: unknown, cb: unknown) => {
+        capturedOnEvent = cb as (e: WorkflowEvent) => void
+        return () => {}
+      })
+
+      useChatStore.getState().applyLoaded(loadedSession('sess-persist-2'))
+      useChatStore.getState().send('question')
+      const assistantId = useChatStore.getState().messages.at(-1)!.id
+
+      const appendMessage = window.sylor.sessions.appendMessage as unknown as ReturnType<
+        typeof vi.fn
+      >
+      appendMessage.mockClear()
+
+      // Stream prose, then let the flush timer fire — with NO `done` event, i.e.
+      // the run is interrupted. The prose must already be on disk by then.
+      capturedOnEvent!({ type: 'delta', runId: 'run-x', text: 'streamed answer' })
+      vi.advanceTimersByTime(DELTA_FLUSH_INTERVAL_MS)
+
+      const call = appendMessage.mock.calls.find(
+        (c) => (c[1] as { id: string }).id === assistantId
+      )
+      expect(call).toBeDefined()
+      expect((call?.[1] as { content: string }).content).toBe('streamed answer')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('persists the partial reply when the run is cancelled (Stop)', () => {
+    let capturedOnEvent: ((e: WorkflowEvent) => void) | null = null
+    const runMock = window.sylor.workflow.run as unknown as ReturnType<typeof vi.fn>
+    runMock.mockImplementationOnce((_input: unknown, cb: unknown) => {
+      capturedOnEvent = cb as (e: WorkflowEvent) => void
+      return () => {}
+    })
+
+    useChatStore.getState().applyLoaded(loadedSession('sess-persist-3'))
+    useChatStore.getState().send('question')
+    const assistantId = useChatStore.getState().messages.at(-1)!.id
+
+    const appendMessage = window.sylor.sessions.appendMessage as unknown as ReturnType<typeof vi.fn>
+    appendMessage.mockClear()
+
+    // A delta arrives but is still buffered (its flush timer hasn't fired) when the
+    // user hits Stop. The engine emits no `done` for a cancel, so disposeRun must
+    // fold the buffer in and save the partial reply itself.
+    capturedOnEvent!({ type: 'delta', runId: 'run-x', text: 'half-written' })
+    useChatStore.getState().cancel()
+
+    const call = appendMessage.mock.calls.find((c) => (c[1] as { id: string }).id === assistantId)
+    expect(call).toBeDefined()
+    expect((call?.[1] as { content: string }).content).toBe('half-written')
+  })
+})
+
+/** Comfortably exceeds useChatStore's DELTA_FLUSH_MS (66) so the flush timer fires. */
+const DELTA_FLUSH_INTERVAL_MS = 200

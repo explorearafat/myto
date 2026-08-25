@@ -22,6 +22,7 @@
  *    for the closing fence.
  *  - Malformed or unterminated blocks are dropped (with a warning), never thrown.
  */
+import { hasRole } from './orchestrator/roles'
 
 const OPEN_FENCE = '```sylor-tool'
 
@@ -32,7 +33,7 @@ export type ParsedTool =
   | { tool: 'remember'; note: string }
   | { tool: 'mcp_call'; server: string; name: string; arguments: Record<string, unknown> }
   | { tool: 'use_skill'; name: string }
-  | { tool: 'spawn_agent'; role: 'planner' | 'builder' | 'reviewer'; task: string }
+  | { tool: 'spawn_agent'; role: string; task: string }
 
 /**
  * How many leading chars of `buffer` are safe to emit as prose without risking
@@ -138,12 +139,16 @@ export function parseToolBlock(raw: string): ParsedTool | null {
     return null
   }
   if (rec.tool === 'spawn_agent') {
-    // Only these three roles can be delegated to; `lead` is the run itself and
-    // is never spawnable. Subagents cannot spawn further subagents — the engine
-    // simply never teaches them this block (nesting depth 1).
+    // Any role in the extensible registry can be delegated to (planner / builder /
+    // reviewer plus the domain specialists) — adding a specialist is a registry
+    // entry, not a change here. `lead` is the run itself and is never spawnable.
+    // Subagents cannot spawn further subagents — the engine simply never teaches
+    // them this block (nesting depth 1).
     const role = rec.role
     if (
-      (role === 'planner' || role === 'builder' || role === 'reviewer') &&
+      typeof role === 'string' &&
+      role !== 'lead' &&
+      hasRole(role) &&
       typeof rec.task === 'string' &&
       rec.task.trim()
     ) {

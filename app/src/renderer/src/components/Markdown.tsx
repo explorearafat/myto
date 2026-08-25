@@ -101,8 +101,8 @@ const components: Components = {
     const lang = langOf(src)
     const raw = hastText(src).replace(/\n$/, '')
     return (
-      <div className="my-3 overflow-hidden rounded-lg border border-border bg-[var(--hl-bg)]">
-        <div className="flex items-center justify-between border-b border-border bg-surface-2 px-3 py-1">
+      <div className="my-3 overflow-hidden rounded-lg border border-border/70">
+        <div className="flex items-center justify-between border-b border-border/70 px-3 py-1">
           <span className="font-mono text-[10px] uppercase tracking-wide text-muted">
             {lang || 'code'}
           </span>

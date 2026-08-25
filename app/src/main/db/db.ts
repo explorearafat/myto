@@ -56,6 +56,13 @@ export function getDb(): DatabaseSync {
   // OneDrive-synced home. Both are per-connection pragmas set on every open.
   handle.exec('PRAGMA foreign_keys = ON')
   handle.exec('PRAGMA journal_mode = WAL')
+  // Wait (up to 5s) for a lock instead of failing instantly with SQLITE_BUSY.
+  // The app has no single-instance lock, so a second launch (or the WAL
+  // checkpointer / OneDrive touching the file) can briefly hold the DB; without
+  // this, a contended write throws and the fire-and-forget `safe()` wrapper in
+  // the IPC layer swallows it — a silently dropped message/tool op. Retrying
+  // under the timeout keeps those persistence writes reliable.
+  handle.exec('PRAGMA busy_timeout = 5000')
   migrate(handle)
   db = handle
   return db

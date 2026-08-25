@@ -324,15 +324,164 @@ export type ToolResult = WriteFileResult | RunCommandResult | McpCallResult
  * The role an agent plays in a Code build (requirement B). `lead` is the
  * top-level orchestrator (the run itself); it delegates to `planner` (writes /
  * refines plan.md), `builder` (implements a slice), and `reviewer` (verifies)
- * subagents via a `spawn_agent` tool block. Subagents cannot spawn further
- * subagents (nesting depth 1).
+ * subagents via a `spawn_agent` tool block.
+ *
+ * The orchestrator (see `main/workflow/orchestrator/roles.ts`) adds a
+ * capability-based role registry — `frontend`, `backend`, `database`,
+ * `security`, `research`, `devops`, `testing`, `docs`, `integration`,
+ * `project-analyst`, … — so this is widened to any registry key while keeping
+ * the four historical values valid for persisted sessions and autocomplete.
  */
-export type AgentRole = 'lead' | 'planner' | 'builder' | 'reviewer'
+export type AgentRole = 'lead' | 'planner' | 'builder' | 'reviewer' | (string & {})
+
+// ── Orchestration data model (hierarchical multi-agent) ───────────────────
+//
+// These types are the cross-process contract for the orchestrator: task-graph
+// nodes, shared-context findings, and the typed agent-to-agent messages all
+// flow to the renderer over `WorkflowEvent`, so they live here (not in the
+// engine-only `orchestrator/` module). Engine-internal shapes (Capability,
+// AgentRoleDef) stay under `orchestrator/`.
+
+/**
+ * How much team the orchestrator assembles for a work turn. Decided by the
+ * complexity router (`orchestrator/complexity.ts`), heuristic-first:
+ *  - `simple`  → collapse to a single execution node (no planner LLM call).
+ *  - `medium`  → a small plan of a few specialists.
+ *  - `complex` → a multi-domain plan with dependencies + parallelism.
+ * Team size only — the plan → execute → verify → review gate always runs.
+ */
+export type Complexity = 'simple' | 'medium' | 'complex'
+
+/**
+ * Lifecycle of a {@link TaskNode} in the task graph. The scheduler moves a node
+ * pending → ready (deps met) → running → completed | failed; a failed node may
+ * go retrying → ready again (bounded), or blocked when a dependency failed, or
+ * cancelled when the run is aborted.
+ */
+export type TaskState =
+  | 'pending'
+  | 'ready'
+  | 'running'
+  | 'blocked'
+  | 'completed'
+  | 'failed'
+  | 'retrying'
+  | 'cancelled'
+
+/**
+ * One unit of work in the task graph (a DAG). Produced by the planner (or a
+ * single synthesized node for SIMPLE turns), executed by a scoped specialist
+ * agent of `role`. `dependsOn` references other node ids; the scheduler runs the
+ * ready set (all deps completed) in parallel.
+ */
+export interface TaskNode {
+  /** Stable id within the run (e.g. `t1`); referenced by `dependsOn`. */
+  id: string
+  /** Registry role that executes this node (validated against roles.ts). */
+  role: AgentRole
+  /** What this node must accomplish (the specialist's task brief). */
+  description: string
+  /** Ids of nodes that must complete before this one is ready. */
+  dependsOn: string[]
+  /** Current lifecycle state (drives scheduling + the UI task list). */
+  state: TaskState
+  /** How many times execution has been attempted (retry bookkeeping). */
+  attempts: number
+  /** Optional planner hint of files this node is expected to touch. */
+  filesHint?: string[]
+  /** The specialist's final report once `completed`. */
+  result?: string
+  /** Failure message once `failed`. */
+  error?: string
+}
+
+/**
+ * A fact discovered, decision made, or artifact produced by an agent, recorded
+ * on the shared-context blackboard. Downstream nodes receive a *scoped* digest
+ * (their task + upstream dependency findings only) so agents don't rediscover
+ * the same facts or drown in unrelated output.
+ */
+export interface Finding {
+  /** The agent that produced it (correlates with agent-start/agent-end). */
+  agentId: string
+  /** The task node this finding came out of. */
+  taskId: string
+  /** The producing agent's role. */
+  role: AgentRole
+  /** The fact / decision / artifact, in one or two sentences. */
+  detail: string
+  /** Files this finding touched or refers to (optional). */
+  files?: string[]
+}
+
+/** The kinds of typed agent-to-agent / agent-to-orchestrator control signals. */
+export type AgentMessageType =
+  | 'TASK_ASSIGNED'
+  | 'STARTED'
+  | 'FINDING'
+  | 'REQUEST_INFO'
+  | 'REQUEST_REVIEW'
+  | 'HANDOFF'
+  | 'BLOCKED'
+  | 'DEPENDENCY_READY'
+  | 'TASK_COMPLETED'
+  | 'TASK_FAILED'
+  | 'RETRY_REQUIRED'
+
+/**
+ * A structured message exchanged during orchestration. These are real
+ * control-flow signals (they drive the scheduler and review routing) *and*
+ * surface to the UI as `agent-message` events for the activity view. Unlike the
+ * old prose "report", the fields are machine-readable so the orchestrator never
+ * has to re-parse natural language.
+ */
+export interface AgentMessage {
+  /** Which control signal this is. */
+  type: AgentMessageType
+  /** The task node this message concerns. */
+  taskId: string
+  /** The parent task (for HANDOFF / rework routing), when applicable. */
+  parentTaskId?: string
+  /** The sender (an agentId, or `'orchestrator'` for engine-emitted messages). */
+  agentId: string
+  /** The sender's role. */
+  role: AgentRole
+  /** Intended recipient: a role, a taskId, `'orchestrator'`, or `'all'`. */
+  recipient?: string
+  /** The task's lifecycle state at send time, when relevant. */
+  status?: TaskState
+  /** One-line human summary (shown in the UI; safe to display verbatim). */
+  summary: string
+  /** Structured findings carried with this message. */
+  findings?: Finding[]
+  /** Files this agent changed. */
+  filesChanged?: string[]
+  /** Task ids this message depends on / unblocks. */
+  dependencies?: string[]
+  /** Opaque artifact references (paths, ids) produced. */
+  artifacts?: string[]
+  /** Error strings, when reporting a failure. */
+  errors?: string[]
+  /** What should happen next (e.g. a rework instruction), when applicable. */
+  nextAction?: string
+}
 
 /** Discriminated union of events streamed from the engine to the renderer. */
 export type WorkflowEvent =
   | { type: 'intent'; runId: string; intent: IntentAnalysis }
-  | { type: 'status'; runId: string; stage: WorkflowStage; message: string; agentId?: string }
+  /**
+   * `retrying` marks a transient-failure notice (rate limit / 5xx / timeout) that
+   * the engine is about to wait out and re-attempt. The UI renders these dimmed
+   * (low opacity) so a retry storm reads as background noise rather than progress.
+   */
+  | {
+      type: 'status'
+      runId: string
+      stage: WorkflowStage
+      message: string
+      agentId?: string
+      retrying?: boolean
+    }
   | { type: 'delta'; runId: string; text: string; agentId?: string }
   /**
    * The engine proposes a side-effecting op and awaits a decision. `auto` is
@@ -349,6 +498,15 @@ export type WorkflowEvent =
   | { type: 'agent-start'; runId: string; agentId: string; role: AgentRole; task: string }
   /** A subagent finished; `report` is its final summary handed back to the lead. */
   | { type: 'agent-end'; runId: string; agentId: string; role: AgentRole; report: string; ok: boolean }
+  /**
+   * Orchestration events (additive — an older renderer simply ignores unknown
+   * `type`s). `plan` announces the task graph the orchestrator will execute;
+   * `task-update` reports a node's lifecycle change (drives the task list);
+   * `agent-message` carries a typed agent-to-agent/orchestrator control signal.
+   */
+  | { type: 'plan'; runId: string; complexity: Complexity; tasks: TaskNode[] }
+  | { type: 'task-update'; runId: string; task: TaskNode }
+  | { type: 'agent-message'; runId: string; message: AgentMessage }
   | { type: 'done'; runId: string }
   | { type: 'error'; runId: string; message: string }
 

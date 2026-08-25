@@ -26,12 +26,40 @@ const BUILD_RE =
   /\b((npm|pnpm|yarn|bun)\s+(run\s+)?build|(vite|next|astro|parcel|webpack)\s+build)\b/i
 
 /**
+ * An `index.html` that is a *bundler entry point* — a module script pointing at
+ * unbuilt source (`/src/…`, or a `.ts`/`.tsx`/`.jsx` file). Serving such a file
+ * statically renders a blank page: the browser fetches `/src/main.tsx` as-is and
+ * chokes on the raw TypeScript/JSX (this is exactly why "React apps don't
+ * preview"). These projects must be shown via their dev server (Vite/Next/…),
+ * which compiles on the fly — so auto-preview skips {@link startStatic} for them
+ * and lets the engine's `startDev` path drive the live preview instead. A
+ * self-contained page (inline scripts, or `src="app.js"` to a built bundle) does
+ * NOT match, so plain HTML still previews instantly with no dev server.
+ */
+const BUNDLER_ENTRY_RE =
+  /<script\b[^>]*\bsrc=["'][^"']*(?:\/src\/[^"']*|\.(?:tsx?|jsx))(?:[?#][^"']*)?["']/i
+
+/**
  * How often (ms) buffered stream deltas are flushed into the rendered message.
  * Appending to a growing Markdown message on every token would re-parse and
  * re-highlight the whole thing each time — O(n²) work that freezes the UI on a
  * large response. Coalescing to ~15fps keeps streaming smooth without a hang.
  */
 const DELTA_FLUSH_MS = 66
+
+/**
+ * How often (ms) the still-streaming assistant reply is checkpointed to the DB.
+ *
+ * Tool ops are persisted the instant each completes, but the assistant's prose
+ * used to be written only once, on `done`. So if a run was interrupted before it
+ * finished — the app reopened, a new session started, a crash — every tool op
+ * survived while the entire reply was lost, and the reloaded session looked
+ * wiped (user turn + orphaned tool cards, no answer). Checkpointing the prose on
+ * a ~1s cadence (in addition to the final `done`/`error` write) bounds the
+ * worst-case loss to the last second of tokens, matching how durably tool ops
+ * and the user turn are already saved. Cheap: a throttled local SQLite upsert.
+ */
+const ASSISTANT_PERSIST_MS = 1000
 
 /** A chat message as rendered in the UI (adds id + streaming/error metadata). */
 export interface ChatMessageUI {
@@ -119,6 +147,8 @@ export interface AgentCardUI {
 export interface ActivityStatus {
   stage: WorkflowStage
   message: string
+  /** Set while the engine is between retry attempts, so the UI can dim the line. */
+  retrying?: boolean
 }
 
 /**
@@ -143,11 +173,14 @@ export interface ActivityStep {
  * can re-emit the same phase and we don't want duplicate rows. Returns the same
  * array reference when nothing changed so callers can skip a needless re-render.
  */
-function appendActivity(list: ActivityStep[], stage: WorkflowStage, message: string): ActivityStep[] {
+function appendActivity(
+  list: ActivityStep[],
+  stage: WorkflowStage,
+  message: string
+): ActivityStep[] {
   const last = list[list.length - 1]
   if (last && last.stage === stage && last.message === message) return list
-  const next =
-    last && !last.done ? [...list.slice(0, -1), { ...last, done: true }] : [...list]
+  const next = last && !last.done ? [...list.slice(0, -1), { ...last, done: true }] : [...list]
   next.push({ id: nextActivityId(), stage, message, done: false })
   return next
 }
@@ -198,6 +231,12 @@ interface LiveRun {
   agentBuffers: Map<string, string>
   /** Pending flush timer id, or null when idle. */
   flushTimer: ReturnType<typeof setTimeout> | null
+  /**
+   * `Date.now()` of the last time the streaming prose was checkpointed to the DB,
+   * or 0 before the first checkpoint. Throttles the mid-run persistence in
+   * {@link ASSISTANT_PERSIST_MS} so an interrupted run keeps its reply.
+   */
+  lastPersist: number
 }
 
 /**
@@ -471,7 +510,22 @@ export const useChatStore = create<ChatState>((set, get) => {
       disposer: () => {},
       buffer: '',
       agentBuffers: new Map(),
-      flushTimer: null
+      flushTimer: null,
+      lastPersist: 0
+    }
+
+    // Create the assistant row up-front (empty), right after the user turn that
+    // was just persisted in `send`. This anchors the run's tool ops — which are
+    // saved incrementally and reference this id — even if the run is interrupted
+    // before it streams any prose, so a reload never shows orphaned tool cards
+    // under a missing answer. `appendMessage` upserts by id, so the regenerate
+    // path (row already blanked) and the streaming checkpoints below reuse it.
+    if (ownerSessionId) {
+      window.sylor.sessions.appendMessage(ownerSessionId, {
+        id: assistantId,
+        role: 'assistant',
+        content: ''
+      })
     }
 
     /** Is this run's owner session the conversation currently on screen? */
@@ -487,6 +541,21 @@ export const useChatStore = create<ChatState>((set, get) => {
       const leadText = run.buffer
       run.buffer = ''
       if (leadText) run.content += leadText
+      // …and is checkpointed to the DB on a throttled cadence so an interrupted
+      // run (app reopened / new session / crash) keeps its reply, not just its
+      // tool ops. Persists to the OWNER session regardless of what's on screen;
+      // the final content is rewritten authoritatively on `done`/`error`.
+      if (leadText && ownerSessionId) {
+        const now = Date.now()
+        if (now - run.lastPersist >= ASSISTANT_PERSIST_MS) {
+          run.lastPersist = now
+          window.sylor.sessions.appendMessage(ownerSessionId, {
+            id: assistantId,
+            role: 'assistant',
+            content: run.content
+          })
+        }
+      }
       // …and each subagent's prose accrues into its own nested card.
       const agentDrains: Array<{ agentId: string; text: string }> = []
       for (const [agentId, buf] of run.agentBuffers) {
@@ -551,7 +620,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           // line (the lead is blocked awaiting it); its nested card's spinner and
           // streamed prose convey progress instead.
           if (event.agentId) break
-          run.status = { stage: event.stage, message: event.message }
+          run.status = { stage: event.stage, message: event.message, retrying: event.retrying }
           run.activity = appendActivity(run.activity, event.stage, event.message)
           if (isVisible()) set({ status: run.status, activity: run.activity })
           break
@@ -604,9 +673,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           if (isVisible()) {
             set((state) => ({
               tools: state.tools.map((t) =>
-                t.id === event.result.id
-                  ? { ...t, status: 'complete', result: event.result }
-                  : t
+                t.id === event.result.id ? { ...t, status: 'complete', result: event.result } : t
               )
             }))
           }
@@ -623,7 +690,8 @@ export const useChatStore = create<ChatState>((set, get) => {
               proposal.kind === 'write_file' &&
               result.kind === 'write_file' &&
               result.ok &&
-              /\.html?$/i.test(proposal.path)
+              /\.html?$/i.test(proposal.path) &&
+              !BUNDLER_ENTRY_RE.test(proposal.newContent)
             ) {
               useAppStore.getState().openPreview()
               void window.sylor.preview.startStatic(proposal.path)
@@ -782,6 +850,21 @@ export const useChatStore = create<ChatState>((set, get) => {
   const disposeRun = (sessionId: string | null): void => {
     const run = sessionId ? liveRuns.get(sessionId) : undefined
     if (run?.flushTimer != null) clearTimeout(run.flushTimer)
+    // Persist the final prose before detaching. A Stop (cancel) or a clear can
+    // land between checkpoints, and the engine emits no `done` for a cancelled
+    // run, so without this the last (<1s) of streamed text — including any delta
+    // still sitting un-flushed in the buffer — would be dropped from the saved
+    // turn. Fold the pending buffer in, then upsert the assistant row by id.
+    if (run?.ownerSessionId) {
+      const finalContent = run.content + run.buffer
+      run.buffer = ''
+      run.content = finalContent
+      window.sylor.sessions.appendMessage(run.ownerSessionId, {
+        id: run.assistantId,
+        role: 'assistant',
+        content: finalContent
+      })
+    }
     // Prefer the run's own disposer; fall back to the visible one (same when the
     // run being cancelled is the on-screen one).
     ;(run?.disposer ?? get().disposer)?.()
@@ -848,7 +931,8 @@ export const useChatStore = create<ChatState>((set, get) => {
       }))
 
       // Persist the user turn immediately (fire-and-forget). The assistant turn is
-      // persisted on 'done'/'error' once its streamed content is final.
+      // created up-front and checkpointed as it streams (see startRun/flush), then
+      // finalized on 'done'/'error' — so an interruption can't lose the reply.
       const sessionId = get().sessionId
       if (sessionId) {
         window.sylor.sessions.appendMessage(sessionId, {
@@ -894,7 +978,9 @@ export const useChatStore = create<ChatState>((set, get) => {
         // Any still-awaiting tool cards are moot once the run is cancelled.
         tools: state.tools.map((t) => (t.status === 'awaiting' ? { ...t, status: 'complete' } : t)),
         // Close any subagent cards left mid-flight.
-        agents: state.agents.map((a) => (a.status === 'running' ? { ...a, status: 'complete' } : a)),
+        agents: state.agents.map((a) =>
+          a.status === 'running' ? { ...a, status: 'complete' } : a
+        ),
         running: false,
         status: null,
         activity: [],

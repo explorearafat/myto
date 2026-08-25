@@ -2,10 +2,12 @@ import type {
   AgentRole,
   ChatMessage,
   IntentKind,
+  McpCategory,
   McpToolInfo,
   PermissionMode,
   ReasoningEffort,
   SkillInfo,
+  TaskNode,
   ToolDecision,
   ToolProposal,
   ToolResult,
@@ -28,6 +30,21 @@ import { classifyIntent } from './intent'
 import { decideAuto } from './permission'
 import { ToolStreamParser, type ParsedTool } from './toolStream'
 import { ReasoningStripper, stripReasoningTags } from './reasoning'
+import { withRetry, type RetryNotice } from './resilience'
+import { resolveRole, roleDirective, roleIds } from './orchestrator/roles'
+import {
+  allowsTool,
+  scopeMcpTools,
+  scopeSkills,
+  serverCategoryMap,
+  type Capability
+} from './orchestrator/capabilities'
+import {
+  runOrchestrator,
+  type NodeRunOptions,
+  type NodeRunResult,
+  type VerifyOutcome
+} from './orchestrator/orchestrator'
 
 /** Sink the engine emits events to (wired to IPC in workflow-ipc.ts). */
 export type EventSink = (event: WorkflowEvent) => void
@@ -90,6 +107,18 @@ CRITICAL — how to deliver code (this is the rule models most often break):
   and preferred over one giant response.
 - Reserve plain Markdown fences for tiny inline illustration only (a shell one-liner or a
   1–2 line snippet) that is NOT meant to become a file.
+
+LIVE PREVIEW (how the user actually SEES what you build):
+- A self-contained page (a single .html with inline/CDN CSS & JS, or a built bundle it
+  references) previews automatically the moment you write it — no server needed.
+- A build-step app (React, Vue, Svelte, Solid, Preact — anything scaffolded with Vite,
+  Next, Astro, Nuxt, Remix, or CRA) CANNOT be previewed as raw files: its index.html points
+  at unbuilt source like /src/main.tsx, which a browser can't run. It MUST be served by its
+  dev server. So after you've written the project files, START THE DEV SERVER with a
+  run_command block — e.g. \`npm run dev\` (or the script in package.json). Dependencies
+  install automatically first, and the live preview opens on the server's URL.
+- Do this as the final step once the files exist. One dev-server command is enough — it
+  keeps running and hot-reloads on further edits; do not re-run it every change.
 
 HOW YOU COMMUNICATE (this is what separates a polished assistant from a noisy one):
 - Do your thinking SILENTLY. What you show the user is only the result: a brief note
@@ -243,7 +272,7 @@ function mcpDirective(tools: McpToolInfo[]): string {
     '```sylor-tool\n{ "tool": "mcp_call", "server": "<server>", "name": "<tool>", "arguments": { } }\n```\n\n' +
     'Use the exact server and tool names from this list, and pass "arguments" as a JSON object ' +
     'matching what the tool expects (use {} when it takes none). Like commands, every MCP call is ' +
-    'shown to the user for approval and its result is reported back to you — propose, don\'t pretend.\n\n' +
+    "shown to the user for approval and its result is reported back to you — propose, don't pretend.\n\n" +
     'Available tools:\n' +
     list
   )
@@ -296,7 +325,10 @@ function spawnDirective(): string {
     'Roles you can delegate to:\n' +
     '- planner — creates or refines `plan.md` (the living checklist) and reports the plan.\n' +
     '- builder — implements one specific slice (creates/edits files, runs commands).\n' +
-    '- reviewer — runs typecheck/tests/lint and inspects the result, reporting PASS/FAIL + issues.\n\n' +
+    '- reviewer — runs typecheck/tests/lint and inspects the result, reporting PASS/FAIL + issues.\n' +
+    `- specialists, when the slice is clearly domain-specific: ${roleIds()
+      .filter((id) => !['lead', 'planner', 'builder', 'reviewer'].includes(id))
+      .join(', ')}.\n\n` +
     'Each subagent works in the same folder under the same approval rules and reports back to you ' +
     'when done; you then read the report and decide the next step (delegate again, fix, or finish). ' +
     'Keep `plan.md` up to date as stages complete — writing it is the FIRST step, never the last: ' +
@@ -310,34 +342,16 @@ function spawnDirective(): string {
 
 /**
  * The role-specific operating instruction seeding a subagent's system prompt
- * (requirement B). Each subagent is a focused specialist: it has the full gated
- * tool protocol (write_file / run_command / mcp_call / use_skill) but a narrow
- * remit and always ends with a short report the lead reads.
+ * (requirement B). Each subagent is a focused specialist: it has the gated tool
+ * protocol (write_file / run_command / mcp_call / use_skill) — narrowed to the
+ * capabilities its role holds — a narrow remit, and always ends with a short
+ * report the lead reads.
+ *
+ * The directives themselves live in the extensible `roles.ts` registry, so
+ * adding a specialist is a registry entry, not an edit to this file.
  */
-function roleDirective(role: Exclude<AgentRole, 'lead'>): string {
-  switch (role) {
-    case 'planner':
-      return (
-        '\n\nYou are the PLANNER subagent. Produce or refine `plan.md` at the project root: the ' +
-        'goal in one line, the files to create or modify, and the work as a numbered, checkable ' +
-        'list (`- [ ]` items). Write it with a write_file block. Do NOT implement the feature ' +
-        'yourself. Finish with a 2–4 line summary of the plan for the lead.'
-      )
-    case 'builder':
-      return (
-        '\n\nYou are the BUILDER subagent. Implement exactly the slice the lead assigned — create ' +
-        'or edit the needed files with write_file blocks and run any required commands, in small ' +
-        'think → act → think steps. If a `plan.md` exists, check off (`- [x]`) each item you ' +
-        'complete. Finish with a short report of what you built and anything still open.'
-      )
-    case 'reviewer':
-      return (
-        '\n\nYou are the REVIEWER subagent. Verify the work: run the project’s typecheck, tests, ' +
-        'and/or lint with run_command and inspect the output. Do NOT rewrite the feature yourself. ' +
-        'Finish with a clear PASS or FAIL verdict followed by a bullet list of any issues (file + ' +
-        'what is wrong) so the lead can dispatch fixes.'
-      )
-  }
+function roleDirectiveFor(role: Exclude<AgentRole, 'lead'>): string {
+  return roleDirective(role)
 }
 
 /** A pending tool decision the engine is blocked on, keyed by toolId. */
@@ -366,8 +380,17 @@ const activeRuns = new Map<string, RunHandle>()
  * verify …) instead of being squeezed into one over-stuffed answer. The loop
  * still stops the instant the model has nothing left to do, so simple turns pay
  * nothing for the extra headroom.
+ *
+ * This is a *runaway backstop*, not a work budget. It used to be 12, which real
+ * multi-file builds hit — the turn stopped mid-task with items still open, which
+ * reads as "Sylor did 12 steps then quit". Work is bounded by convergence (the
+ * loop exits the moment the model proposes no tool) and by the stall guards
+ * below (MAX_NUDGES / MAX_CONTINUES / MAX_START_NUDGES), which cap the paths
+ * that could actually spin. A productive step — one that wrote a file, ran a
+ * command, or delegated — is always allowed to be followed by another, so a
+ * genuinely large task now runs to completion instead of being truncated.
  */
-const MAX_STEPS = 12
+const MAX_STEPS = 250
 
 /**
  * Upper bound on corrective "you dumped raw code — re-emit as write_file blocks"
@@ -386,8 +409,13 @@ const MAX_NUDGES = 2
  * implement the next unchecked item. Bounded (alongside MAX_STEPS) so a model that
  * never converges can't spin or burn tokens — and only *stalls* spend this budget:
  * turns where the model is actively proposing tools cost nothing here.
+ *
+ * Raised from 4 alongside MAX_STEPS: a long checklist legitimately needs one
+ * continuation per remaining item, and a *productive* continuation (the model
+ * went on to build something) refunds itself — see `continues` bookkeeping in
+ * the loop, which only charges continuations that produced nothing.
  */
-const MAX_CONTINUES = 4
+const MAX_CONTINUES = 60
 
 /**
  * Fed back to the model when, on an edit turn, it pasted file contents as plain
@@ -463,8 +491,13 @@ const nextToolId = (): string => `tool-${++toolCounter}`
 let agentCounter = 0
 const nextAgentId = (): string => `agent-${++agentCounter}`
 
-/** Upper bound on a subagent's own step budget (a slice of the lead's work). */
-const SUBAGENT_MAX_STEPS = 8
+/**
+ * Upper bound on a subagent's own step budget (a slice of the lead's work).
+ * Raised from 8: a specialist owning a whole task node (an API surface, a UI
+ * feature) needs the same think → act → think headroom the lead has. Still a
+ * fraction of MAX_STEPS, since a node is a slice rather than the whole request.
+ */
+const SUBAGENT_MAX_STEPS = 80
 
 /**
  * Runs one workflow turn: analyze intent → (optionally) scan/read project →
@@ -520,18 +553,31 @@ export async function runWorkflow(
 
       const parser = new ToolStreamParser()
       const think = new ReasoningStripper()
-      await provider.streamCompletion(
-        settings.modelId,
-        outbound,
-        (chunk) => {
-          if (!chunk.delta) return
-          const prose = parser.push(chunk.delta)
-          if (!prose) return
-          const shown = think.push(prose)
-          if (shown) emit({ type: 'delta', runId, text: shown })
+      let received = false
+      const retry = retryReporter(runId, emit)
+      await withRetry(
+        async () => {
+          await provider.streamCompletion(
+            settings.modelId,
+            outbound,
+            (chunk) => {
+              if (!chunk.delta) return
+              received = true
+              const prose = parser.push(chunk.delta)
+              if (!prose) return
+              const shown = think.push(prose)
+              if (shown) emit({ type: 'delta', runId, text: shown })
+            },
+            controller.signal
+          )
         },
-        controller.signal
+        {
+          signal: controller.signal,
+          canRetry: () => !received,
+          onRetry: retry.onRetry
+        }
       )
+      retry.clear('Thinking…')
       if (controller.signal.aborted) return
       const tail = think.push(parser.flush()) + think.flush()
       if (tail) emit({ type: 'delta', runId, text: tail })
@@ -574,9 +620,8 @@ export async function runWorkflow(
     // back as a new turn so the model can react — fix a failed command, continue a
     // multi-step task, or conclude. The loop ends when the model proposes no
     // side-effecting tools (its final answer), when the step budget is spent, or
-    // on abort. This is what makes Sylor work in steps instead of one shot.
-    emit({ type: 'status', runId, stage: 'generating', message: 'Generating…' })
-
+    // on abort. This is what makes Sylor work in steps instead of one shot. On a
+    // work turn the orchestrator below drives this same loop once per task node.
     const provider = providerFromSettings(settings)
 
     // Connect to any configured MCP servers (idempotent; reconnects only when the
@@ -623,13 +668,12 @@ export async function runWorkflow(
       enabledSkills
     }
 
-    // Run the lead agent loop. The lead is a full agent — it can edit/run/call
-    // directly — that can ALSO delegate a slice to a planner/builder/reviewer
-    // subagent via spawn_agent (allowSpawn). Each subagent runs this SAME gated
-    // loop (nesting depth 1) with its activity nested under its own agentId and a
-    // report handed back to the lead. The loop emits every delta/tool/status
-    // itself; here we only finish the run once it returns.
-    await runAgentLoop({
+    // The lead agent's arguments. The lead is a full agent — it can edit/run/call
+    // directly — that can ALSO delegate a slice to a specialist subagent via
+    // spawn_agent (allowSpawn). Each subagent runs this SAME gated loop (nesting
+    // depth 1) with its activity nested under its own agentId and a report handed
+    // back to the lead. The loop emits every delta/tool/status itself.
+    const leadArgs: AgentLoopArgs = {
       role: 'lead',
       outbound,
       maxSteps,
@@ -646,7 +690,56 @@ export async function runWorkflow(
       emit,
       onTerminal,
       spawnContext
-    })
+    }
+
+    // The orchestration gate (requirement A). EVERY work-producing Code turn runs
+    // the full hierarchy: complexity router → planner → task graph → parallel
+    // specialists → integration → verification → mandatory review → response.
+    // The router only sizes the team, so a one-line fix collapses to a single node
+    // — executed as the lead itself, over the real conversation history, so a small
+    // turn behaves exactly as it did before orchestration existed — while a
+    // multi-domain request fans out across scoped specialists.
+    //
+    // Deliberately NOT orchestrated: chat/question intents (nothing to build, so
+    // planning and review would be pure overhead) and plan-first turns (the user
+    // explicitly asked for a plan and a stop, which is its own gate).
+    if (intent.kind === 'edit' && !planFirstStop) {
+      await runOrchestrator({
+        runId,
+        request: lastUser,
+        overview,
+        settings,
+        emit,
+        signal: controller.signal,
+        executeNode: (node, opts) => executeNode(node, opts, leadArgs),
+        // plan.md goes through the same approval gate as any other write.
+        writePlan: async (markdown) => {
+          await executeTool(
+            { tool: 'write_file', path: 'plan.md', content: markdown },
+            { runId, permissionMode, handle, emit, onTerminal }
+          )
+        },
+        verify: () => verifyProject({ runId, permissionMode, handle, emit, onTerminal }),
+        // Non-streaming (a verdict, not prose) so it stays off the reply stream.
+        // Paced + retried like every other model call; safe to replay verbatim
+        // because nothing has been shown to the user yet.
+        judge: async (msgs) => {
+          const retry = retryReporter(runId, emit)
+          const verdict = await withRetry(() => provider.getCompletion(settings.modelId, msgs), {
+            signal: controller.signal,
+            onRetry: retry.onRetry
+          })
+          retry.clear('Reviewing…')
+          return verdict
+        }
+      })
+      if (controller.signal.aborted) return
+      emit({ type: 'done', runId })
+      return
+    }
+
+    emit({ type: 'status', runId, stage: 'generating', message: 'Generating…' })
+    await runAgentLoop(leadArgs)
 
     if (controller.signal.aborted) return
     emit({ type: 'done', runId })
@@ -704,6 +797,73 @@ interface AgentLoopArgs {
   emit: EventSink
   onTerminal: TerminalSink
   spawnContext: SpawnContext
+  /**
+   * The capabilities this agent's role holds. When present, `executeTool` refuses
+   * any tool kind the role isn't granted (a reviewer can't silently rewrite
+   * files). Absent for the lead, which is unrestricted.
+   */
+  capabilities?: readonly Capability[]
+  /**
+   * Collector the loop appends each successfully written project-relative path to,
+   * so the orchestrator knows exactly what a task node changed.
+   */
+  filesWritten?: string[]
+}
+
+/**
+ * Surfaces a retry attempt to the UI as a dimmed, italic status line — the
+ * "low-opacity text" the user asked for. Emitted as a `status` event so it lands
+ * on the single evolving activity line (not as prose in the reply, which would
+ * pollute the assistant turn and get persisted). `_…_` renders italic/muted; the
+ * `retrying` marker lets the renderer dim it further.
+ */
+function emitRetryNotice(
+  notice: RetryNotice,
+  runId: string,
+  emit: EventSink,
+  agentId?: string
+): void {
+  const seconds = Math.round(notice.delayMs / 1000)
+  emit({
+    type: 'status',
+    runId,
+    stage: 'generating',
+    message: `Request failed (${notice.reason}) — retrying in ${seconds}s · attempt ${notice.attempt + 1}/${notice.max}`,
+    ...(agentId ? { agentId } : {}),
+    retrying: true
+  })
+}
+
+/**
+ * Pairs {@link emitRetryNotice} with a `clear` that restores a normal (undimmed)
+ * status once the request finally goes through. Without it the dimmed
+ * "retrying in 60s" line would linger for the rest of the phase, telling the user
+ * we're stalled while work is actually streaming again. `clear` is a no-op unless a
+ * notice was actually emitted, so the happy path emits nothing extra.
+ */
+function retryReporter(
+  runId: string,
+  emit: EventSink,
+  agentId?: string
+): { onRetry: (notice: RetryNotice) => void; clear: (message: string) => void } {
+  let noticed = false
+  return {
+    onRetry: (notice) => {
+      noticed = true
+      emitRetryNotice(notice, runId, emit, agentId)
+    },
+    clear: (message) => {
+      if (!noticed) return
+      noticed = false
+      emit({
+        type: 'status',
+        runId,
+        stage: 'generating',
+        message,
+        ...(agentId ? { agentId } : {})
+      })
+    }
+  }
 }
 
 /**
@@ -758,26 +918,47 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     // 4a. Stream one completion, demuxing prose from tool blocks. Accumulate the
     // raw text (prose + blocks) so the assistant turn can be replayed verbatim,
     // and the prose alone so we can detect a raw-code dump (see the nudge below).
+    //
+    // Paced + retried (see resilience.ts): requests are spaced so parallel
+    // specialists can't trip a rate limit, and a 429/5xx/timeout is retried up to
+    // 10 times a minute apart, reported to the UI as a dimmed notice. `received`
+    // guards replay safety — once bytes have reached the user, a retry would
+    // duplicate them, so the attempt is not repeated.
     const parser = new ToolStreamParser()
     const think = new ReasoningStripper()
     let raw = ''
     let proseText = ''
-    await provider.streamCompletion(
-      modelId,
-      outbound,
-      (chunk) => {
-        if (!chunk.delta) return
-        raw += chunk.delta
-        const prose = parser.push(chunk.delta)
-        if (!prose) return
-        const shown = think.push(prose)
-        if (shown) {
-          proseText += shown
-          emit({ type: 'delta', runId, text: shown })
-        }
+    let received = false
+    const retry = retryReporter(runId, emit, args.agentId)
+    await withRetry(
+      async () => {
+        await provider.streamCompletion(
+          modelId,
+          outbound,
+          (chunk) => {
+            if (!chunk.delta) return
+            received = true
+            raw += chunk.delta
+            const prose = parser.push(chunk.delta)
+            if (!prose) return
+            const shown = think.push(prose)
+            if (shown) {
+              proseText += shown
+              emit({ type: 'delta', runId, text: shown })
+            }
+          },
+          signal
+        )
       },
-      signal
+      {
+        signal,
+        canRetry: () => !received,
+        onRetry: retry.onRetry
+      }
     )
+    // A retry that eventually succeeded left the line dimmed; restore it so the
+    // rest of the phase doesn't read as stalled.
+    retry.clear('Generating…')
     if (signal.aborted) return report
     const tail = think.push(parser.flush()) + think.flush()
     if (tail) {
@@ -844,7 +1025,12 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
       hasPlainCodeFence(proseText)
     ) {
       nudges++
-      emit({ type: 'status', runId, stage: 'generating', message: 'Turning that code into file edits…' })
+      emit({
+        type: 'status',
+        runId,
+        stage: 'generating',
+        message: 'Turning that code into file edits…'
+      })
       outbound.push({ role: 'assistant', content: raw })
       outbound.push({ role: 'user', content: RAW_CODE_NUDGE })
       continue
@@ -905,7 +1091,17 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
 
     // Once we're past the break, real work is about to happen this step. Remember it so a
     // later prose-only turn reads as a closing summary (a finish), not a stall to nudge.
-    if (sideEffects.length > 0 || spawnRequests.length > 0) built = true
+    if (sideEffects.length > 0 || spawnRequests.length > 0) {
+      built = true
+      // A productive step refunds the stall budgets: the continuation/start/nudge
+      // caps exist to stop a model that only *talks*, and this step just DID work.
+      // Refunding here is what makes a large build effectively unlimited — every
+      // real step re-arms the budget for the next possible stall — while a genuine
+      // dead stall (talk with no work, repeatedly) still exhausts it and stops.
+      continues = 0
+      startNudges = 0
+      nudges = 0
+    }
 
     // 4e. Execute each proposed tool under the permission mode, pairing each with
     // its structured outcome so the results can be fed back to the model.
@@ -915,7 +1111,16 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
       emit({ type: 'status', runId, stage: batch.stage, message: batch.message })
       for (const tool of sideEffects) {
         if (signal.aborted) return report
-        const result = await executeTool(tool, { runId, permissionMode, handle, emit, onTerminal })
+        const result = await executeTool(tool, {
+          runId,
+          permissionMode,
+          handle,
+          emit,
+          onTerminal,
+          capabilities: args.capabilities,
+          filesWritten: args.filesWritten
+        })
+
         if (!result) return report // aborted while awaiting a decision
         outcomes.push({ tool, result })
       }
@@ -967,21 +1172,26 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
 /**
  * Runs one delegated subagent (requirement B). Emits `agent-start` on the
  * parent's (unstamped) sink, runs the SAME gated agent loop with a role-scoped
- * system prompt and a bounded step budget — its activity tagged with a fresh
- * agentId so the renderer nests it — then emits `agent-end` with the report the
- * lead reads. `allowSpawn` is false so a subagent cannot spawn (nesting depth 1).
- * Never throws: a subagent failure becomes a failed report, so one bad slice
- * can't abort the whole build.
+ * system prompt, capability-scoped tools, and a bounded step budget — its
+ * activity tagged with a fresh agentId so the renderer nests it — then emits
+ * `agent-end` with the report the lead reads. `allowSpawn` is false so a subagent
+ * cannot spawn (nesting depth 1). Never throws: a subagent failure becomes a
+ * failed report, so one bad slice can't abort the whole build.
+ *
+ * `opts.context` is the orchestrator's scoped shared-context digest (what this
+ * agent's upstream dependencies already established); `opts.filesWritten`
+ * collects the paths it actually changed.
  */
 async function runSubagent(
   spawn: Extract<ParsedTool, { tool: 'spawn_agent' }>,
-  parent: AgentLoopArgs
-): Promise<{ report: string; ok: boolean }> {
+  parent: AgentLoopArgs,
+  opts: { context?: string; filesWritten?: string[] } = {}
+): Promise<{ report: string; ok: boolean; agentId: string }> {
   const agentId = nextAgentId()
   const { role, task } = spawn
   parent.emit({ type: 'agent-start', runId: parent.runId, agentId, role, task })
 
-  const system = buildSubagentSystem(role, task, parent.spawnContext)
+  const system = buildSubagentSystem(role, task, parent.spawnContext, opts.context)
   const outbound: ChatMessage[] = [
     { role: 'system', content: system },
     { role: 'user', content: task }
@@ -999,6 +1209,8 @@ async function runSubagent(
       intentKind: 'edit',
       planFirstStop: false,
       allowSpawn: false,
+      capabilities: resolveRole(role).capabilities,
+      filesWritten: opts.filesWritten,
       emit: stampEmit(parent.emit, agentId)
     })
     ok = !parent.handle.controller.signal.aborted
@@ -1008,7 +1220,104 @@ async function runSubagent(
   }
 
   parent.emit({ type: 'agent-end', runId: parent.runId, agentId, role, report, ok })
-  return { report, ok }
+  return { report, ok, agentId }
+}
+
+/**
+ * Executes one orchestrator task node as a real agent — the bridge between the
+ * (engine-agnostic) orchestrator and this file's agent machinery.
+ *
+ * Two shapes, one loop:
+ *  - `asLead` (a single-node graph — the SIMPLE path): the node *is* the turn, so
+ *    it runs as the lead over the real conversation history with the full tool
+ *    set, free to delegate further via `spawn_agent`. A small edit therefore
+ *    behaves exactly as it did before orchestration existed.
+ *  - otherwise: a scoped specialist with its own agentId, its role's
+ *    capability-filtered tools/MCP/skills, and only the slice of shared context
+ *    its upstream dependencies produced.
+ *
+ * Either way, the paths it actually wrote come back in `filesChanged`.
+ */
+async function executeNode(
+  node: TaskNode,
+  opts: NodeRunOptions,
+  leadArgs: AgentLoopArgs
+): Promise<NodeRunResult> {
+  const filesWritten: string[] = []
+
+  if (opts.asLead) {
+    const report = await runAgentLoop({ ...leadArgs, filesWritten })
+    return {
+      agentId: 'lead',
+      report,
+      ok: !leadArgs.handle.controller.signal.aborted,
+      filesChanged: filesWritten
+    }
+  }
+
+  const { report, ok, agentId } = await runSubagent(
+    { tool: 'spawn_agent', role: node.role, task: nodeBrief(node) },
+    leadArgs,
+    { context: opts.context, filesWritten }
+  )
+  return { agentId, report, ok, filesChanged: filesWritten }
+}
+
+/** The brief a specialist receives for its node: the task plus any file hints. */
+function nodeBrief(node: TaskNode): string {
+  const hint = node.filesHint?.length ? `\n\nLikely files: ${node.filesHint.join(', ')}` : ''
+  return `${node.description}${hint}`
+}
+
+/**
+ * Scripts tried, in order, for the orchestrator's VERIFY stage — cheapest and
+ * most deterministic first. A project with none of these simply isn't verified
+ * (reported honestly) rather than having a command invented for it.
+ */
+const VERIFY_SCRIPTS = ['typecheck', 'lint', 'build', 'test'] as const
+
+/** Watcher-shaped scripts, skipped because they never exit and would hang the turn. */
+const WATCHER_RE = /--watch|^\s*(vitest|jest|nodemon)\s*$/
+
+/**
+ * The VERIFY stage: runs the project's own check through the SAME approval gate
+ * as any other command, so the user sees and authorizes it. Distinguishes three
+ * outcomes honestly — no check exists / the user declined (`ran: false`, no
+ * claim made), the check passed, or the check failed (which the reviewer then
+ * sees and can route to rework).
+ */
+async function verifyProject(ctx: ExecContext): Promise<VerifyOutcome> {
+  const command = detectVerifyCommand()
+  if (!command) return { ran: false, ok: false }
+
+  const result = await executeTool({ tool: 'run_command', command }, ctx)
+  if (!result || result.kind !== 'run_command') return { ran: false, ok: false }
+  // A null exit code means it never actually ran (declined or aborted) — that is
+  // "unverified", not "failed". We don't manufacture evidence in either direction.
+  if (result.exitCode === null) return { ran: false, ok: false, command }
+  return { ran: true, ok: result.exitCode === 0, command, output: result.output }
+}
+
+/**
+ * Picks the project's verification command from its package.json scripts, or null
+ * when it has none (a non-Node project, or no package.json). Best-effort and
+ * never throws — an unreadable/malformed manifest simply means "no check".
+ */
+function detectVerifyCommand(): string | null {
+  let scripts: Record<string, unknown>
+  try {
+    const pkg = JSON.parse(readProjectFile('package.json')) as { scripts?: Record<string, unknown> }
+    scripts = pkg.scripts ?? {}
+  } catch {
+    return null
+  }
+  for (const name of VERIFY_SCRIPTS) {
+    const script = scripts[name]
+    if (typeof script !== 'string' || !script.trim()) continue
+    if (WATCHER_RE.test(script)) continue
+    return `npm run ${name}`
+  }
+  return null
 }
 
 /**
@@ -1049,29 +1358,55 @@ function readPlanMd(): string {
 
 /**
  * Assembles a subagent's system prompt: the same base protocol + shell / MCP /
- * skills framing the lead received (so it wields the same gated tools), its
- * role-specific operating instruction, the project preamble + overview, the
- * current `plan.md`, and finally the assigned task — but NOT `spawnDirective`
- * (subagents can't spawn: nesting depth 1).
+ * skills framing the lead received — but **capability-scoped**, so a role only
+ * ever sees the MCP servers and skills its capabilities unlock (a docs writer
+ * isn't shown a database server) — its role-specific operating instruction from
+ * the registry, the project preamble + overview, the current `plan.md`, the
+ * orchestrator's scoped shared-context digest, and finally the assigned task.
+ * `spawnDirective` is deliberately omitted: subagents can't spawn (depth 1).
  */
 function buildSubagentSystem(
   role: Exclude<AgentRole, 'lead'>,
   task: string,
-  ctx: SpawnContext
+  ctx: SpawnContext,
+  sharedContext?: string
 ): string {
+  const capabilities = resolveRole(role).capabilities
+  const mcpTools = scopeMcpTools(ctx.mcpTools, capabilities, mcpServerCategories())
+  const skills = scopeSkills(ctx.enabledSkills, capabilities)
+
   let system =
     SYSTEM_PROMPT +
     shellDirective() +
-    mcpDirective(ctx.mcpTools) +
-    skillsDirective(ctx.enabledSkills) +
+    mcpDirective(mcpTools) +
+    skillsDirective(skills) +
     effortDirective(ctx.effort) +
-    roleDirective(role)
+    roleDirectiveFor(role)
   if (ctx.projectPreamble) system += `\n\n${ctx.projectPreamble}`
   if (ctx.overview) system += `\n\n## Project context\n${ctx.overview}`
   const plan = readPlanMd()
   if (plan) system += `\n\n## Current plan.md\n${plan}`
+  if (sharedContext?.trim()) {
+    system +=
+      `\n\n## What the team has established so far\n${sharedContext.trim()}\n\n` +
+      'Build on this instead of rediscovering it. Do not redo work already reported here.'
+  }
   system += `\n\n## Your assigned task\n${task}`
   return system
+}
+
+/**
+ * `server → category` lookup for MCP capability scoping. Best-effort: an MCP
+ * manager without a server list (or one that throws) yields an empty map, which
+ * scopes every tool as `external` — visible only to roles with broad `mcp`
+ * access. Never throws, so prompt assembly can't fail on this.
+ */
+function mcpServerCategories(): Map<string, McpCategory> {
+  try {
+    return serverCategoryMap(mcpManager.listServers())
+  } catch {
+    return new Map()
+  }
 }
 
 interface ExecContext {
@@ -1080,6 +1415,14 @@ interface ExecContext {
   handle: RunHandle
   emit: EventSink
   onTerminal: TerminalSink
+  /**
+   * The acting role's capabilities. When present, a tool kind the role isn't
+   * granted is refused before any approval is asked for. Absent = unrestricted
+   * (the lead).
+   */
+  capabilities?: readonly Capability[]
+  /** Collector for successfully written project-relative paths. */
+  filesWritten?: string[]
 }
 
 /** The side-effecting tools that flow through the approval pipeline. */
@@ -1106,7 +1449,13 @@ async function executeTool(tool: SideEffectTool, ctx: ExecContext): Promise<Tool
     } else if (tool.tool === 'run_command') {
       proposal = { id, kind: 'run_command', command: tool.command }
     } else {
-      proposal = { id, kind: 'mcp_call', server: tool.server, name: tool.name, arguments: tool.arguments }
+      proposal = {
+        id,
+        kind: 'mcp_call',
+        server: tool.server,
+        name: tool.name,
+        arguments: tool.arguments
+      }
     }
   } catch (err) {
     // e.g. a sandbox (path-escape) violation while preparing the diff. Surface a
@@ -1124,6 +1473,23 @@ async function executeTool(tool: SideEffectTool, ctx: ExecContext): Promise<Tool
   }
 
   const outcome = decideAuto(permissionMode, proposal.kind)
+
+  // Capability gate (requirement: per-agent tool scoping). A scoped specialist may
+  // only use the tool kinds its role holds — a reviewer that tries to rewrite the
+  // feature gets a refusal fed back to it instead of silently mutating files. This
+  // sits BEFORE the approval prompt so the user is never asked to approve
+  // something the agent isn't allowed to do. The lead passes no capabilities and
+  // is unrestricted.
+  if (ctx.capabilities && !allowsTool(ctx.capabilities, proposal.kind)) {
+    emit({ type: 'tool-request', runId, proposal, auto: false })
+    const result = rejectedResult(
+      proposal,
+      `Not permitted for this agent's role (missing capability for ${proposal.kind}).`
+    )
+    emit({ type: 'tool-result', runId, result })
+    return result
+  }
+
   emit({ type: 'tool-request', runId, proposal, auto: outcome === 'auto' })
 
   const decision = outcome === 'auto' ? 'approve' : await awaitDecision(handle, id)
@@ -1136,6 +1502,16 @@ async function executeTool(tool: SideEffectTool, ctx: ExecContext): Promise<Tool
   }
 
   const result = await applyTool(proposal, onTerminal, handle.controller.signal)
+  // Record what actually landed on disk, so the orchestrator can attribute files
+  // to the task node that changed them (and decide whether to verify at all).
+  if (
+    ctx.filesWritten &&
+    proposal.kind === 'write_file' &&
+    result.kind === 'write_file' &&
+    result.ok
+  ) {
+    if (!ctx.filesWritten.includes(proposal.path)) ctx.filesWritten.push(proposal.path)
+  }
   emit({ type: 'tool-result', runId, result })
   return result
 }
@@ -1152,15 +1528,22 @@ function awaitDecision(handle: RunHandle, toolId: string): Promise<ToolDecision>
   })
 }
 
-/** A rejected proposal's (skipped) result. */
-function rejectedResult(proposal: ToolProposal): ToolResult {
+/** A rejected (or refused) proposal's skipped result, with the reason shown. */
+function rejectedResult(proposal: ToolProposal, reason = 'Skipped by user'): ToolResult {
   if (proposal.kind === 'write_file') {
-    return { id: proposal.id, kind: 'write_file', ok: false, error: 'Skipped by user' }
+    return { id: proposal.id, kind: 'write_file', ok: false, error: reason }
   }
   if (proposal.kind === 'mcp_call') {
-    return { id: proposal.id, kind: 'mcp_call', ok: false, output: '', truncated: false, error: 'Skipped by user' }
+    return {
+      id: proposal.id,
+      kind: 'mcp_call',
+      ok: false,
+      output: '',
+      truncated: false,
+      error: reason
+    }
   }
-  return { id: proposal.id, kind: 'run_command', exitCode: null, output: 'Skipped by user', truncated: false }
+  return { id: proposal.id, kind: 'run_command', exitCode: null, output: reason, truncated: false }
 }
 
 /** Executes an approved proposal, returning its structured outcome. */
@@ -1270,10 +1653,17 @@ function describeBatch(tools: SideEffectTool[]): { stage: WorkflowStage; message
   const firstCmd = (): string => commands[0].command.trim().split(/\s+/).slice(0, 3).join(' ')
 
   // A command batch that's purely checks/builds → the verifying phase.
-  if (commands.length > 0 && writes.length === 0 && commands.every((c) => VERIFY_RE.test(c.command))) {
+  if (
+    commands.length > 0 &&
+    writes.length === 0 &&
+    commands.every((c) => VERIFY_RE.test(c.command))
+  ) {
     return {
       stage: 'verifying',
-      message: commands.length === 1 ? `Verifying · ${firstCmd()}` : `Verifying · ${commands.length} checks`
+      message:
+        commands.length === 1
+          ? `Verifying · ${firstCmd()}`
+          : `Verifying · ${commands.length} checks`
     }
   }
   // Pure writes → name the files being edited/created.
@@ -1287,7 +1677,8 @@ function describeBatch(tools: SideEffectTool[]): { stage: WorkflowStage; message
   if (commands.length > 0 && writes.length === 0) {
     return {
       stage: 'executing',
-      message: commands.length === 1 ? `Running ${firstCmd()}` : `Running ${commands.length} commands`
+      message:
+        commands.length === 1 ? `Running ${firstCmd()}` : `Running ${commands.length} commands`
     }
   }
   // Mixed / MCP batch → a generic apply.
@@ -1301,9 +1692,7 @@ function describeBatch(tools: SideEffectTool[]): { stage: WorkflowStage; message
  * never echoed — only the path and outcome — and command output is already
  * bounded by the runner, so this can't blow up the context window.
  */
-function summarizeResults(
-  outcomes: Array<{ tool: SideEffectTool; result: ToolResult }>
-): string {
+function summarizeResults(outcomes: Array<{ tool: SideEffectTool; result: ToolResult }>): string {
   const lines = outcomes.map(({ tool, result }) => {
     if (result.kind === 'write_file') {
       const path = tool.tool === 'write_file' ? tool.path : ''

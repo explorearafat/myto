@@ -18,7 +18,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "pack:dir": "npm run build && electron-builder --dir",
-    "dist:win": "npm run build && electron-builder --win"
+    "dist:win": "npm run build && electron-builder --win",
+    "preview:web": "vite --config vite.preview.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",

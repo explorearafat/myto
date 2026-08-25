@@ -92,3 +92,22 @@ app.on('before-quit', () => {
   killAllPtys()
   closeDb()
 })
+
+/*
+ * Keep the main process alive through a stray fault.
+ *
+ * Node's default for an uncaught exception is to kill the process — and killing
+ * the main process kills the window, mid-write, with no chance to flush. That is
+ * the harshest version of the "app died and my data was gone" report: a rejected
+ * promise in a tool handler or an MCP transport could take the whole app down.
+ * Nothing here tries to *repair* the fault; it logs it and lets the app keep
+ * running so the user can finish or close cleanly. IPC handlers already wrap their
+ * own work, so anything reaching this point is genuinely unexpected.
+ */
+process.on('uncaughtException', (error) => {
+  console.error('[sylor] uncaught exception in main:', error)
+})
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[sylor] unhandled rejection in main:', reason)
+})

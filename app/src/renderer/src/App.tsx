@@ -3,6 +3,7 @@ import { TitleBar } from '@renderer/components/TitleBar'
 import { SplashScreen } from '@renderer/components/SplashScreen'
 import { SettingsPanel } from '@renderer/components/SettingsPanel'
 import { AppLayout } from '@renderer/components/layout/AppLayout'
+import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
 import { useAppStore } from '@renderer/store/useAppStore'
 import { useSessionStore } from '@renderer/store/useSessionStore'
 import { useProjectStore } from '@renderer/store/useProjectStore'
@@ -43,9 +44,14 @@ export default function App() {
       <TitleBar />
       {/* min-h-0 is required so the panel group can shrink inside the flex column.
           `relative` anchors the full-screen Settings overlay so it fills this area
-          (below the title bar) rather than covering the window controls. */}
+          (below the title bar) rather than covering the window controls.
+          The inner boundary keeps a chat/preview crash contained: the title bar and
+          window controls stay alive, so the user can still move or close the window
+          instead of facing a blank, unclosable frame. */}
       <div className="relative min-h-0 flex-1">
-        <AppLayout />
+        <ErrorBoundary label="The workspace">
+          <AppLayout />
+        </ErrorBoundary>
         {settingsOpen && <SettingsPanel />}
       </div>
       <SplashScreen />

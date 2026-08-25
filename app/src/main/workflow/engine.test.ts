@@ -94,6 +94,8 @@ vi.mock('@main/mcp/manager', () => ({
   mcpManager: {
     ensureConnected: vi.fn(async () => {}),
     getTools: () => mcpTools,
+    // Used by capability scoping to classify each tool's server by category.
+    listServers: () => [] as { name: string; category: 'development' }[],
     callTool: (server: string, name: string, args: Record<string, unknown>) =>
       mcpCallTool(server, name, args)
   }

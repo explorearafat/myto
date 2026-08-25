@@ -56,8 +56,10 @@ export function TitleBar() {
       className="flex h-9 shrink-0 items-center justify-between border-b border-border bg-surface select-none"
     >
       <div className="flex items-center gap-2 px-3">
-        <SylorLogo size={20} showBubbles={false} />
-        <span className="text-[13px] font-semibold tracking-wide text-text">Sylor</span>
+        <SylorLogo size={20} showBubbles={false} className="shrink-0" />
+        <span className="text-[13px] font-semibold leading-none tracking-wide text-text">
+          Sylor
+        </span>
       </div>
 
       <div className="flex h-full items-stretch">
@@ -73,7 +75,14 @@ export function TitleBar() {
           {isMaximized ? (
             <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
               <rect x="2.5" y="0.5" width="7" height="7" fill="none" stroke="currentColor" />
-              <rect x="0.5" y="2.5" width="7" height="7" fill="var(--color-surface)" stroke="currentColor" />
+              <rect
+                x="0.5"
+                y="2.5"
+                width="7"
+                height="7"
+                fill="var(--color-surface)"
+                stroke="currentColor"
+              />
             </svg>
           ) : (
             <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">

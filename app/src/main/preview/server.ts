@@ -5,6 +5,7 @@ import type { IPty } from '@lydell/node-pty'
 import { contextManager } from '../context/manager'
 import { resolveSafe } from '../fs/operations'
 import { spawnCommandPty } from '../terminal/pty'
+import { runCommand } from '../terminal/runner'
 import type { PreviewEvent, PreviewStartResult } from '../../shared/types'
 
 /**
@@ -55,7 +56,7 @@ const IGNORE_RE =
   /(^|[/\\])(node_modules|\.git|dist|out|\.vite|\.next|\.turbo|coverage|release)([/\\]|$)/
 
 /** Matches the first localhost dev-server URL a tool prints to stdout. */
-const DEV_URL_RE = /(https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+[^\s'"]*)/i
+const DEV_URL_RE = /(https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):\d+[^\s'"]*)/i
 
 /**
  * Matches shell commands that (re)start a long-running local dev/preview server —
@@ -288,15 +289,45 @@ function killDev(): void {
 }
 
 /**
- * Spawn `command` as a dev server and resolve once its localhost URL appears in
- * stdout. Replaces any prior dev server. A `starting` event fires immediately; a
- * `ready` (with URL) or `error` (exit-before-URL / timeout) follows.
+ * The install command for the project, or null when none is needed. A Node dev
+ * server (Vite/Next/CRA/…) launched with no `node_modules` exits instantly —
+ * "vite is not recognized" / "next: not found" — which the user experiences as
+ * "React apps don't preview at all". So when the project has a `package.json`
+ * but its deps aren't installed, install them first, picking the package manager
+ * from the lockfile (npm otherwise). Returns null for non-Node projects and when
+ * `node_modules` already exists, so a plain static site never triggers an install.
  */
-export function startDev(command: string): Promise<PreviewStartResult> {
-  return new Promise((resolve) => {
-    killDev()
-    push({ phase: 'starting' })
+function resolveInstallCommand(): string | null {
+  let root: string
+  try {
+    root = contextManager.getRoot()
+  } catch {
+    return null
+  }
+  const has = (name: string): boolean => {
+    try {
+      return existsSync(join(root, name))
+    } catch {
+      return false
+    }
+  }
+  if (!has('package.json')) return null
+  if (has('node_modules')) return null
+  if (has('pnpm-lock.yaml')) return 'pnpm install'
+  if (has('yarn.lock')) return 'yarn install'
+  if (has('bun.lockb') || has('bun.lock')) return 'bun install'
+  return 'npm install'
+}
 
+/**
+ * Spawn `command` and resolve once its localhost URL is printed. Split from
+ * {@link startDev} so an optional dependency install can complete first. The wait
+ * is generous (120s): a cold framework start — first-run dep optimization, an
+ * initial compile — routinely runs well past the old 30s ceiling, and a premature
+ * timeout looked exactly like "the preview never shows".
+ */
+function awaitDevUrl(command: string): Promise<PreviewStartResult> {
+  return new Promise((resolve) => {
     let pty: IPty
     try {
       pty = spawnCommandPty(command)
@@ -317,7 +348,7 @@ export function startDev(command: string): Promise<PreviewStartResult> {
       push({ phase: 'error', message })
       resolve({ ok: false, error: message })
       killDev()
-    }, 30_000)
+    }, 120_000)
 
     pty.onData((data) => {
       if (settled) return
@@ -326,8 +357,8 @@ export function startDev(command: string): Promise<PreviewStartResult> {
       if (match) {
         settled = true
         clearTimeout(timeout)
-        // A webview can't load 0.0.0.0; rewrite to loopback.
-        const url = match[1].replace('0.0.0.0', '127.0.0.1')
+        // A webview can't load 0.0.0.0 or a bare IPv6 host; rewrite to loopback.
+        const url = match[1].replace('0.0.0.0', '127.0.0.1').replace('[::1]', '127.0.0.1')
         push({ phase: 'ready', url })
         resolve({ ok: true, url })
         return
@@ -349,6 +380,33 @@ export function startDev(command: string): Promise<PreviewStartResult> {
       if (devPty === pty) devPty = null
     })
   })
+}
+
+/**
+ * Bring up a dev server for the live preview: when the project needs its
+ * dependencies installed first ({@link resolveInstallCommand}), install them
+ * (blocking) so the server can actually boot, then spawn `command` and scrape its
+ * localhost URL. Replaces any prior dev server. A `starting` event fires
+ * immediately; a `ready` (with URL) or `error` follows.
+ */
+export async function startDev(command: string): Promise<PreviewStartResult> {
+  killDev()
+  push({ phase: 'starting' })
+
+  const install = resolveInstallCommand()
+  if (install) {
+    // Install output isn't streamed here (the panel shows its "starting"
+    // placeholder); the pty runner never rejects and resolves on exit.
+    const result = await runCommand(install, () => {})
+    if (result.exitCode !== 0) {
+      const message =
+        'Could not install dependencies, so the dev server did not start. Check that Node.js/npm are installed and the project has a valid package.json.'
+      push({ phase: 'error', message })
+      return { ok: false, error: message }
+    }
+  }
+
+  return awaitDevUrl(command)
 }
 
 /**
