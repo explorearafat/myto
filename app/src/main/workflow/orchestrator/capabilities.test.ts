@@ -72,6 +72,13 @@ describe('scopeMcpTools', () => {
 })
 
 describe('allowsTool', () => {
+  it('lets every role read the project, whatever it is scoped to', () => {
+    // A reviewer that could not read files could not review. Scoping is about
+    // what an agent may CHANGE.
+    expect(allowsTool(['terminal', 'testing'], 'read')).toBe(true)
+    expect(allowsTool([], 'read')).toBe(true)
+  })
+
   it('lets a filesystem role write files', () => {
     expect(allowsTool(['filesystem'], 'write_file')).toBe(true)
   })

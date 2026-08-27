@@ -29,11 +29,27 @@ const OPEN_FENCE = '```sylor-tool'
 /** A tool operation parsed from a block, before the engine enriches it. */
 export type ParsedTool =
   | { tool: 'write_file'; path: string; content: string }
+  | { tool: 'edit_file'; path: string; oldString: string; newString: string; replaceAll: boolean }
+  | { tool: 'read_file'; path: string; offset?: number; limit?: number }
+  | { tool: 'list_files'; path: string }
+  | { tool: 'search_files'; query: string; path: string; glob?: string }
   | { tool: 'run_command'; command: string }
   | { tool: 'remember'; note: string }
   | { tool: 'mcp_call'; server: string; name: string; arguments: Record<string, unknown> }
   | { tool: 'use_skill'; name: string }
   | { tool: 'spawn_agent'; role: string; task: string }
+
+/**
+ * A positive integer field, or undefined when absent/invalid. Used for the
+ * optional `offset`/`limit` line window on read_file: a garbage value is dropped
+ * (falling back to the default window) rather than failing the whole block, since
+ * the read itself is still perfectly well-defined without it.
+ */
+function positiveInt(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  const n = Math.floor(value)
+  return n > 0 ? n : undefined
+}
 
 /**
  * How many leading chars of `buffer` are safe to emit as prose without risking
@@ -104,6 +120,52 @@ export function parseToolBlock(raw: string): ParsedTool | null {
   if (rec.tool === 'write_file') {
     if (typeof rec.path === 'string' && rec.path.trim() && typeof rec.content === 'string') {
       return { tool: 'write_file', path: rec.path, content: rec.content }
+    }
+    return null
+  }
+  if (rec.tool === 'edit_file') {
+    // A surgical replacement: `old_string` must appear in the file, and swapping in
+    // `new_string` produces the edit. `new_string` may be '' (a deletion), but the
+    // two must differ — a no-op edit is a malformed block, not a valid write.
+    if (
+      typeof rec.path === 'string' &&
+      rec.path.trim() &&
+      typeof rec.old_string === 'string' &&
+      rec.old_string.length > 0 &&
+      typeof rec.new_string === 'string' &&
+      rec.old_string !== rec.new_string
+    ) {
+      return {
+        tool: 'edit_file',
+        path: rec.path,
+        oldString: rec.old_string,
+        newString: rec.new_string,
+        replaceAll: rec.replace_all === true
+      }
+    }
+    return null
+  }
+  if (rec.tool === 'read_file') {
+    if (typeof rec.path === 'string' && rec.path.trim()) {
+      return {
+        tool: 'read_file',
+        path: rec.path,
+        offset: positiveInt(rec.offset),
+        limit: positiveInt(rec.limit)
+      }
+    }
+    return null
+  }
+  if (rec.tool === 'list_files') {
+    // `path` is optional here — a bare list_files block means "the project root".
+    const path = typeof rec.path === 'string' && rec.path.trim() ? rec.path : '.'
+    return { tool: 'list_files', path }
+  }
+  if (rec.tool === 'search_files') {
+    if (typeof rec.query === 'string' && rec.query.length > 0) {
+      const path = typeof rec.path === 'string' && rec.path.trim() ? rec.path : '.'
+      const glob = typeof rec.glob === 'string' && rec.glob.trim() ? rec.glob : undefined
+      return { tool: 'search_files', query: rec.query, path, glob }
     }
     return null
   }

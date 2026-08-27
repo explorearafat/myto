@@ -427,6 +427,16 @@ function toolLabel(card: ToolCardUI): string {
   if (proposal.kind === 'mcp_call') {
     return `${proposal.server}/${proposal.name}`
   }
+  if (proposal.kind === 'read') {
+    if (proposal.op === 'search_files') {
+      return `${tense('Search', 'Searching', 'Searched')} "${proposal.query ?? ''}"`
+    }
+    if (proposal.op === 'list_files') {
+      return `${tense('List', 'Listing', 'Listed')} ${proposal.path}`
+    }
+    // "Read" is its own past tense, so this row reads naturally in every state.
+    return `${tense('Read', 'Reading', 'Read')} ${basename(proposal.path)}`
+  }
   const head = proposal.command.trim().split(/\s+/).slice(0, 3).join(' ')
   return `${tense('Run', 'Running', 'Ran')} ${head}`
 }
@@ -435,6 +445,11 @@ function toolLabel(card: ToolCardUI): string {
 function proposalFullTitle(proposal: ToolProposal): string {
   if (proposal.kind === 'write_file') return proposal.path
   if (proposal.kind === 'mcp_call') return `${proposal.server}/${proposal.name}`
+  if (proposal.kind === 'read') {
+    return proposal.op === 'search_files'
+      ? `search "${proposal.query ?? ''}" in ${proposal.path}`
+      : proposal.path
+  }
   return proposal.command
 }
 
@@ -445,7 +460,8 @@ function StatusBadge({ card }: { card: ToolCardUI }) {
       card.decision === 'reject' ||
       (card.result?.kind === 'write_file' && !card.result.ok) ||
       (card.result?.kind === 'run_command' && card.result.exitCode !== 0) ||
-      (card.result?.kind === 'mcp_call' && !card.result.ok)
+      (card.result?.kind === 'mcp_call' && !card.result.ok) ||
+      (card.result?.kind === 'read' && !card.result.ok)
     return (
       <span
         className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
@@ -503,6 +519,25 @@ function ToolResultFooter({ card }: { card: ToolCardUI }) {
       </div>
     )
   }
+  if (result.kind === 'read') {
+    if (!result.ok) {
+      return (
+        <div className="border-t border-border bg-red-500/10 px-3 py-1.5 text-[11px] text-red-300">
+          {result.error ?? 'Read failed.'}
+        </div>
+      )
+    }
+    return (
+      <div className="border-t border-border bg-bg px-3 py-1.5">
+        {result.truncated && (
+          <div className="mb-1 text-[10px] text-amber-300">output truncated</div>
+        )}
+        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-text/80">
+          {result.output.trimEnd()}
+        </pre>
+      </div>
+    )
+  }
   // run_command
   const output = result.output.trimEnd()
   return (
@@ -526,6 +561,47 @@ function ToolResultFooter({ card }: { card: ToolCardUI }) {
 }
 
 /**
+ * A read op rendered as a single quiet line — "⌕ Read useChatStore.ts · 1158
+ * lines". Deliberately lighter than {@link ToolCard}: understanding a change can
+ * take a dozen reads, and a dozen bordered cards would bury the actual work in
+ * the transcript. Nothing was changed here, so there is no diff and no status
+ * badge — just what was looked at and what came back, expandable if the user
+ * wants to see exactly what Sylor saw.
+ */
+function ReadCard({ card }: { card: ToolCardUI }) {
+  const [expanded, setExpanded] = useState(false)
+  const result = card.result?.kind === 'read' ? card.result : null
+  const failed = result !== null && !result.ok
+
+  return (
+    <div className="my-0.5">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        title={proposalFullTitle(card.proposal)}
+        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left transition-colors hover:bg-surface-2"
+      >
+        <span className="shrink-0 text-[11px] text-muted">⌕</span>
+        <span className="min-w-0 truncate text-[11.5px] text-text/70">{toolLabel(card)}</span>
+        <span
+          className={
+            'min-w-0 shrink truncate text-[10.5px] ' + (failed ? 'text-red-300' : 'text-muted')
+          }
+        >
+          {result ? `· ${failed ? (result.error ?? 'failed') : result.summary}` : '· …'}
+        </span>
+      </button>
+
+      {expanded && result?.ok && (
+        <pre className="mt-0.5 max-h-64 overflow-auto rounded border border-border bg-bg px-2 py-1.5 font-mono text-[11px] leading-relaxed text-text/80">
+          {result.output.trimEnd()}
+        </pre>
+      )}
+    </div>
+  )
+}
+
+/**
  * A tool op rendered as a compact, tappable activity line (requirement C): a
  * single row — chevron, icon, "Edited App.tsx", +/− line stats, status badge —
  * with the diff / command / output tucked behind a tap. Approval is NOT here;
@@ -536,6 +612,8 @@ function ToolCard({ card }: { card: ToolCardUI }) {
   const { proposal } = card
   const theme = useAppStore((s) => s.theme)
   const [expanded, setExpanded] = useState(false)
+  // Reads get their own much quieter row — they carry no diff and no approval.
+  if (proposal.kind === 'read') return <ReadCard card={card} />
   const language = proposal.kind === 'write_file' ? languageForPath(proposal.path) : 'plaintext'
   const icon = proposal.kind === 'write_file' ? '✎' : proposal.kind === 'mcp_call' ? '⚙' : '❯'
   const stats =
@@ -1051,13 +1129,16 @@ function AssistantMessage({ message, isActive, status, cards, agents, agentTools
   }, [message.content, cards, agents])
 
   // Rough running token estimate for the live status line (≈ chars ÷ 4): the
-  // lead's prose, every subagent's prose, and any file contents the model wrote —
-  // the visible "output so far". A renderer-side approximation (no provider usage
-  // plumbing, per the low-token constraint), so the UI prefixes it with ~.
+  // lead's prose, every subagent's prose, any file contents the model wrote, and
+  // whatever it read back — the visible "output so far". A renderer-side
+  // approximation (no provider usage plumbing, per the low-token constraint), so
+  // the UI prefixes it with ~.
   const tokenEstimate = useMemo(() => {
     let chars = message.content.length
     for (const c of cards) {
       if (c.proposal.kind === 'write_file') chars += c.proposal.newContent.length
+      // A read's output is fed straight back to the model, so it costs context too.
+      if (c.result?.kind === 'read') chars += c.result.output.length
     }
     for (const a of agents) chars += a.content.length
     return Math.round(chars / 4)
@@ -1204,7 +1285,9 @@ function PermissionBar({
               ? '✎'
               : card.proposal.kind === 'mcp_call'
                 ? '⚙'
-                : '❯'
+                : card.proposal.kind === 'read'
+                  ? '⌕'
+                  : '❯'
           return (
             <div
               key={card.id}

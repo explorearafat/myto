@@ -105,6 +105,100 @@ describe('parseToolBlock', () => {
     expect(parseToolBlock('{ "tool": "spawn_agent", "role": "builder", "task": "  " }')).toBeNull()
     expect(parseToolBlock('{ "tool": "spawn_agent", "role": "builder" }')).toBeNull()
   })
+
+  it('parses an edit_file block, mapping the wire snake_case to camelCase', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "edit_file", "path": "a.ts", "old_string": "let x", "new_string": "const x" }'
+      )
+    ).toEqual({
+      tool: 'edit_file',
+      path: 'a.ts',
+      oldString: 'let x',
+      newString: 'const x',
+      replaceAll: false
+    })
+  })
+
+  it('parses edit_file with replace_all, and treats an empty new_string as a deletion', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "edit_file", "path": "a.ts", "old_string": "debug\\n", "new_string": "", "replace_all": true }'
+      )
+    ).toEqual({
+      tool: 'edit_file',
+      path: 'a.ts',
+      oldString: 'debug\n',
+      newString: '',
+      replaceAll: true
+    })
+  })
+
+  it('rejects an edit_file that could not change anything', () => {
+    // Missing halves, an empty needle, or old === new: all no-ops, so the block is
+    // malformed rather than a valid write of unchanged content.
+    expect(parseToolBlock('{ "tool": "edit_file", "path": "a.ts", "old_string": "x" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "edit_file", "path": "a.ts", "new_string": "x" }')).toBeNull()
+    expect(
+      parseToolBlock('{ "tool": "edit_file", "path": "a.ts", "old_string": "", "new_string": "x" }')
+    ).toBeNull()
+    expect(
+      parseToolBlock('{ "tool": "edit_file", "path": "a.ts", "old_string": "x", "new_string": "x" }')
+    ).toBeNull()
+    expect(
+      parseToolBlock('{ "tool": "edit_file", "path": " ", "old_string": "x", "new_string": "y" }')
+    ).toBeNull()
+  })
+
+  it('parses a read_file block with and without a line window', () => {
+    expect(parseToolBlock('{ "tool": "read_file", "path": "src/a.ts" }')).toEqual({
+      tool: 'read_file',
+      path: 'src/a.ts'
+    })
+    expect(
+      parseToolBlock('{ "tool": "read_file", "path": "src/a.ts", "offset": 40, "limit": 20 }')
+    ).toEqual({ tool: 'read_file', path: 'src/a.ts', offset: 40, limit: 20 })
+  })
+
+  it('drops a nonsensical offset/limit rather than failing the whole read', () => {
+    // Reading the whole file is a fine fallback; refusing to read at all is not.
+    expect(
+      parseToolBlock(
+        '{ "tool": "read_file", "path": "a.ts", "offset": 0, "limit": "lots" }'
+      )
+    ).toEqual({ tool: 'read_file', path: 'a.ts' })
+  })
+
+  it('rejects a read_file with no path', () => {
+    expect(parseToolBlock('{ "tool": "read_file" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "read_file", "path": "  " }')).toBeNull()
+  })
+
+  it('defaults list_files to the project root', () => {
+    expect(parseToolBlock('{ "tool": "list_files" }')).toEqual({ tool: 'list_files', path: '.' })
+    expect(parseToolBlock('{ "tool": "list_files", "path": "src" }')).toEqual({
+      tool: 'list_files',
+      path: 'src'
+    })
+  })
+
+  it('parses a search_files block, defaulting the search root and keeping the glob', () => {
+    expect(parseToolBlock('{ "tool": "search_files", "query": "useAuth" }')).toEqual({
+      tool: 'search_files',
+      query: 'useAuth',
+      path: '.'
+    })
+    expect(
+      parseToolBlock(
+        '{ "tool": "search_files", "query": "useAuth", "path": "src", "glob": "*.tsx" }'
+      )
+    ).toEqual({ tool: 'search_files', query: 'useAuth', path: 'src', glob: '*.tsx' })
+  })
+
+  it('rejects a search_files with no query', () => {
+    expect(parseToolBlock('{ "tool": "search_files", "path": "src" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "search_files", "query": "" }')).toBeNull()
+  })
 })
 
 describe('ToolStreamParser', () => {

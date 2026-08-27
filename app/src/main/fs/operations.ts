@@ -1,6 +1,15 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
-import { contextManager } from '../context/manager'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+  type Dirent
+} from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { contextManager, IGNORED_DIRS } from '../context/manager'
 
 /**
  * Sandbox violation: a requested path resolved outside the project root. This is
@@ -113,4 +122,322 @@ export function proposeWrite(relPath: string, newContent: string): WriteProposal
   const exists = existsSync(abs)
   const oldContent = exists ? readFileSync(abs, 'utf-8') : ''
   return { exists, oldContent, newContent }
+}
+
+// ── Project inspection (read_file / list_files / search_files) ─────────────
+//
+// These are what let the agent work on code it didn't just write: open the real
+// file, list what's actually there, grep for a symbol. Every one is
+// sandbox-checked through resolveSafe and reads from disk fresh — deliberately
+// NOT through ContextManager, whose caches would hand back a pre-edit copy and
+// make a read-after-write loop lie.
+
+/**
+ * Hard ceiling on the text one inspection feeds back to the model (≈6k tokens).
+ * A read that would exceed it is clipped and flagged `truncated`, so a 2 MB
+ * bundle can't blow the context window — the agent narrows with offset/limit.
+ */
+const MAX_READ_CHARS = 24_000
+
+/** Default line window for a read_file with no explicit `limit`. */
+const DEFAULT_READ_LINES = 2_000
+
+/** Bounds for a directory listing and a project search. */
+const MAX_LIST_ENTRIES = 400
+const MAX_SEARCH_MATCHES = 60
+const MAX_SEARCH_FILES = 3_000
+const MAX_SEARCH_DEPTH = 12
+/** Longest single matched line echoed back (a minified bundle line is useless). */
+const MAX_MATCH_LINE_CHARS = 300
+
+/** The bounded text an inspection produces, plus a one-line summary for the UI. */
+export interface ReadOutcome {
+  /** The file text / listing / match lines. */
+  output: string
+  /** True when a cap clipped the result. */
+  truncated: boolean
+  /** Human one-liner for the tool card ('240 lines', '8 matches in 3 files'). */
+  summary: string
+}
+
+/** Clips `text` to {@link MAX_READ_CHARS}, reporting whether it had to. */
+function clip(text: string): { text: string; truncated: boolean } {
+  if (text.length <= MAX_READ_CHARS) return { text, truncated: false }
+  return { text: `${text.slice(0, MAX_READ_CHARS)}\n… (output clipped)`, truncated: true }
+}
+
+/** Heuristic binary check: a NUL byte in the first 8 KB means "not source". */
+function looksBinary(text: string): boolean {
+  return text.slice(0, 8_192).includes('\0')
+}
+
+/** Splits into lines without a trailing empty entry for a final newline. */
+function toLines(text: string): string[] {
+  const lines = text.split(/\r?\n/)
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+  return lines
+}
+
+/**
+ * Reads a project file as numbered lines, optionally windowed by a 1-based
+ * `offset` and a `limit`. Numbering is what makes the result *citable* — the
+ * model can say "line 412" and the user can follow along — but the numbers are
+ * display only and must never be pasted back into an edit's `old_string`.
+ *
+ * Throws {@link PathEscapeError} on a sandbox escape, or the underlying fs error
+ * when the file is missing/unreadable; the caller turns that into a failed result.
+ */
+export function readFileSlice(relPath: string, offset?: number, limit?: number): ReadOutcome {
+  const raw = readProjectFile(relPath)
+  if (looksBinary(raw)) {
+    return { output: '(binary file — not shown)', truncated: false, summary: 'binary file' }
+  }
+  const lines = toLines(raw)
+  const start = Math.max(0, (offset ?? 1) - 1)
+  const end = Math.min(lines.length, start + (limit ?? DEFAULT_READ_LINES))
+  const window = lines.slice(start, end)
+  const width = String(end).length
+  const numbered = window.map((line, i) => `${String(start + i + 1).padStart(width)}\t${line}`)
+
+  const { text, truncated } = clip(numbered.join('\n'))
+  // A window that doesn't reach the end also counts as truncated, so the model
+  // always knows when there is more file left to ask for.
+  const windowed = start > 0 || end < lines.length
+  const summary = windowed
+    ? `lines ${start + 1}–${end} of ${lines.length}`
+    : `${lines.length} line${lines.length === 1 ? '' : 's'}`
+  return { output: text || '(empty file)', truncated: truncated || end < lines.length, summary }
+}
+
+/**
+ * Lists one directory: subdirectories first (with a trailing `/`), then files
+ * with their byte sizes. One level only — the model asks again to go deeper,
+ * which keeps each result small and the exploration deliberate.
+ */
+export function listDirectory(relPath: string): ReadOutcome {
+  const abs = resolveSafe(relPath || '.')
+  const entries = readdirSync(abs, { withFileTypes: true })
+  const dirs: string[] = []
+  const files: string[] = []
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      // Skip build/vendor noise so a listing shows the project, not its artifacts.
+      if (IGNORED_DIRS.has(entry.name)) continue
+      dirs.push(`${entry.name}/`)
+      continue
+    }
+    let size = 0
+    try {
+      size = statSync(join(abs, entry.name)).size
+    } catch {
+      // Unreadable (permission, race) — still list it, just without a size.
+    }
+    files.push(`${entry.name}  (${size} B)`)
+  }
+  dirs.sort()
+  files.sort()
+
+  const all = [...dirs, ...files]
+  const capped = all.slice(0, MAX_LIST_ENTRIES)
+  const overflow = all.length - capped.length
+  const body = capped.length > 0 ? capped.join('\n') : '(empty directory)'
+  const { text, truncated } = clip(overflow > 0 ? `${body}\n… (+${overflow} more)` : body)
+  return {
+    output: text,
+    truncated: truncated || overflow > 0,
+    summary: `${dirs.length} folder${dirs.length === 1 ? '' : 's'}, ${files.length} file${files.length === 1 ? '' : 's'}`
+  }
+}
+
+/**
+ * Translates a shell-style glob into an anchored regex. Supports `*` (within one
+ * path segment), `**` (across segments), `?`, and `{a,b}` alternatives. A pattern
+ * with no `/` is matched against the basename, so `*.ts` finds TypeScript
+ * anywhere — the behaviour anyone who has used ripgrep expects.
+ */
+function globToRegExp(pattern: string): { re: RegExp; basenameOnly: boolean } {
+  let out = ''
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i]
+    if (ch === '*') {
+      if (pattern[i + 1] === '*') {
+        out += '.*'
+        i++
+        // Swallow the slash after `**` so `**/x` also matches a bare `x`.
+        if (pattern[i + 1] === '/') i++
+      } else {
+        out += '[^/]*'
+      }
+    } else if (ch === '?') out += '[^/]'
+    else if (ch === '{') out += '(?:'
+    else if (ch === '}') out += ')'
+    else if (ch === ',') out += '|'
+    else out += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+  }
+  return { re: new RegExp(`^${out}$`), basenameOnly: !pattern.includes('/') }
+}
+
+/** Compiles `query` as a regex, falling back to a literal match if it won't parse. */
+function toSearchRegExp(query: string): RegExp {
+  try {
+    return new RegExp(query)
+  } catch {
+    return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  }
+}
+
+/**
+ * Greps the project for `query` (a regex, or a literal when it doesn't compile),
+ * returning `path:line: text` hits grouped by file. Walks from `relPath` fresh on
+ * every call, skipping {@link IGNORED_DIRS} and binaries, bounded by
+ * {@link MAX_SEARCH_FILES} files and {@link MAX_SEARCH_MATCHES} hits.
+ */
+export function searchProject(query: string, relPath = '.', glob?: string): ReadOutcome {
+  const root = resolveSafe(relPath || '.')
+  const projectRoot = contextManager.getRoot()
+  const re = toSearchRegExp(query)
+  const globMatch = glob ? globToRegExp(glob) : null
+
+  const hits: string[] = []
+  let matchCount = 0
+  let fileHitCount = 0
+  let scanned = 0
+  let capped = false
+
+  const walk = (dir: string, depth: number): void => {
+    if (capped || depth > MAX_SEARCH_DEPTH) return
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return // unreadable dir — skip silently, same as the context walker
+    }
+    for (const entry of entries) {
+      if (capped) return
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (IGNORED_DIRS.has(entry.name) || entry.name.startsWith('.')) continue
+        walk(full, depth + 1)
+        continue
+      }
+      if (!entry.isFile()) continue
+      if (++scanned > MAX_SEARCH_FILES) {
+        capped = true
+        return
+      }
+      const rel = relative(projectRoot, full).split(sep).join('/')
+      if (globMatch && !globMatch.re.test(globMatch.basenameOnly ? entry.name : rel)) continue
+
+      let text: string
+      try {
+        text = readFileSync(full, 'utf-8')
+      } catch {
+        continue
+      }
+      if (looksBinary(text)) continue
+
+      const lines = toLines(text)
+      let fileMatched = false
+      for (let i = 0; i < lines.length; i++) {
+        if (!re.test(lines[i])) continue
+        fileMatched = true
+        if (matchCount >= MAX_SEARCH_MATCHES) {
+          capped = true
+          break
+        }
+        matchCount++
+        const line = lines[i]
+        const shown =
+          line.length > MAX_MATCH_LINE_CHARS ? `${line.slice(0, MAX_MATCH_LINE_CHARS)}…` : line
+        hits.push(`${rel}:${i + 1}: ${shown.trim()}`)
+      }
+      if (fileMatched) fileHitCount++
+      if (capped) return
+    }
+  }
+  walk(root, 0)
+
+  const body =
+    hits.length > 0
+      ? hits.join('\n') + (capped ? `\n… (stopped at ${MAX_SEARCH_MATCHES} matches)` : '')
+      : `No matches for ${query}`
+  const { text, truncated } = clip(body)
+  return {
+    output: text,
+    truncated: truncated || capped,
+    summary:
+      matchCount === 0
+        ? 'no matches'
+        : `${matchCount} match${matchCount === 1 ? '' : 'es'} in ${fileHitCount} file${fileHitCount === 1 ? '' : 's'}`
+  }
+}
+
+// ── Surgical edits (edit_file) ─────────────────────────────────────────────
+
+/**
+ * An `edit_file` whose target text couldn't be located unambiguously. Thrown
+ * rather than guessed at: a near-miss replacement in the wrong place is far worse
+ * than a refusal the model can see and correct. The message is written FOR the
+ * model — it names the likely mistake so the retry is informed.
+ */
+export class EditMatchError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'EditMatchError'
+  }
+}
+
+/**
+ * Resolves an exact-string replacement against a project file's current contents,
+ * returning old and new text for the approval diff. Pure: nothing is written here
+ * — the caller stages it as a normal `write_file` proposal, so a surgical edit
+ * still shows the user a diff and still passes the permission gate.
+ *
+ * `oldString` must occur EXACTLY once unless `replaceAll` is set. Zero occurrences
+ * or (without the flag) several both throw {@link EditMatchError}.
+ */
+export function applyEdit(
+  relPath: string,
+  oldString: string,
+  newString: string,
+  replaceAll = false
+): { oldContent: string; newContent: string } {
+  const abs = resolveSafe(relPath)
+  if (!existsSync(abs)) {
+    throw new EditMatchError(
+      `${relPath} does not exist, so there is nothing to edit. Use write_file to create it.`
+    )
+  }
+  const oldContent = readFileSync(abs, 'utf-8')
+
+  // Count occurrences by scanning, not split(), so an empty needle can't loop.
+  let count = 0
+  for (let i = oldContent.indexOf(oldString); i !== -1; i = oldContent.indexOf(oldString, i + oldString.length)) {
+    count++
+    if (count > 1 && !replaceAll) break
+  }
+
+  if (count === 0) {
+    throw new EditMatchError(
+      `old_string was not found in ${relPath}. It must match the file byte for byte — ` +
+        `including indentation, and WITHOUT the line numbers read_file prints for display. ` +
+        `Read the file again and copy the exact text you want to replace.`
+    )
+  }
+  if (count > 1 && !replaceAll) {
+    throw new EditMatchError(
+      `old_string appears more than once in ${relPath}, so the edit is ambiguous. ` +
+        `Include enough surrounding lines to make it unique, or set "replace_all": true ` +
+        `to change every occurrence.`
+    )
+  }
+
+  // Spliced by index rather than String.replace: a replacement containing `$&`,
+  // `$1`, or `` $` `` would otherwise be reinterpreted as a substitution pattern
+  // and silently corrupt the file. split/join is likewise pattern-free.
+  const at = oldContent.indexOf(oldString)
+  const newContent = replaceAll
+    ? oldContent.split(oldString).join(newString)
+    : oldContent.slice(0, at) + newString + oldContent.slice(at + oldString.length)
+  return { oldContent, newContent }
 }

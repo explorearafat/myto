@@ -12,10 +12,15 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { contextManager } from '@main/context/manager'
 import {
+  applyEdit,
+  EditMatchError,
+  listDirectory,
   PathEscapeError,
   proposeWrite,
+  readFileSlice,
   readProjectFile,
   resolveSafe,
+  searchProject,
   writeProjectFile
 } from '@main/fs/operations'
 
@@ -140,5 +145,151 @@ describe('proposeWrite', () => {
 
   it('throws on a sandbox escape before reading anything', () => {
     expect(() => proposeWrite('../../secret.ts', 'x')).toThrow(PathEscapeError)
+  })
+})
+
+/**
+ * Project inspection — the tools that let the agent work on code it did NOT just
+ * write. Each is scoped to its own subdirectory so the suite stays independent of
+ * what the earlier describes left lying in the shared temp root.
+ */
+describe('readFileSlice', () => {
+  it('numbers every line and reports the total', () => {
+    writeProjectFile('look/three.ts', 'one\ntwo\nthree\n')
+    const out = readFileSlice('look/three.ts')
+    expect(out.output).toBe('1\tone\n2\ttwo\n3\tthree')
+    expect(out.summary).toBe('3 lines')
+    expect(out.truncated).toBe(false)
+  })
+
+  it('windows by offset/limit, numbering from the real line and flagging the rest', () => {
+    writeProjectFile('look/ten.ts', Array.from({ length: 10 }, (_, i) => `line${i + 1}`).join('\n'))
+    const out = readFileSlice('look/ten.ts', 4, 2)
+    expect(out.output).toBe('4\tline4\n5\tline5')
+    expect(out.summary).toBe('lines 4–5 of 10')
+    // More file remains past the window — the model must be told, or it will
+    // assume it has seen everything and edit against a partial picture.
+    expect(out.truncated).toBe(true)
+  })
+
+  it('says so for an empty file rather than returning nothing', () => {
+    writeProjectFile('look/empty.ts', '')
+    expect(readFileSlice('look/empty.ts').output).toBe('(empty file)')
+  })
+
+  it('refuses to dump a binary file as text', () => {
+    writeProjectFile('look/blob.bin', 'MZ\0\0\0binary')
+    expect(readFileSlice('look/blob.bin').summary).toBe('binary file')
+  })
+
+  it('is sandbox-checked', () => {
+    expect(() => readFileSlice('../outside.ts')).toThrow(PathEscapeError)
+  })
+})
+
+describe('listDirectory', () => {
+  it('lists folders first, then files with sizes, skipping build/vendor noise', () => {
+    writeProjectFile('ls/b.ts', 'xx')
+    writeProjectFile('ls/a.ts', 'x')
+    writeProjectFile('ls/sub/nested.ts', 'x')
+    writeProjectFile('ls/node_modules/pkg/index.js', 'x')
+    const out = listDirectory('ls')
+    expect(out.output).toBe('sub/\na.ts  (1 B)\nb.ts  (2 B)')
+    expect(out.output).not.toContain('node_modules')
+    expect(out.summary).toBe('1 folder, 2 files')
+  })
+
+  it('says so for an empty directory', () => {
+    mkdirSync(join(root, 'ls-empty'), { recursive: true })
+    expect(listDirectory('ls-empty').output).toBe('(empty directory)')
+  })
+})
+
+describe('searchProject', () => {
+  beforeAll(() => {
+    writeProjectFile('grep/a.ts', 'export const useAuth = 1\nconst other = 2\n')
+    writeProjectFile('grep/b.tsx', 'import { useAuth } from "./a"\n')
+    writeProjectFile('grep/notes.md', 'useAuth is documented here\n')
+    writeProjectFile('grep/lit.ts', 'a[b(c\n')
+    writeProjectFile('grep/node_modules/dep/index.js', 'useAuth in a dependency\n')
+  })
+
+  it('returns path:line: text hits and counts files, skipping ignored dirs', () => {
+    const out = searchProject('useAuth', 'grep')
+    expect(out.output).toContain('grep/a.ts:1: export const useAuth = 1')
+    expect(out.output).toContain('grep/b.tsx:1: import { useAuth } from "./a"')
+    expect(out.output).not.toContain('node_modules')
+    expect(out.summary).toBe('3 matches in 3 files')
+  })
+
+  it('narrows by glob, matching the basename when the pattern has no slash', () => {
+    const out = searchProject('useAuth', 'grep', '*.tsx')
+    expect(out.output).toContain('grep/b.tsx:1')
+    expect(out.output).not.toContain('grep/a.ts')
+    expect(out.summary).toBe('1 match in 1 file')
+  })
+
+  it('treats the query as a regular expression', () => {
+    expect(searchProject('const \\w+ = \\d', 'grep').summary).toBe('2 matches in 1 file')
+  })
+
+  it('does not throw on an unparseable regex — falls back to a literal match', () => {
+    const out = searchProject('a[b(c', 'grep')
+    expect(out.output).toContain('grep/lit.ts:1')
+  })
+
+  it('reports no matches plainly', () => {
+    const out = searchProject('zzz-nothing-here', 'grep')
+    expect(out.summary).toBe('no matches')
+    expect(out.output).toContain('No matches')
+  })
+})
+
+describe('applyEdit', () => {
+  it('replaces a unique occurrence and leaves disk untouched', () => {
+    writeProjectFile('edit/one.ts', 'const a = 1\nconst b = 2\n')
+    const { oldContent, newContent } = applyEdit('edit/one.ts', 'const b = 2', 'const b = 99')
+    expect(oldContent).toBe('const a = 1\nconst b = 2\n')
+    expect(newContent).toBe('const a = 1\nconst b = 99\n')
+    // Staging only — the engine turns this into a write_file proposal to approve.
+    expect(readProjectFile('edit/one.ts')).toBe('const a = 1\nconst b = 2\n')
+  })
+
+  it('deletes text when new_string is empty', () => {
+    writeProjectFile('edit/del.ts', 'keep\nremove me\n')
+    expect(applyEdit('edit/del.ts', 'remove me\n', '').newContent).toBe('keep\n')
+  })
+
+  it('inserts a replacement containing $& literally, not as a substitution pattern', () => {
+    // String.replace would expand `$&` to the matched text and corrupt the file;
+    // the splice must treat it as ordinary characters.
+    writeProjectFile('edit/dollar.ts', 'price = X\n')
+    expect(applyEdit('edit/dollar.ts', 'X', '"$& $1 $`"').newContent).toBe('price = "$& $1 $`"\n')
+  })
+
+  it('refuses an old_string that is not in the file, and says why', () => {
+    writeProjectFile('edit/miss.ts', 'actual contents\n')
+    expect(() => applyEdit('edit/miss.ts', 'imagined contents', 'x')).toThrow(EditMatchError)
+    // The message is written for the model: it must name the line-number trap,
+    // which is the single most common way an edit misses.
+    expect(() => applyEdit('edit/miss.ts', 'imagined contents', 'x')).toThrow(/line numbers/i)
+  })
+
+  it('refuses an ambiguous match rather than picking one', () => {
+    writeProjectFile('edit/dup.ts', 'x = 1\ny = 2\nx = 1\n')
+    expect(() => applyEdit('edit/dup.ts', 'x = 1', 'x = 9')).toThrow(/more than once/i)
+  })
+
+  it('replaces every occurrence when replace_all is set', () => {
+    writeProjectFile('edit/all.ts', 'x = 1\ny = 2\nx = 1\n')
+    expect(applyEdit('edit/all.ts', 'x = 1', 'x = 9', true).newContent).toBe('x = 9\ny = 2\nx = 9\n')
+  })
+
+  it('refuses to edit a file that does not exist, pointing at write_file', () => {
+    expect(() => applyEdit('edit/ghost.ts', 'a', 'b')).toThrow(/does not exist/i)
+  })
+
+  it('is sandbox-checked', () => {
+    expect(() => applyEdit('../outside.ts', 'a', 'b')).toThrow(PathEscapeError)
   })
 })

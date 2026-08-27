@@ -196,6 +196,11 @@ function installShim(): void {
           ok: false,
           error: 'Live preview is unavailable in the browser preview.'
         }),
+      startAuto: () =>
+        Promise.resolve({
+          ok: false,
+          error: 'Live preview is unavailable in the browser preview.'
+        }),
       stop: () => {},
       onEvent: () => () => {}
     },

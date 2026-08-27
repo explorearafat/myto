@@ -158,9 +158,12 @@ export function scopeSkills(
 }
 
 /**
- * Whether a role may execute a side-effecting tool kind. Enforced in the
- * engine's `executeTool`: an out-of-scope tool becomes a failed tool-result fed
- * back to the loop (the model learns it can't do that), never a silent mutation.
+ * Whether a role may execute a tool kind. Enforced in the engine's `executeTool`:
+ * an out-of-scope tool becomes a failed tool-result fed back to the loop (the
+ * model learns it can't do that), never a silent mutation.
+ *  - `read`        → always. Every role must be able to look at the project it is
+ *    working on; a reviewer that couldn't read files could not review, and reading
+ *    is not a side effect. Scoping applies to what an agent may CHANGE.
  *  - `write_file`  → needs `filesystem`.
  *  - `run_command` → needs `terminal`, `code-exec`, or `testing`.
  *  - `mcp_call`    → needs any MCP-granting capability (finer per-server scoping
@@ -170,6 +173,8 @@ export function scopeSkills(
 export function allowsTool(capabilities: readonly Capability[], toolKind: ToolKind): boolean {
   const has = new Set(capabilities)
   switch (toolKind) {
+    case 'read':
+      return true
     case 'write_file':
       return has.has('filesystem')
     case 'run_command':

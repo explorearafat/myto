@@ -114,6 +114,7 @@ const sylorMock: SylorApi = {
   preview: {
     startStatic: vi.fn().mockResolvedValue({ ok: true, url: 'http://127.0.0.1:0/index.html' }),
     startDev: vi.fn().mockResolvedValue({ ok: true, url: 'http://127.0.0.1:5173/' }),
+    startAuto: vi.fn().mockResolvedValue({ ok: true, url: 'http://127.0.0.1:5173/' }),
     stop: vi.fn(),
     // No lifecycle events in tests; hand back a no-op disposer.
     onEvent: vi.fn().mockReturnValue(() => {})

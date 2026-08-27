@@ -97,6 +97,8 @@ export const IpcChannel = {
   PreviewStartStatic: 'preview:start-static',
   /** Renderer → main (invoke): spawn a dev server; returns the scraped localhost URL. */
   PreviewStartDev: 'preview:start-dev',
+  /** Renderer → main (invoke): preview however this project actually renders (dev server or static). */
+  PreviewStartAuto: 'preview:start-auto',
   /** Renderer → main (send): stop the preview (dev server + static server + watcher). */
   PreviewStop: 'preview:stop',
   /** Main → renderer (send): a preview lifecycle event (starting/ready/reload/stopped/error). */

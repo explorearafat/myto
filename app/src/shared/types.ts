@@ -235,8 +235,12 @@ export type WorkflowStage =
 
 // ── Tool execution (Phase 4) ──────────────────────────────────────────────
 
-/** The kinds of side-effecting operations the engine can propose. */
-export type ToolKind = 'write_file' | 'run_command' | 'mcp_call'
+/**
+ * The kinds of operations the engine can propose. The first three are
+ * side-effecting and permission-gated; `read` only inspects the project (see
+ * {@link ReadProposal}) and is always auto-approved.
+ */
+export type ToolKind = 'write_file' | 'run_command' | 'mcp_call' | 'read'
 
 /** A proposed file write: full new contents for a project-relative path. */
 export interface WriteFileProposal {
@@ -276,8 +280,50 @@ export interface McpCallProposal {
   arguments: Record<string, unknown>
 }
 
+/**
+ * Which project inspection a {@link ReadProposal} performs. Three ops share one
+ * proposal kind because they share a shape (a target + bounded text back), which
+ * keeps every switch in the pipeline to a single `read` branch.
+ */
+export type ReadOp = 'read_file' | 'list_files' | 'search_files'
+
+/**
+ * A request to LOOK at the project — open a file, list a directory, grep for a
+ * string. Unlike the three above, this changes nothing, so it is auto-approved in
+ * every permission mode (see `decideAuto`) and every role may issue it (see
+ * `allowsTool`). It is still a real proposal rather than an inline side channel,
+ * so the UI, the transcript, and the session DB all record what Sylor looked at
+ * — the user can always see what it based a decision on.
+ *
+ * This is the tool that makes Sylor able to work on an EXISTING file: before it
+ * had one, the model could only rewrite files whole, from guesswork.
+ */
+export interface ReadProposal {
+  id: string
+  kind: 'read'
+  op: ReadOp
+  /**
+   * Project-relative POSIX target: the file for `read_file`, the directory for
+   * `list_files`, and the directory to search under for `search_files` ('.' for
+   * the whole project).
+   */
+  path: string
+  /** The text/regex being searched for — `search_files` only. */
+  query?: string
+  /** Restrict `search_files` to paths matching this glob (e.g. `*.ts`). */
+  glob?: string
+  /** 1-based first line to return — `read_file` only (default: the start). */
+  offset?: number
+  /** How many lines to return — `read_file` only (default: a bounded window). */
+  limit?: number
+}
+
 /** Discriminated union of everything the engine can ask to do. */
-export type ToolProposal = WriteFileProposal | RunCommandProposal | McpCallProposal
+export type ToolProposal =
+  | WriteFileProposal
+  | RunCommandProposal
+  | McpCallProposal
+  | ReadProposal
 
 /** The user's (or permission-mode's) verdict on a proposal. */
 export type ToolDecision = 'approve' | 'reject'
@@ -289,6 +335,14 @@ export interface WriteFileResult {
   ok: boolean
   /** Present when `ok` is false (e.g. sandbox violation, write error). */
   error?: string
+  /**
+   * Problems found by statically checking the bytes just written — malformed
+   * JSON, an unbalanced/truncated source file, a missing asset or import target.
+   * The write still succeeded (`ok` stays true); these are fed back to the agent
+   * so it fixes them on the next iteration instead of leaving the user with a
+   * blank page. Absent means nothing was detected, NOT that the file is correct.
+   */
+  issues?: string[]
 }
 
 /** Outcome of an executed `run_command` proposal. */
@@ -317,8 +371,24 @@ export interface McpCallResult {
   error?: string
 }
 
+/** Outcome of a `read` proposal (file text, directory listing, or search hits). */
+export interface ReadResult {
+  id: string
+  kind: 'read'
+  /** False when the target was missing, unreadable, or outside the sandbox. */
+  ok: boolean
+  /** The file text / listing / matching lines, bounded to stay context-safe. */
+  output: string
+  /** True when `output` was clipped at the cap. */
+  truncated: boolean
+  /** One-line human summary for the card ('240 lines', '8 matches in 3 files'). */
+  summary: string
+  /** Present when `ok` is false. */
+  error?: string
+}
+
 /** Discriminated union of tool outcomes reported back to the renderer. */
-export type ToolResult = WriteFileResult | RunCommandResult | McpCallResult
+export type ToolResult = WriteFileResult | RunCommandResult | McpCallResult | ReadResult
 
 /**
  * The role an agent plays in a Code build (requirement B). `lead` is the
@@ -786,6 +856,13 @@ export interface PreviewApi {
    * URL is scraped from stdout (or an error/timeout). Kills any prior dev server.
    */
   startDev: (command: string) => Promise<PreviewStartResult>
+  /**
+   * Preview the project the way it actually renders: its dev server when it has
+   * one (reusing an already-running server), a plain static serve otherwise. Use
+   * this when you just want the app on screen — a bundler app (React/Vue/Svelte)
+   * served statically is a blank page, and this is what avoids that.
+   */
+  startAuto: (entry?: string) => Promise<PreviewStartResult>
   /** Stop the dev server, close the static server, and drop the file watcher. */
   stop: () => void
   /** Subscribe to preview lifecycle events; returns a disposer. */

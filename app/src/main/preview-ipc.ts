@@ -1,7 +1,7 @@
 import { BrowserWindow, ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { IpcChannel } from '../shared/ipc'
 import type { PreviewEvent } from '../shared/types'
-import { setPreviewEmitter, startDev, startStatic, stopPreview } from './preview/server'
+import { setPreviewEmitter, startAuto, startDev, startStatic, stopPreview } from './preview/server'
 
 /**
  * Registers the live-preview IPC. `start-static`/`start-dev` are invoke/handle
@@ -24,6 +24,9 @@ export function registerPreviewIpc(): void {
   )
   ipcMain.handle(IpcChannel.PreviewStartDev, (_event: IpcMainInvokeEvent, command: string) =>
     startDev(command)
+  )
+  ipcMain.handle(IpcChannel.PreviewStartAuto, (_event: IpcMainInvokeEvent, entry?: string) =>
+    startAuto(entry)
   )
   ipcMain.on(IpcChannel.PreviewStop, () => {
     stopPreview()

@@ -1,8 +1,12 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, join, relative, sep } from 'node:path'
 
-/** Directories never worth walking for project context. */
-const IGNORED_DIRS = new Set([
+/**
+ * Directories never worth walking for project context. Exported because the
+ * file-inspection tools in `fs/operations.ts` must skip exactly the same noise —
+ * a `search_files` that trawled node_modules would be useless and slow.
+ */
+export const IGNORED_DIRS = new Set([
   'node_modules',
   '.git',
   'out',

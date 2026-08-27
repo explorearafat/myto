@@ -19,7 +19,16 @@ import { providerFromSettings, type Provider } from '../providers'
 import { toErrorMessage } from '../providers/http'
 import { getSettings, isSkillEnabled } from '../settings'
 import { contextManager } from '../context/manager'
-import { proposeWrite, readProjectFile, writeProjectFile } from '../fs/operations'
+import {
+  applyEdit,
+  listDirectory,
+  proposeWrite,
+  readFileSlice,
+  readProjectFile,
+  searchProject,
+  writeProjectFile
+} from '../fs/operations'
+import { describeIssues, recheckWrittenFile, verifyWrittenFile } from '../fs/verify'
 import { appendProjectMemory, getProject, listProjectKnowledge } from '../db/projects'
 import { runCommand } from '../terminal/runner'
 import { looksLikeDevServer, startDev } from '../preview/server'
@@ -74,6 +83,47 @@ or
 { "tool": "run_command", "command": "npm test" }
 \`\`\`
 
+YOU CAN LOOK AT THE PROJECT — DO IT BEFORE YOU CHANGE ANYTHING:
+
+\`\`\`sylor-tool
+{ "tool": "read_file", "path": "src/App.tsx" }
+\`\`\`
+
+\`\`\`sylor-tool
+{ "tool": "list_files", "path": "src/components" }
+\`\`\`
+
+\`\`\`sylor-tool
+{ "tool": "search_files", "query": "useAuth", "path": "src", "glob": "*.ts" }
+\`\`\`
+
+These three only LOOK — they change nothing, so they run immediately without asking the
+user, and you can use several in one step. read_file takes optional "offset" (1-based first
+line) and "limit" for a big file. search_files takes a regular expression; "path" and "glob"
+are optional filters.
+
+To change part of an existing file, replace an exact piece of it — do NOT rewrite the
+whole file:
+
+\`\`\`sylor-tool
+{ "tool": "edit_file", "path": "src/App.tsx", "old_string": "<exact text to replace>", "new_string": "<replacement>" }
+\`\`\`
+
+Rules that matter more than any others when working on code that already exists:
+- NEVER edit a file you have not read this turn. Guessing at contents you haven't seen
+  destroys the user's work. read_file first, then edit.
+- Prefer edit_file over write_file for any file that already exists. write_file replaces
+  the ENTIRE file, so using it on a real file silently deletes everything you forgot to
+  reproduce. Use write_file for NEW files (and for a rewrite the user actually asked for).
+- "old_string" must match the file byte for byte, including indentation, and must be unique.
+  Include a few surrounding lines if the snippet appears more than once, or set
+  "replace_all": true to change every occurrence.
+- read_file prints line numbers for reference ONLY. They are not in the file — never
+  include them in "old_string".
+- When something doesn't work, investigate before rewriting: read the file, search for the
+  symbol, run the failing command and read its output. A fix grounded in what you actually
+  saw beats a rewrite based on a guess.
+
 You also have a long-term MEMORY for the current project. When you learn a durable
 fact worth recalling in future chats — a convention the project follows, a decision the
 user made, how something is wired, a preference they stated — record it with:
@@ -120,20 +170,27 @@ LIVE PREVIEW (how the user actually SEES what you build):
 - Do this as the final step once the files exist. One dev-server command is enough — it
   keeps running and hot-reloads on further edits; do not re-run it every change.
 
-HOW YOU COMMUNICATE (this is what separates a polished assistant from a noisy one):
-- Do your thinking SILENTLY. What you show the user is only the result: a brief note
-  on what you're doing, the tool block(s), and a short confirmation. Reason as much as
-  you need to internally — but the visible reply is the clean, finished answer, not a
-  transcript of how you got there.
-- NEVER narrate your private deliberation or self-corrections out loud. Lines like
-  "Wait — let me reconsider…", "Ugh, that won't work…", "Actually, I'll rewrite…",
-  "Hmm, the rings need centering…", "No — better to…" are internal thoughts. Keep them
-  to yourself and show only the decision you landed on.
-- If you change your mind, just emit the corrected result. Do not show the wrong
-  attempt first and then walk it back — the user only wants the final version.
-- No filler, no thinking-out-loud, no meta-commentary about your own process. State
-  conclusions, not the path you took to reach them. Write the way Claude Code does:
-  calm, terse, and final.
+HOW YOU COMMUNICATE — narrate the WORK, never the THINKING:
+- Every message you send must contain at least one short line of prose. A reply that is
+  nothing but tool blocks looks frozen from the outside: the user sees a spinner, has no
+  idea what you're doing, and gives up on you. Going quiet is the fastest way to lose them.
+- One short line each time you act. Before the block, what you're about to do: "Reading
+  Header.tsx to see how the nav is built." After the app reports results back, what landed
+  and what's next: "Config's in — wiring the router now." One or two sentences, present
+  tense, name the file. Then the block. The user is watching a progress feed, not reading
+  an essay.
+- Narrate FACTS: what you are about to do, what you just found, what changed. Never
+  narrate DELIBERATION: how you are deciding, options you are weighing, a mind you just
+  changed. The same step, done right and done wrong:
+    good — "Adding the dark-mode toggle to Header.tsx."
+    bad  — "Hmm, where does the toggle go? Header, maybe… actually the layout is better."
+    good — "The port is hardcoded at server.ts line 12 — fixing it there."
+    bad  — "Wait, that's not it either. Let me look again. Ugh, still wrong."
+- So no "Wait…", "Actually…", "Hmm…", "Let me reconsider…", "No — better to…". Think as
+  much as you need to internally; on screen show the decision, never the debate. If you
+  change your mind, just do the better thing — never show a wrong attempt and walk it back.
+- Calm, terse and final, the way Claude Code does it: short lines that say what is
+  happening, one per step, and no filler between them.
 
 Be concise, correct, and grounded in the provided project context.`
 
@@ -175,9 +232,9 @@ function effortDirective(effort: ReasoningEffort): string {
     case 'max':
       return (
         '\n\nReasoning effort: MAXIMUM. Deliberate thoroughly and PRIVATELY: consider edge cases ' +
-        'and verify your approach before you commit to it. Then show only the polished result — ' +
-        'never your step-by-step scratchpad, dead ends, or self-corrections. More effort means ' +
-        'more careful thinking, not more words on screen.'
+        'and verify your approach before you commit to it. On screen, keep it brief: the short ' +
+        'line for each step you take, and the result — never your scratchpad, dead ends, or ' +
+        'self-corrections. More effort means more careful thinking, not more words on screen.'
       )
     default:
       return ''
@@ -205,7 +262,10 @@ function intentDirective(kind: IntentKind): string {
     case 'question':
       return (
         '\n\nThe user is asking a question. Work it out privately, then answer directly and ' +
-        'clearly with the conclusion — do not narrate your reasoning or think out loud. Propose a ' +
+        'clearly with the conclusion — do not narrate your reasoning or think out loud. If you ' +
+        'need to look at the project first, say in one short line what you are checking ' +
+        '("Checking how auth is wired in src/auth.") so the user is not left watching silence, ' +
+        'read what you need, then answer. Propose a ' +
         'file edit or command ONLY if the user is explicitly asking you to change something.'
       )
     case 'edit':
@@ -214,9 +274,12 @@ function intentDirective(kind: IntentKind): string {
         'way Claude Code does. Open with ONE short sentence on what you are about to do (do not ' +
         'restate their request back to them, and do not write a long plan), then IMMEDIATELY emit ' +
         'the write_file block(s) that make it real in this SAME turn. Never end a turn on a promise ' +
-        'like "I\'ll create…" or "let me build…" with no tool block — that builds nothing. Prefer ' +
-        'many small steps (write a file or two, let them apply, then continue) over one giant ' +
-        'message. Keep prose minimal and let the files be the work.'
+        'like "I\'ll create…" or "let me build…" with no tool block — that builds nothing. Work in ' +
+        'many small steps (write a file or two, let them apply, then continue) rather than one ' +
+        'giant message — and each time the app reports results back, open your next message with ' +
+        'one short line on what just landed and what you are doing next, then the next block(s). ' +
+        'One line per step, never a paragraph: the user should be able to follow the build as it ' +
+        'happens instead of staring at a spinner.'
       )
     default:
       return ''
@@ -471,6 +534,31 @@ const START_BUILD_NUDGE =
   '```sylor-tool\n{ "tool": "write_file", "path": "relative/path.ext", "content": "<the full file>" }\n```\n\n' +
   'Start with the most important file and keep going in small steps. Build the thing — do not just ' +
   'talk about it.'
+
+/**
+ * Upper bound on "fix the file you just broke" nudges in a single turn. The static
+ * check on every write (see `fs/verify`) can find a file that is provably broken —
+ * unparseable JSON, a truncated source, a dead import — and the write's result
+ * says so. If the model then tries to *end the turn anyway*, this pushes it back
+ * to the file instead of handing the user something that won't run. Bounded: after
+ * this many tries the turn ends and the issues are stated to the user rather than
+ * looping forever on something the model can't fix.
+ */
+const MAX_FIX_NUDGES = 2
+
+/** Fed back when the turn is about to end with a file still known to be broken. */
+function fixItNudge(entries: Array<[string, string[]]>): string {
+  const detail = entries
+    .map(([path, messages]) => `${path}:\n${messages.map((m) => `  - ${m}`).join('\n')}`)
+    .join('\n')
+  return (
+    'You are about to finish, but files you wrote this turn are still broken:\n\n' +
+    detail +
+    '\n\nDo not end here — the user would get something that does not run. Fix each one now: ' +
+    'read_file it if you need to see its current state, then correct it with a write_file or ' +
+    'edit_file block. If a report is genuinely wrong, say so explicitly and explain why.'
+  )
+}
 
 /**
  * Detects a Markdown code fence in the prose the model streamed. `sylor-tool`
@@ -905,12 +993,44 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
   let continues = 0
   // How many "you promised but built nothing — start now" nudges spent (MAX_START_NUDGES).
   let startNudges = 0
+  // Files written this turn that failed their static check and have not been
+  // rewritten cleanly since, keyed by path. This is what stops the turn ending on
+  // a file we already know is broken (see MAX_FIX_NUDGES).
+  const pendingIssues = new Map<string, string[]>()
+  // How many "fix what you just broke" nudges spent this turn (MAX_FIX_NUDGES).
+  let fixNudges = 0
   // Whether this turn has actually built anything yet (executed a side effect or ran a
   // subagent). Gates the start-build nudge so a genuine closing summary — prose after real
   // work — is treated as a finish, not a stall.
   let built = false
   // The agent's latest non-empty prose — its conclusion, returned as the report.
   let report = ''
+
+  // Last few characters of prose streamed so far, and whether the current step has
+  // yet to stream any. Each step is a separate completion appended to the SAME
+  // assistant message, so a model that ends a step without a trailing newline would
+  // otherwise run straight into the next step's opening line
+  // ("…writing the config.Config's in — now the router."). See `emitProse`.
+  let proseTail = ''
+  let stepOpening = false
+
+  /**
+   * Streams prose to the UI, keeping a paragraph break between the narration of one
+   * step and the next. Only ever *adds* separator whitespace — the model's own text
+   * is never altered — and only at a step boundary, so prose within a single step
+   * (before and after a tool block) flows exactly as written.
+   */
+  const emitProse = (text: string): void => {
+    let out = text
+    if (stepOpening && text.trim() !== '') {
+      if (proseTail !== '' && !/\n[ \t]*\n[ \t]*$/.test(proseTail)) {
+        out = (/\n[ \t]*$/.test(proseTail) ? '\n' : '\n\n') + text.replace(/^\s+/, '')
+      }
+      stepOpening = false
+    }
+    proseTail = (proseTail + out).slice(-8)
+    emit({ type: 'delta', runId, text: out })
+  }
 
   for (let step = 0; step < maxSteps; step++) {
     if (signal.aborted) return report
@@ -926,6 +1046,7 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     // duplicate them, so the attempt is not repeated.
     const parser = new ToolStreamParser()
     const think = new ReasoningStripper()
+    stepOpening = true
     let raw = ''
     let proseText = ''
     let received = false
@@ -944,7 +1065,7 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
             const shown = think.push(prose)
             if (shown) {
               proseText += shown
-              emit({ type: 'delta', runId, text: shown })
+              emitProse(shown)
             }
           },
           signal
@@ -963,7 +1084,7 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     const tail = think.push(parser.flush()) + think.flush()
     if (tail) {
       proseText += tail
-      emit({ type: 'delta', runId, text: tail })
+      emitProse(tail)
     }
     // Some models inline their chain-of-thought as `<think>…</think>` in the
     // content channel; it's stripped from the shown prose above. Strip it from the
@@ -992,16 +1113,24 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     )
     const skillInjection = buildSkillInjections(skillRequests, enabledSkills, activatedSkills)
     for (const name of skillInjection.activatedNow) {
-      emit({ type: 'delta', runId, text: `\n\n📎 Using skill: ${name}` })
+      emitProse(`\n\n📎 Using skill: ${name}`)
     }
 
-    // 4d. Side-effecting tools and (lead only) delegated subagents. When the model
+    // 4d. Executable tools and (lead only) delegated subagents. When the model
     // proposed none of these and no skill, it has given its final answer for this
     // turn — stop looping. A skill-only turn keeps looping so the injected
-    // instructions get a following iteration in which to be acted on.
+    // instructions get a following iteration in which to be acted on. Reads count:
+    // a turn that only looked at files must get another iteration to ACT on what
+    // it found, otherwise the agent would stop mid-investigation.
     const sideEffects = parser.tools.filter(
-      (t): t is SideEffectTool =>
-        t.tool === 'write_file' || t.tool === 'run_command' || t.tool === 'mcp_call'
+      (t): t is ExecutableTool =>
+        t.tool === 'write_file' ||
+        t.tool === 'edit_file' ||
+        t.tool === 'read_file' ||
+        t.tool === 'list_files' ||
+        t.tool === 'search_files' ||
+        t.tool === 'run_command' ||
+        t.tool === 'mcp_call'
     )
     const spawnRequests = allowSpawn
       ? parser.tools.filter(
@@ -1087,11 +1216,65 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
       continue
     }
 
-    if (sideEffects.length === 0 && spawnRequests.length === 0 && !skillInjection.text) break
+    // The turn wants to end here: nothing was proposed, delegated, or activated.
+    const ending = sideEffects.length === 0 && spawnRequests.length === 0 && !skillInjection.text
+
+    // 4d⁗. Verify-fix nudge. The turn is ending but a file written earlier this turn
+    // is still failing its static check — the model wrote something broken and is
+    // about to tell the user it's done. Send it back to the file. Applies to every
+    // agent and every intent, because a file that cannot parse is broken regardless
+    // of who wrote it or why; plan-first is exempt since it is contractually
+    // single-pass.
+    if (ending && pendingIssues.size > 0) {
+      // Re-check each one against the file as it stands NOW. An issue can be
+      // resolved by a later write to a different file — the missing stylesheet
+      // finally created, the imported module finally added — and nudging about an
+      // already-fixed file would be worse than not checking at all.
+      for (const path of [...pendingIssues.keys()]) {
+        const issues = recheckWrittenFile(path)
+        if (issues.length === 0) pendingIssues.delete(path)
+        else pendingIssues.set(path, issues.map((issue) => issue.message))
+      }
+    }
+    if (
+      ending &&
+      !planFirstStop &&
+      pendingIssues.size > 0 &&
+      fixNudges < MAX_FIX_NUDGES &&
+      step < maxSteps - 1
+    ) {
+      fixNudges++
+      emit({ type: 'status', runId, stage: 'generating', message: 'Fixing what broke…' })
+      outbound.push({ role: 'assistant', content: raw })
+      outbound.push({ role: 'user', content: fixItNudge([...pendingIssues]) })
+      continue
+    }
+
+    if (ending) {
+      // Out of fix attempts (or out of steps) with something still broken. The
+      // model's closing prose may well claim success, so state the truth plainly
+      // next to it — the user finding out from a blank page instead is the exact
+      // failure this whole check exists to prevent.
+      if (pendingIssues.size > 0) {
+        const detail = [...pendingIssues]
+          .map(([path, messages]) => `- \`${path}\` — ${messages.join('; ')}`)
+          .join('\n')
+        emitProse(
+          `\n\n_Heads up: these files still look broken to me, so check them before relying on this:_\n${detail}\n`
+        )
+      }
+      break
+    }
 
     // Once we're past the break, real work is about to happen this step. Remember it so a
     // later prose-only turn reads as a closing summary (a finish), not a stall to nudge.
-    if (sideEffects.length > 0 || spawnRequests.length > 0) {
+    // Reads are deliberately excluded: looking at files is progress, but it is not
+    // *building*, and if a read refunded the stall budgets a model could investigate
+    // in circles forever instead of being nudged into writing something.
+    const mutated = sideEffects.some(
+      (t) => t.tool !== 'read_file' && t.tool !== 'list_files' && t.tool !== 'search_files'
+    )
+    if (mutated || spawnRequests.length > 0) {
       built = true
       // A productive step refunds the stall budgets: the continuation/start/nudge
       // caps exist to stop a model that only *talks*, and this step just DID work.
@@ -1105,7 +1288,7 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
 
     // 4e. Execute each proposed tool under the permission mode, pairing each with
     // its structured outcome so the results can be fed back to the model.
-    const outcomes: Array<{ tool: SideEffectTool; result: ToolResult }> = []
+    const outcomes: Array<{ tool: ExecutableTool; result: ToolResult }> = []
     if (sideEffects.length > 0) {
       const batch = describeBatch(sideEffects)
       emit({ type: 'status', runId, stage: batch.stage, message: batch.message })
@@ -1123,6 +1306,15 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
 
         if (!result) return report // aborted while awaiting a decision
         outcomes.push({ tool, result })
+
+        // Track which files are still known-broken. A clean rewrite of the same path
+        // clears it, so the nudge above fires only while something is actually wrong
+        // — and a file the model fixed on its own never triggers it.
+        if (result.kind === 'write_file' && result.ok) {
+          const path = tool.tool === 'write_file' || tool.tool === 'edit_file' ? tool.path : ''
+          if (result.issues && result.issues.length > 0) pendingIssues.set(path, result.issues)
+          else pendingIssues.delete(path)
+        }
       }
       if (signal.aborted) return report
     }
@@ -1146,11 +1338,9 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
 
     // 4g. Out of budget: tell the user and stop rather than silently truncating.
     if (step === maxSteps - 1) {
-      emit({
-        type: 'delta',
-        runId,
-        text: `\n\n_(Reached the ${maxSteps}-step limit for this turn — ask me to continue if there's more to do.)_`
-      })
+      emitProse(
+        `\n\n_(Reached the ${maxSteps}-step limit for this turn — ask me to continue if there's more to do.)_`
+      )
       break
     }
 
@@ -1425,8 +1615,20 @@ interface ExecContext {
   filesWritten?: string[]
 }
 
-/** The side-effecting tools that flow through the approval pipeline. */
-type SideEffectTool = Extract<ParsedTool, { tool: 'write_file' | 'run_command' | 'mcp_call' }>
+/**
+ * The tools that flow through the approval pipeline: everything that produces a
+ * `tool-request` / `tool-result` pair. `read_file` / `list_files` / `search_files`
+ * ride the same rails as the side-effecting three — so the user sees what Sylor
+ * looked at — but are auto-approved by `decideAuto` since they change nothing.
+ * `edit_file` is staged as a `write_file` proposal (see {@link executeTool}), so
+ * a surgical edit is still reviewed as a diff.
+ */
+type ExecutableTool = Extract<
+  ParsedTool,
+  {
+    tool: 'write_file' | 'edit_file' | 'read_file' | 'list_files' | 'search_files' | 'run_command' | 'mcp_call'
+  }
+>
 
 /**
  * Turns a parsed tool op into a proposal, requests a decision (auto-approved or
@@ -1436,16 +1638,49 @@ type SideEffectTool = Extract<ParsedTool, { tool: 'write_file' | 'run_command' |
  * the agent loop can feed it back to the model, or `null` if the run was aborted
  * while awaiting the user's decision.
  */
-async function executeTool(tool: SideEffectTool, ctx: ExecContext): Promise<ToolResult | null> {
+async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<ToolResult | null> {
   const { runId, permissionMode, handle, emit, onTerminal } = ctx
   const id = nextToolId()
 
-  // Build the proposal (resolving file diffs up front for write_file).
+  // Build the proposal (resolving file diffs up front for write_file / edit_file).
   let proposal: ToolProposal
   try {
     if (tool.tool === 'write_file') {
       const { exists, oldContent, newContent } = proposeWrite(tool.path, tool.content)
       proposal = { id, kind: 'write_file', path: tool.path, oldContent, newContent, exists }
+    } else if (tool.tool === 'edit_file') {
+      // A surgical edit becomes an ordinary write_file proposal: the exact-string
+      // replacement is resolved against the file's CURRENT contents here, so the
+      // user still reviews a diff, the permission gate is unchanged, and every
+      // downstream consumer (diff stats, filesWritten, auto-preview) keeps working.
+      // A miss or an ambiguous match throws and lands in the catch below.
+      const { oldContent, newContent } = applyEdit(
+        tool.path,
+        tool.oldString,
+        tool.newString,
+        tool.replaceAll
+      )
+      proposal = { id, kind: 'write_file', path: tool.path, oldContent, newContent, exists: true }
+    } else if (tool.tool === 'read_file') {
+      proposal = {
+        id,
+        kind: 'read',
+        op: 'read_file',
+        path: tool.path,
+        offset: tool.offset,
+        limit: tool.limit
+      }
+    } else if (tool.tool === 'list_files') {
+      proposal = { id, kind: 'read', op: 'list_files', path: tool.path }
+    } else if (tool.tool === 'search_files') {
+      proposal = {
+        id,
+        kind: 'read',
+        op: 'search_files',
+        path: tool.path,
+        query: tool.query,
+        glob: tool.glob
+      }
     } else if (tool.tool === 'run_command') {
       proposal = { id, kind: 'run_command', command: tool.command }
     } else {
@@ -1458,18 +1693,13 @@ async function executeTool(tool: SideEffectTool, ctx: ExecContext): Promise<Tool
       }
     }
   } catch (err) {
-    // e.g. a sandbox (path-escape) violation while preparing the diff. Surface a
-    // no-diff proposal + failed result so the UI shows what was refused and why.
-    const path = tool.tool === 'write_file' ? tool.path : ''
-    emit({
-      type: 'tool-request',
-      runId,
-      proposal: { id, kind: 'write_file', path, oldContent: '', newContent: '', exists: false },
-      auto: false
-    })
-    const result: ToolResult = { id, kind: 'write_file', ok: false, error: toErrorMessage(err) }
-    emit({ type: 'tool-result', runId, result })
-    return result
+    // A sandbox (path-escape) violation, or an edit whose old_string didn't match.
+    // Surface a proposal + failed result of the right shape so the UI shows what
+    // was refused and the model is told precisely why, in its own terms.
+    const failed = failedPreparation(id, tool, toErrorMessage(err))
+    emit({ type: 'tool-request', runId, proposal: failed.proposal, auto: false })
+    emit({ type: 'tool-result', runId, result: failed.result })
+    return failed.result
   }
 
   const outcome = decideAuto(permissionMode, proposal.kind)
@@ -1512,6 +1742,16 @@ async function executeTool(tool: SideEffectTool, ctx: ExecContext): Promise<Tool
   ) {
     if (!ctx.filesWritten.includes(proposal.path)) ctx.filesWritten.push(proposal.path)
   }
+  // Check the bytes that just landed, before the model moves on. The project-level
+  // verify (typecheck/lint/build) runs once at the end of an orchestrated turn and
+  // needs npm scripts to exist at all; this catches the silent breakage — broken
+  // JSON, a truncated file, a dead asset or import — immediately, for any project,
+  // and hands it back through `summarizeResults` so the next iteration fixes it.
+  // `newContent` is the final text even for an `edit_file` (desugared above).
+  if (proposal.kind === 'write_file' && result.kind === 'write_file' && result.ok) {
+    const issues = verifyWrittenFile(proposal.path, proposal.newContent)
+    if (issues.length > 0) result.issues = issues.map((issue) => issue.message)
+  }
   emit({ type: 'tool-result', runId, result })
   return result
 }
@@ -1528,10 +1768,51 @@ function awaitDecision(handle: RunHandle, toolId: string): Promise<ToolDecision>
   })
 }
 
+/**
+ * A proposal + matching failed result for a tool that couldn't even be *prepared*
+ * — a path-escape, or an `edit_file` whose `old_string` didn't match. Kept in one
+ * place so the emitted pair always agrees in `kind`: the renderer switches on the
+ * result's kind, so a read that failed must NOT come back shaped like a write.
+ */
+function failedPreparation(
+  id: string,
+  tool: ExecutableTool,
+  error: string
+): { proposal: ToolProposal; result: ToolResult } {
+  if (tool.tool === 'read_file' || tool.tool === 'list_files' || tool.tool === 'search_files') {
+    return {
+      proposal: {
+        id,
+        kind: 'read',
+        op: tool.tool,
+        path: tool.path,
+        query: tool.tool === 'search_files' ? tool.query : undefined
+      },
+      result: { id, kind: 'read', ok: false, output: '', truncated: false, summary: 'failed', error }
+    }
+  }
+  const path = tool.tool === 'write_file' || tool.tool === 'edit_file' ? tool.path : ''
+  return {
+    proposal: { id, kind: 'write_file', path, oldContent: '', newContent: '', exists: false },
+    result: { id, kind: 'write_file', ok: false, error }
+  }
+}
+
 /** A rejected (or refused) proposal's skipped result, with the reason shown. */
 function rejectedResult(proposal: ToolProposal, reason = 'Skipped by user'): ToolResult {
   if (proposal.kind === 'write_file') {
     return { id: proposal.id, kind: 'write_file', ok: false, error: reason }
+  }
+  if (proposal.kind === 'read') {
+    return {
+      id: proposal.id,
+      kind: 'read',
+      ok: false,
+      output: '',
+      truncated: false,
+      summary: 'skipped',
+      error: reason
+    }
   }
   if (proposal.kind === 'mcp_call') {
     return {
@@ -1558,6 +1839,38 @@ async function applyTool(
       return { id: proposal.id, kind: 'write_file', ok: true }
     } catch (err) {
       return { id: proposal.id, kind: 'write_file', ok: false, error: toErrorMessage(err) }
+    }
+  }
+
+  // read — inspect the project and hand the text back to the model. Reads are the
+  // only tool kind whose *output* is the whole point, so unlike a write they echo
+  // real content into the next turn (bounded by fs/operations' caps).
+  if (proposal.kind === 'read') {
+    try {
+      const outcome =
+        proposal.op === 'read_file'
+          ? readFileSlice(proposal.path, proposal.offset, proposal.limit)
+          : proposal.op === 'list_files'
+            ? listDirectory(proposal.path)
+            : searchProject(proposal.query ?? '', proposal.path, proposal.glob)
+      return {
+        id: proposal.id,
+        kind: 'read',
+        ok: true,
+        output: outcome.output,
+        truncated: outcome.truncated,
+        summary: outcome.summary
+      }
+    } catch (err) {
+      return {
+        id: proposal.id,
+        kind: 'read',
+        ok: false,
+        output: '',
+        truncated: false,
+        summary: 'failed',
+        error: toErrorMessage(err)
+      }
     }
   }
 
@@ -1643,14 +1956,35 @@ const VERIFY_RE = /\b(tests?|vitest|jest|typecheck|tsc|lint|eslint|build|check)\
  * Exactly one status per batch — the per-tool cards carry the detail — so the
  * engine's status stream stays single-emission per step.
  */
-function describeBatch(tools: SideEffectTool[]): { stage: WorkflowStage; message: string } {
+function describeBatch(tools: ExecutableTool[]): { stage: WorkflowStage; message: string } {
   const commands = tools.filter(
-    (t): t is Extract<SideEffectTool, { tool: 'run_command' }> => t.tool === 'run_command'
+    (t): t is Extract<ExecutableTool, { tool: 'run_command' }> => t.tool === 'run_command'
   )
   const writes = tools.filter(
-    (t): t is Extract<SideEffectTool, { tool: 'write_file' }> => t.tool === 'write_file'
+    (t): t is Extract<ExecutableTool, { tool: 'write_file' | 'edit_file' }> =>
+      t.tool === 'write_file' || t.tool === 'edit_file'
+  )
+  const reads = tools.filter(
+    (t): t is Extract<ExecutableTool, { tool: 'read_file' | 'list_files' | 'search_files' }> =>
+      t.tool === 'read_file' || t.tool === 'list_files' || t.tool === 'search_files'
   )
   const firstCmd = (): string => commands[0].command.trim().split(/\s+/).slice(0, 3).join(' ')
+
+  // Pure inspection → the reading phase, naming what's being looked at. This is
+  // the status the user sees while Sylor is orienting itself in their code.
+  if (reads.length > 0 && commands.length === 0 && writes.length === 0) {
+    const search = reads.find((r) => r.tool === 'search_files')
+    if (search && search.tool === 'search_files') {
+      return { stage: 'scanning', message: `Searching for "${search.query}"` }
+    }
+    const files = reads.filter((r) => r.tool === 'read_file').map((r) => baseName(r.path))
+    if (files.length > 0) {
+      const head = files.slice(0, 2).join(', ')
+      const rest = files.length - 2
+      return { stage: 'reading', message: `Reading ${rest > 0 ? `${head} +${rest} more` : head}` }
+    }
+    return { stage: 'scanning', message: 'Looking through the project…' }
+  }
 
   // A command batch that's purely checks/builds → the verifying phase.
   if (
@@ -1688,15 +2022,39 @@ function describeBatch(tools: SideEffectTool[]): { stage: WorkflowStage; message
 /**
  * Builds the synthesized user turn fed back to the model after a round of tool
  * execution, so the next loop iteration can react to what actually happened.
- * Provider-agnostic plain text (works across Ollama/Gateway). File contents are
- * never echoed — only the path and outcome — and command output is already
- * bounded by the runner, so this can't blow up the context window.
+ * Provider-agnostic plain text (works across Ollama/Gateway).
+ *
+ * Writes report only their path and outcome — a write's content is already in the
+ * model's own message. A `read` deliberately DOES echo its output, since that text
+ * is the entire point of having asked; `fs/operations` caps each read, and command
+ * output is bounded by the runner, so the context window still can't blow up.
  */
-function summarizeResults(outcomes: Array<{ tool: SideEffectTool; result: ToolResult }>): string {
+function summarizeResults(outcomes: Array<{ tool: ExecutableTool; result: ToolResult }>): string {
+  /** True when a write landed but its static check found something broken. */
+  let broken = false
   const lines = outcomes.map(({ tool, result }) => {
     if (result.kind === 'write_file') {
-      const path = tool.tool === 'write_file' ? tool.path : ''
-      return `write_file ${path} → ${result.ok ? 'applied' : (result.error ?? 'failed')}`
+      // An edit_file was staged as a write_file, so name the verb the model used.
+      const verb = tool.tool === 'edit_file' ? 'edit_file' : 'write_file'
+      const path = tool.tool === 'write_file' || tool.tool === 'edit_file' ? tool.path : ''
+      const head = `${verb} ${path} → ${result.ok ? 'applied' : (result.error ?? 'failed')}`
+      // A successful write that failed its static check reports both: the file IS
+      // on disk, and here is what's wrong with it. Silence means nothing was
+      // detected — never a claim that the file is correct.
+      const check = describeIssues(result.issues ?? [])
+      if (check) broken = true
+      return check ? `${head}\n${check}` : head
+    }
+    if (result.kind === 'read') {
+      const label =
+        tool.tool === 'search_files'
+          ? `search_files "${tool.query}" in ${tool.path}`
+          : tool.tool === 'read_file' || tool.tool === 'list_files'
+            ? `${tool.tool} ${tool.path}`
+            : 'read'
+      if (!result.ok) return `${label} → error: ${result.error ?? 'failed'}`
+      const truncNote = result.truncated ? ' — truncated, ask for a narrower range if you need more' : ''
+      return `${label} → ${result.summary}${truncNote}\n${result.output}`
     }
     if (result.kind === 'mcp_call') {
       const label = tool.tool === 'mcp_call' ? `${tool.server}/${tool.name}` : ''
@@ -1715,8 +2073,18 @@ function summarizeResults(outcomes: Array<{ tool: SideEffectTool; result: ToolRe
   return (
     'Results of the actions you just proposed:\n\n' +
     lines.join('\n\n') +
-    '\n\nIf these results complete the task, give your final answer to the user now. ' +
-    'If a command failed or work remains, fix it or take the next step by proposing more tool blocks.'
+    (broken
+      ? // A file with a detected defect is not done, whatever the model believes.
+        // Naming that here is what closes the write → check → fix loop, instead of
+        // leaving the user to discover it as a blank page.
+        '\n\nOne or more files you just wrote are broken as written. Fix them now — ' +
+        'read the file if you need to see its current state, then correct it with a ' +
+        'tool block. Do not give your final answer while a detected problem remains.'
+      : '\n\nIf these results complete the task, give your final answer to the user now. ' +
+        'If a command failed or work remains, fix it or take the next step: open with ONE short ' +
+        'line telling the user what just landed and what you are doing next, then the tool ' +
+        'block(s). Never reply with blocks alone — from the outside that looks like nothing is ' +
+        'happening.')
   )
 }
 

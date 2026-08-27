@@ -116,6 +116,7 @@ const api: SylorApi = {
   preview: {
     startStatic: (entry) => ipcRenderer.invoke(IpcChannel.PreviewStartStatic, entry),
     startDev: (command) => ipcRenderer.invoke(IpcChannel.PreviewStartDev, command),
+    startAuto: (entry) => ipcRenderer.invoke(IpcChannel.PreviewStartAuto, entry),
     stop: () => ipcRenderer.send(IpcChannel.PreviewStop),
     onEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: PreviewEvent): void =>

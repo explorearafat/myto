@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import type { Provider } from '@main/providers'
 import type {
   ChatMessage,
@@ -53,18 +56,32 @@ vi.mock('@main/workflow/intent', () => ({
   classifyIntent: () => classifyIntent()
 }))
 
-// Tool sinks — the engine's write/exec collaborators are mocked so tests stay
-// hermetic (no disk writes, no real pty).
+// Tool sinks — the engine's exec collaborator is mocked so tests stay hermetic
+// (no real pty). Writes DO land on disk, in a throwaway directory: the
+// verify-after-write check (`fs/verify`) reads the file's current bytes back
+// before deciding it is still broken, so a mock that wrote nowhere would make
+// every written file look instantly fixed and the "don't finish on a broken file"
+// loop untestable here.
+const fsRoot = mkdtempSync(join(tmpdir(), 'sylor-engine-'))
 const proposeWrite = vi.fn((_path: string, content: string) => ({
   exists: false,
   oldContent: '',
   newContent: content
 }))
-const writeProjectFile = vi.fn<(path: string, content: string) => void>()
+const writeProjectFile = vi.fn<(path: string, content: string) => void>((path, content) => {
+  const abs = join(fsRoot, path)
+  mkdirSync(dirname(abs), { recursive: true })
+  writeFileSync(abs, content)
+})
 vi.mock('@main/fs/operations', () => ({
   proposeWrite: (path: string, content: string) => proposeWrite(path, content),
-  writeProjectFile: (path: string, content: string) => writeProjectFile(path, content)
+  writeProjectFile: (path: string, content: string) => writeProjectFile(path, content),
+  resolveSafe: (path: string) => join(fsRoot, path)
 }))
+
+afterAll(() => {
+  rmSync(fsRoot, { recursive: true, force: true })
+})
 
 const runCommand = vi.fn<
   (command: string, onData: (d: string) => void, signal?: AbortSignal) => Promise<{
@@ -967,6 +984,255 @@ describe('runWorkflow error handling', () => {
     const result = firstToolResult(events)
     expect(result.result).toMatchObject({ kind: 'write_file', ok: false })
     expect((result.result as { error?: string }).error).toMatch(/escapes the project root/)
+    expect(events.at(-1)?.type).toBe('done')
+  })
+})
+
+/**
+ * Verify-after-write (task 4). A write that lands is immediately checked against
+ * the bytes that landed, and what's wrong goes back into the loop. This is the
+ * difference between "Sylor wrote a file" and "Sylor wrote a file that works":
+ * before this, a broken `package.json` or a truncated component surfaced to the
+ * user as a dead command or a blank page, with the model insisting it was done.
+ */
+describe('runWorkflow verify-after-write', () => {
+  // package.json with a trailing comma: invalid JSON, and the check for it is
+  // pure — no filesystem involved — so these cases are fully deterministic.
+  const BROKEN_JSON =
+    '```sylor-tool\n{ "tool": "write_file", "path": "package.json", "content": "{ \\"name\\": \\"app\\", }" }\n```\n'
+  const FIXED_JSON =
+    '```sylor-tool\n{ "tool": "write_file", "path": "package.json", "content": "{ \\"name\\": \\"app\\" }" }\n```\n'
+
+  beforeEach(() => {
+    streamCompletion.mockReset()
+    classifyIntent.mockReset()
+    proposeWrite.mockClear()
+    writeProjectFile.mockClear()
+    mcpTools = []
+    skills = []
+    disabledSkills = new Set()
+    classifyIntent.mockResolvedValue({ kind: 'edit', summary: 'edit', needsContext: false })
+  })
+
+  it('carries what is broken on the write result and feeds it back', async () => {
+    let feedback: ChatMessage[] = []
+    streamCompletion
+      .mockImplementationOnce(emitsText('Creating the manifest.\n' + BROKEN_JSON))
+      .mockImplementationOnce(async (_model, msgs, onChunk) => {
+        feedback = (msgs as ChatMessage[]).map((m) => ({ ...m }))
+        onChunk({ delta: 'Fixing that.\n' + FIXED_JSON } as Omit<CompletionChunk, 'streamId'>)
+      })
+      .mockImplementationOnce(emitsText('Done — package.json is valid now.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('v1', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    // The write succeeded — the bytes are on disk — and still reports the defect.
+    const result = firstToolResult(events)
+    expect(result.result).toMatchObject({ kind: 'write_file', ok: true })
+    expect((result.result as { issues?: string[] }).issues?.[0]).toMatch(/not valid JSON/)
+
+    // ...and the model was told, in the synthesized turn it acts on next.
+    expect(feedback.at(-1)?.role).toBe('user')
+    expect(feedback.at(-1)?.content).toMatch(/not valid JSON/)
+    expect(feedback.at(-1)?.content).toMatch(/broken as written/)
+    // The normal "you may finish now" ending is withheld while something is broken.
+    expect(feedback.at(-1)?.content).not.toMatch(/give your final answer to the user now/)
+
+    expect(writeProjectFile).toHaveBeenLastCalledWith('package.json', '{ "name": "app" }')
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('says nothing at all about a file it cannot fault', async () => {
+    // The check must be invisible when there is nothing to report: a false alarm
+    // would send the model off rewriting code that already worked.
+    let feedback: ChatMessage[] = []
+    streamCompletion
+      .mockImplementationOnce(emitsText('Creating it.\n' + WRITE_BLOCK))
+      .mockImplementationOnce(async (_model, msgs, onChunk) => {
+        feedback = (msgs as ChatMessage[]).map((m) => ({ ...m }))
+        onChunk({ delta: 'Done — created src/new.ts.' } as Omit<CompletionChunk, 'streamId'>)
+      })
+
+    const { events, emit } = collector()
+    await runWorkflow(req('v2', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    const result = firstToolResult(events)
+    expect(result.result).toMatchObject({ kind: 'write_file', ok: true })
+    expect(result.result).not.toHaveProperty('issues')
+    expect(feedback.at(-1)?.content).not.toMatch(/detected in what you just wrote/)
+    expect(feedback.at(-1)?.content).toMatch(/give your final answer to the user now/)
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('refuses to end the turn while a file it wrote is still broken', async () => {
+    // The stall this exists for: the model writes something broken, then declares
+    // success in prose with no further tool block. Left alone the turn ends there
+    // and the user gets the broken file with a confident "done" over it.
+    let nudge: ChatMessage[] = []
+    streamCompletion
+      .mockImplementationOnce(emitsText('Creating the manifest.\n' + BROKEN_JSON))
+      .mockImplementationOnce(emitsText('All set — package.json is created.'))
+      .mockImplementationOnce(async (_model, msgs, onChunk) => {
+        nudge = (msgs as ChatMessage[]).map((m) => ({ ...m }))
+        onChunk({ delta: 'You are right.\n' + FIXED_JSON } as Omit<CompletionChunk, 'streamId'>)
+      })
+      .mockImplementationOnce(emitsText('Fixed — package.json parses now.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('v3', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    // Four completions: the broken write, the premature "done", the nudge that
+    // sent it back, and the conclusion after the fix actually applied.
+    expect(streamCompletion).toHaveBeenCalledTimes(4)
+    expect(nudge.at(-1)?.role).toBe('user')
+    expect(nudge.at(-1)?.content).toMatch(/still broken/)
+    expect(nudge.at(-1)?.content).toMatch(/package\.json/)
+
+    expect(writeProjectFile).toHaveBeenLastCalledWith('package.json', '{ "name": "app" }')
+    // Fixed before the end, so the user is never warned about it.
+    const prose = events
+      .filter((e) => e.type === 'delta')
+      .map((e) => (e as { text: string }).text)
+      .join('')
+    expect(prose).not.toMatch(/still look broken/)
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('warns the user outright when it cannot get the file clean', async () => {
+    // Bounded: after two attempts the turn ends anyway, but it must not end on a
+    // silent lie. The model's own prose claims success, so the truth is appended
+    // next to it — the user finding out from a dead command instead is the whole
+    // failure this check exists to prevent.
+    streamCompletion
+      .mockImplementation(emitsText('All good — package.json is ready.'))
+      .mockImplementationOnce(emitsText('Creating the manifest.\n' + BROKEN_JSON))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('v4', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    // The write, then two nudged retries, then the give-up turn.
+    expect(streamCompletion).toHaveBeenCalledTimes(4)
+    const prose = events
+      .filter((e) => e.type === 'delta')
+      .map((e) => (e as { text: string }).text)
+      .join('')
+    expect(prose).toMatch(/still look broken/)
+    expect(prose).toMatch(/package\.json/)
+    expect(prose).toMatch(/not valid JSON/)
+    expect(events.at(-1)?.type).toBe('done')
+  })
+})
+
+/**
+ * Step narration (task 5). Sylor used to do a whole build in one silent burst: the
+ * user watched a spinner, got no word on what was happening, and gave up. Each step
+ * now opens with one short line — and since every step is a separate completion
+ * appended to the SAME assistant message, those lines have to be kept apart without
+ * ever rewriting what the model actually said.
+ */
+describe('runWorkflow step narration', () => {
+  const SECOND_BLOCK =
+    '```sylor-tool\n{ "tool": "write_file", "path": "src/two.ts", "content": "export const y = 2" }\n```\n'
+
+  beforeEach(() => {
+    streamCompletion.mockReset()
+    classifyIntent.mockReset()
+    proposeWrite.mockClear()
+    writeProjectFile.mockClear()
+    mcpTools = []
+    skills = []
+    disabledSkills = new Set()
+    classifyIntent.mockResolvedValue({ kind: 'edit', summary: 'edit', needsContext: false })
+  })
+
+  const prose = (events: WorkflowEvent[]): string =>
+    events
+      .filter((e) => e.type === 'delta')
+      .map((e) => (e as { text: string }).text)
+      .join('')
+
+  it('keeps a paragraph break between one step line and the next', async () => {
+    // The block comes last, so this step's prose ends mid-paragraph — exactly when
+    // the next step's opening line would otherwise be glued onto it.
+    streamCompletion
+      .mockImplementationOnce(emitsText('Writing the config.' + WRITE_BLOCK))
+      .mockImplementationOnce(emitsText('Config is in — adding the second file.' + SECOND_BLOCK))
+      .mockImplementationOnce(emitsText('Both files are in place.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('n1', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    const text = prose(events)
+    expect(text).not.toMatch(/config\.Config is in/)
+    expect(text).toMatch(/Writing the config\.\n\n+Config is in — adding the second file\./)
+    expect(text).toMatch(/second file\.\n\n+Both files are in place\./)
+  })
+
+  it('separates steps even when the prose ends flush against the block', async () => {
+    // Prose *after* the block, with no trailing newline at all: nothing in the
+    // stream can be relied on to end a step cleanly.
+    streamCompletion
+      .mockImplementationOnce(emitsText(WRITE_BLOCK + 'Config written.'))
+      .mockImplementationOnce(emitsText('Now the router.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('n2', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    expect(prose(events)).toMatch(/Config written\.\n\nNow the router\./)
+  })
+
+  it('never reflows prose inside a single step', async () => {
+    // The separator is added only at a step boundary. Within a step the model's own
+    // spacing is untouched — reflowing it would corrupt lists, code and Markdown.
+    const written = 'Line one.\nLine two.\n- a\n- b'
+    streamCompletion.mockImplementationOnce(emitsText(written))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('n3'), emit, noTerminal)
+
+    expect(prose(events)).toBe(written)
+  })
+
+  it('tells the model to narrate, both up front and at every step', async () => {
+    let system = ''
+    let feedback: ChatMessage[] = []
+    streamCompletion
+      .mockImplementationOnce(async (_model, msgs, onChunk) => {
+        system = (msgs as ChatMessage[])[0].content
+        onChunk({ delta: 'Creating it.\n' + WRITE_BLOCK } as Omit<CompletionChunk, 'streamId'>)
+      })
+      .mockImplementationOnce(async (_model, msgs, onChunk) => {
+        feedback = (msgs as ChatMessage[]).map((m) => ({ ...m }))
+        onChunk({ delta: 'Done.' } as Omit<CompletionChunk, 'streamId'>)
+      })
+
+    const { events, emit } = collector()
+    await runWorkflow(req('n4', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    // The standing rule…
+    expect(system).toMatch(/narrate the WORK/i)
+    expect(system).toMatch(/at least one short line of prose/)
+    // …restated where it actually bites: the turn the model reads after each round.
+    expect(feedback.at(-1)?.content).toMatch(/ONE short line/)
+    expect(feedback.at(-1)?.content).toMatch(/Never reply with blocks alone/)
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('still forbids narrating deliberation', async () => {
+    // The line restored here is "what I am doing", never "how I am deciding" — the
+    // distinction that keeps this from re-opening the reasoning leak.
+    let system = ''
+    streamCompletion.mockImplementationOnce(async (_model, msgs, onChunk) => {
+      system = (msgs as ChatMessage[])[0].content
+      onChunk({ delta: 'Hi.' } as Omit<CompletionChunk, 'streamId'>)
+    })
+
+    const { events, emit } = collector()
+    await runWorkflow(req('n5'), emit, noTerminal)
+
+    expect(system).toMatch(/never\s+narrate DELIBERATION/i)
+    expect(system).toMatch(/show the decision, never the debate/)
     expect(events.at(-1)?.type).toBe('done')
   })
 })

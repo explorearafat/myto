@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { isBundlerEntryHtml } from '@shared/preview'
 import type {
   AgentRole,
   Attachment,
@@ -24,20 +25,6 @@ import { useAppStore } from './useAppStore'
  */
 const BUILD_RE =
   /\b((npm|pnpm|yarn|bun)\s+(run\s+)?build|(vite|next|astro|parcel|webpack)\s+build)\b/i
-
-/**
- * An `index.html` that is a *bundler entry point* — a module script pointing at
- * unbuilt source (`/src/…`, or a `.ts`/`.tsx`/`.jsx` file). Serving such a file
- * statically renders a blank page: the browser fetches `/src/main.tsx` as-is and
- * chokes on the raw TypeScript/JSX (this is exactly why "React apps don't
- * preview"). These projects must be shown via their dev server (Vite/Next/…),
- * which compiles on the fly — so auto-preview skips {@link startStatic} for them
- * and lets the engine's `startDev` path drive the live preview instead. A
- * self-contained page (inline scripts, or `src="app.js"` to a built bundle) does
- * NOT match, so plain HTML still previews instantly with no dev server.
- */
-const BUNDLER_ENTRY_RE =
-  /<script\b[^>]*\bsrc=["'][^"']*(?:\/src\/[^"']*|\.(?:tsx?|jsx))(?:[?#][^"']*)?["']/i
 
 /**
  * How often (ms) buffered stream deltas are flushed into the rendered message.
@@ -718,11 +705,17 @@ export const useChatStore = create<ChatState>((set, get) => {
               proposal.kind === 'write_file' &&
               result.kind === 'write_file' &&
               result.ok &&
-              /\.html?$/i.test(proposal.path) &&
-              !BUNDLER_ENTRY_RE.test(proposal.newContent)
+              /\.html?$/i.test(proposal.path)
             ) {
               useAppStore.getState().openPreview()
-              void window.sylor.preview.startStatic(proposal.path)
+              // A bundler entry point (a script tag pointing at unbuilt `/src/…`)
+              // is blank when served as a file, so it goes through startAuto — the
+              // main process finds the project's dev script, reuses an already
+              // running server, and reports honestly when there is nothing that
+              // can render it. Everything self-contained still serves instantly.
+              void (isBundlerEntryHtml(proposal.newContent)
+                ? window.sylor.preview.startAuto(proposal.path)
+                : window.sylor.preview.startStatic(proposal.path))
             } else if (
               proposal.kind === 'run_command' &&
               result.kind === 'run_command' &&
