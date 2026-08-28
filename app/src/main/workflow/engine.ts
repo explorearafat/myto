@@ -39,8 +39,8 @@ import { classifyIntent } from './intent'
 import { decideAuto } from './permission'
 import { ToolStreamParser, type ParsedTool } from './toolStream'
 import { ReasoningStripper, stripReasoningTags } from './reasoning'
-import { withRetry, type RetryNotice } from './resilience'
-import { resolveRole, roleDirective, roleIds } from './orchestrator/roles'
+import { isAbort, withRetry, type RetryNotice } from './resilience'
+import { resolveRole, roleDirective, roleIds, reportWordBudget } from './orchestrator/roles'
 import {
   allowsTool,
   scopeMcpTools,
@@ -98,9 +98,9 @@ YOU CAN LOOK AT THE PROJECT — DO IT BEFORE YOU CHANGE ANYTHING:
 \`\`\`
 
 These three only LOOK — they change nothing, so they run immediately without asking the
-user, and you can use several in one step. read_file takes optional "offset" (1-based first
-line) and "limit" for a big file. search_files takes a regular expression; "path" and "glob"
-are optional filters.
+user, and (unlike an action) you may emit several in one message to gather what you need
+before deciding. read_file takes optional "offset" (1-based first line) and "limit" for a
+big file. search_files takes a regular expression; "path" and "glob" are optional filters.
 
 To change part of an existing file, replace an exact piece of it — do NOT rewrite the
 whole file:
@@ -133,14 +133,21 @@ user made, how something is wired, a preference they stated — record it with:
 \`\`\`
 
 Rules for tool blocks:
-- One JSON object per block, and ONE FILE PER write_file block. To create or change several
-  files, emit several separate write_file blocks (across one or more steps).
+- ONE ACTION PER MESSAGE. A write_file, edit_file, run_command, or mcp_call block ENDS your
+  message: say one short line, emit that single block, and stop. The app runs it and reports
+  back, and only THEN do you continue. Anything you write after an action block is discarded
+  unseen — so never stack a second file, a summary, or "next I'll…" behind it. (Read-only
+  blocks are the sole exception: several read_file / list_files / search_files in one message
+  is fine, since they only gather context before you act.)
+- To create or change several files, emit them one per message across several steps — file,
+  result, next file — never many at once.
+- One JSON object per block.
 - Use ONLY project-relative paths (never absolute, never "..").
 - For write_file, "content" MUST be the complete new file, not a diff or a fragment.
 - For remember, "note" is a single short fact (not a whole conversation). Only remember
   things that stay true across chats; never secrets, keys, or one-off details.
-- Explain your plan in prose first, then emit the tool block(s). Prose outside blocks is
-  shown to the user; the JSON inside blocks is not.
+- Explain what you're about to do in one line of prose first, then emit the tool block. Prose
+  outside blocks is shown to the user; the JSON inside blocks is not.
 - Do not claim an edit or command succeeded — the app executes approved blocks and reports
   the result back. Propose, don't pretend.
 
@@ -151,10 +158,10 @@ CRITICAL — how to deliver code (this is the rule models most often break):
 - If you intend for a file to exist, emit a write_file block for it — one block per file.
   Whenever you catch yourself about to open a plain code fence to "show" a file, stop and
   emit a write_file block instead.
-- For a multi-file project, do NOT dump everything in one message. Work in steps: say briefly
-  what you're building, emit the write_file block(s) for this step, and after the app reports
-  them applied, continue with the next file(s). This think → act → think rhythm is expected
-  and preferred over one giant response.
+- For a multi-file project, build it ONE FILE AT A TIME: say briefly what this file is, emit
+  the single write_file block for it, and after the app reports it applied, move to the next
+  file. Do not dump the whole project in one message — that is the opposite of what's wanted.
+  This think → act → think rhythm, one file per step, is expected and required.
 - Reserve plain Markdown fences for tiny inline illustration only (a shell one-liner or a
   1–2 line snippet) that is NOT meant to become a file.
 
@@ -273,13 +280,15 @@ function intentDirective(kind: IntentKind): string {
         '\n\nThe user wants you to build or change something — act like a hands-on engineer, the ' +
         'way Claude Code does. Open with ONE short sentence on what you are about to do (do not ' +
         'restate their request back to them, and do not write a long plan), then IMMEDIATELY emit ' +
-        'the write_file block(s) that make it real in this SAME turn. Never end a turn on a promise ' +
-        'like "I\'ll create…" or "let me build…" with no tool block — that builds nothing. Work in ' +
-        'many small steps (write a file or two, let them apply, then continue) rather than one ' +
-        'giant message — and each time the app reports results back, open your next message with ' +
-        'one short line on what just landed and what you are doing next, then the next block(s). ' +
-        'One line per step, never a paragraph: the user should be able to follow the build as it ' +
-        'happens instead of staring at a spinner.'
+        'the write_file block that makes it real in this SAME turn. Never end a turn on a promise ' +
+        'like "I\'ll create…" or "let me build…" with no tool block — that builds nothing. Do ONE ' +
+        'action per message: emit a single write_file / edit_file / run_command block, then STOP ' +
+        'and wait — the app runs it and reports back before you continue. Never stack two files, ' +
+        'or a "next I\'ll…" note, behind an action block; anything after it is thrown away unseen. ' +
+        'Build a multi-file project ONE FILE AT A TIME across many small steps, and each time the ' +
+        'app reports back, open with one short line on what just landed and what you are doing ' +
+        'next, then the next block. One line per step, never a paragraph: the user should be able ' +
+        'to follow the build as it happens, file by file, instead of staring at a spinner.'
       )
     default:
       return ''
@@ -452,8 +461,12 @@ const activeRuns = new Map<string, RunHandle>()
  * that could actually spin. A productive step — one that wrote a file, ran a
  * command, or delegated — is always allowed to be followed by another, so a
  * genuinely large task now runs to completion instead of being truncated.
+ *
+ * Raised from 250 when a step became ONE action instead of a batch: the same build
+ * that used to fit in one eight-write step now costs eight steps, so the backstop
+ * has to scale with it or a large project would hit the cap mid-way.
  */
-const MAX_STEPS = 250
+const MAX_STEPS = 400
 
 /**
  * Upper bound on corrective "you dumped raw code — re-emit as write_file blocks"
@@ -584,8 +597,10 @@ const nextAgentId = (): string => `agent-${++agentCounter}`
  * Raised from 8: a specialist owning a whole task node (an API surface, a UI
  * feature) needs the same think → act → think headroom the lead has. Still a
  * fraction of MAX_STEPS, since a node is a slice rather than the whole request.
+ * Doubled again (80 → 160) when a step became one action rather than a batch of
+ * them — the same slice, more steps to express it in.
  */
-const SUBAGENT_MAX_STEPS = 80
+const SUBAGENT_MAX_STEPS = 160
 
 /**
  * Runs one workflow turn: analyze intent → (optionally) scan/read project →
@@ -753,7 +768,10 @@ export async function runWorkflow(
       projectPreamble,
       effort: effort ?? 'medium',
       mcpTools,
-      enabledSkills
+      enabledSkills,
+      // Condensed prior-turn context (no LLM) so a fresh-context subagent can
+      // resolve references like "now make it blue" without the full history.
+      recap: buildConversationRecap(messages)
     }
 
     // The lead agent's arguments. The lead is a full agent — it can edit/run/call
@@ -854,6 +872,14 @@ interface SpawnContext {
   effort: ReasoningEffort
   mcpTools: McpToolInfo[]
   enabledSkills: SkillInfo[]
+  /**
+   * A cheap, bounded plain-text recap of the conversation BEFORE the current turn
+   * (no model call). It lets a fresh-context subagent resolve back-references like
+   * "now make it blue" without inheriting the whole history — the continuity that
+   * used to come from running a SIMPLE turn as the lead. '' on a first turn. See
+   * {@link buildConversationRecap}.
+   */
+  recap: string
 }
 
 /**
@@ -1032,6 +1058,31 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     emit({ type: 'delta', runId, text: out })
   }
 
+  /**
+   * Which tool block ends the model's message. One action per message is what makes
+   * the work legible: a line of narration, one file, its result, then the next
+   * decision — the same rhythm as the CLI, and the reason each tool card appears at
+   * its own point in the prose instead of the whole batch arriving at the end.
+   *
+   * Reads are deliberately exempt: gathering three files before deciding anything is
+   * one investigative act, and splitting it would just cost three round-trips.
+   * `spawn_agent` only counts when this agent may actually spawn — otherwise the
+   * block is filtered out later and stopping on it would end the step having done
+   * nothing at all. Plan-first is exempt too: it is contractually a single pass that
+   * writes plan.md and breaks, so there is nothing to interleave and cutting its
+   * closing summary would only lose the explanation the user asked for.
+   */
+  const stopAfter = (tool: ParsedTool): boolean => {
+    if (planFirstStop) return false
+    return (
+      tool.tool === 'write_file' ||
+      tool.tool === 'edit_file' ||
+      tool.tool === 'run_command' ||
+      tool.tool === 'mcp_call' ||
+      (allowSpawn && tool.tool === 'spawn_agent')
+    )
+  }
+
   for (let step = 0; step < maxSteps; step++) {
     if (signal.aborted) return report
 
@@ -1039,44 +1090,68 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     // raw text (prose + blocks) so the assistant turn can be replayed verbatim,
     // and the prose alone so we can detect a raw-code dump (see the nudge below).
     //
+    // The stream is cut at the first *action* (see `stopAfter`): the model narrates
+    // one line, acts once, sees the result, and only then decides what comes next.
+    // That is the whole think → act → observe → think rhythm — without it a model
+    // emits eight write_file blocks in one message, every card lands at the same
+    // point in the prose (so they all appear at once, at the end), and file #8 was
+    // written without ever having seen what happened to file #1.
+    //
     // Paced + retried (see resilience.ts): requests are spaced so parallel
     // specialists can't trip a rate limit, and a 429/5xx/timeout is retried up to
     // 10 times a minute apart, reported to the UI as a dimmed notice. `received`
     // guards replay safety — once bytes have reached the user, a retry would
     // duplicate them, so the attempt is not repeated.
-    const parser = new ToolStreamParser()
+    const parser = new ToolStreamParser({ stopAfter })
     const think = new ReasoningStripper()
     stepOpening = true
     let raw = ''
     let proseText = ''
     let received = false
+    // Cuts the HTTP stream the moment the parser closes, so we don't sit waiting on
+    // tokens we have already decided to discard. Chained off the run signal so a real
+    // cancellation still propagates. Latency only — the one-action guarantee is the
+    // parser's, which holds even when a provider delivers the whole message at once.
+    const stepCtl = new AbortController()
+    const relayAbort = (): void => stepCtl.abort()
+    signal.addEventListener('abort', relayAbort, { once: true })
     const retry = retryReporter(runId, emit, args.agentId)
-    await withRetry(
-      async () => {
-        await provider.streamCompletion(
-          modelId,
-          outbound,
-          (chunk) => {
-            if (!chunk.delta) return
-            received = true
-            raw += chunk.delta
-            const prose = parser.push(chunk.delta)
-            if (!prose) return
-            const shown = think.push(prose)
-            if (shown) {
-              proseText += shown
-              emitProse(shown)
-            }
-          },
-          signal
-        )
-      },
-      {
-        signal,
-        canRetry: () => !received,
-        onRetry: retry.onRetry
-      }
-    )
+    try {
+      await withRetry(
+        async () => {
+          await provider.streamCompletion(
+            modelId,
+            outbound,
+            (chunk) => {
+              if (!chunk.delta) return
+              received = true
+              raw += chunk.delta
+              const prose = parser.push(chunk.delta)
+              if (parser.stopped) stepCtl.abort()
+              if (!prose) return
+              const shown = think.push(prose)
+              if (shown) {
+                proseText += shown
+                emitProse(shown)
+              }
+            },
+            stepCtl.signal
+          )
+        },
+        {
+          signal,
+          canRetry: () => !received,
+          onRetry: retry.onRetry
+        }
+      )
+    } catch (err) {
+      // The abort we raised ourselves is the normal path, not a failure: the action
+      // is already parsed and everything after it was going to be thrown away. Any
+      // other error — including a genuine user cancel — still propagates.
+      if (!(parser.stopped && !signal.aborted && isAbort(err))) throw err
+    } finally {
+      signal.removeEventListener('abort', relayAbort)
+    }
     // A retry that eventually succeeded left the line dimmed; restore it so the
     // rest of the phase doesn't read as stalled.
     retry.clear('Generating…')
@@ -1086,6 +1161,11 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
       proseText += tail
       emitProse(tail)
     }
+    // Cut the replayed turn at the action too. The tail the model had already
+    // generated — more blocks, or a summary of writes that never happened — is not
+    // history: it was never executed and the user never saw it. Keeping it would let
+    // the model carry on from a plan it only imagined.
+    if (parser.stopped) raw = raw.slice(0, parser.consumed)
     // Some models inline their chain-of-thought as `<think>…</think>` in the
     // content channel; it's stripped from the shown prose above. Strip it from the
     // verbatim turn too, so a stray trace never re-primes the model on the next step.
@@ -1360,6 +1440,57 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
 }
 
 /**
+ * Truncates `text` to at most `maxWords` whitespace-separated words, marking the
+ * cut. Bounds a subagent's handoff so one verbose agent can't flood the
+ * orchestrator's context. Counts words, not chars, because the budget the roles
+ * advertise ("under 150 words") is in words. A short string is returned unchanged.
+ */
+export function capWords(text: string, maxWords: number): string {
+  const trimmed = text.trim()
+  if (!trimmed) return trimmed
+  const words = trimmed.split(/\s+/)
+  if (words.length <= maxWords) return trimmed
+  return `${words.slice(0, maxWords).join(' ')} …[report truncated at ${maxWords} words]`
+}
+
+/** Recap sizing: at most N prior turns, each clamped, and the whole clamped again. */
+const RECAP_MAX_TURNS = 6
+const RECAP_TURN_CHARS = 240
+const RECAP_TOTAL_CHARS = 1200
+
+/** Character clamp with a trailing ellipsis marker, keeping a recap bounded. */
+function recapClamp(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max).trimEnd()} …`
+}
+
+/**
+ * A cheap (no-LLM) recap of the conversation BEFORE the current turn, so a
+ * fresh-context subagent can resolve back-references like "now make it blue"
+ * without inheriting the whole history. Drops the final user turn (that's the
+ * live request the subagent already receives as its task), strips tool-block and
+ * reasoning noise from each prior message, keeps the last {@link RECAP_MAX_TURNS}
+ * turns, and clamps both per-turn and overall. Returns '' when there is no prior
+ * turn — the common first-message case, where callers see no change.
+ */
+export function buildConversationRecap(messages: readonly ChatMessage[]): string {
+  const lastUserIdx = messages.map((m) => m.role).lastIndexOf('user')
+  const prior = lastUserIdx > 0 ? messages.slice(0, lastUserIdx) : []
+  const turns = prior
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .map((m) => {
+      const text = stripReasoningTags(m.content)
+        .replace(/```sylor-tool[\s\S]*?```/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+      const who = m.role === 'user' ? 'User' : 'Sylor'
+      return text ? `${who}: ${recapClamp(text, RECAP_TURN_CHARS)}` : ''
+    })
+    .filter(Boolean)
+  if (turns.length === 0) return ''
+  return recapClamp(turns.slice(-RECAP_MAX_TURNS).join('\n'), RECAP_TOTAL_CHARS)
+}
+
+/**
  * Runs one delegated subagent (requirement B). Emits `agent-start` on the
  * parent's (unstamped) sink, runs the SAME gated agent loop with a role-scoped
  * system prompt, capability-scoped tools, and a bounded step budget — its
@@ -1408,6 +1539,11 @@ async function runSubagent(
     report = `Subagent error: ${toErrorMessage(err)}`
     ok = false
   }
+
+  // Bound the handoff: the orchestrator (and the nested-agent UI) only ever see a
+  // report capped to the role's word budget, so one verbose subagent can't flood
+  // the lead's context. Error strings are short, so this is a no-op for them.
+  report = capWords(report, reportWordBudget(role))
 
   parent.emit({ type: 'agent-end', runId: parent.runId, agentId, role, report, ok })
   return { report, ok, agentId }
@@ -1551,8 +1687,9 @@ function readPlanMd(): string {
  * skills framing the lead received — but **capability-scoped**, so a role only
  * ever sees the MCP servers and skills its capabilities unlock (a docs writer
  * isn't shown a database server) — its role-specific operating instruction from
- * the registry, the project preamble + overview, the current `plan.md`, the
- * orchestrator's scoped shared-context digest, and finally the assigned task.
+ * the registry, the project preamble + overview, a bounded recap of the prior
+ * conversation (so references survive a fresh context), the current `plan.md`,
+ * the orchestrator's scoped shared-context digest, and finally the assigned task.
  * `spawnDirective` is deliberately omitted: subagents can't spawn (depth 1).
  */
 function buildSubagentSystem(
@@ -1574,6 +1711,12 @@ function buildSubagentSystem(
     roleDirectiveFor(role)
   if (ctx.projectPreamble) system += `\n\n${ctx.projectPreamble}`
   if (ctx.overview) system += `\n\n## Project context\n${ctx.overview}`
+  if (ctx.recap) {
+    system +=
+      `\n\n## Conversation so far\n${ctx.recap}\n\n` +
+      'This is prior context to resolve references in your task ("it", "that", "the button" ' +
+      'from an earlier turn) — not new work to do.'
+  }
   const plan = readPlanMd()
   if (plan) system += `\n\n## Current plan.md\n${plan}`
   if (sharedContext?.trim()) {
@@ -2081,10 +2224,11 @@ function summarizeResults(outcomes: Array<{ tool: ExecutableTool; result: ToolRe
         'read the file if you need to see its current state, then correct it with a ' +
         'tool block. Do not give your final answer while a detected problem remains.'
       : '\n\nIf these results complete the task, give your final answer to the user now. ' +
-        'If a command failed or work remains, fix it or take the next step: open with ONE short ' +
-        'line telling the user what just landed and what you are doing next, then the tool ' +
-        'block(s). Never reply with blocks alone — from the outside that looks like nothing is ' +
-        'happening.')
+        'If a command failed or work remains, take the NEXT SINGLE step: open with ONE short ' +
+        'line telling the user what just landed and what you are doing next, then ONE tool ' +
+        'block — and stop there so it can run before you continue. Never reply with a block ' +
+        'alone (from the outside that looks like nothing is happening), and never stack several ' +
+        'files into one message.')
   )
 }
 

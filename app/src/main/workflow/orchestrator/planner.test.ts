@@ -24,7 +24,7 @@ afterEach(() => {
 })
 
 describe('buildPlan — SIMPLE', () => {
-  it('collapses to a single generalist node with NO LLM call', async () => {
+  it('collapses to a single builder node with NO LLM call', async () => {
     const res = await buildPlan('fix the typo', 'simple', settings)
     expect(res.usedLlm).toBe(false)
     expect(getCompletion).not.toHaveBeenCalled()

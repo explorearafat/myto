@@ -10,9 +10,12 @@
  * need no change (requirement: extensible capability-based roles, no giant
  * if/else).
  *
- * The four historical roles (`lead`, `planner`, `builder`, `reviewer`) keep
- * their exact directives so existing behavior and tests are preserved; the
- * specialist roles (frontend, backend, database, …) are new.
+ * The core loop roles are `explorer` (read-only mapping), `editor` (edits, no
+ * shell), `test-runner` (runs checks, no edits), and `reviewer` (static
+ * read-only review); `lead`/`planner`/`builder` and the domain specialists
+ * (frontend, backend, database, …) round out the registry. Adding a role is one
+ * `define(...)` entry — the orchestrator, planner, and prompt builder all resolve
+ * roles through here and need no change.
  *
  * Pure data + lookups — no Electron/engine imports — so it is unit-testable and
  * safe to import from both the engine and `toolStream.ts` (spawn-role
@@ -48,6 +51,20 @@ export interface AgentRoleDef {
   capabilities: Capability[]
   /** How much project context this role receives. */
   contextScope: ContextScope
+  /**
+   * Soft word budget for this role's handoff report. The engine truncates the
+   * subagent's report to this many words (via `capWords`) before it reaches the
+   * orchestrator, so no single agent floods the lead's context. Omit to use
+   * {@link DEFAULT_REPORT_WORDS}. The explorer gets a larger budget because it
+   * hands back key code snippets, not just prose.
+   */
+  reportWords?: number
+  /**
+   * Per-finding char cap for this role on the shared-context blackboard. Omit to
+   * use the blackboard's default. The explorer raises it so its snippets aren't
+   * clipped; every other role keeps the tight default.
+   */
+  detailChars?: number
 }
 
 const ROLES = new Map<string, AgentRoleDef>()
@@ -111,13 +128,65 @@ define({
   id: 'reviewer',
   title: 'Reviewer',
   systemDirective:
-    'You are the REVIEWER subagent. Verify the work: run the project’s typecheck, tests, ' +
-    'and/or lint with run_command and inspect the output. Do NOT rewrite the feature yourself. ' +
-    'Finish with a clear PASS or FAIL verdict followed by a bullet list of any issues (file + ' +
-    'what is wrong) so the lead can dispatch fixes.',
-  // No filesystem: a reviewer may run checks but must not edit the code it judges.
-  capabilities: ['terminal', 'testing', 'code-exec', 'skills'],
-  contextScope: 'minimal'
+    'You are the REVIEWER subagent. Statically review the changes: read the touched files ' +
+    '(read_file) and grep for related call sites (search_files), then judge correctness, ' +
+    'edge cases, and consistency with the surrounding code. Do NOT edit files and do NOT run ' +
+    'commands — you report, you don’t fix. Finish in under 200 words: either concrete issues ' +
+    'as `path:line — what is wrong` bullets, or exactly “No issues found.”',
+  // Read-only: a reviewer inspects code but must never edit it or shell out. `read`
+  // is always permitted regardless of capabilities, so `skills` alone is enough.
+  capabilities: ['skills'],
+  // `minimal`: the reviewer verifies against the plan + a compact execution
+  // roll-up (what each node did), not the full finding firehose — this is the
+  // digest `summarizeForAgent` builds for the REVIEW stage.
+  contextScope: 'minimal',
+  reportWords: 200
+})
+
+// ── Core execution roles (the everyday explore → edit → test → review loop) ──
+
+define({
+  id: 'explorer',
+  title: 'Explorer',
+  systemDirective:
+    'You are the EXPLORER subagent. Read-only: locate the code that matters for the task with ' +
+    'read_file / search_files / list_files. Do NOT write files or run commands. Hand back a ' +
+    'map, not a data dump: the relevant file paths with line ranges, a one-line note on what ' +
+    'each does, and the few short code snippets the editor will actually need to make the ' +
+    'change. Never paste whole files. Keep it under ~350 words including snippets.',
+  // Read-only explorer: `skills` only (read is always allowed); no filesystem/terminal.
+  capabilities: ['skills'],
+  contextScope: 'full',
+  reportWords: 350,
+  detailChars: 1800
+})
+
+define({
+  id: 'editor',
+  title: 'Editor',
+  systemDirective:
+    'You are the EDITOR subagent. You make the code change and nothing else: read_file to ' +
+    'confirm context, then edit_file / write_file to apply it, in small think → act → think ' +
+    'steps. You CANNOT run commands — do not attempt to build or test. Prefer the snippets the ' +
+    'explorer gave you over re-reading whole files. Finish in under 150 words: what you ' +
+    'changed, which files, and anything still open.',
+  capabilities: ['filesystem', 'skills'],
+  contextScope: 'scoped',
+  reportWords: 150
+})
+
+define({
+  id: 'test-runner',
+  title: 'Test Runner',
+  systemDirective:
+    'You are the TEST-RUNNER subagent. Run the project’s tests / typecheck / lint with ' +
+    'run_command and read the output — that is all you do. Do NOT edit files. Report only the ' +
+    'verdict, never the full log: “N passed, M failed”, and for each failure the test name ' +
+    'plus the one- or two-line assertion/error message. Keep it under 120 words.',
+  // Runs commands but cannot edit: no filesystem.
+  capabilities: ['terminal', 'testing', 'code-exec'],
+  contextScope: 'minimal',
+  reportWords: 120
 })
 
 // ── Specialist roles (new) ────────────────────────────────────────────────
@@ -245,6 +314,21 @@ define({
 
 /** The fallback role for an unknown id — a safe generalist implementer. */
 const FALLBACK_ROLE = 'builder'
+
+/**
+ * Default handoff word budget for a role that doesn't set its own — the
+ * ~200-word cap on a subagent → orchestrator report (see {@link reportWordBudget}).
+ */
+export const DEFAULT_REPORT_WORDS = 200
+
+/**
+ * The word budget the engine truncates this role's handoff report to before it
+ * reaches the orchestrator. Roles declare it via `reportWords`; unset roles use
+ * {@link DEFAULT_REPORT_WORDS}.
+ */
+export function reportWordBudget(id: AgentRole): number {
+  return resolveRole(id).reportWords ?? DEFAULT_REPORT_WORDS
+}
 
 /** Whether a role id is registered. */
 export function hasRole(id: string): boolean {

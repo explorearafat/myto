@@ -163,7 +163,8 @@ vi.mock('@main/db/projects', () => ({
     appendProjectMemory(id, note, now)
 }))
 
-const { runWorkflow, cancelWorkflow, resolveToolDecision } = await import('@main/workflow/engine')
+const { runWorkflow, cancelWorkflow, resolveToolDecision, capWords, buildConversationRecap } =
+  await import('@main/workflow/engine')
 
 // ---- Helpers ----------------------------------------------------------------
 
@@ -209,6 +210,72 @@ function skill(overrides: Partial<SkillInfo> & { name: string }): SkillInfo {
     ...overrides
   }
 }
+
+describe('capWords (handoff cap)', () => {
+  it('returns short text unchanged', () => {
+    expect(capWords('a concise three word', 200)).toBe('a concise three word')
+  })
+
+  it('truncates to the word budget and marks the cut', () => {
+    const long = Array.from({ length: 50 }, (_, i) => `w${i}`).join(' ')
+    const out = capWords(long, 10)
+    expect(out.startsWith('w0 w1 w2 w3 w4 w5 w6 w7 w8 w9')).toBe(true)
+    expect(out).toContain('truncated at 10 words')
+    // The prose portion carries exactly the budgeted number of words.
+    expect(out.split(/\s+/).slice(0, 10)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `w${i}`)
+    )
+  })
+
+  it('counts words, not characters, so a budget of 150 keeps long-but-few words', () => {
+    const fifteenLongWords = Array.from({ length: 15 }, () => 'antidisestablishmentarianism').join(' ')
+    expect(capWords(fifteenLongWords, 150)).toBe(fifteenLongWords)
+  })
+
+  it('trims surrounding whitespace and handles empty input, leaving inner text intact', () => {
+    expect(capWords('   ', 5)).toBe('')
+    expect(capWords('  hello world  ', 5)).toBe('hello world')
+  })
+})
+
+describe('buildConversationRecap (bounded, no-LLM continuity)', () => {
+  const msg = (role: ChatMessage['role'], content: string): ChatMessage => ({ role, content })
+
+  it('returns empty for a first turn (nothing before the current request)', () => {
+    expect(buildConversationRecap([msg('user', 'add a login button')])).toBe('')
+    expect(buildConversationRecap([])).toBe('')
+  })
+
+  it('condenses prior turns, labels speakers, and drops the live final user turn', () => {
+    const recap = buildConversationRecap([
+      msg('user', 'add a login button to the header'),
+      msg('assistant', 'Added a Button component to Header.tsx.'),
+      msg('user', 'now make it blue') // the live request — supplied to the subagent as its task
+    ])
+    expect(recap).toBe(
+      'User: add a login button to the header\nSylor: Added a Button component to Header.tsx.'
+    )
+    expect(recap).not.toContain('now make it blue')
+  })
+
+  it('strips sylor-tool blocks and collapses whitespace to one line per turn', () => {
+    const withTool =
+      'Editing the file now.\n```sylor-tool\n{"tool":"write_file","path":"a.ts"}\n```\nDone.'
+    const recap = buildConversationRecap([msg('assistant', withTool), msg('user', 'thanks')])
+    expect(recap).toBe('Sylor: Editing the file now. Done.')
+    expect(recap).not.toContain('write_file')
+  })
+
+  it('keeps only the last six prior turns', () => {
+    const history: ChatMessage[] = []
+    for (let i = 0; i < 10; i++) history.push(msg('user', `turn ${i}`))
+    history.push(msg('user', 'current request'))
+    const lines = buildConversationRecap(history).split('\n')
+    expect(lines).toHaveLength(6)
+    expect(lines[0]).toBe('User: turn 4') // turns 4..9 survive; 0..3 dropped
+    expect(lines[5]).toBe('User: turn 9')
+  })
+})
 
 describe('runWorkflow', () => {
   beforeEach(() => {
@@ -451,6 +518,11 @@ const MCP_BLOCK =
   '```sylor-tool\n{ "tool": "mcp_call", "server": "fs", "name": "read_file", "arguments": { "path": "a.txt" } }\n```\n'
 const USE_SKILL_BLOCK = '```sylor-tool\n{ "tool": "use_skill", "name": "pdf-tools" }\n```\n'
 
+/** A write_file block for an arbitrary path/content (for multi-block completions). */
+function writeBlock(path: string, content: string): string {
+  return '```sylor-tool\n' + JSON.stringify({ tool: 'write_file', path, content }) + '\n```\n'
+}
+
 describe('runWorkflow tool execution', () => {
   beforeEach(() => {
     streamCompletion.mockReset()
@@ -502,6 +574,62 @@ describe('runWorkflow tool execution', () => {
 
     expect(writeProjectFile).toHaveBeenCalledOnce()
     expect(runCommand).not.toHaveBeenCalled()
+  })
+
+  it('executes only the FIRST action when a completion emits several blocks', async () => {
+    // The model dumps three write blocks in one message. One action per message: only
+    // the first runs — the rest are discarded so the model re-decides after seeing the
+    // result, instead of writing three files blind. This is what stops the whole batch
+    // from landing at once at the end of the turn.
+    const many =
+      'First file.\n' +
+      writeBlock('a.ts', 'a') +
+      'Second file.\n' +
+      writeBlock('b.ts', 'b') +
+      'Third file.\n' +
+      writeBlock('c.ts', 'c')
+    let feedback: ChatMessage[] = []
+    streamCompletion
+      .mockImplementationOnce(emitsText(many))
+      .mockImplementationOnce(async (_model, msgs, onChunk) => {
+        feedback = (msgs as ChatMessage[]).map((m) => ({ ...m }))
+        onChunk({ delta: 'Done.' } as Omit<CompletionChunk, 'streamId'>)
+      })
+
+    const { events, emit } = collector()
+    await runWorkflow(req('one1', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    // Exactly one file was written, and it was the first block.
+    expect(writeProjectFile).toHaveBeenCalledOnce()
+    expect(writeProjectFile).toHaveBeenCalledWith('a.ts', 'a')
+    // Prose after the first block never reached the user.
+    const prose = events
+      .filter((e) => e.type === 'delta')
+      .map((e) => (e as { text: string }).text)
+      .join('')
+    expect(prose).toContain('First file.')
+    expect(prose).not.toContain('Second file.')
+    expect(prose).not.toContain('Third file.')
+    // The next step is fed the result of the one write that ran…
+    expect(feedback.at(-1)?.content ?? '').toMatch(/a\.ts.*applied/)
+    // …and the replayed assistant turn is truncated at that block — the discarded
+    // second/third blocks are not in history, so the model can't resume them.
+    const assistant = feedback.filter((m) => m.role === 'assistant').at(-1)?.content ?? ''
+    expect(assistant).not.toContain('b.ts')
+    expect(assistant).not.toContain('c.ts')
+  })
+
+  it('writes one file per completion, in order, across steps', async () => {
+    streamCompletion
+      .mockImplementationOnce(emitsText('One.\n' + writeBlock('a.ts', 'a')))
+      .mockImplementationOnce(emitsText('Two.\n' + writeBlock('b.ts', 'b')))
+      .mockImplementationOnce(emitsText('Three.\n' + writeBlock('c.ts', 'c')))
+      .mockImplementationOnce(emitsText('All done.'))
+
+    const { emit } = collector()
+    await runWorkflow(req('one2', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    expect(writeProjectFile.mock.calls.map((c) => c[0])).toEqual(['a.ts', 'b.ts', 'c.ts'])
   })
 
   it('records a remember block to the active project memory (no approval card)', async () => {
@@ -1169,17 +1297,24 @@ describe('runWorkflow step narration', () => {
     expect(text).toMatch(/second file\.\n\n+Both files are in place\./)
   })
 
-  it('separates steps even when the prose ends flush against the block', async () => {
-    // Prose *after* the block, with no trailing newline at all: nothing in the
-    // stream can be relied on to end a step cleanly.
+  it('drops prose that trails an action block, then still breaks before the next step', async () => {
+    // One action ends the message: prose the model writes AFTER the block describes
+    // work that will not run this step, so it is suppressed rather than shown (it
+    // would otherwise narrate a phantom file). The next step's line still opens on
+    // its own paragraph.
     streamCompletion
-      .mockImplementationOnce(emitsText(WRITE_BLOCK + 'Config written.'))
+      .mockImplementationOnce(emitsText('Writing the config.' + WRITE_BLOCK + 'Config written.'))
       .mockImplementationOnce(emitsText('Now the router.'))
 
     const { events, emit } = collector()
     await runWorkflow(req('n2', { permissionMode: 'auto-edit' }), emit, noTerminal)
 
-    expect(prose(events)).toMatch(/Config written\.\n\nNow the router\./)
+    const text = prose(events)
+    expect(text).toContain('Writing the config.')
+    // Trailing prose after the action block never reaches the user.
+    expect(text).not.toContain('Config written.')
+    // The step boundary still inserts a paragraph break before the next line.
+    expect(text).toMatch(/Writing the config\.\n\n+Now the router\./)
   })
 
   it('never reflows prose inside a single step', async () => {
@@ -1215,7 +1350,7 @@ describe('runWorkflow step narration', () => {
     expect(system).toMatch(/at least one short line of prose/)
     // …restated where it actually bites: the turn the model reads after each round.
     expect(feedback.at(-1)?.content).toMatch(/ONE short line/)
-    expect(feedback.at(-1)?.content).toMatch(/Never reply with blocks alone/)
+    expect(feedback.at(-1)?.content).toMatch(/Never reply with a block alone/)
     expect(events.at(-1)?.type).toBe('done')
   })
 

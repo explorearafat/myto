@@ -184,8 +184,10 @@ describe('routing — the complexity router only sizes the team', () => {
     expect(getCompletion).not.toHaveBeenCalled() // no router call, no planner call
     expect(h.writePlan).not.toHaveBeenCalled() // a one-node plan is not worth a file
     expect(h.executeNode).toHaveBeenCalledTimes(1)
-    // A single-node graph IS the turn, so it runs as the lead (pre-orchestration behavior).
+    // A single-node graph IS the turn, so it runs as the lead (pre-orchestration
+    // behavior); it still receives a shared-context digest string like any node.
     expect(h.executeNode.mock.calls[0][1].asLead).toBe(true)
+    expect(typeof h.executeNode.mock.calls[0][1].context).toBe('string')
     // …but plan → execute → review still happened.
     expect(h.judge).toHaveBeenCalledTimes(1)
     expect(stagesOf(h.events)).toEqual(['planning', 'planning', 'generating', 'verifying'])
@@ -210,7 +212,10 @@ describe('routing — the complexity router only sizes the team', () => {
     expect(h.writePlan).toHaveBeenCalledTimes(1)
     expect(h.writePlan.mock.calls[0][0]).toContain('- [ ] **t1** (database) do t1')
     expect(h.executeNode).toHaveBeenCalledTimes(3)
+    // A multi-node graph never runs a node as the lead — every one is a scoped
+    // specialist that still receives its shared-context digest.
     expect(h.executeNode.mock.calls.every(([, opts]) => opts.asLead === false)).toBe(true)
+    expect(h.executeNode.mock.calls.every(([, opts]) => typeof opts.context === 'string')).toBe(true)
     expect(result.tasks.map((t) => t.role)).toEqual(['database', 'backend', 'frontend'])
     expect(result.tasks.every((t) => t.state === 'completed')).toBe(true)
   })
@@ -234,6 +239,7 @@ describe('routing — the complexity router only sizes the team', () => {
 
     expect(result.tasks).toHaveLength(1)
     expect(h.writePlan).not.toHaveBeenCalled()
+    // Degraded to one node → that node IS the turn, so it runs as the lead.
     expect(h.executeNode.mock.calls[0][1].asLead).toBe(true)
     expect(h.judge).toHaveBeenCalledTimes(1)
   })
@@ -264,14 +270,50 @@ describe('assignment', () => {
 
 // ---- Parallelism + dependency ordering -------------------------------------
 
-describe('execution — real parallelism, real DAG ordering', () => {
-  it('overlaps independent nodes up to the concurrency bound', async () => {
+describe('execution — writers serialize, readers parallelize, real DAG ordering', () => {
+  it('serializes file-writing specialists — one writer at a time, in order', async () => {
+    // Every role here has the `filesystem` capability, so the scheduler runs them
+    // strictly one at a time even though MAX_PARALLEL would allow three. This is
+    // what makes the tool cards land one-by-one, the way a single engineer works.
     getCompletion.mockResolvedValueOnce(
       planJson([
         task('t1', 'backend'),
         task('t2', 'frontend'),
-        task('t3', 'docs'),
-        task('t4', 'testing')
+        task('t3', 'testing'),
+        task('t4', 'docs')
+      ])
+    )
+    const started: string[] = []
+    let inFlight = 0
+    let peak = 0
+
+    const h = harness({
+      executeNode: async (node) => {
+        started.push(node.id)
+        inFlight++
+        peak = Math.max(peak, inFlight)
+        await new Promise((resolve) => setTimeout(resolve, 1))
+        inFlight--
+        return ran(node)
+      }
+    })
+
+    const result = await h.run(COMPLEX_REQUEST)
+    // Never two writers at once, and dispatched in insertion order.
+    expect(peak).toBe(1)
+    expect(started).toEqual(['t1', 't2', 't3', 't4'])
+    expect(result.tasks.every((t) => t.state === 'completed')).toBe(true)
+  })
+
+  it('still overlaps non-writing specialists up to the concurrency bound', async () => {
+    // None of these roles touches the filesystem, so parallelism is unchanged:
+    // three run at once and the fourth waits for a slot.
+    getCompletion.mockResolvedValueOnce(
+      planJson([
+        task('t1', 'research'),
+        task('t2', 'project-analyst'),
+        task('t3', 'reviewer'),
+        task('t4', 'research')
       ])
     )
     const started: string[] = []
@@ -294,8 +336,7 @@ describe('execution — real parallelism, real DAG ordering', () => {
     })
 
     const run = h.run(COMPLEX_REQUEST)
-    // Three nodes are genuinely in flight at once; the fourth waits for a slot.
-    await until(() => started.length === 3, 'three nodes in flight')
+    await until(() => started.length === 3, 'three readers in flight')
     expect(inFlight).toBe(3)
     expect(started).toEqual(['t1', 't2', 't3'])
 
@@ -306,9 +347,50 @@ describe('execution — real parallelism, real DAG ordering', () => {
     expect(result.tasks.every((t) => t.state === 'completed')).toBe(true)
   })
 
-  it('holds a dependent node until every dependency has completed', async () => {
+  it('runs a writer alongside a reader, but holds a second writer even with a free slot', async () => {
+    // t1 (writer) and t2 (reader) run together; t3 (writer) is held not by the
+    // concurrency bound — a slot is free — but because a writer is already running.
+    // Proves the gate uses `continue`, not `break`: a reader further down the ready
+    // set still starts while a writer runs.
     getCompletion.mockResolvedValueOnce(
-      planJson([task('t1', 'backend'), task('t2', 'frontend'), task('t3', 'integration', ['t1', 't2'])])
+      planJson([task('t1', 'backend'), task('t2', 'research'), task('t3', 'frontend')])
+    )
+    const started: string[] = []
+    let inFlight = 0
+    let release = (): void => {}
+    const barrier = new Promise<void>((resolve) => {
+      release = () => resolve()
+    })
+
+    const h = harness({
+      executeNode: async (node) => {
+        started.push(node.id)
+        inFlight++
+        await barrier
+        inFlight--
+        return ran(node)
+      }
+    })
+
+    const run = h.run(COMPLEX_REQUEST)
+    await until(() => started.length === 2, 'a writer and a reader in flight')
+    expect(inFlight).toBe(2)
+    // The writer overlaps the reader; the second writer has not started despite
+    // only two of three slots being taken.
+    expect(started).toEqual(['t1', 't2'])
+
+    release()
+    const result = await run
+    // The held writer runs once the first writer frees the exclusive slot.
+    expect(started).toEqual(['t1', 't2', 't3'])
+    expect(result.tasks.every((t) => t.state === 'completed')).toBe(true)
+  })
+
+  it('holds a dependent node until every dependency has completed', async () => {
+    // t1/t2 are readers so they still overlap (two writers would serialize); t3
+    // depends on both and must wait for the pair regardless of their roles.
+    getCompletion.mockResolvedValueOnce(
+      planJson([task('t1', 'research'), task('t2', 'reviewer'), task('t3', 'integration', ['t1', 't2'])])
     )
     const trace: string[] = []
     const h = harness({

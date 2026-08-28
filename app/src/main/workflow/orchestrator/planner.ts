@@ -126,9 +126,17 @@ async function requestPlan(
     '- dependsOn: ids of tasks that MUST finish first (only real data/sequence dependencies — ' +
     'keep independent tasks parallel with an empty array).\n' +
     '- filesHint: likely file paths this task writes (best guess; used to serialize conflicting edits).\n' +
+    '\nDEFAULT SHAPE — most requests are one feature, not many domains. Prefer the core loop: ' +
+    'explorer (read-only — locate the exact files and lines to change) → editor (make the code ' +
+    'change; it reads and writes but has no shell) → test-runner (run the project’s checks and ' +
+    'report pass/fail; it runs commands but makes no edits), chained through dependsOn. Reach for ' +
+    'a domain specialist (frontend, backend, database, security, devops, docs, …) ONLY when the ' +
+    'work genuinely spans that domain. Do NOT add a review or verify task — a mandatory reviewer ' +
+    'gate already runs automatically after the plan.\n' +
     `Prefer the fewest tasks that cover the work; at most ${MAX_TASKS}. Do not invent work the user did not ask for. ` +
     `This request was routed as ${complexity.toUpperCase()} complexity — size the plan accordingly ` +
-    '(a medium request is a handful of tasks; a complex one may span several domains).'
+    '(a medium request is the core loop, ~2–4 tasks; a complex one may fan out across several ' +
+    'domain specialists before converging).'
 
   const user = overview ? `${request}\n\n## Project context\n${overview}` : request
   const messages: ChatMessage[] = [

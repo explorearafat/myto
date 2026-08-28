@@ -50,6 +50,15 @@ export interface SchedulerOptions {
   concurrency?: number
   /** Max total attempts per node before it stays `failed` (default 1 = no retry). */
   maxAttempts?: number
+  /**
+   * Marks a node as needing exclusive execution: at most one exclusive node runs
+   * at any moment, even when `concurrency` would allow more. Non-exclusive nodes
+   * still overlap freely, and still overlap the single running exclusive node.
+   * Used to serialize file-writing specialists so their edits — and their tool
+   * cards — land one at a time, the way a single engineer works, while read-only
+   * or research nodes keep running in parallel. Default: nothing is exclusive.
+   */
+  exclusive?: (node: TaskNode) => boolean
   /** Called whenever a node changes state (drives `task-update` events). */
   onStateChange?: (node: TaskNode) => void
 }
@@ -255,6 +264,10 @@ export class TaskGraph {
  * (`attempts < maxAttempts`) re-enters as `retrying`; otherwise it stays
  * `failed` and its dependents become `blocked`.
  *
+ * When {@link SchedulerOptions.exclusive} is given, at most one exclusive node
+ * runs at a time (file-writing specialists, so their edits and tool cards land
+ * one at a time); non-exclusive nodes keep overlapping up to `concurrency`.
+ *
  * On abort, in-flight executors are left to settle on their own (they observe
  * the same signal) and all not-yet-terminal nodes are marked `cancelled`.
  */
@@ -265,12 +278,14 @@ export async function runScheduler(
 ): Promise<void> {
   const concurrency = Math.max(1, opts.concurrency ?? Number.POSITIVE_INFINITY)
   const maxAttempts = Math.max(1, opts.maxAttempts ?? 1)
-  const { signal, onStateChange } = opts
+  const { signal, onStateChange, exclusive } = opts
   const notify = (nodes: TaskNode[]): void => {
     if (onStateChange) for (const n of nodes) onStateChange(n)
   }
 
   const running = new Map<string, Promise<void>>()
+  // How many exclusive nodes are in flight (0 or 1 by construction).
+  let exclusiveInFlight = 0
 
   const settle = async (node: TaskNode): Promise<void> => {
     let outcome: NodeOutcome
@@ -298,9 +313,15 @@ export async function runScheduler(
     for (const node of graph.ready()) {
       if (running.size >= concurrency) break
       if (running.has(node.id)) continue
+      const isExclusive = exclusive?.(node) ?? false
+      // One exclusive node at a time. `continue`, not `break`, so a non-exclusive
+      // node further down the ready set can still start while this one waits.
+      if (isExclusive && exclusiveInFlight > 0) continue
       notify([graph.markRunning(node.id)])
+      if (isExclusive) exclusiveInFlight++
       const p = settle(node).finally(() => {
         running.delete(node.id)
+        if (isExclusive) exclusiveInFlight--
       })
       running.set(node.id, p)
     }

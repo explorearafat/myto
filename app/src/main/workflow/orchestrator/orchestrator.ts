@@ -387,6 +387,13 @@ async function execute(
     signal,
     concurrency: MAX_PARALLEL,
     maxAttempts: MAX_ATTEMPTS,
+    // Serialize the file-writing specialists: only one role that can touch the
+    // filesystem runs at a time, so their edits — and their tool cards — appear
+    // one after another instead of three interleaving. Read-only roles (reviewer,
+    // research, project-analyst) have no 'filesystem' capability and keep
+    // overlapping up to MAX_PARALLEL. This lifts `linkOverlappingWriters`'
+    // same-file guard up to a per-writer one.
+    exclusive: (node) => resolveRole(node.role).capabilities.includes('filesystem'),
     onStateChange: (node) => {
       emit({ type: 'task-update', runId, task: { ...node } })
       const base = {

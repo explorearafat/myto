@@ -35,7 +35,11 @@ export interface Artifact {
   note?: string
 }
 
-/** Per-finding detail cap so one verbose agent can't flood a downstream prompt. */
+/**
+ * Default per-finding detail cap so one verbose agent can't flood a downstream
+ * prompt. A role may raise its own cap via `detailChars` (the explorer does, to
+ * fit code snippets); everything else uses this.
+ */
 const MAX_DETAIL = 600
 /** Overall digest cap (chars) fed into any single agent prompt. */
 const MAX_DIGEST = 6_000
@@ -71,7 +75,8 @@ export class SharedContext {
 
   /** Records a finding on the blackboard. */
   addFinding(finding: Finding): void {
-    this.findings.push({ ...finding, detail: clamp(finding.detail, MAX_DETAIL) })
+    const cap = resolveRole(finding.role).detailChars ?? MAX_DETAIL
+    this.findings.push({ ...finding, detail: clamp(finding.detail, cap) })
   }
 
   /** Records a decision. */

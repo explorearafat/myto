@@ -21,6 +21,15 @@
  *    raw bytes — a triple-backtick *inside* a file's `content` cannot be mistaken
  *    for the closing fence.
  *  - Malformed or unterminated blocks are dropped (with a warning), never thrown.
+ *
+ * Stop-at-action: with a {@link ToolStreamParserOptions.stopAfter} predicate, the
+ * parser closes itself the instant a matching block completes — the rest of the
+ * completion is discarded rather than parsed. That is what makes the agent act one
+ * step at a time (think → act → observe → think) instead of emitting eight writes
+ * blind. The stop lives here, not in the engine, because a single delta can carry
+ * prose from *before* and *after* a block: only the parser can return the leading
+ * prose while dropping the trailing prose (which describes work that will never
+ * happen).
  */
 import { hasRole } from './orchestrator/roles'
 
@@ -226,16 +235,46 @@ export function parseToolBlock(raw: string): ParsedTool | null {
  * and accumulates parsed tool ops in {@link tools}. Call {@link flush} at the end
  * of the stream to release any held-back prose and salvage a trailing block.
  */
+export interface ToolStreamParserOptions {
+  /**
+   * Closes the parser as soon as a committed block matches — used to enforce one
+   * action per model message. Everything after that block's close fence is
+   * discarded: later blocks are never parsed and trailing prose is never emitted.
+   * Omit for the classic "parse the whole completion" behaviour.
+   */
+  stopAfter?: (tool: ParsedTool) => boolean
+}
+
 export class ToolStreamParser {
   /** Tool ops discovered so far, in stream order. */
   readonly tools: ParsedTool[] = []
 
+  /** True once {@link ToolStreamParserOptions.stopAfter} matched; the parser is closed. */
+  stopped = false
+
+  /**
+   * Chars of the fed stream that were actually parsed. Equals everything fed
+   * until a stop, at which point it freezes just past the triggering block's
+   * close fence — so the caller can truncate the raw assistant text to exactly
+   * what it acted on.
+   */
+  consumed = 0
+
   private buffer = '' // prose not yet emitted (may hold a partial-marker tail)
   private toolBuffer = '' // body accumulated while inside a block
   private inside = false
+  private fed = 0 // total chars pushed, for the `consumed` boundary
+  private readonly stopAfter?: (tool: ParsedTool) => boolean
+
+  constructor(options: ToolStreamParserOptions = {}) {
+    this.stopAfter = options.stopAfter
+  }
 
   /** Feeds a delta; returns the prose safe to render now (possibly empty). */
   push(delta: string): string {
+    if (this.stopped) return ''
+    this.fed += delta.length
+    this.consumed = this.fed
     if (this.inside) this.toolBuffer += delta
     else this.buffer += delta
 
@@ -260,10 +299,19 @@ export class ToolStreamParser {
       } else {
         const close = findClose(this.toolBuffer)
         if (!close) break
-        this.commit(this.toolBuffer.slice(0, close.jsonEnd))
-        this.buffer = this.toolBuffer.slice(close.after)
+        const committed = this.commit(this.toolBuffer.slice(0, close.jsonEnd))
+        const rest = this.toolBuffer.slice(close.after)
         this.toolBuffer = ''
         this.inside = false
+        if (committed && this.stopAfter?.(committed)) {
+          // Freeze at the close fence and drop the tail: `rest` is a suffix of the
+          // fed stream, so `fed - rest.length` is the index just past the fence.
+          this.stopped = true
+          this.consumed = this.fed - rest.length
+          this.buffer = ''
+          break
+        }
+        this.buffer = rest
       }
     }
     return out
@@ -271,12 +319,14 @@ export class ToolStreamParser {
 
   /** Ends the stream: emits held prose and salvages any trailing block. */
   flush(): string {
+    if (this.stopped) return ''
     if (this.inside) {
       // Salvage a block whose close fence lacked a trailing newline.
       const raw = this.toolBuffer.replace(/\n```[ \t]*$/, '')
-      this.commit(raw)
+      const committed = this.commit(raw)
       this.toolBuffer = ''
       this.inside = false
+      if (committed && this.stopAfter?.(committed)) this.stopped = true
       return ''
     }
     const out = this.buffer
@@ -284,12 +334,14 @@ export class ToolStreamParser {
     return out
   }
 
-  private commit(raw: string): void {
+  /** Parses and records a block body; returns the tool, or null if malformed. */
+  private commit(raw: string): ParsedTool | null {
     const parsed = parseToolBlock(raw)
     if (parsed) {
       this.tools.push(parsed)
     } else {
       console.warn('[sylor] dropping malformed sylor-tool block')
     }
+    return parsed
   }
 }

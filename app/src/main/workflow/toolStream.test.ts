@@ -316,3 +316,75 @@ describe('ToolStreamParser', () => {
     expect(parser.tools).toEqual([{ tool: 'write_file', path: 'z.ts', content: 'z' }])
   })
 })
+
+describe('ToolStreamParser stop-at-action', () => {
+  // The engine stops on mutating tools; reads are exempt so they can batch.
+  const stopOnWrite = (t: ParsedTool): boolean => t.tool === 'write_file' || t.tool === 'edit_file'
+
+  it('stops after the first matching block and discards the rest of the message', () => {
+    const a = { tool: 'write_file' as const, path: 'a.ts', content: 'a' }
+    const b = { tool: 'write_file' as const, path: 'b.ts', content: 'b' }
+    const input = 'Writing a.\n' + block(a) + 'Writing b.\n' + block(b)
+    const parser = new ToolStreamParser({ stopAfter: stopOnWrite })
+    const prose = parser.push(input)
+
+    expect(parser.stopped).toBe(true)
+    // Only the first action ran; the second block never became a tool.
+    expect(parser.tools).toEqual([a])
+    // Prose *before* the block is shown; prose after it — narrating work that will
+    // never happen — is suppressed, so the chat can't describe a phantom file.
+    expect(prose).toBe('Writing a.\n')
+    // `consumed` marks exactly the end of the executed block, so the engine can
+    // truncate the replayed assistant turn to what actually ran.
+    expect(input.slice(0, parser.consumed)).toBe('Writing a.\n' + block(a))
+    // flush() after a stop yields nothing (and never resurrects held prose).
+    expect(parser.flush()).toBe('')
+  })
+
+  it('does not stop on read-only blocks, so several reads still batch', () => {
+    const r1 = { tool: 'read_file' as const, path: 'a.ts' }
+    const r2 = { tool: 'list_files' as const, path: 'src' }
+    const r3 = { tool: 'search_files' as const, query: 'x', path: '.' }
+    const parser = new ToolStreamParser({ stopAfter: stopOnWrite })
+    parser.push(block(r1) + block(r2) + block(r3))
+    parser.flush()
+
+    expect(parser.stopped).toBe(false)
+    expect(parser.tools).toEqual([r1, r2, r3])
+  })
+
+  it('stops even when the matching block is split across chunks', () => {
+    const parser = new ToolStreamParser({ stopAfter: stopOnWrite })
+    let prose = ''
+    prose += parser.push('One. ```sylor')
+    prose += parser.push('-tool\n{ "tool": "write_file", "path": "a.ts", "content": "a" }\n``')
+    prose += parser.push('`\nTwo.' + block({ tool: 'write_file', path: 'b.ts', content: 'b' }))
+
+    expect(parser.stopped).toBe(true)
+    expect(parser.tools).toEqual([{ tool: 'write_file', path: 'a.ts', content: 'a' }])
+    expect(prose).toBe('One. ')
+    // Once stopped, further deltas are ignored entirely.
+    expect(parser.push('ignored')).toBe('')
+  })
+
+  it('with no stopAfter, still parses every block (unchanged default)', () => {
+    const parser = new ToolStreamParser()
+    parser.push(
+      block({ tool: 'write_file', path: 'a.ts', content: 'a' }) +
+        block({ tool: 'write_file', path: 'b.ts', content: 'b' })
+    )
+    parser.flush()
+    expect(parser.stopped).toBe(false)
+    expect(parser.tools).toHaveLength(2)
+  })
+
+  it('stops on a matching block that only flush() salvages', () => {
+    const parser = new ToolStreamParser({ stopAfter: stopOnWrite })
+    // Unterminated block (close fence never arrived); flush() salvages it and the
+    // stop must still latch.
+    parser.push('Editing…\n' + OPEN + '{ "tool": "write_file", "path": "z.ts", "content": "z" }')
+    expect(parser.flush()).toBe('')
+    expect(parser.stopped).toBe(true)
+    expect(parser.tools).toEqual([{ tool: 'write_file', path: 'z.ts', content: 'z' }])
+  })
+})
