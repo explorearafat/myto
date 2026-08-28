@@ -163,8 +163,14 @@ vi.mock('@main/db/projects', () => ({
     appendProjectMemory(id, note, now)
 }))
 
-const { runWorkflow, cancelWorkflow, resolveToolDecision, capWords, buildConversationRecap } =
-  await import('@main/workflow/engine')
+const {
+  runWorkflow,
+  cancelWorkflow,
+  resolveToolDecision,
+  capWords,
+  buildConversationRecap,
+  compactHistory
+} = await import('@main/workflow/engine')
 
 // ---- Helpers ----------------------------------------------------------------
 
@@ -274,6 +280,85 @@ describe('buildConversationRecap (bounded, no-LLM continuity)', () => {
     expect(lines).toHaveLength(6)
     expect(lines[0]).toBe('User: turn 4') // turns 4..9 survive; 0..3 dropped
     expect(lines[5]).toBe('User: turn 9')
+  })
+})
+
+describe('compactHistory (mid-run context compaction, §17)', () => {
+  const m = (role: ChatMessage['role'], content: string): ChatMessage => ({ role, content })
+  const tool = (obj: Record<string, unknown>): string =>
+    '```sylor-tool\n' + JSON.stringify(obj) + '\n```'
+  const wrote = (path: string): ChatMessage =>
+    m('assistant', `Writing ${path}.\n` + tool({ tool: 'write_file', path, content: 'x' }))
+  const ran = (command: string): ChatMessage =>
+    m('assistant', 'Running it.\n' + tool({ tool: 'run_command', command }))
+
+  it('returns the SAME array (a no-op) when the history fits the budget', () => {
+    const msgs = [m('system', 'S'), m('user', 'do a thing'), m('assistant', 'done')]
+    // The default budget dwarfs this tiny history, so nothing is folded.
+    expect(compactHistory(msgs, 1)).toBe(msgs)
+  })
+
+  it('folds the old middle, keeping the pinned prologue and the most recent turns', () => {
+    const head = [m('system', 'SYSTEM PROMPT'), m('user', 'the original request')]
+    const appended = [
+      wrote('a.ts'), m('user', 'a.ts applied'),
+      wrote('b.ts'), m('user', 'b.ts applied'),
+      ran('npm test'), m('user', '1 passed'),
+      wrote('c.ts'), m('user', 'c.ts applied') // the latest step
+    ]
+    const msgs = [...head, ...appended]
+    // Tiny budgets force a fold and keep only the last pair verbatim.
+    const out = compactHistory(msgs, head.length, 200, 10)
+
+    // The pinned prologue survives verbatim, by reference.
+    expect(out[0]).toBe(msgs[0])
+    expect(out[1]).toBe(msgs[1])
+    // A single synthesized note replaces the folded middle.
+    expect(out[2].role).toBe('user')
+    expect(out[2].content.startsWith('[Context note')).toBe(true)
+    // The latest action and its result are preserved verbatim at the end.
+    expect(out.at(-2)).toBe(msgs.at(-2))
+    expect(out.at(-1)).toBe(msgs.at(-1))
+    // head(2) + note(1) + tail(2): the six folded turns collapsed into one.
+    expect(out).toHaveLength(5)
+  })
+
+  it('names the real files and commands from the folded turns in the note', () => {
+    const head = [m('system', 'S'), m('user', 'req')]
+    const appended = [
+      wrote('src/a.ts'), m('user', 'ok'),
+      ran('npm run build'), m('user', 'ok'),
+      wrote('src/b.ts'), m('user', 'ok'),
+      wrote('src/z.ts'), m('user', 'ok') // last pair kept, not summarized
+    ]
+    const out = compactHistory([...head, ...appended], head.length, 150, 10)
+    const note = out.find((x) => x.content.startsWith('[Context note'))!.content
+    // Only real, folded operations appear — no model call, nothing invented.
+    expect(note).toContain('src/a.ts')
+    expect(note).toContain('src/b.ts')
+    expect(note).toContain('npm run build')
+    expect(note).toMatch(/Files changed:/)
+    expect(note).toMatch(/Commands run:/)
+  })
+
+  it('does not fold when only the latest pair exists (nothing old to drop)', () => {
+    const msgs = [m('system', 'S'), m('user', 'req'), wrote('a.ts'), m('user', 'ok')]
+    // Over the (tiny) budget, but the two appended turns are the must-keep last
+    // pair, so there is nothing to fold — the same array reference comes back.
+    expect(compactHistory(msgs, 2, 1, 1)).toBe(msgs)
+  })
+
+  it('de-duplicates and elides a long file list', () => {
+    const head = [m('system', 'S'), m('user', 'req')]
+    const appended: ChatMessage[] = []
+    for (let i = 0; i < 14; i++) appended.push(wrote(`f${i}.ts`), m('user', 'ok'))
+    appended.push(wrote('f0.ts'), m('user', 'ok')) // duplicate path — counted once
+    appended.push(m('assistant', 'tail'), m('user', 'ok')) // last pair kept verbatim
+    const out = compactHistory([...head, ...appended], head.length, 200, 1)
+    const note = out.find((x) => x.content.startsWith('[Context note'))!.content
+    // 14 unique paths, capped at 12 shown, remainder elided.
+    expect(note).toContain('+2 more')
+    expect(note.match(/f0\.ts/g) ?? []).toHaveLength(1)
   })
 })
 

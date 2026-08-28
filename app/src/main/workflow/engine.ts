@@ -37,7 +37,7 @@ import { skillsRegistry } from '../skills/registry'
 import { mergeSkillCatalog } from '../skills/catalog'
 import { classifyIntent } from './intent'
 import { decideAuto } from './permission'
-import { ToolStreamParser, type ParsedTool } from './toolStream'
+import { ToolStreamParser, parseToolBlock, type ParsedTool } from './toolStream'
 import { ReasoningStripper, stripReasoningTags } from './reasoning'
 import { isAbort, withRetry, type RetryNotice } from './resilience'
 import { resolveRole, roleDirective, roleIds, reportWordBudget } from './orchestrator/roles'
@@ -1083,8 +1083,27 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     )
   }
 
+  // The pinned prologue — system prompt, prior conversation, and the original
+  // request — captured before any step appends to `outbound`, so compaction folds
+  // only the per-step growth after it (see {@link compactHistory}).
+  const baseLen = outbound.length
+
   for (let step = 0; step < maxSteps; step++) {
     if (signal.aborted) return report
+
+    // Before streaming, fold the old middle of a long history into a short note so
+    // it can't overflow the model's context mid-build (§17). A no-op (same array
+    // back) until the turn has actually grown large, so short turns are untouched.
+    const compacted = compactHistory(outbound, baseLen)
+    if (compacted !== outbound) {
+      outbound.splice(0, outbound.length, ...compacted)
+      emit({
+        type: 'status',
+        runId,
+        stage: 'generating',
+        message: 'Condensing earlier steps to stay within context…'
+      })
+    }
 
     // 4a. Stream one completion, demuxing prose from tool blocks. Accumulate the
     // raw text (prose + blocks) so the assistant turn can be replayed verbatim,
@@ -1488,6 +1507,110 @@ export function buildConversationRecap(messages: readonly ChatMessage[]): string
     .filter(Boolean)
   if (turns.length === 0) return ''
   return recapClamp(turns.slice(-RECAP_MAX_TURNS).join('\n'), RECAP_TOTAL_CHARS)
+}
+
+/**
+ * Trigger and window sizes for mid-run context compaction, in characters
+ * (≈4 chars/token). Deliberately conservative so a small local model's window
+ * isn't overrun before folding kicks in; a short turn never reaches the trigger,
+ * so the common case is untouched. Tunable — a model-aware budget is the eventual
+ * refinement, but a fixed floor already removes the unbounded-growth failure.
+ */
+const MAX_CONTEXT_CHARS = 48_000
+const RECENT_KEEP_CHARS = 18_000
+/** Most file paths / commands listed in one compaction note before eliding. */
+const MAX_COMPACTION_ITEMS = 12
+
+/** The `sylor-tool` operations recorded in one assistant turn (for compaction). */
+function extractToolBlocks(content: string): ParsedTool[] {
+  const out: ParsedTool[] = []
+  const re = /```sylor-tool\r?\n([\s\S]*?)\r?\n```/g
+  for (let m = re.exec(content); m !== null; m = re.exec(content)) {
+    const parsed = parseToolBlock(m[1])
+    if (parsed) out.push(parsed)
+  }
+  return out
+}
+
+/** Joins a bounded, de-duplicated list, eliding the overflow as "+N more". */
+function briefList(items: string[]): string {
+  const uniq = [...new Set(items)]
+  const shown = uniq.slice(0, MAX_COMPACTION_ITEMS).join(', ')
+  const extra = uniq.length - MAX_COMPACTION_ITEMS
+  return extra > 0 ? `${shown}, +${extra} more` : shown
+}
+
+/**
+ * A single short note standing in for a run of folded steps: how many steps, the
+ * files they changed, and the commands they ran — read from the turns' own
+ * `sylor-tool` blocks, so it states what actually happened rather than a guess.
+ * This is what lets the model keep the thread ("I already wrote a.ts, b.ts")
+ * after the verbose middle of the history is dropped.
+ */
+function summarizeFoldedSteps(folded: readonly ChatMessage[]): string {
+  const files: string[] = []
+  const commands: string[] = []
+  let steps = 0
+  for (const m of folded) {
+    if (m.role !== 'assistant') continue
+    steps++
+    for (const t of extractToolBlocks(m.content)) {
+      if (t.tool === 'write_file' || t.tool === 'edit_file') files.push(t.path)
+      else if (t.tool === 'run_command') commands.push(t.command)
+    }
+  }
+  let note = `[Context note — ${steps} earlier step${steps === 1 ? '' : 's'} condensed to save room.`
+  if (files.length > 0) note += ` Files changed: ${briefList(files)}.`
+  if (commands.length > 0) note += ` Commands run: ${briefList(commands)}.`
+  note += ' Continue from the latest result below.]'
+  return note
+}
+
+/**
+ * Mid-run context compaction (§17). Every step the agent loop appends the model's
+ * turn (which can carry a whole file's contents) and a user feedback turn (tool
+ * output), so across a long build `outbound` grows without bound and would
+ * eventually overflow the model's context window mid-run. When the assembled size
+ * passes {@link MAX_CONTEXT_CHARS}, this folds the OLD middle of that growth into
+ * one short {@link summarizeFoldedSteps} note while preserving verbatim (a) the
+ * pinned prologue — system prompt, prior conversation, and the original request:
+ * the first `baseLen` messages, never folded — and (b) the most recent turns
+ * (~{@link RECENT_KEEP_CHARS}, and always at least the last pair), so the model
+ * still sees its latest action and its result and can continue coherently.
+ *
+ * No model call — the note is scanned from the turns themselves, matching Sylor's
+ * offline-first, deterministic style (cf. {@link summarizeResults}). Returns the
+ * SAME array reference when nothing needs folding, so the caller detects a no-op
+ * by identity and skips the rewrite.
+ */
+export function compactHistory(
+  messages: ChatMessage[],
+  baseLen: number,
+  budget = MAX_CONTEXT_CHARS,
+  recentBudget = RECENT_KEEP_CHARS
+): ChatMessage[] {
+  const total = messages.reduce((n, m) => n + m.content.length, 0)
+  if (total <= budget) return messages
+
+  const head = messages.slice(0, baseLen)
+  const appended = messages.slice(baseLen)
+  // Grow the kept tail backwards from the end while it fits the recency budget,
+  // but always keep the last two appended turns (latest action + its result) so
+  // the step the model must continue from is never the thing we drop.
+  let tailChars = 0
+  let firstTail = appended.length
+  for (let i = appended.length - 1; i >= 0; i--) {
+    const withThis = tailChars + appended[i].content.length
+    const mustKeep = appended.length - i <= 2
+    if (withThis > recentBudget && !mustKeep) break
+    tailChars = withThis
+    firstTail = i
+  }
+  const folded = appended.slice(0, firstTail)
+  if (folded.length === 0) return messages // only the pinned head is large — nothing to fold
+
+  const note: ChatMessage = { role: 'user', content: summarizeFoldedSteps(folded) }
+  return [...head, note, ...appended.slice(firstTail)]
 }
 
 /**
