@@ -186,21 +186,6 @@ function MessageAttachmentChip({ attachment }: { attachment: Attachment }) {
   )
 }
 
-function Avatar({ role }: { role: ChatMessageUI['role'] }) {
-  if (role === 'assistant') {
-    return (
-      <div className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-primary/12">
-        <SylorLogo size={18} showBubbles={false} />
-      </div>
-    )
-  }
-  return (
-    <div className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-surface-2 text-[11px] font-semibold text-muted">
-      You
-    </div>
-  )
-}
-
 /** Formats elapsed seconds for the live status line: `12s`, then `1m 03s`. */
 function formatElapsed(totalSeconds: number): string {
   if (totalSeconds < 60) return `${totalSeconds}s`
@@ -1144,53 +1129,45 @@ function AssistantMessage({ message, isActive, status, cards, agents, agentTools
     return Math.round(chars / 4)
   }, [message.content, cards, agents])
 
+  // Claude-Code-style flat turn: the assistant reply renders directly on the
+  // surface — no avatar, no name badge, no left-gutter indent. Only the user's
+  // turn keeps a bubble, so the two speakers still read distinctly (user =
+  // right-aligned pill, Sylor = flat full-width prose on the background).
   return (
-    <div className="flex gap-3">
-      <Avatar role="assistant" />
-      <div className="min-w-0 flex-1">
-        {/* The name row is given the avatar's exact height (h-7) and centers its
-            text, so "Sylor" sits dead-center against the mark instead of riding
-            above it — and whatever comes next (the live status line on a fresh
-            turn, or the prose) starts cleanly below the avatar rather than
-            hanging off its bottom corner. */}
-        <div className="flex h-7 items-center text-[11px] font-medium leading-none text-muted">
-          Sylor
+    <div className="min-w-0">
+      {message.error && (
+        <div className="mb-1.5 rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-300">
+          {message.error}
         </div>
+      )}
 
-        {message.error && (
-          <div className="mb-1.5 rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-300">
-            {message.error}
-          </div>
-        )}
+      {blocks.length > 0 && (
+        <div className="min-w-0">
+          {blocks.map((block, i) =>
+            block.kind === 'card' ? (
+              <ToolCard key={block.card.id} card={block.card} />
+            ) : block.kind === 'agent' ? (
+              <AgentCard
+                key={block.agent.agentId}
+                agent={block.agent}
+                tools={agentTools.get(block.agent.agentId) ?? []}
+              />
+            ) : (
+              <ProseBlock
+                key={`prose-${i}`}
+                text={block.text}
+                showCaret={message.pending === true && i === blocks.length - 1}
+              />
+            )
+          )}
+        </div>
+      )}
 
-        {blocks.length > 0 && (
-          <div className="min-w-0">
-            {blocks.map((block, i) =>
-              block.kind === 'card' ? (
-                <ToolCard key={block.card.id} card={block.card} />
-              ) : block.kind === 'agent' ? (
-                <AgentCard
-                  key={block.agent.agentId}
-                  agent={block.agent}
-                  tools={agentTools.get(block.agent.agentId) ?? []}
-                />
-              ) : (
-                <ProseBlock
-                  key={`prose-${i}`}
-                  text={block.text}
-                  showCaret={message.pending === true && i === blocks.length - 1}
-                />
-              )
-            )}
-          </div>
-        )}
+      {isActive && message.pending && <StatusLine status={status} tokens={tokenEstimate} />}
 
-        {isActive && message.pending && <StatusLine status={status} tokens={tokenEstimate} />}
-
-        {!message.pending && (displayContent.length > 0 || message.error != null) && (
-          <MessageActions message={message} />
-        )}
-      </div>
+      {!message.pending && (displayContent.length > 0 || message.error != null) && (
+        <MessageActions message={message} />
+      )}
     </div>
   )
 }
