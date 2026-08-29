@@ -44,6 +44,7 @@ export type ParsedTool =
   | { tool: 'search_files'; query: string; path: string; glob?: string }
   | { tool: 'run_command'; command: string }
   | { tool: 'remember'; note: string }
+  | { tool: 'remember_user'; note: string }
   | { tool: 'mcp_call'; server: string; name: string; arguments: Record<string, unknown> }
   | { tool: 'use_skill'; name: string }
   | { tool: 'spawn_agent'; role: string; task: string }
@@ -187,6 +188,12 @@ export function parseToolBlock(raw: string): ParsedTool | null {
   if (rec.tool === 'remember') {
     if (typeof rec.note === 'string' && rec.note.trim()) {
       return { tool: 'remember', note: rec.note }
+    }
+    return null
+  }
+  if (rec.tool === 'remember_user') {
+    if (typeof rec.note === 'string' && rec.note.trim()) {
+      return { tool: 'remember_user', note: rec.note }
     }
     return null
   }

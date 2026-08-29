@@ -17,7 +17,7 @@ import type {
 } from '../../shared/types'
 import { providerFromSettings, type Provider } from '../providers'
 import { toErrorMessage } from '../providers/http'
-import { getSettings, isSkillEnabled } from '../settings'
+import { getSettings, isSkillEnabled, getUserProfile, appendUserProfile } from '../settings'
 import { contextManager } from '../context/manager'
 import {
   applyEdit,
@@ -132,6 +132,21 @@ user made, how something is wired, a preference they stated — record it with:
 { "tool": "remember", "note": "<one concise fact to remember>" }
 \`\`\`
 
+You ALSO have a global memory ABOUT THE USER that follows them across every
+project — this is how you get more useful the more you work together. When you
+learn something durable about the person themselves — their name, how they like
+to work, the kind of sites or apps they build, and the visual style, typography,
+layout, or tone they gravitate to — record it with:
+
+\`\`\`sylor-tool
+{ "tool": "remember_user", "note": "<one concise fact about the user or their taste>" }
+\`\`\`
+
+Prefer their remembered taste by default so you don't have to ask again, and
+record a new preference the moment they express one ("I like clean minimal
+sites", "use a serif for headings", "call me Arafat"). Keep each note short and
+durable; never store secrets, keys, or one-off details.
+
 Rules for tool blocks:
 - ONE ACTION PER MESSAGE. A write_file, edit_file, run_command, or mcp_call block ENDS your
   message: say one short line, emit that single block, and stop. The app runs it and reports
@@ -144,8 +159,10 @@ Rules for tool blocks:
 - One JSON object per block.
 - Use ONLY project-relative paths (never absolute, never "..").
 - For write_file, "content" MUST be the complete new file, not a diff or a fragment.
-- For remember, "note" is a single short fact (not a whole conversation). Only remember
-  things that stay true across chats; never secrets, keys, or one-off details.
+- For remember (and remember_user), "note" is a single short fact (not a whole
+  conversation). Only record things that stay true across chats; never secrets, keys,
+  or one-off details. remember is scoped to THIS project; remember_user is about the
+  person and applies everywhere.
 - Explain what you're about to do in one line of prose first, then emit the tool block. Prose
   outside blocks is shown to the user; the JSON inside blocks is not.
 - Do not claim an edit or command succeeded — the app executes approved blocks and reports
@@ -574,6 +591,30 @@ function fixItNudge(entries: Array<[string, string[]]>): string {
 }
 
 /**
+ * Upper bound on "the action failed — don't stop, fix it" nudges in a single
+ * turn. Distinct from {@link MAX_FIX_NUDGES} (which is about a file that parsed
+ * but failed a static check): this fires when the OPERATION itself errored — a
+ * command exited non-zero, a write or MCP call failed — and the model then tries
+ * to end the turn without addressing it. Small on purpose: some failures (a test
+ * that is legitimately red, a command that can't succeed here) are not the
+ * model's to fix by retrying, so after a couple of pushes the turn is allowed to
+ * end with an honest explanation rather than looping forever.
+ */
+const MAX_FAIL_NUDGES = 2
+
+/** Fed back when the turn is about to end right after an action errored. */
+function fixFailureNudge(failures: string[]): string {
+  return (
+    'The last action did not succeed:\n\n' +
+    failures.map((f) => `- ${f}`).join('\n') +
+    '\n\nDo not stop here. Take ONE next step to make it work: if you can fix the cause, do it ' +
+    '(read_file to see the current state or adjust the command first if needed), then retry with ' +
+    'a single tool block. Only if it genuinely cannot succeed, tell the user plainly what failed ' +
+    'and why — do not claim it worked. Open with one short line, then one tool block.'
+  )
+}
+
+/**
  * Detects a Markdown code fence in the prose the model streamed. `sylor-tool`
  * blocks are demuxed out before this sees the text, so any remaining opening
  * fence is a plain code block — the "raw code dump" the nudge converts into
@@ -651,7 +692,9 @@ export async function runWorkflow(
     if ((mode ?? 'code') === 'cowork') {
       emit({ type: 'status', runId, stage: 'generating', message: 'Thinking…' })
       const provider = providerFromSettings(settings)
-      const system = COWORK_SYSTEM_PROMPT + effortDirective(effort ?? 'medium')
+      let system = COWORK_SYSTEM_PROMPT + effortDirective(effort ?? 'medium')
+      const coworkProfile = buildUserProfilePreamble()
+      if (coworkProfile) system += `\n\n${coworkProfile}`
       const outbound: ChatMessage[] = [{ role: 'system', content: system }, ...messages]
 
       const parser = new ToolStreamParser()
@@ -1025,6 +1068,14 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
   const pendingIssues = new Map<string, string[]>()
   // How many "fix what you just broke" nudges spent this turn (MAX_FIX_NUDGES).
   let fixNudges = 0
+  // Human summaries of any op that ERRORED in the most recently executed step —
+  // a command that exited non-zero, a write/mcp that failed. Distinct from
+  // pendingIssues (files that parsed but failed a static check): this is "the
+  // action itself failed". Recomputed each executed step and cleared on success,
+  // so it only fires the retry nudge below while a failure is genuinely unresolved.
+  let lastFailures: string[] = []
+  // How many "the last action failed — don't stop, fix it" nudges spent (MAX_FAIL_NUDGES).
+  let failNudges = 0
   // Whether this turn has actually built anything yet (executed a side effect or ran a
   // subagent). Gates the start-build nudge so a genuine closing summary — prose after real
   // work — is treated as a finish, not a stall.
@@ -1202,6 +1253,17 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
       recordMemory(memoryNotes, projectId, runId, emit)
     }
 
+    // 4b′. Record any `remember_user` notes to the GLOBAL user profile. Like
+    // `remember` these are inline (no approval, no disk/command power beyond a
+    // small JSON write) but are project-independent — they follow the user into
+    // every future chat, which is what makes Sylor more useful over time.
+    const userNotes = parser.tools.filter(
+      (t): t is Extract<ParsedTool, { tool: 'remember_user' }> => t.tool === 'remember_user'
+    )
+    if (userNotes.length > 0) {
+      recordUserProfile(userNotes, runId, emit)
+    }
+
     // 4c. Skill activations. `use_skill` loads a disk-authored SKILL.md's
     // instructions into the conversation so the next iteration follows them —
     // like the CLI's Skill tool. It's inline (no approval): reading a local
@@ -1349,6 +1411,27 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
       continue
     }
 
+    // 4d⁗′. Retry-on-failure nudge. The turn is ending, no broken file is pending,
+    // but the most recent action ERRORED — a command exited non-zero, a write or an
+    // MCP call failed — and the model is about to conclude without addressing it.
+    // Send it back to make the thing work, or (only if it genuinely can't) to say so
+    // honestly instead of implying success. Bounded by MAX_FAIL_NUDGES so a
+    // legitimately-red command can't loop forever; plan-first is exempt (single-pass).
+    if (
+      ending &&
+      !planFirstStop &&
+      pendingIssues.size === 0 &&
+      lastFailures.length > 0 &&
+      failNudges < MAX_FAIL_NUDGES &&
+      step < maxSteps - 1
+    ) {
+      failNudges++
+      emit({ type: 'status', runId, stage: 'generating', message: 'Retrying what failed…' })
+      outbound.push({ role: 'assistant', content: raw })
+      outbound.push({ role: 'user', content: fixFailureNudge(lastFailures) })
+      continue
+    }
+
     if (ending) {
       // Out of fix attempts (or out of steps) with something still broken. The
       // model's closing prose may well claim success, so state the truth plainly
@@ -1417,6 +1500,29 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
       }
       if (signal.aborted) return report
     }
+
+    // Record which ops ERRORED this step (a command that exited non-zero, a write
+    // or MCP call that failed), so the retry-on-failure nudge can catch the model
+    // trying to end on an unresolved failure. Recomputed every executed step —
+    // an empty list means the last actions all landed (or only read), which clears
+    // the nudge. Failed READS are excluded on purpose: a bad path is investigative,
+    // not a broken deliverable, and the model already reacts to it from the fed-back
+    // result without being forced to retry.
+    lastFailures = outcomes.flatMap(({ tool, result }) => {
+      if (result.kind === 'write_file' && !result.ok) {
+        const path = tool.tool === 'write_file' || tool.tool === 'edit_file' ? tool.path : ''
+        return [`write ${path} failed: ${result.error ?? 'unknown error'}`]
+      }
+      if (result.kind === 'mcp_call' && !result.ok) {
+        const label = tool.tool === 'mcp_call' ? `${tool.server}/${tool.name}` : 'mcp_call'
+        return [`${label} failed: ${result.error ?? 'unknown error'}`]
+      }
+      if (result.kind === 'run_command' && result.exitCode !== 0 && result.exitCode !== null) {
+        const command = tool.tool === 'run_command' ? tool.command : ''
+        return [`command \`${command}\` exited ${result.exitCode}`]
+      }
+      return []
+    })
 
     // 4e′. Delegated subagents (lead only — allowSpawn is false past depth 1).
     // Each runs this same gated loop in the same folder and hands back a report,
@@ -1832,6 +1938,8 @@ function buildSubagentSystem(
     skillsDirective(skills) +
     effortDirective(ctx.effort) +
     roleDirectiveFor(role)
+  const userProfile = buildUserProfilePreamble()
+  if (userProfile) system += `\n\n${userProfile}`
   if (ctx.projectPreamble) system += `\n\n${ctx.projectPreamble}`
   if (ctx.overview) system += `\n\n## Project context\n${ctx.overview}`
   if (ctx.recap) {
@@ -2449,6 +2557,8 @@ function buildMessages(
     effortDirective(effort) +
     intentDirective(intentKind) +
     planDirective(planFirst, intentKind)
+  const userProfile = buildUserProfilePreamble()
+  if (userProfile) system += `\n\n${userProfile}`
   if (projectPreamble) system += `\n\n${projectPreamble}`
   if (overview) system += `\n\n## Project context\n${overview}`
   return [{ role: 'system', content: system }, ...history]
@@ -2515,6 +2625,54 @@ function recordMemory(
       emit({ type: 'delta', runId, text: `\n\n🧠 Noted to project memory: ${note.note.trim()}` })
     } catch (err) {
       console.error('[sylor] failed to append project memory:', err)
+    }
+  }
+}
+
+/**
+ * Builds the GLOBAL user-profile preamble — what Sylor has learned about the
+ * person across every project (name, working style, the kind of sites they
+ * build, their look/typography taste). Returns '' when nothing's been learned,
+ * so a fresh install adds no section. Injected into every run's system prompt
+ * (Code and Cowork) so preferences carry over without the user repeating them.
+ * Reads only the local profile file; never throws.
+ */
+function buildUserProfilePreamble(): string {
+  try {
+    const profile = getUserProfile()
+    if (!profile) return ''
+    return (
+      '## About this user (remembered across all their projects)\n' +
+      profile +
+      '\n\nMatch these preferences by default — their name, how they like to work, the ' +
+      'kind of sites they build, and their style/typography taste — instead of asking ' +
+      'again. If a new instruction clearly supersedes something here, follow the new one.'
+    )
+  } catch (err) {
+    console.error('[sylor] failed to load user profile:', err)
+    return ''
+  }
+}
+
+/**
+ * Persists Sylor's `remember_user` notes to the global user profile and confirms
+ * each newly-saved one as a `delta`. Unlike {@link recordMemory} this is NOT
+ * project-scoped — it follows the user everywhere — so it needs no projectId and
+ * saves even in an unfiled chat. DB/file-only and best-effort: a duplicate is a
+ * silent no-op, and a persistence failure is logged, never thrown.
+ */
+function recordUserProfile(
+  notes: Array<Extract<ParsedTool, { tool: 'remember_user' }>>,
+  runId: string,
+  emit: EventSink
+): void {
+  for (const note of notes) {
+    try {
+      if (appendUserProfile(note.note)) {
+        emit({ type: 'delta', runId, text: `\n\n🧠 Remembered about you: ${note.note.trim()}` })
+      }
+    } catch (err) {
+      console.error('[sylor] failed to append user profile:', err)
     }
   }
 }

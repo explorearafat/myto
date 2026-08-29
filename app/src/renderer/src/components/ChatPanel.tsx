@@ -438,22 +438,43 @@ function proposalFullTitle(proposal: ToolProposal): string {
   return proposal.command
 }
 
-/** Header badge reflecting a card's lifecycle state. */
+/**
+ * A short, human reason a completed op did NOT succeed, or null when it applied
+ * cleanly (or the user skipped it). Drives the calm inline note beside a card:
+ * the user sees WHAT went wrong, never a bare alarming "Failed".
+ */
+function cardError(card: ToolCardUI): string | null {
+  if (card.status !== 'complete' || card.decision === 'reject') return null
+  const r = card.result
+  if (r?.kind === 'write_file' && !r.ok) return r.error ?? 'write failed'
+  if (r?.kind === 'read' && !r.ok) return r.error ?? 'read failed'
+  if (r?.kind === 'mcp_call' && !r.ok) return r.error ?? 'call failed'
+  if (r?.kind === 'run_command' && r.exitCode !== 0 && r.exitCode !== null) return `exit ${r.exitCode}`
+  return null
+}
+
+/**
+ * Header indicator reflecting a card's lifecycle. A clean success is a quiet
+ * green tick — no "Applied" text. A failure is deliberately calm: a soft amber
+ * dot, not an alarming red "Failed" pill, because the agent loop feeds the error
+ * back and tries again (the short reason renders beside the row, and the retry
+ * shows up as the next card's tick). A user-skipped op reads as a flat "skipped".
+ */
 function StatusBadge({ card }: { card: ToolCardUI }) {
   if (card.status === 'complete') {
-    const failed =
-      card.decision === 'reject' ||
-      (card.result?.kind === 'write_file' && !card.result.ok) ||
-      (card.result?.kind === 'run_command' && card.result.exitCode !== 0) ||
-      (card.result?.kind === 'mcp_call' && !card.result.ok) ||
-      (card.result?.kind === 'read' && !card.result.ok)
+    if (card.decision === 'reject') return <span className="text-[10px] text-muted">skipped</span>
+    if (cardError(card)) {
+      return (
+        <span
+          className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-400/80"
+          aria-label="retrying"
+          title="Ran into a problem — retrying"
+        />
+      )
+    }
     return (
-      <span
-        className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-          failed ? 'bg-red-500/15 text-red-300' : 'bg-emerald-500/15 text-emerald-300'
-        }`}
-      >
-        {card.decision === 'reject' ? 'Skipped' : failed ? 'Failed' : 'Applied'}
+      <span className="text-[12px] font-semibold text-emerald-500" aria-label="applied" title="Applied">
+        ✓
       </span>
     )
   }
@@ -478,7 +499,7 @@ function ToolResultFooter({ card }: { card: ToolCardUI }) {
   if (result.kind === 'write_file') {
     if (result.ok) return null
     return (
-      <div className="border-t border-border bg-red-500/10 px-3 py-1.5 text-[11px] text-red-300">
+      <div className="border-t border-border bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-200/90">
         {result.error ?? 'Write failed.'}
       </div>
     )
@@ -488,13 +509,13 @@ function ToolResultFooter({ card }: { card: ToolCardUI }) {
     return (
       <div className="border-t border-border bg-bg px-3 py-1.5">
         <div className="mb-1 flex items-center gap-2 text-[10px] text-muted">
-          <span className={result.ok ? 'text-emerald-300' : 'text-red-300'}>
+          <span className={result.ok ? 'text-emerald-300' : 'text-amber-300'}>
             {result.ok ? 'ok' : 'error'}
           </span>
           {result.truncated && <span className="text-amber-300">output truncated</span>}
         </div>
         {!result.ok && result.error && (
-          <div className="mb-1 text-[11px] text-red-300">{result.error}</div>
+          <div className="mb-1 text-[11px] text-amber-200/90">{result.error}</div>
         )}
         {mcpOut.length > 0 && (
           <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-text/80">
@@ -507,7 +528,7 @@ function ToolResultFooter({ card }: { card: ToolCardUI }) {
   if (result.kind === 'read') {
     if (!result.ok) {
       return (
-        <div className="border-t border-border bg-red-500/10 px-3 py-1.5 text-[11px] text-red-300">
+        <div className="border-t border-border bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-200/90">
           {result.error ?? 'Read failed.'}
         </div>
       )
@@ -530,7 +551,7 @@ function ToolResultFooter({ card }: { card: ToolCardUI }) {
       <div className="mb-1 flex items-center gap-2 text-[10px] text-muted">
         <span>
           exit code{' '}
-          <span className={result.exitCode === 0 ? 'text-emerald-300' : 'text-red-300'}>
+          <span className={result.exitCode === 0 ? 'text-emerald-300' : 'text-amber-300'}>
             {result.exitCode ?? 'killed'}
           </span>
         </span>
@@ -587,11 +608,14 @@ function ReadCard({ card }: { card: ToolCardUI }) {
 }
 
 /**
- * A tool op rendered as a compact, tappable activity line (requirement C): a
- * single row — chevron, icon, "Edited App.tsx", +/− line stats, status badge —
- * with the diff / command / output tucked behind a tap. Approval is NOT here;
- * pending ops are approved from the permission bar above the composer
- * (requirement D). This keeps code out of the conversation by default.
+ * A tool op rendered as a flat, tappable activity line (requirement C) — no
+ * bordered card around it: a single row (chevron, icon, "Edited App.tsx", +/−
+ * line stats, a quiet tick/status) with the diff / command / output tucked
+ * behind a tap. This matches the flat assistant turn so the transcript reads as
+ * one calm feed instead of a stack of boxes. Approval is NOT here; pending ops
+ * are approved from the permission bar above the composer (requirement D). If an
+ * op errored, a soft one-line reason shows beneath the row — calm, never a red
+ * "Failed" — because the agent loop retries it (the fix lands as the next tick).
  */
 function ToolCard({ card }: { card: ToolCardUI }) {
   const { proposal } = card
@@ -603,14 +627,15 @@ function ToolCard({ card }: { card: ToolCardUI }) {
   const icon = proposal.kind === 'write_file' ? '✎' : proposal.kind === 'mcp_call' ? '⚙' : '❯'
   const stats =
     proposal.kind === 'write_file' ? lineDiffStats(proposal.oldContent, proposal.newContent) : null
+  const error = cardError(card)
 
   return (
-    <div className="my-2 overflow-hidden rounded-lg border border-border bg-surface">
+    <div className="my-0.5">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
         title={proposalFullTitle(proposal)}
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-surface-2"
+        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left transition-colors hover:bg-surface-2"
       >
         <svg
           width="10"
@@ -629,58 +654,66 @@ function ToolCard({ card }: { card: ToolCardUI }) {
           />
         </svg>
         <span className="shrink-0 text-[11px] text-muted">{icon}</span>
-        <span className="truncate text-[12px] font-medium text-text">{toolLabel(card)}</span>
+        <span className="min-w-0 truncate text-[12px] text-text/90">{toolLabel(card)}</span>
         {stats && (stats.added > 0 || stats.removed > 0) && (
           <span className="shrink-0 font-mono text-[10px]">
             <span className="text-emerald-500">+{stats.added}</span>{' '}
             <span className="text-red-400">−{stats.removed}</span>
           </span>
         )}
-        <span className="ml-auto shrink-0">
+        <span className="ml-auto flex shrink-0 items-center gap-1.5">
           <StatusBadge card={card} />
         </span>
       </button>
 
-      {expanded &&
-        (proposal.kind === 'write_file' ? (
-          <div className="h-56 border-t border-border">
-            <DiffEditor
-              theme={monacoThemeFor(theme)}
-              language={language}
-              original={proposal.oldContent}
-              modified={proposal.newContent}
-              options={{
-                readOnly: true,
-                renderSideBySide: false,
-                fontFamily: 'JetBrains Mono Variable, monospace',
-                fontSize: 12,
-                lineHeight: 18,
-                minimap: { enabled: false },
-                automaticLayout: true,
-                scrollBeyondLastLine: false,
-                renderOverviewRuler: false,
-                scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 }
-              }}
-              loading={<div className="p-3 text-[11px] text-muted">Loading diff…</div>}
-            />
-          </div>
-        ) : proposal.kind === 'mcp_call' ? (
-          <div className="border-t border-border bg-bg px-3 py-2">
-            <div className="mb-1 font-mono text-[11px] text-muted">
-              {proposal.server}/{proposal.name}
-            </div>
-            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] text-text/90">
-              {JSON.stringify(proposal.arguments, null, 2)}
-            </pre>
-          </div>
-        ) : (
-          <pre className="border-t border-border bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
-            <span className="text-muted">$ </span>
-            {proposal.command}
-          </pre>
-        ))}
+      {error && !expanded && (
+        <div className="ml-[26px] truncate text-[10.5px] text-amber-300/70" title={error}>
+          {error} · retrying
+        </div>
+      )}
 
-      {expanded && <ToolResultFooter card={card} />}
+      {expanded && (
+        <div className="mt-1 overflow-hidden rounded-md border border-border">
+          {proposal.kind === 'write_file' ? (
+            <div className="h-56">
+              <DiffEditor
+                theme={monacoThemeFor(theme)}
+                language={language}
+                original={proposal.oldContent}
+                modified={proposal.newContent}
+                options={{
+                  readOnly: true,
+                  renderSideBySide: false,
+                  fontFamily: 'JetBrains Mono Variable, monospace',
+                  fontSize: 12,
+                  lineHeight: 18,
+                  minimap: { enabled: false },
+                  automaticLayout: true,
+                  scrollBeyondLastLine: false,
+                  renderOverviewRuler: false,
+                  scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 }
+                }}
+                loading={<div className="p-3 text-[11px] text-muted">Loading diff…</div>}
+              />
+            </div>
+          ) : proposal.kind === 'mcp_call' ? (
+            <div className="bg-bg px-3 py-2">
+              <div className="mb-1 font-mono text-[11px] text-muted">
+                {proposal.server}/{proposal.name}
+              </div>
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] text-text/90">
+                {JSON.stringify(proposal.arguments, null, 2)}
+              </pre>
+            </div>
+          ) : (
+            <pre className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
+              <span className="text-muted">$ </span>
+              {proposal.command}
+            </pre>
+          )}
+          <ToolResultFooter card={card} />
+        </div>
+      )}
     </div>
   )
 }
@@ -760,11 +793,14 @@ function roleMeta(role: AgentRole): { label: string; icon: string } {
 }
 
 /**
- * A subagent the lead delegated to (requirement B), rendered as a nested,
- * left-ruled card: role + assigned task in the header, the subagent's own
- * streamed prose and tool cards in the body (its report is the tail of that
- * prose), and a Done/Failed badge once it hands back to the lead. This is the
- * visible "agents communicating": lead → task in, subagent → work + report out.
+ * A subagent the lead delegated to (requirement B), rendered flat — no bordered
+ * box: a header row (role + assigned task + a quiet working/tick state) and,
+ * beneath it, a subtly left-ruled column holding the subagent's own streamed
+ * prose and (now flat) tool lines. The left rule is the only chrome — just
+ * enough to read as "nested under the lead" without a card around it, matching
+ * the flat assistant turn. This is the visible "agents communicating": lead →
+ * task in, subagent → work + report out. A problem reads as a calm amber dot
+ * (the loop retries), never a red "Failed".
  */
 function AgentCard({ agent, tools }: { agent: AgentCardUI; tools: ToolCardUI[] }) {
   const meta = roleMeta(agent.role)
@@ -779,11 +815,9 @@ function AgentCard({ agent, tools }: { agent: AgentCardUI; tools: ToolCardUI[] }
   )
 
   return (
-    <div className="my-3 overflow-hidden rounded-lg border border-border bg-surface/50">
-      <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
-        <span className="grid h-5 w-5 shrink-0 place-items-center rounded bg-primary/12 text-[11px] text-primary">
-          {meta.icon}
-        </span>
+    <div className="my-2">
+      <div className="flex items-center gap-1.5 px-1 py-0.5">
+        <span className="shrink-0 text-[12px] text-primary">{meta.icon}</span>
         <span className="shrink-0 text-[12px] font-semibold text-text">{meta.label}</span>
         <span className="min-w-0 flex-1 truncate text-[11px] text-muted" title={agent.task}>
           {agent.task}
@@ -793,18 +827,19 @@ function AgentCard({ agent, tools }: { agent: AgentCardUI; tools: ToolCardUI[] }
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
             working
           </span>
+        ) : agent.ok ? (
+          <span className="shrink-0 text-[12px] font-semibold text-emerald-500" title="Done">
+            ✓
+          </span>
         ) : (
           <span
-            className={
-              'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ' +
-              (agent.ok ? 'bg-emerald-500/15 text-emerald-300' : 'bg-red-500/15 text-red-300')
-            }
-          >
-            {agent.ok ? 'Done' : 'Failed'}
-          </span>
+            className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-400/80"
+            aria-label="retrying"
+            title="Ran into a problem — retrying"
+          />
         )}
       </div>
-      <div className="border-l-2 border-primary/30 px-3 py-2">
+      <div className="ml-[7px] border-l border-border/60 pl-3">
         {blocks.length > 0 ? (
           blocks.map((block, i) =>
             block.kind === 'card' ? (

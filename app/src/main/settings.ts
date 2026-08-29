@@ -296,3 +296,62 @@ export function resetMcpOverrides(): void {
   writeOverrides(mcpStatePath(), empty)
   mcpOverridesCache = empty
 }
+
+// ── User profile (`sylor-profile.json`) ────────────────────────────────────
+
+/**
+ * A GLOBAL, cross-project memory of the person using Sylor — their name, how
+ * they like to work, the kind of sites they build, their style and typography
+ * taste. Unlike project memory (scoped to one folder), this follows the user
+ * everywhere, so Sylor gets more useful the more it learns. Stored as a small
+ * append-only list of short facts in userData, and injected into the system
+ * prompt at the start of every run. Deliberately its own file (not
+ * ProviderSettings): a Settings-modal save must never clobber a fact learned
+ * mid-conversation, exactly as the skills/MCP override files are kept separate.
+ */
+function userProfilePath(): string {
+  return join(app.getPath('userData'), 'sylor-profile.json')
+}
+
+/** Most facts kept before the oldest are dropped — bounds the prompt cost. */
+const MAX_PROFILE_NOTES = 80
+
+let userProfileCache: string[] | null = null
+
+/** Reads the raw profile notes (defensive: a missing/garbage file → no notes). */
+function readUserProfileNotes(): string[] {
+  if (userProfileCache) return userProfileCache
+  const parsed = readJsonFile<{ notes?: unknown }>(userProfilePath())
+  const notes = Array.isArray(parsed?.notes)
+    ? parsed.notes.filter((n): n is string => typeof n === 'string' && !!n.trim())
+    : []
+  userProfileCache = notes
+  return notes
+}
+
+/**
+ * The user profile as prompt-ready text — one fact per bullet, or '' when
+ * nothing has been learned yet (so callers can omit the section entirely).
+ */
+export function getUserProfile(): string {
+  const notes = readUserProfileNotes()
+  return notes.length ? notes.map((n) => `- ${n}`).join('\n') : ''
+}
+
+/**
+ * Records one durable fact about the user, returning true when it was actually
+ * added (false for a blank or exact-duplicate note). Append-only and deduped
+ * (case-insensitive), capped at {@link MAX_PROFILE_NOTES} keeping the most
+ * recent. Best-effort: a write failure is swallowed by the atomic writer's own
+ * guards, never thrown, so a persistence hiccup can't abort a run.
+ */
+export function appendUserProfile(note: string): boolean {
+  const trimmed = note.trim().replace(/\s+/g, ' ')
+  if (!trimmed) return false
+  const notes = readUserProfileNotes()
+  if (notes.some((n) => n.toLowerCase() === trimmed.toLowerCase())) return false
+  const next = [...notes, trimmed].slice(-MAX_PROFILE_NOTES)
+  writeJsonAtomic(userProfilePath(), { notes: next })
+  userProfileCache = next
+  return true
+}

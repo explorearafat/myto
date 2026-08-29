@@ -92,6 +92,26 @@ describe('parseToolBlock', () => {
     expect(parseToolBlock('{ "tool": "use_skill", "name": "   " }')).toBeNull()
   })
 
+  it('parses a project-scoped remember block', () => {
+    expect(parseToolBlock('{ "tool": "remember", "note": "uses pnpm, not npm" }')).toEqual({
+      tool: 'remember',
+      note: 'uses pnpm, not npm'
+    })
+  })
+
+  it('parses a global remember_user block (cross-project user memory)', () => {
+    expect(
+      parseToolBlock('{ "tool": "remember_user", "note": "likes clean minimal sites" }')
+    ).toEqual({ tool: 'remember_user', note: 'likes clean minimal sites' })
+  })
+
+  it('rejects a remember / remember_user with a blank or missing note', () => {
+    expect(parseToolBlock('{ "tool": "remember" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "remember", "note": "   " }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "remember_user" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "remember_user", "note": "" }')).toBeNull()
+  })
+
   it('parses a valid spawn_agent block', () => {
     expect(
       parseToolBlock('{ "tool": "spawn_agent", "role": "builder", "task": "scaffold the app" }')
