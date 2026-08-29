@@ -138,6 +138,18 @@ const sylorMock: SylorApi = {
     remove: vi.fn().mockResolvedValue([]),
     configPaths: vi.fn().mockResolvedValue({ global: '', project: null })
   },
+  commands: {
+    list: vi.fn().mockResolvedValue([]),
+    reload: vi.fn().mockResolvedValue([]),
+    add: vi.fn().mockResolvedValue({ ok: true, commands: [] }),
+    remove: vi.fn().mockResolvedValue([]),
+    configPaths: vi.fn().mockResolvedValue({ global: '', project: null })
+  },
+  plugins: {
+    list: vi.fn().mockResolvedValue([]),
+    install: vi.fn().mockResolvedValue({ ok: true, plugins: [] }),
+    remove: vi.fn().mockResolvedValue([])
+  },
   workspace: {
     // No folder picker in jsdom: the workspace stays the cwd default (never
     // "chosen"), select resolves null, and no change events fire.

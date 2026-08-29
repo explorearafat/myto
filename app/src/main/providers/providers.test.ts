@@ -94,6 +94,31 @@ describe('OllamaProvider', () => {
     expect(result.message).toMatch(/2 models/)
     expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:11434/api/tags')
   })
+
+  it('maps a requested temperature into native options.temperature', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ message: { content: 'ok' } }))
+    const provider = new OllamaProvider({ baseUrl: 'http://localhost:11434' })
+    await provider.getCompletion('llama3.1:8b', [{ role: 'user', content: 'hi' }], {
+      temperature: 0.5
+    })
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.options).toEqual({ temperature: 0.5 })
+    // Ollama has no reasoning_effort concept — it must never leak onto the wire.
+    expect(body.reasoning_effort).toBeUndefined()
+  })
+
+  it('ignores reasoningEffort and sends no options when only effort is given', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ message: { content: 'ok' } }))
+    const provider = new OllamaProvider({ baseUrl: 'http://localhost:11434' })
+    await provider.getCompletion('llama3.1:8b', [{ role: 'user', content: 'hi' }], {
+      reasoningEffort: 'high'
+    })
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.options).toBeUndefined()
+    expect(body.reasoning_effort).toBeUndefined()
+  })
 })
 
 describe('GatewayProvider', () => {
@@ -255,5 +280,43 @@ describe('GatewayProvider', () => {
     )
     expect(text).toBe('Hello')
     expect(done).toBe(true)
+  })
+
+  it('sends reasoning_effort and drops temperature when an effort is requested', async () => {
+    // Anthropic-backed proxies reject a custom temperature while extended thinking
+    // is on, so effort and temperature must never ride together on the wire.
+    fetchMock.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'ok' } }] }))
+    const provider = new GatewayProvider(baseConfig)
+    await provider.getCompletion('gpt-4o-mini', [{ role: 'user', content: 'hi' }], {
+      reasoningEffort: 'high',
+      temperature: 0.7
+    })
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.reasoning_effort).toBe('high')
+    expect(body.temperature).toBeUndefined()
+  })
+
+  it('clamps the Sylor-internal "max" effort down to the wire vocabulary "high"', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'ok' } }] }))
+    const provider = new GatewayProvider(baseConfig)
+    await provider.getCompletion('gpt-4o-mini', [{ role: 'user', content: 'hi' }], {
+      reasoningEffort: 'max'
+    })
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.reasoning_effort).toBe('high')
+  })
+
+  it('sends temperature only when no reasoning effort is requested', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'ok' } }] }))
+    const provider = new GatewayProvider(baseConfig)
+    await provider.getCompletion('gpt-4o-mini', [{ role: 'user', content: 'hi' }], {
+      temperature: 0.3
+    })
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.temperature).toBe(0.3)
+    expect(body.reasoning_effort).toBeUndefined()
   })
 })

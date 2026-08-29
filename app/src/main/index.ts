@@ -10,6 +10,8 @@ import { registerAttachmentIpc } from './attachment-ipc'
 import { registerPreviewIpc } from './preview-ipc'
 import { registerMcpIpc } from './mcp-ipc'
 import { registerSkillsIpc } from './skills-ipc'
+import { registerCommandsIpc } from './commands-ipc'
+import { registerPluginsIpc } from './plugins-ipc'
 import { registerWorkspaceIpc } from './workspace-ipc'
 import { cancelAllWorkflows } from './workflow/engine'
 import { killAllPtys } from './terminal/pty'
@@ -106,6 +108,8 @@ app.whenReady().then(() => {
   registerPreviewIpc()
   registerMcpIpc()
   registerSkillsIpc()
+  registerCommandsIpc()
+  registerPluginsIpc()
   registerWorkspaceIpc()
   createWindow()
 

@@ -14,6 +14,7 @@ import { contextManager } from '@main/context/manager'
 import {
   applyEdit,
   EditMatchError,
+  findFiles,
   listDirectory,
   PathEscapeError,
   proposeWrite,
@@ -242,6 +243,50 @@ describe('searchProject', () => {
     const out = searchProject('zzz-nothing-here', 'grep')
     expect(out.summary).toBe('no matches')
     expect(out.output).toContain('No matches')
+  })
+})
+
+describe('findFiles', () => {
+  beforeAll(() => {
+    writeProjectFile('find/src/app.ts', 'x')
+    writeProjectFile('find/src/util.ts', 'x')
+    writeProjectFile('find/src/app.test.ts', 'x')
+    writeProjectFile('find/readme.md', 'x')
+    writeProjectFile('find/src/deep/inner.ts', 'x')
+    writeProjectFile('find/node_modules/dep/index.ts', 'x')
+  })
+
+  it('matches a basename glob at any depth, skipping ignored dirs, sorted', () => {
+    const out = findFiles('*.ts', 'find')
+    expect(out.output).toBe(
+      ['find/src/app.test.ts', 'find/src/app.ts', 'find/src/deep/inner.ts', 'find/src/util.ts'].join('\n')
+    )
+    expect(out.output).not.toContain('node_modules')
+    expect(out.output).not.toContain('readme.md')
+    expect(out.summary).toBe('4 files')
+    expect(out.truncated).toBe(false)
+  })
+
+  it('matches the project-relative path when the pattern has a slash', () => {
+    const out = findFiles('find/src/*.ts', '.')
+    expect(out.output).toBe(['find/src/app.test.ts', 'find/src/app.ts', 'find/src/util.ts'].join('\n'))
+    // deep/inner.ts is one segment deeper, so a single-* segment glob excludes it.
+    expect(out.output).not.toContain('inner.ts')
+    expect(out.summary).toBe('3 files')
+  })
+
+  it('reports no matches plainly with a singular/plural-safe summary', () => {
+    const out = findFiles('*.rs', 'find')
+    expect(out.summary).toBe('no files')
+    expect(out.output).toContain('No files match')
+  })
+
+  it('uses the singular noun for a single match', () => {
+    expect(findFiles('util.ts', 'find').summary).toBe('1 file')
+  })
+
+  it('is sandbox-checked', () => {
+    expect(() => findFiles('*.ts', '../outside')).toThrow(PathEscapeError)
   })
 })
 

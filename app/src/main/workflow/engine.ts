@@ -1,6 +1,7 @@
 import type {
   AgentRole,
   ChatMessage,
+  CompletionOptions,
   IntentKind,
   McpCategory,
   McpToolInfo,
@@ -21,6 +22,7 @@ import { getSettings, isSkillEnabled, getUserProfile, appendUserProfile } from '
 import { contextManager } from '../context/manager'
 import {
   applyEdit,
+  findFiles,
   listDirectory,
   proposeWrite,
   readFileSlice,
@@ -32,9 +34,12 @@ import { describeIssues, recheckWrittenFile, verifyWrittenFile } from '../fs/ver
 import { appendProjectMemory, getProject, listProjectKnowledge } from '../db/projects'
 import { runCommand } from '../terminal/runner'
 import { looksLikeDevServer, startDev } from '../preview/server'
+import { fetchUrl } from '../web/fetch'
 import { mcpManager } from '../mcp/manager'
 import { skillsRegistry } from '../skills/registry'
 import { mergeSkillCatalog } from '../skills/catalog'
+import { commandsRegistry } from '../commands/registry'
+import { installPlugin } from '../plugins/installer'
 import { classifyIntent } from './intent'
 import { decideAuto } from './permission'
 import { ToolStreamParser, parseToolBlock, type ParsedTool } from './toolStream'
@@ -97,10 +102,30 @@ YOU CAN LOOK AT THE PROJECT — DO IT BEFORE YOU CHANGE ANYTHING:
 { "tool": "search_files", "query": "useAuth", "path": "src", "glob": "*.ts" }
 \`\`\`
 
-These three only LOOK — they change nothing, so they run immediately without asking the
+\`\`\`sylor-tool
+{ "tool": "find_files", "glob": "**/*.test.ts" }
+\`\`\`
+
+These four only LOOK — they change nothing, so they run immediately without asking the
 user, and (unlike an action) you may emit several in one message to gather what you need
 before deciding. read_file takes optional "offset" (1-based first line) and "limit" for a
 big file. search_files takes a regular expression; "path" and "glob" are optional filters.
+find_files lists files by a name/path glob (\`**\` across folders, \`*\` within one, \`{a,b}\`
+alternatives) — use it to locate files by name when search_files (which greps CONTENTS) is
+the wrong tool.
+
+When a task genuinely needs the outside world — reading a doc page, an API reference, or
+the text of an error — fetch a URL:
+
+\`\`\`sylor-tool
+{ "tool": "web_fetch", "url": "https://example.com/docs" }
+\`\`\`
+
+web_fetch reaches the network, so unlike the read-only blocks it IS an action: it needs the
+user's approval, ENDS your message (one per message, like any action), and returns the
+page's readable text. Only http/https URLs work, and internal/loopback addresses are
+refused. Sylor works offline — reach for web_fetch only when the answer isn't already in the
+project or your own knowledge, not as a first move.
 
 To change part of an existing file, replace an exact piece of it — do NOT rewrite the
 whole file:
@@ -147,13 +172,30 @@ record a new preference the moment they express one ("I like clean minimal
 sites", "use a serif for headings", "call me Arafat"). Keep each note short and
 durable; never store secrets, keys, or one-off details.
 
+When the user asks you to INSTALL a skill, plugin, or connector from somewhere — e.g.
+"Sylor, install this skill https://github.com/acme/cool-skills", "install owner/repo", or
+"add this plugin <folder>" — do it with:
+
+\`\`\`sylor-tool
+{ "tool": "install_plugin", "source": "owner/repo", "scope": "global" }
+\`\`\`
+
+"source" is exactly what they gave you: a GitHub \`owner/repo\`, a full git URL, a
+\`github:owner/repo\` shorthand, or a local folder path. "scope" is "global" (usable in every
+project — the default, and what to use unless they say otherwise) or "project" (only the open
+folder). Like web_fetch this reaches outside the app (a git clone) and writes to disk, so it
+needs approval and ENDS your message. Sylor clones the source, adds every skill / command /
+connector it bundles, and reports what it installed — you never hand-write those files
+yourself. After it lands, the new skills are available immediately and any \`/command\` it added
+can be used from the composer.
+
 Rules for tool blocks:
-- ONE ACTION PER MESSAGE. A write_file, edit_file, run_command, or mcp_call block ENDS your
-  message: say one short line, emit that single block, and stop. The app runs it and reports
-  back, and only THEN do you continue. Anything you write after an action block is discarded
-  unseen — so never stack a second file, a summary, or "next I'll…" behind it. (Read-only
-  blocks are the sole exception: several read_file / list_files / search_files in one message
-  is fine, since they only gather context before you act.)
+- ONE ACTION PER MESSAGE. A write_file, edit_file, run_command, web_fetch, install_plugin, or
+  mcp_call block ENDS your message: say one short line, emit that single block, and stop. The app runs it
+  and reports back, and only THEN do you continue. Anything you write after an action block is
+  discarded unseen — so never stack a second file, a summary, or "next I'll…" behind it.
+  (Read-only blocks are the sole exception: several read_file / list_files / search_files /
+  find_files in one message is fine, since they only gather context before you act.)
 - To create or change several files, emit them one per message across several steps — file,
   result, next file — never many at once.
 - One JSON object per block.
@@ -263,6 +305,20 @@ function effortDirective(effort: ReasoningEffort): string {
     default:
       return ''
   }
+}
+
+/**
+ * Turns the composer's reasoning effort into concrete sampling/thinking hints for
+ * the provider. `reasoningEffort` is the primary lever — a capable gateway maps it
+ * to the model's extended-thinking budget, which is most of what makes replies
+ * feel deliberate (Claude-Code-like) rather than glib. `temperature` is a coding
+ * default (kept in a precise range) that only backends without a reasoning knob —
+ * e.g. Ollama — actually apply; the gateway drops it in favour of the effort. Both
+ * are best-effort: a backend that understands neither is unaffected.
+ */
+function completionOptions(effort: ReasoningEffort): CompletionOptions {
+  const temperature = effort === 'low' ? 0.3 : effort === 'medium' ? 0.5 : 0.7
+  return { reasoningEffort: effort, temperature }
 }
 
 /**
@@ -673,9 +729,13 @@ export async function runWorkflow(
 
   const settings = getSettings()
   const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
-  // Load per-project instructions + knowledge once, up front, so they frame the
-  // whole run. Never throws — a bad/deleted project id degrades to no preamble.
-  const projectPreamble = buildProjectPreamble(projectId ?? null)
+  // Load per-project instructions + knowledge (from the DB) and the repo's
+  // checked-in instruction files (.sylor/SYLOR.md et al.) once, up front, so they
+  // frame the whole run. Never throws — a bad/deleted project id or a missing
+  // instruction file degrades to no preamble.
+  const projectPreamble = [buildProjectPreamble(projectId ?? null), buildRepoInstructionsPreamble()]
+    .filter(Boolean)
+    .join('\n\n')
 
   try {
     // 0. Guard: nothing works without a model. Rather than firing a malformed
@@ -723,7 +783,8 @@ export async function runWorkflow(
               const shown = think.push(prose)
               if (shown) emit({ type: 'delta', runId, text: shown })
             },
-            controller.signal
+            controller.signal,
+            completionOptions(effort ?? 'medium')
           )
         },
         {
@@ -883,10 +944,13 @@ export async function runWorkflow(
         // because nothing has been shown to the user yet.
         judge: async (msgs) => {
           const retry = retryReporter(runId, emit)
-          const verdict = await withRetry(() => provider.getCompletion(settings.modelId, msgs), {
-            signal: controller.signal,
-            onRetry: retry.onRetry
-          })
+          const verdict = await withRetry(
+            () => provider.getCompletion(settings.modelId, msgs, completionOptions(effort ?? 'medium')),
+            {
+              signal: controller.signal,
+              onRetry: retry.onRetry
+            }
+          )
           retry.clear('Reviewing…')
           return verdict
         }
@@ -1138,6 +1202,8 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
       tool.tool === 'write_file' ||
       tool.tool === 'edit_file' ||
       tool.tool === 'run_command' ||
+      tool.tool === 'web_fetch' ||
+      tool.tool === 'install_plugin' ||
       tool.tool === 'mcp_call' ||
       (allowSpawn && tool.tool === 'spawn_agent')
     )
@@ -1152,9 +1218,14 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     if (signal.aborted) return report
 
     // Before streaming, fold the old middle of a long history into a short note so
-    // it can't overflow the model's context mid-build (§17). A no-op (same array
-    // back) until the turn has actually grown large, so short turns are untouched.
-    const compacted = compactHistory(outbound, baseLen)
+    // it can't overflow the model's context mid-build (§17). The note is written by
+    // the model (a coherent recap of the folded steps), falling back to a
+    // deterministic file/command list if that call fails — so it degrades to the
+    // old behaviour offline. A no-op (same array back) until the turn has actually
+    // grown large, so short turns are untouched and cost nothing.
+    const compacted = await compactHistoryWithModel(outbound, baseLen, (folded) =>
+      summarizeFoldedWithModel(provider, modelId, folded, signal)
+    )
     if (compacted !== outbound) {
       outbound.splice(0, outbound.length, ...compacted)
       emit({
@@ -1214,7 +1285,8 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
                 emitProse(shown)
               }
             },
-            stepCtl.signal
+            stepCtl.signal,
+            completionOptions(args.spawnContext.effort)
           )
         },
         {
@@ -1299,7 +1371,10 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
         t.tool === 'read_file' ||
         t.tool === 'list_files' ||
         t.tool === 'search_files' ||
+        t.tool === 'find_files' ||
         t.tool === 'run_command' ||
+        t.tool === 'web_fetch' ||
+        t.tool === 'install_plugin' ||
         t.tool === 'mcp_call'
     )
     const spawnRequests = allowSpawn
@@ -1459,11 +1534,16 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
 
     // Once we're past the break, real work is about to happen this step. Remember it so a
     // later prose-only turn reads as a closing summary (a finish), not a stall to nudge.
-    // Reads are deliberately excluded: looking at files is progress, but it is not
-    // *building*, and if a read refunded the stall budgets a model could investigate
-    // in circles forever instead of being nudged into writing something.
+    // Reads (and web_fetch) are deliberately excluded: gathering information is progress,
+    // but it is not *building*, and if a read or fetch refunded the stall budgets a model
+    // could investigate in circles forever instead of being nudged into writing something.
     const mutated = sideEffects.some(
-      (t) => t.tool !== 'read_file' && t.tool !== 'list_files' && t.tool !== 'search_files'
+      (t) =>
+        t.tool !== 'read_file' &&
+        t.tool !== 'list_files' &&
+        t.tool !== 'search_files' &&
+        t.tool !== 'find_files' &&
+        t.tool !== 'web_fetch'
     )
     if (mutated || spawnRequests.length > 0) {
       built = true
@@ -1635,6 +1715,27 @@ const MAX_CONTEXT_CHARS = 48_000
 const RECENT_KEEP_CHARS = 18_000
 /** Most file paths / commands listed in one compaction note before eliding. */
 const MAX_COMPACTION_ITEMS = 12
+/**
+ * Cap on the folded-transcript text fed to the summariser model. The folded middle
+ * can itself be tens of thousands of characters (that is *why* we are compacting),
+ * so we clip it — keeping the start and end, eliding the centre — before spending a
+ * model call on it. Bounds the cost of the one summarisation to a small, fixed size.
+ */
+const COMPACTION_INPUT_CHARS = 24_000
+/**
+ * System prompt for the model that rewrites the folded middle into a coherent note.
+ * It asks for exactly what lets the agent continue seamlessly — decisions, outcomes,
+ * and facts later steps must remember — and forbids narration, code, and preamble,
+ * so the note stays short. The deterministic file/command list is appended around
+ * this by {@link decorateModelNote}, so hard facts survive even a vague summary.
+ */
+const COMPACTION_SUMMARY_SYSTEM =
+  'You are compacting the middle of an in-progress engineering session to save context. ' +
+  'Given a transcript of earlier steps (assistant actions and their results), write a SHORT ' +
+  'summary — a few sentences or terse bullets — of what was attempted, what was decided, what ' +
+  'succeeded or failed, and any fact a later step must remember (paths, identifiers, error causes). ' +
+  'Keep concrete details; drop narration, code bodies, and pleasantries. No preamble and no ' +
+  'headings — output only the summary itself, so the assistant can read it and continue seamlessly.'
 
 /** The `sylor-tool` operations recorded in one assistant turn (for compaction). */
 function extractToolBlocks(content: string): ParsedTool[] {
@@ -1655,30 +1756,119 @@ function briefList(items: string[]): string {
   return extra > 0 ? `${shown}, +${extra} more` : shown
 }
 
+/** How many assistant turns are in a folded run (its "step" count). */
+function countFoldedSteps(folded: readonly ChatMessage[]): number {
+  return folded.reduce((n, m) => n + (m.role === 'assistant' ? 1 : 0), 0)
+}
+
 /**
- * A single short note standing in for a run of folded steps: how many steps, the
- * files they changed, and the commands they ran — read from the turns' own
- * `sylor-tool` blocks, so it states what actually happened rather than a guess.
- * This is what lets the model keep the thread ("I already wrote a.ts, b.ts")
- * after the verbose middle of the history is dropped.
+ * The hard, deterministic facts of a folded run — the files it changed and the
+ * commands it ran, read from the turns' own `sylor-tool` blocks. These are the
+ * anchors that must never be lost in compaction (a summary may gloss "edited a few
+ * files"; the agent needs the exact paths). Returned as a trailing clause, or '' if
+ * the run touched nothing. Shared by the deterministic and model-based notes.
  */
-function summarizeFoldedSteps(folded: readonly ChatMessage[]): string {
+function foldedFactClause(folded: readonly ChatMessage[]): string {
   const files: string[] = []
   const commands: string[] = []
-  let steps = 0
   for (const m of folded) {
     if (m.role !== 'assistant') continue
-    steps++
     for (const t of extractToolBlocks(m.content)) {
       if (t.tool === 'write_file' || t.tool === 'edit_file') files.push(t.path)
       else if (t.tool === 'run_command') commands.push(t.command)
     }
   }
+  let clause = ''
+  if (files.length > 0) clause += ` Files changed: ${briefList(files)}.`
+  if (commands.length > 0) clause += ` Commands run: ${briefList(commands)}.`
+  return clause
+}
+
+/**
+ * A single short note standing in for a run of folded steps: how many steps, the
+ * files they changed, and the commands they ran — read from the turns' own
+ * `sylor-tool` blocks, so it states what actually happened rather than a guess.
+ * This is what lets the model keep the thread ("I already wrote a.ts, b.ts")
+ * after the verbose middle of the history is dropped. This is the deterministic,
+ * no-model fallback; {@link compactHistoryWithModel} produces a richer note.
+ */
+function summarizeFoldedSteps(folded: readonly ChatMessage[]): string {
+  const steps = countFoldedSteps(folded)
   let note = `[Context note — ${steps} earlier step${steps === 1 ? '' : 's'} condensed to save room.`
-  if (files.length > 0) note += ` Files changed: ${briefList(files)}.`
-  if (commands.length > 0) note += ` Commands run: ${briefList(commands)}.`
+  note += foldedFactClause(folded)
   note += ' Continue from the latest result below.]'
   return note
+}
+
+/**
+ * Wraps a model-written summary as the folded-middle note: the same `[Context note …]`
+ * framing as the deterministic path, the model's narrative, then the deterministic
+ * file/command clause so exact paths survive even if the prose glossed them.
+ */
+function decorateModelNote(summary: string, folded: readonly ChatMessage[]): string {
+  const steps = countFoldedSteps(folded)
+  const facts = foldedFactClause(folded)
+  return (
+    `[Context note — ${steps} earlier step${steps === 1 ? '' : 's'} condensed to save room.]\n` +
+    `${summary}` +
+    (facts ? `\n${facts.trim()}` : '') +
+    '\nContinue from the latest result below.'
+  )
+}
+
+/**
+ * Renders a folded run as a plain transcript for the summariser, clipped to
+ * {@link COMPACTION_INPUT_CHARS} by keeping the head and tail and eliding the middle
+ * — the ends carry the run's opening intent and its latest state, which matter most.
+ */
+function renderFoldedTranscript(folded: readonly ChatMessage[]): string {
+  const full = folded.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n')
+  if (full.length <= COMPACTION_INPUT_CHARS) return full
+  const half = Math.floor(COMPACTION_INPUT_CHARS / 2)
+  return `${full.slice(0, half)}\n\n…[middle elided]…\n\n${full.slice(-half)}`
+}
+
+interface CompactionPlan {
+  head: ChatMessage[]
+  folded: ChatMessage[]
+  tail: ChatMessage[]
+}
+
+/**
+ * Decides what a compaction pass would fold, without producing the note. Returns
+ * null (a no-op) when the whole history fits `budget`, or when the only thing over
+ * budget is the pinned head plus the must-keep last pair (nothing old to drop).
+ * Otherwise splits into the pinned prologue (first `baseLen`), the recent tail grown
+ * backwards while it fits `recentBudget` (always at least the last two turns), and
+ * the folded middle between them. Shared by the sync and model-based compactors so
+ * both fold at exactly the same boundary.
+ */
+function planCompaction(
+  messages: ChatMessage[],
+  baseLen: number,
+  budget: number,
+  recentBudget: number
+): CompactionPlan | null {
+  const total = messages.reduce((n, m) => n + m.content.length, 0)
+  if (total <= budget) return null
+
+  const head = messages.slice(0, baseLen)
+  const appended = messages.slice(baseLen)
+  // Grow the kept tail backwards from the end while it fits the recency budget,
+  // but always keep the last two appended turns (latest action + its result) so
+  // the step the model must continue from is never the thing we drop.
+  let tailChars = 0
+  let firstTail = appended.length
+  for (let i = appended.length - 1; i >= 0; i--) {
+    const withThis = tailChars + appended[i].content.length
+    const mustKeep = appended.length - i <= 2
+    if (withThis > recentBudget && !mustKeep) break
+    tailChars = withThis
+    firstTail = i
+  }
+  const folded = appended.slice(0, firstTail)
+  if (folded.length === 0) return null // only the pinned head is large — nothing to fold
+  return { head, folded, tail: appended.slice(firstTail) }
 }
 
 /**
@@ -1696,7 +1886,8 @@ function summarizeFoldedSteps(folded: readonly ChatMessage[]): string {
  * No model call — the note is scanned from the turns themselves, matching Sylor's
  * offline-first, deterministic style (cf. {@link summarizeResults}). Returns the
  * SAME array reference when nothing needs folding, so the caller detects a no-op
- * by identity and skips the rewrite.
+ * by identity and skips the rewrite. See {@link compactHistoryWithModel} for the
+ * richer, model-written note used at run time.
  */
 export function compactHistory(
   messages: ChatMessage[],
@@ -1704,28 +1895,65 @@ export function compactHistory(
   budget = MAX_CONTEXT_CHARS,
   recentBudget = RECENT_KEEP_CHARS
 ): ChatMessage[] {
-  const total = messages.reduce((n, m) => n + m.content.length, 0)
-  if (total <= budget) return messages
+  const plan = planCompaction(messages, baseLen, budget, recentBudget)
+  if (!plan) return messages
+  const note: ChatMessage = { role: 'user', content: summarizeFoldedSteps(plan.folded) }
+  return [...plan.head, note, ...plan.tail]
+}
 
-  const head = messages.slice(0, baseLen)
-  const appended = messages.slice(baseLen)
-  // Grow the kept tail backwards from the end while it fits the recency budget,
-  // but always keep the last two appended turns (latest action + its result) so
-  // the step the model must continue from is never the thing we drop.
-  let tailChars = 0
-  let firstTail = appended.length
-  for (let i = appended.length - 1; i >= 0; i--) {
-    const withThis = tailChars + appended[i].content.length
-    const mustKeep = appended.length - i <= 2
-    if (withThis > recentBudget && !mustKeep) break
-    tailChars = withThis
-    firstTail = i
+/**
+ * Model-based context compaction — the run-time default. Folds at the SAME boundary
+ * as {@link compactHistory}, but the note replacing the folded middle is written by
+ * the model: a coherent summary of what those steps accomplished (decisions, results,
+ * facts to remember), which reads far better than a bare file/command list — the way
+ * Claude Code condenses a long session. The deterministic file/command clause is still
+ * appended as a hard-fact anchor, so exact paths survive a glossy summary.
+ *
+ * `summarize` does the model call. It is only ever invoked when there is genuinely
+ * something to fold, and any failure/empty reply (offline, provider error, cancelled)
+ * falls back to the exact deterministic {@link summarizeFoldedSteps} note — so this
+ * never blocks a build and keeps working with no reachable model. Returns the SAME
+ * array reference on a no-op, matching {@link compactHistory}.
+ */
+export async function compactHistoryWithModel(
+  messages: ChatMessage[],
+  baseLen: number,
+  summarize: (folded: readonly ChatMessage[]) => Promise<string>,
+  budget = MAX_CONTEXT_CHARS,
+  recentBudget = RECENT_KEEP_CHARS
+): Promise<ChatMessage[]> {
+  const plan = planCompaction(messages, baseLen, budget, recentBudget)
+  if (!plan) return messages
+  let summary = ''
+  try {
+    summary = (await summarize(plan.folded)).trim()
+  } catch {
+    summary = ''
   }
-  const folded = appended.slice(0, firstTail)
-  if (folded.length === 0) return messages // only the pinned head is large — nothing to fold
+  const content = summary ? decorateModelNote(summary, plan.folded) : summarizeFoldedSteps(plan.folded)
+  return [...plan.head, { role: 'user', content }, ...plan.tail]
+}
 
-  const note: ChatMessage = { role: 'user', content: summarizeFoldedSteps(folded) }
-  return [...head, note, ...appended.slice(firstTail)]
+/**
+ * The default `summarize` for {@link compactHistoryWithModel}: one cheap, low-effort
+ * completion that turns the folded transcript into a note. Skipped (returns '') when
+ * the run is already cancelled, so we don't spend a call whose result is discarded.
+ */
+async function summarizeFoldedWithModel(
+  provider: Provider,
+  modelId: string,
+  folded: readonly ChatMessage[],
+  signal: AbortSignal
+): Promise<string> {
+  if (signal.aborted) return ''
+  return provider.getCompletion(
+    modelId,
+    [
+      { role: 'system', content: COMPACTION_SUMMARY_SYSTEM },
+      { role: 'user', content: renderFoldedTranscript(folded) }
+    ],
+    completionOptions('low')
+  )
 }
 
 /**
@@ -2009,7 +2237,17 @@ interface ExecContext {
 type ExecutableTool = Extract<
   ParsedTool,
   {
-    tool: 'write_file' | 'edit_file' | 'read_file' | 'list_files' | 'search_files' | 'run_command' | 'mcp_call'
+    tool:
+      | 'write_file'
+      | 'edit_file'
+      | 'read_file'
+      | 'list_files'
+      | 'search_files'
+      | 'find_files'
+      | 'run_command'
+      | 'web_fetch'
+      | 'install_plugin'
+      | 'mcp_call'
   }
 >
 
@@ -2064,8 +2302,14 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
         query: tool.query,
         glob: tool.glob
       }
+    } else if (tool.tool === 'find_files') {
+      proposal = { id, kind: 'read', op: 'find_files', path: tool.path, glob: tool.glob }
     } else if (tool.tool === 'run_command') {
       proposal = { id, kind: 'run_command', command: tool.command }
+    } else if (tool.tool === 'web_fetch') {
+      proposal = { id, kind: 'web_fetch', url: tool.url }
+    } else if (tool.tool === 'install_plugin') {
+      proposal = { id, kind: 'install_plugin', source: tool.source, scope: tool.scope }
     } else {
       proposal = {
         id,
@@ -2162,16 +2406,34 @@ function failedPreparation(
   tool: ExecutableTool,
   error: string
 ): { proposal: ToolProposal; result: ToolResult } {
-  if (tool.tool === 'read_file' || tool.tool === 'list_files' || tool.tool === 'search_files') {
+  if (
+    tool.tool === 'read_file' ||
+    tool.tool === 'list_files' ||
+    tool.tool === 'search_files' ||
+    tool.tool === 'find_files'
+  ) {
     return {
       proposal: {
         id,
         kind: 'read',
         op: tool.tool,
         path: tool.path,
-        query: tool.tool === 'search_files' ? tool.query : undefined
+        query: tool.tool === 'search_files' ? tool.query : undefined,
+        glob: tool.tool === 'find_files' ? tool.glob : undefined
       },
       result: { id, kind: 'read', ok: false, output: '', truncated: false, summary: 'failed', error }
+    }
+  }
+  if (tool.tool === 'web_fetch') {
+    return {
+      proposal: { id, kind: 'web_fetch', url: tool.url },
+      result: { id, kind: 'web_fetch', ok: false, output: '', truncated: false, error }
+    }
+  }
+  if (tool.tool === 'install_plugin') {
+    return {
+      proposal: { id, kind: 'install_plugin', source: tool.source, scope: tool.scope },
+      result: { id, kind: 'install_plugin', ok: false, output: '', error }
     }
   }
   const path = tool.tool === 'write_file' || tool.tool === 'edit_file' ? tool.path : ''
@@ -2207,6 +2469,12 @@ function rejectedResult(proposal: ToolProposal, reason = 'Skipped by user'): Too
       error: reason
     }
   }
+  if (proposal.kind === 'web_fetch') {
+    return { id: proposal.id, kind: 'web_fetch', ok: false, output: '', truncated: false, error: reason }
+  }
+  if (proposal.kind === 'install_plugin') {
+    return { id: proposal.id, kind: 'install_plugin', ok: false, output: '', error: reason }
+  }
   return { id: proposal.id, kind: 'run_command', exitCode: null, output: reason, truncated: false }
 }
 
@@ -2235,7 +2503,9 @@ async function applyTool(
           ? readFileSlice(proposal.path, proposal.offset, proposal.limit)
           : proposal.op === 'list_files'
             ? listDirectory(proposal.path)
-            : searchProject(proposal.query ?? '', proposal.path, proposal.glob)
+            : proposal.op === 'find_files'
+              ? findFiles(proposal.glob ?? '', proposal.path)
+              : searchProject(proposal.query ?? '', proposal.path, proposal.glob)
       return {
         id: proposal.id,
         kind: 'read',
@@ -2257,6 +2527,27 @@ async function applyTool(
     }
   }
 
+  // web_fetch — reach the network for a page's text. fetchUrl never throws (bad
+  // URL, blocked host, timeout, and network error all come back as an outcome),
+  // and honours the abort signal, so no extra plumbing here.
+  if (proposal.kind === 'web_fetch') {
+    onTerminal(`\r\n\x1b[38;5;39m🌐 ${proposal.url}\x1b[0m\r\n`)
+    const outcome = await fetchUrl(proposal.url, signal)
+    if (outcome.ok) {
+      onTerminal(`\x1b[32m✓ fetched ${proposal.url}\x1b[0m\r\n`)
+    } else {
+      onTerminal(`\x1b[31m${outcome.error ?? 'Fetch failed.'}\x1b[0m\r\n`)
+    }
+    return {
+      id: proposal.id,
+      kind: 'web_fetch',
+      ok: outcome.ok,
+      output: outcome.output,
+      truncated: outcome.truncated,
+      error: outcome.error
+    }
+  }
+
   // mcp_call — dispatch to the connected server via the manager. The manager
   // never throws (missing server, disconnected, or tool error all come back as
   // an outcome), and enforces its own call timeout, so no abort plumbing here.
@@ -2275,6 +2566,51 @@ async function applyTool(
       output: outcome.output,
       truncated: outcome.truncated,
       error: outcome.error
+    }
+  }
+
+  // install_plugin — clone (git) or read (local) a plugin source and add every
+  // skill/command/connector it bundles. installPlugin never throws — a bad source,
+  // a missing Git, an empty repo, or a write error all return as a result — and
+  // honours the abort signal during the clone.
+  if (proposal.kind === 'install_plugin') {
+    onTerminal(`\r\n\x1b[38;5;39m📦 installing ${proposal.source}\x1b[0m\r\n`)
+    const outcome = await installPlugin(
+      { source: proposal.source, scope: proposal.scope },
+      contextManager.getRoot(),
+      signal
+    )
+    if (!outcome.ok || !outcome.plugin) {
+      onTerminal(`\x1b[31m${outcome.error ?? 'Install failed.'}\x1b[0m\r\n`)
+      return {
+        id: proposal.id,
+        kind: 'install_plugin',
+        ok: false,
+        output: '',
+        error: outcome.error ?? 'Install failed.'
+      }
+    }
+    const c = outcome.plugin.contents
+    const count = (n: number, one: string): string => (n ? `${n} ${one}${n > 1 ? 's' : ''}` : '')
+    const parts = [count(c.skills.length, 'skill'), count(c.commands.length, 'command'), count(c.connectors.length, 'connector')].filter(Boolean)
+    const detail = [
+      c.skills.length ? `skills: ${c.skills.join(', ')}` : '',
+      c.commands.length ? `commands: ${c.commands.join(', ')}` : '',
+      c.connectors.length ? `connectors: ${c.connectors.join(', ')}` : ''
+    ]
+      .filter(Boolean)
+      .join('\n')
+    // Refresh the cached registries so the new skills/commands are usable at once;
+    // MCP connectors are read from disk on the next connect.
+    skillsRegistry.reload(contextManager.getRoot())
+    commandsRegistry.reload(contextManager.getRoot())
+    onTerminal(`\x1b[32m✓ installed ${outcome.plugin.name}\x1b[0m\r\n`)
+    return {
+      id: proposal.id,
+      kind: 'install_plugin',
+      ok: true,
+      plugin: outcome.plugin.name,
+      output: `Installed ${outcome.plugin.name}${parts.length ? ` — ${parts.join(', ')}` : ''}.${detail ? `\n${detail}` : ''}`
     }
   }
 
@@ -2348,10 +2684,43 @@ function describeBatch(tools: ExecutableTool[]): { stage: WorkflowStage; message
       t.tool === 'write_file' || t.tool === 'edit_file'
   )
   const reads = tools.filter(
-    (t): t is Extract<ExecutableTool, { tool: 'read_file' | 'list_files' | 'search_files' }> =>
-      t.tool === 'read_file' || t.tool === 'list_files' || t.tool === 'search_files'
+    (
+      t
+    ): t is Extract<
+      ExecutableTool,
+      { tool: 'read_file' | 'list_files' | 'search_files' | 'find_files' }
+    > =>
+      t.tool === 'read_file' ||
+      t.tool === 'list_files' ||
+      t.tool === 'search_files' ||
+      t.tool === 'find_files'
+  )
+  const fetches = tools.filter(
+    (t): t is Extract<ExecutableTool, { tool: 'web_fetch' }> => t.tool === 'web_fetch'
+  )
+  const installs = tools.filter(
+    (t): t is Extract<ExecutableTool, { tool: 'install_plugin' }> => t.tool === 'install_plugin'
   )
   const firstCmd = (): string => commands[0].command.trim().split(/\s+/).slice(0, 3).join(' ')
+
+  // A plugin install → the executing phase, naming the source.
+  if (installs.length > 0) {
+    return { stage: 'executing', message: `Installing ${installs[0].source}` }
+  }
+
+  // A web_fetch batch (no files, no commands) → the scanning phase, naming the host.
+  if (fetches.length > 0 && commands.length === 0 && writes.length === 0 && reads.length === 0) {
+    let host = ''
+    try {
+      host = new URL(fetches[0].url).hostname
+    } catch {
+      host = ''
+    }
+    return {
+      stage: 'scanning',
+      message: fetches.length === 1 ? `Fetching ${host || 'the web'}` : `Fetching ${fetches.length} pages`
+    }
+  }
 
   // Pure inspection → the reading phase, naming what's being looked at. This is
   // the status the user sees while Sylor is orienting itself in their code.
@@ -2359,6 +2728,10 @@ function describeBatch(tools: ExecutableTool[]): { stage: WorkflowStage; message
     const search = reads.find((r) => r.tool === 'search_files')
     if (search && search.tool === 'search_files') {
       return { stage: 'scanning', message: `Searching for "${search.query}"` }
+    }
+    const find = reads.find((r) => r.tool === 'find_files')
+    if (find && find.tool === 'find_files') {
+      return { stage: 'scanning', message: `Finding ${find.glob}` }
     }
     const files = reads.filter((r) => r.tool === 'read_file').map((r) => baseName(r.path))
     if (files.length > 0) {
@@ -2432,9 +2805,11 @@ function summarizeResults(outcomes: Array<{ tool: ExecutableTool; result: ToolRe
       const label =
         tool.tool === 'search_files'
           ? `search_files "${tool.query}" in ${tool.path}`
-          : tool.tool === 'read_file' || tool.tool === 'list_files'
-            ? `${tool.tool} ${tool.path}`
-            : 'read'
+          : tool.tool === 'find_files'
+            ? `find_files "${tool.glob}" in ${tool.path}`
+            : tool.tool === 'read_file' || tool.tool === 'list_files'
+              ? `${tool.tool} ${tool.path}`
+              : 'read'
       if (!result.ok) return `${label} → error: ${result.error ?? 'failed'}`
       const truncNote = result.truncated ? ' — truncated, ask for a narrower range if you need more' : ''
       return `${label} → ${result.summary}${truncNote}\n${result.output}`
@@ -2444,6 +2819,17 @@ function summarizeResults(outcomes: Array<{ tool: ExecutableTool; result: ToolRe
       if (!result.ok) return `mcp_call ${label} → error: ${result.error ?? 'failed'}`
       const truncNote = result.truncated ? ' (output truncated)' : ''
       return `mcp_call ${label} → ok${truncNote}\noutput:\n${result.output.trim()}`
+    }
+    if (result.kind === 'web_fetch') {
+      const label = tool.tool === 'web_fetch' ? tool.url : ''
+      if (!result.ok) return `web_fetch ${label} → error: ${result.error ?? 'failed'}`
+      const truncNote = result.truncated ? ' (content truncated)' : ''
+      return `web_fetch ${label} → ok${truncNote}\n${result.output.trim()}`
+    }
+    if (result.kind === 'install_plugin') {
+      const label = tool.tool === 'install_plugin' ? tool.source : ''
+      if (!result.ok) return `install_plugin ${label} → error: ${result.error ?? 'failed'}`
+      return `install_plugin ${label} → ok\n${result.output.trim()}`
     }
     // run_command — a null exit code means the user skipped it (it never ran).
     const command = tool.tool === 'run_command' ? tool.command : ''
@@ -2605,6 +2991,53 @@ function buildProjectPreamble(projectId: string | null): string {
     console.error('[sylor] failed to load project context:', err)
     return ''
   }
+}
+
+/**
+ * The repo-checked-in instruction files Sylor reads into every Code turn — the
+ * `.sylor` analogue of Claude Code's CLAUDE.md. `.sylor/SYLOR.md` is the primary,
+ * project-owned convention; root `SYLOR.md` and the cross-tool `AGENTS.md` are
+ * honoured too so an existing repo works without renaming. First found wins per
+ * slot; all found are included, in this order.
+ */
+const REPO_INSTRUCTION_FILES = ['.sylor/SYLOR.md', 'SYLOR.md', 'AGENTS.md'] as const
+/** Total char budget for injected repo instructions (keeps the prompt lean). */
+const MAX_REPO_INSTRUCTION_CHARS = 8_000
+
+/**
+ * Builds the repo-instructions preamble from the project's checked-in guidance
+ * files (see {@link REPO_INSTRUCTION_FILES}). Unlike {@link buildProjectPreamble}
+ * (DB-only), this reads real files — but only project-relative ones through the
+ * sandbox (`readProjectFile`), so the boundary is untouched. A missing file is
+ * skipped; the whole thing is best-effort and never throws. Returns '' when no
+ * instruction file exists, so a repo without one adds nothing.
+ */
+function buildRepoInstructionsPreamble(): string {
+  const parts: string[] = []
+  const seen = new Set<string>()
+  let total = 0
+  for (const rel of REPO_INSTRUCTION_FILES) {
+    let content: string
+    try {
+      content = readProjectFile(rel).trim()
+    } catch {
+      continue // missing / unreadable / outside sandbox — skip
+    }
+    if (!content || seen.has(content)) continue
+    seen.add(content)
+    const remaining = MAX_REPO_INSTRUCTION_CHARS - total
+    if (remaining <= 0) break
+    const clipped =
+      content.length > remaining ? `${content.slice(0, remaining)}\n… (instructions clipped)` : content
+    total += clipped.length
+    parts.push(`## Repository instructions (from ${rel})\n${clipped}`)
+  }
+  if (parts.length === 0) return ''
+  return (
+    parts.join('\n\n') +
+    '\n\nFollow these repository instructions as standing guidance for this project, ' +
+    'the same way you would the user’s direct request.'
+  )
 }
 
 /**

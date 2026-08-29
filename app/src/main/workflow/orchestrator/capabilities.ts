@@ -166,6 +166,7 @@ export function scopeSkills(
  *    is not a side effect. Scoping applies to what an agent may CHANGE.
  *  - `write_file`  → needs `filesystem`.
  *  - `run_command` → needs `terminal`, `code-exec`, or `testing`.
+ *  - `web_fetch`   → needs `web` (network egress; the lead is unrestricted).
  *  - `mcp_call`    → needs any MCP-granting capability (finer per-server scoping
  *    already happens in {@link scopeMcpTools}, so the role only ever sees tools
  *    it may call).
@@ -179,6 +180,12 @@ export function allowsTool(capabilities: readonly Capability[], toolKind: ToolKi
       return has.has('filesystem')
     case 'run_command':
       return has.has('terminal') || has.has('code-exec') || has.has('testing')
+    case 'web_fetch':
+      return has.has('web')
+    case 'install_plugin':
+      // Installing a plugin mutates global/project config and is user-initiated;
+      // only the unrestricted lead ever does it — a scoped specialist never may.
+      return false
     case 'mcp_call':
       return has.has('mcp') || mcpCategoriesFor(capabilities).size > 0
     default:

@@ -6,17 +6,23 @@ export type PermissionOutcome = 'auto' | 'ask'
 /**
  * The permission matrix. Governs whether a given tool op runs without asking:
  *
- * | mode         | read | write_file | run_command | mcp_call |
- * |--------------|------|------------|-------------|----------|
- * | `ask`        | auto | ask        | ask         | ask      |
- * | `auto-edit`  | auto | auto       | ask         | ask      |
- * | `autonomous` | auto | auto       | auto        | auto     |
+ * | mode         | read | write_file | run_command | mcp_call | web_fetch |
+ * |--------------|------|------------|-------------|----------|-----------|
+ * | `ask`        | auto | ask        | ask         | ask      | ask       |
+ * | `auto-edit`  | auto | auto       | ask         | ask      | ask       |
+ * | `autonomous` | auto | auto       | auto        | auto     | auto      |
  *
  * `read` is auto in every mode — it changes nothing, and gating it would make the
  * agent unusable: understanding a single change can take a dozen file reads, and a
  * dozen approval prompts for looking at the user's own project is not a safety
  * feature. Every read is still sandbox-confined and still shown as a tool card, so
  * the user can see exactly what Sylor consulted.
+ *
+ * `web_fetch` reaches the network, so it is gated exactly like write_file's
+ * command siblings: asked in `ask`/`auto-edit`, auto only in hands-free
+ * `autonomous`. This is what keeps the offline-first posture honest — nothing
+ * leaves the machine without an explicit decision unless the user opted into
+ * hands-free.
  *
  * `autonomous` is an explicit, opt-in, hands-free posture (requirement D): it
  * auto-approves everything so a build runs without prompts. Even an `auto`

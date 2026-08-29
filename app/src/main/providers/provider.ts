@@ -1,6 +1,7 @@
 import type {
   ChatMessage,
   CompletionChunk,
+  CompletionOptions,
   ListModelsResult,
   ModelInfo,
   TestConnectionResult
@@ -8,12 +9,17 @@ import type {
 export interface Provider {
   listModels(): Promise<ListModelsResult>
   testConnection(modelId: string): Promise<TestConnectionResult>
-  getCompletion(modelId: string, messages: ChatMessage[]): Promise<string>
+  getCompletion(
+    modelId: string,
+    messages: ChatMessage[],
+    options?: CompletionOptions
+  ): Promise<string>
   streamCompletion(
     modelId: string,
     messages: ChatMessage[],
     onChunk: (chunk: Omit<CompletionChunk, 'streamId'>) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: CompletionOptions
   ): Promise<void>
 }
 

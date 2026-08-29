@@ -196,6 +196,22 @@ export interface CompletionChunk {
   error?: string
 }
 
+/**
+ * Optional sampling/thinking hints for a completion. Every field is best-effort:
+ * a provider forwards what its wire format supports and silently drops the rest,
+ * so passing these can only improve a capable backend and never breaks a plain
+ * one. `reasoningEffort` maps to the OpenAI-compatible `reasoning_effort` (which
+ * many gateways translate into a model's extended-thinking budget); `temperature`
+ * is standard sampling. They are kept apart on the wire when a backend would
+ * reject both together (e.g. Anthropic thinking requires the default temperature).
+ */
+export interface CompletionOptions {
+  /** How hard the model should think before answering (gateway-mapped). */
+  reasoningEffort?: ReasoningEffort
+  /** Sampling temperature; lower is more precise/deterministic. */
+  temperature?: number
+}
+
 // ── AI core & workflow engine (Phase 3) ───────────────────────────────────
 
 /**
@@ -240,7 +256,7 @@ export type WorkflowStage =
  * side-effecting and permission-gated; `read` only inspects the project (see
  * {@link ReadProposal}) and is always auto-approved.
  */
-export type ToolKind = 'write_file' | 'run_command' | 'mcp_call' | 'read'
+export type ToolKind = 'write_file' | 'run_command' | 'mcp_call' | 'web_fetch' | 'install_plugin' | 'read'
 
 /** A proposed file write: full new contents for a project-relative path. */
 export interface WriteFileProposal {
@@ -281,11 +297,42 @@ export interface McpCallProposal {
 }
 
 /**
- * Which project inspection a {@link ReadProposal} performs. Three ops share one
- * proposal kind because they share a shape (a target + bounded text back), which
- * keeps every switch in the pipeline to a single `read` branch.
+ * A proposed fetch of a web page — Sylor's opt-in exception to offline-first
+ * (the analogue of Claude Code's WebFetch). Permission-gated like run_command:
+ * it reaches the network, so it is never auto-approved outside the explicit
+ * hands-free `autonomous` mode, and a scoped subagent needs the `web` capability.
  */
-export type ReadOp = 'read_file' | 'list_files' | 'search_files'
+export interface WebFetchProposal {
+  id: string
+  kind: 'web_fetch'
+  /** The http/https URL to fetch (validated; internal hosts refused). */
+  url: string
+}
+
+/**
+ * A proposed plugin install from a git repo or local folder — the action behind
+ * "Sylor, install this skill <url>". Permission-gated like web_fetch: a git
+ * source reaches the network (clone) and every source writes skills/commands/
+ * connectors into `~/.sylor` or the project, so it is never auto-approved outside
+ * hands-free `autonomous`. It ENDS the model's message like any other action.
+ */
+export interface InstallPluginProposal {
+  id: string
+  kind: 'install_plugin'
+  /** The raw source the user gave: `owner/repo`, a git URL, or a local folder. */
+  source: string
+  /** Where the discovered skills/commands/connectors are written. */
+  scope: ConfigScope
+}
+
+/**
+ * Which project inspection a {@link ReadProposal} performs. Four ops share one
+ * proposal kind because they share a shape (a target + bounded text back), which
+ * keeps every switch in the pipeline to a single `read` branch. `find_files`
+ * lists files by name/path glob (the counterpart of `search_files`, which greps
+ * their contents).
+ */
+export type ReadOp = 'read_file' | 'list_files' | 'search_files' | 'find_files'
 
 /**
  * A request to LOOK at the project — open a file, list a directory, grep for a
@@ -304,13 +351,17 @@ export interface ReadProposal {
   op: ReadOp
   /**
    * Project-relative POSIX target: the file for `read_file`, the directory for
-   * `list_files`, and the directory to search under for `search_files` ('.' for
-   * the whole project).
+   * `list_files`, and the directory to search under for `search_files` /
+   * `find_files` ('.' for the whole project).
    */
   path: string
   /** The text/regex being searched for — `search_files` only. */
   query?: string
-  /** Restrict `search_files` to paths matching this glob (e.g. `*.ts`). */
+  /**
+   * A glob pattern. For `search_files` it restricts which files are grepped
+   * (e.g. `*.ts`); for `find_files` it IS the query — the name/path pattern whose
+   * matching files are returned.
+   */
   glob?: string
   /** 1-based first line to return — `read_file` only (default: the start). */
   offset?: number
@@ -323,6 +374,8 @@ export type ToolProposal =
   | WriteFileProposal
   | RunCommandProposal
   | McpCallProposal
+  | WebFetchProposal
+  | InstallPluginProposal
   | ReadProposal
 
 /** The user's (or permission-mode's) verdict on a proposal. */
@@ -387,8 +440,42 @@ export interface ReadResult {
   error?: string
 }
 
+/** Outcome of a `web_fetch` proposal (readable page text, or the failure). */
+export interface WebFetchResult {
+  id: string
+  kind: 'web_fetch'
+  /** Whether the fetch completed and returned usable content. */
+  ok: boolean
+  /** The page's readable text (bounded), prefixed with the URL/title header. */
+  output: string
+  /** True when `output` was clipped at the cap. */
+  truncated: boolean
+  /** Present when `ok` is false (bad URL, blocked host, network error, timeout). */
+  error?: string
+}
+
+/** Outcome of an `install_plugin` proposal (what got installed, or the failure). */
+export interface InstallPluginResult {
+  id: string
+  kind: 'install_plugin'
+  /** Whether the plugin installed successfully. */
+  ok: boolean
+  /** Human summary of what was added (skills/commands/connectors), shown + fed back. */
+  output: string
+  /** The installed plugin's name, when `ok` (so the UI can label the card). */
+  plugin?: string
+  /** Present when `ok` is false (bad source, missing Git, empty repo, write error). */
+  error?: string
+}
+
 /** Discriminated union of tool outcomes reported back to the renderer. */
-export type ToolResult = WriteFileResult | RunCommandResult | McpCallResult | ReadResult
+export type ToolResult =
+  | WriteFileResult
+  | RunCommandResult
+  | McpCallResult
+  | WebFetchResult
+  | InstallPluginResult
+  | ReadResult
 
 /**
  * The role an agent plays in a Code build (requirement B). `lead` is the
@@ -913,6 +1000,10 @@ export interface SylorApi {
   mcp: McpApi
   /** Skills: disk-authored capability folders the model can invoke. */
   skills: SkillsApi
+  /** Commands: disk-authored slash-command templates surfaced in the `/` menu. */
+  commands: CommandsApi
+  /** Plugins: git-installed bundles of skills / commands / connectors. */
+  plugins: PluginsApi
   /** Working folder (Code mode): select/get the agent's sandbox root. */
   workspace: WorkspaceApi
 }
@@ -1275,6 +1366,152 @@ export interface SkillsApi {
   remove: (name: string) => Promise<SkillStatus[]>
   /** Absolute paths of the skills directories (for the "add a skill" hint). */
   configPaths: () => Promise<{ global: string; project: string | null }>
+}
+
+// ---------------------------------------------------------------------------
+// Slash commands (disk-authored prompt templates) — extensibility
+// ---------------------------------------------------------------------------
+
+/**
+ * Where a command came from:
+ *  - `global`  → `~/.sylor/commands/<name>.md` (applies everywhere).
+ *  - `project` → `<root>/.sylor/commands/<name>.md` (overrides global by name).
+ */
+export type CommandSource = 'global' | 'project'
+
+/**
+ * A slash command: a Markdown prompt template invoked from the composer with
+ * `/<name>`, mirroring the Claude CLI's custom commands. The file's body is the
+ * template; `$ARGUMENTS` (and `$1`, `$2`, …) are substituted with whatever the
+ * user typed after the command name, and the result is sent as the prompt.
+ */
+export interface CommandInfo {
+  /** Unique key: the frontmatter `name`, falling back to the file's basename. */
+  name: string
+  /** One-line description shown in the slash menu (may be empty). */
+  description: string
+  /** Optional hint about expected arguments, shown after the name (may be empty). */
+  argumentHint: string
+  /** The prompt template body (everything after the frontmatter). */
+  body: string
+  /** Which location the command was read from (project shadows global by name). */
+  source: CommandSource
+  /** Absolute path of the command's `.md` file (for the UI's "edit" hint). */
+  path: string
+}
+
+/**
+ * Input for authoring a new command from the UI. Sylor renders these fields into
+ * a `<name>.md` with a frontmatter block (`description`/`argument_hint`) followed
+ * by `body`, then writes it to `<scope>/commands/<slug>.md`.
+ */
+export interface CommandAddInput {
+  name: string
+  description?: string
+  argumentHint?: string
+  body: string
+  scope: ConfigScope
+}
+
+/** Outcome of an add attempt: the fresh command list, or a friendly error. */
+export interface CommandMutationResult {
+  ok: boolean
+  /** Present when `ok` is false (blank name/body, no writable scope, write failed). */
+  error?: string
+  /** Fresh list for the settings UI + slash menu (unchanged when `ok` is false). */
+  commands: CommandInfo[]
+}
+
+/**
+ * Renderer-facing API for slash commands. Commands are disk-authored Markdown
+ * templates in `~/.sylor/commands/*.md` (global) + `<root>/.sylor/commands/*.md`
+ * (project). The composer lists them in the `/` menu, and the engine expands a
+ * leading `/<name> args` into the template body before the turn runs.
+ */
+export interface CommandsApi {
+  /** Every command (global + project; project shadows global). */
+  list: () => Promise<CommandInfo[]>
+  /** Re-scan disk for commands; returns the fresh list. */
+  reload: () => Promise<CommandInfo[]>
+  /**
+   * Author a new command: write a `<name>.md` on disk (chosen scope), then
+   * re-scan. Validates main-side; returns a friendly error rather than throwing
+   * on a blank name/body or an unwritable scope.
+   */
+  add: (input: CommandAddInput) => Promise<CommandMutationResult>
+  /** Delete a command's `.md` file, then re-scan. Returns the fresh list. */
+  remove: (name: string) => Promise<CommandInfo[]>
+  /** Absolute paths of the commands directories (for the "add a command" hint). */
+  configPaths: () => Promise<{ global: string; project: string | null }>
+}
+
+// ---------------------------------------------------------------------------
+// Plugins (git-installed bundles of skills / commands / connectors)
+// ---------------------------------------------------------------------------
+
+/**
+ * What a plugin installed, by name, so a later removal can withdraw exactly
+ * those additions and nothing the user added by hand.
+ */
+export interface PluginContents {
+  /** Skill names authored into `<scope>/skills/`. */
+  skills: string[]
+  /** Command names authored into `<scope>/commands/`. */
+  commands: string[]
+  /** MCP server (connector) names written into `<scope>/mcp.json`. */
+  connectors: string[]
+}
+
+/**
+ * A plugin installed from a git repo (or a local folder), recorded in
+ * `~/.sylor/plugins.json` so the UI can list and cleanly remove it. A plugin is
+ * just a bundle: on install its skills/commands/connectors are unpacked into the
+ * ordinary `.sylor` locations, so they behave identically to hand-authored ones.
+ */
+export interface InstalledPlugin {
+  /** Unique key: derived from the repo/folder name (slugified). */
+  name: string
+  /** The source it was installed from (a git URL or a local path), for display + reinstall. */
+  source: string
+  /** Which scope its contents were written to. */
+  scope: ConfigScope
+  /** Epoch ms the plugin was installed. */
+  installedAt: number
+  /** Exactly what was added, for a clean uninstall. */
+  contents: PluginContents
+}
+
+/** Where to install a plugin from + into which scope. */
+export interface PluginInstallInput {
+  /** A GitHub `owner/repo`, a full git URL, or a local folder path. */
+  source: string
+  scope: ConfigScope
+}
+
+/** Outcome of an install attempt: the recorded plugin, or a friendly error. */
+export interface PluginInstallResult {
+  ok: boolean
+  /** Present when `ok` is false (bad source, git missing, nothing found, write failed). */
+  error?: string
+  /** The installed plugin record (absent when `ok` is false). */
+  plugin?: InstalledPlugin
+  /** Fresh list of installed plugins for the UI. */
+  plugins: InstalledPlugin[]
+}
+
+/**
+ * Renderer-facing API for plugins. A plugin is a git repo (or local folder) that
+ * bundles any of: `skills/<name>/SKILL.md`, `commands/*.md`, and an `mcp.json` of
+ * connectors. Installing clones it, unpacks its contents into `~/.sylor` (or the
+ * project), and records the set so it can be removed cleanly later.
+ */
+export interface PluginsApi {
+  /** Every installed plugin, most-recent first. */
+  list: () => Promise<InstalledPlugin[]>
+  /** Clone + unpack a plugin's contents into the chosen scope; returns the record. */
+  install: (input: PluginInstallInput) => Promise<PluginInstallResult>
+  /** Withdraw a plugin's installed skills/commands/connectors + its record. */
+  remove: (name: string) => Promise<InstalledPlugin[]>
 }
 
 // ---------------------------------------------------------------------------

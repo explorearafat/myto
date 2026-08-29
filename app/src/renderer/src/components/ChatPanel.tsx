@@ -33,10 +33,13 @@ import { lineDiffStats, estimateTokens, formatCount } from '../lib/diff-stats'
 import type {
   AgentRole,
   Attachment,
+  CommandInfo,
+  SkillStatus,
   ToolDecision,
   ToolProposal,
   WorkflowStage
 } from '@shared/types'
+import { parseSlash, expandCommand } from '@shared/commands'
 
 /** Human-readable byte size for an attachment chip (e.g. "12.4 KB"). */
 function formatBytes(bytes: number): string {
@@ -416,14 +419,32 @@ function toolLabel(card: ToolCardUI): string {
     if (proposal.op === 'search_files') {
       return `${tense('Search', 'Searching', 'Searched')} "${proposal.query ?? ''}"`
     }
+    if (proposal.op === 'find_files') {
+      return `${tense('Find', 'Finding', 'Found')} ${proposal.glob ?? ''}`
+    }
     if (proposal.op === 'list_files') {
       return `${tense('List', 'Listing', 'Listed')} ${proposal.path}`
     }
     // "Read" is its own past tense, so this row reads naturally in every state.
     return `${tense('Read', 'Reading', 'Read')} ${basename(proposal.path)}`
   }
+  if (proposal.kind === 'web_fetch') {
+    return `${tense('Fetch', 'Fetching', 'Fetched')} ${hostOf(proposal.url)}`
+  }
+  if (proposal.kind === 'install_plugin') {
+    return `${tense('Install', 'Installing', 'Installed')} ${proposal.source}`
+  }
   const head = proposal.command.trim().split(/\s+/).slice(0, 3).join(' ')
   return `${tense('Run', 'Running', 'Ran')} ${head}`
+}
+
+/** The host of a URL for a compact label, falling back to the raw string. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host
+  } catch {
+    return url
+  }
 }
 
 /** Full, untruncated description of a proposal (used as a hover title). */
@@ -433,8 +454,12 @@ function proposalFullTitle(proposal: ToolProposal): string {
   if (proposal.kind === 'read') {
     return proposal.op === 'search_files'
       ? `search "${proposal.query ?? ''}" in ${proposal.path}`
-      : proposal.path
+      : proposal.op === 'find_files'
+        ? `find "${proposal.glob ?? ''}" in ${proposal.path}`
+        : proposal.path
   }
+  if (proposal.kind === 'web_fetch') return proposal.url
+  if (proposal.kind === 'install_plugin') return `install ${proposal.source} (${proposal.scope})`
   return proposal.command
 }
 
@@ -449,6 +474,8 @@ function cardError(card: ToolCardUI): string | null {
   if (r?.kind === 'write_file' && !r.ok) return r.error ?? 'write failed'
   if (r?.kind === 'read' && !r.ok) return r.error ?? 'read failed'
   if (r?.kind === 'mcp_call' && !r.ok) return r.error ?? 'call failed'
+  if (r?.kind === 'web_fetch' && !r.ok) return r.error ?? 'fetch failed'
+  if (r?.kind === 'install_plugin' && !r.ok) return r.error ?? 'install failed'
   if (r?.kind === 'run_command' && r.exitCode !== 0 && r.exitCode !== null) return `exit ${r.exitCode}`
   return null
 }
@@ -544,6 +571,48 @@ function ToolResultFooter({ card }: { card: ToolCardUI }) {
       </div>
     )
   }
+  if (result.kind === 'web_fetch') {
+    if (!result.ok) {
+      return (
+        <div className="border-t border-border bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-200/90">
+          {result.error ?? 'Fetch failed.'}
+        </div>
+      )
+    }
+    return (
+      <div className="border-t border-border bg-bg px-3 py-1.5">
+        {result.truncated && (
+          <div className="mb-1 text-[10px] text-amber-300">content truncated</div>
+        )}
+        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-text/80">
+          {result.output.trimEnd()}
+        </pre>
+      </div>
+    )
+  }
+  if (result.kind === 'install_plugin') {
+    if (!result.ok) {
+      return (
+        <div className="border-t border-border bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-200/90">
+          {result.error ?? 'Install failed.'}
+        </div>
+      )
+    }
+    const installOut = result.output.trimEnd()
+    return (
+      <div className="border-t border-border bg-bg px-3 py-1.5">
+        <div className="mb-1 flex items-center gap-2 text-[10px] text-muted">
+          <span className="text-emerald-300">installed</span>
+          {result.plugin && <span>{result.plugin}</span>}
+        </div>
+        {installOut.length > 0 && (
+          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-text/80">
+            {installOut}
+          </pre>
+        )}
+      </div>
+    )
+  }
   // run_command
   const output = result.output.trimEnd()
   return (
@@ -624,7 +693,16 @@ function ToolCard({ card }: { card: ToolCardUI }) {
   // Reads get their own much quieter row — they carry no diff and no approval.
   if (proposal.kind === 'read') return <ReadCard card={card} />
   const language = proposal.kind === 'write_file' ? languageForPath(proposal.path) : 'plaintext'
-  const icon = proposal.kind === 'write_file' ? '✎' : proposal.kind === 'mcp_call' ? '⚙' : '❯'
+  const icon =
+    proposal.kind === 'write_file'
+      ? '✎'
+      : proposal.kind === 'mcp_call'
+        ? '⚙'
+        : proposal.kind === 'web_fetch'
+          ? '🌐'
+          : proposal.kind === 'install_plugin'
+            ? '📦'
+            : '❯'
   const stats =
     proposal.kind === 'write_file' ? lineDiffStats(proposal.oldContent, proposal.newContent) : null
   const error = cardError(card)
@@ -704,6 +782,17 @@ function ToolCard({ card }: { card: ToolCardUI }) {
               <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] text-text/90">
                 {JSON.stringify(proposal.arguments, null, 2)}
               </pre>
+            </div>
+          ) : proposal.kind === 'web_fetch' ? (
+            <div className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
+              <span className="text-muted">🌐 </span>
+              {proposal.url}
+            </div>
+          ) : proposal.kind === 'install_plugin' ? (
+            <div className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
+              <span className="text-muted">📦 </span>
+              {proposal.source}
+              <span className="text-muted"> · {proposal.scope}</span>
             </div>
           ) : (
             <pre className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
@@ -1157,8 +1246,10 @@ function AssistantMessage({ message, isActive, status, cards, agents, agentTools
     let chars = message.content.length
     for (const c of cards) {
       if (c.proposal.kind === 'write_file') chars += c.proposal.newContent.length
-      // A read's output is fed straight back to the model, so it costs context too.
+      // A read's (or web fetch's) output is fed straight back to the model, so it
+      // costs context too.
       if (c.result?.kind === 'read') chars += c.result.output.length
+      if (c.result?.kind === 'web_fetch') chars += c.result.output.length
     }
     for (const a of agents) chars += a.content.length
     return Math.round(chars / 4)
@@ -1297,9 +1388,11 @@ function PermissionBar({
               ? '✎'
               : card.proposal.kind === 'mcp_call'
                 ? '⚙'
-                : card.proposal.kind === 'read'
-                  ? '⌕'
-                  : '❯'
+                : card.proposal.kind === 'web_fetch'
+                  ? '🌐'
+                  : card.proposal.kind === 'read'
+                    ? '⌕'
+                    : '❯'
           return (
             <div
               key={card.id}
@@ -1462,6 +1555,169 @@ function ChatHeader({ onNewChat }: { onNewChat: () => void }) {
   )
 }
 
+/**
+ * One entry in the composer's `/` menu. `command` is a disk-authored template,
+ * `skill` an enabled skill surfaced as a quick "use this skill" shortcut, and
+ * `builtin` a hard-wired action (currently just `/install`). All three carry a
+ * `name` (typed after the slash), a one-line `description`, and an optional
+ * `hint` shown after the name to preview expected arguments.
+ */
+type SlashItem =
+  | { kind: 'command'; name: string; description: string; hint: string; body: string }
+  | { kind: 'skill'; name: string; description: string; hint: string; title: string }
+  | { kind: 'builtin'; name: string; description: string; hint: string }
+
+/**
+ * Turns a `/install <source> [scope]` line into a natural-language instruction
+ * the engine reliably answers with an `install_plugin` tool block. The scope
+ * word (project|global) is optional and stripped from the source; a bare
+ * `/install` (no source) yields a prompt asking the user for the repo, so the
+ * shortcut is still useful when typed on its own. Fulfils the user's ask:
+ * "Sylor install this skill" → clone the repo and add all its skills.
+ */
+function buildInstallPrompt(args: string): string {
+  const words = args.trim().split(/\s+/).filter(Boolean)
+  let scope: 'global' | 'project' | null = null
+  if (words.length > 0) {
+    const last = words[words.length - 1].toLowerCase()
+    if (last === 'project' || last === 'global') {
+      scope = last
+      words.pop()
+    }
+  }
+  const source = words.join(' ').trim()
+  if (!source) {
+    return (
+      'I want to install a Sylor plugin — a bundle of skills, commands, and ' +
+      'connectors from a Git repository or a local folder. Ask me for the ' +
+      'GitHub repository (a URL or `owner/repo`) or the folder path, then use ' +
+      'the install_plugin tool to install it.'
+    )
+  }
+  const scopeClause = scope ? ` Install it at ${scope} scope.` : ''
+  return (
+    `Install the Sylor plugin from "${source}" using the install_plugin tool.` +
+    `${scopeClause} After it installs, briefly list the skills, commands, and ` +
+    'connectors it added so I know what became available.'
+  )
+}
+
+/** Small leading glyph for each slash-menu row, keyed by item kind. */
+function SlashItemIcon({ kind }: { kind: SlashItem['kind'] }): ReactNode {
+  if (kind === 'skill') {
+    return (
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path
+          d="M8 2l1.6 3.3L13 6l-2.5 2.4L11 12 8 10.3 5 12l.5-3.6L3 6l3.4-.7L8 2Z"
+          stroke="currentColor"
+          strokeWidth="1.2"
+          strokeLinejoin="round"
+        />
+      </svg>
+    )
+  }
+  if (kind === 'builtin') {
+    return (
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path
+          d="M6 2v3M10 2v3M4.5 5h7v3.5a3.5 3.5 0 0 1-7 0V5ZM8 12v2.5"
+          stroke="currentColor"
+          strokeWidth="1.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    )
+  }
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M3 4l3 4-3 4M8 12h5"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+/**
+ * The `/`-triggered command palette shown directly above the textarea (like the
+ * Claude CLI's slash menu). Purely presentational: the composer owns the item
+ * list, the active index, and keyboard navigation; this renders the rows and
+ * reports hover/click. Highlighting the active row and scrolling it into view is
+ * handled here so ↑/↓ stays visible in a long list.
+ */
+const SlashMenu = memo(function SlashMenu({
+  items,
+  activeIndex,
+  onSelect,
+  onHover
+}: {
+  items: SlashItem[]
+  activeIndex: number
+  onSelect: (item: SlashItem) => void
+  onHover: (index: number) => void
+}) {
+  const listRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = listRef.current?.children[activeIndex] as HTMLElement | undefined
+    el?.scrollIntoView({ block: 'nearest' })
+  }, [activeIndex])
+  return (
+    <div className="absolute bottom-full left-0 right-0 mb-2 overflow-hidden rounded-lg border border-border bg-surface shadow-lg">
+      <div className="border-b border-border px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-muted">
+        Commands
+      </div>
+      <div ref={listRef} className="max-h-64 overflow-y-auto py-1">
+        {items.map((item, i) => (
+          <button
+            key={`${item.kind}:${item.name}`}
+            type="button"
+            // Use onMouseDown (not onClick) so the textarea doesn't blur first,
+            // which would otherwise steal the click and lose composer focus.
+            onMouseDown={(e) => {
+              e.preventDefault()
+              onSelect(item)
+            }}
+            onMouseEnter={() => onHover(i)}
+            className={
+              'flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors ' +
+              (i === activeIndex ? 'bg-primary/10' : 'hover:bg-surface-2')
+            }
+          >
+            <span
+              className={
+                'grid h-6 w-6 shrink-0 place-items-center rounded-md ' +
+                (i === activeIndex ? 'text-primary' : 'text-muted')
+              }
+            >
+              <SlashItemIcon kind={item.kind} />
+            </span>
+            <span className="flex min-w-0 flex-1 items-baseline gap-2">
+              <span className="shrink-0 font-mono text-[12px] font-medium text-text">
+                /{item.name}
+              </span>
+              {item.hint && (
+                <span className="shrink-0 font-mono text-[11px] text-muted">{item.hint}</span>
+              )}
+              {item.description && (
+                <span className="min-w-0 truncate text-[11px] text-muted">{item.description}</span>
+              )}
+            </span>
+            {item.kind !== 'command' && (
+              <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-muted">
+                {item.kind === 'skill' ? 'skill' : 'built-in'}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+})
+
 export function ChatPanel() {
   const messages = useChatStore((s) => s.messages)
   const tools = useChatStore((s) => s.tools)
@@ -1483,6 +1739,14 @@ export function ChatPanel() {
   // Files staged in the composer (already stored on disk as pending rows).
   const [pending, setPending] = useState<PendingAttachment[]>([])
   const [dragging, setDragging] = useState(false)
+  // Slash-menu sources: disk commands + enabled skills, loaded lazily when the
+  // user starts a `/` line (so freshly-added ones show without a restart).
+  const [commands, setCommands] = useState<CommandInfo[]>([])
+  const [skills, setSkills] = useState<SkillStatus[]>([])
+  const [menuIndex, setMenuIndex] = useState(0)
+  // Escape closes the menu without clearing the text; reset when the line stops
+  // being a slash query so the next `/` reopens it.
+  const [menuDismissed, setMenuDismissed] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -1577,6 +1841,113 @@ export function ChatPanel() {
     return estimateTokens('x'.repeat(chars))
   }, [messages, input])
 
+  // ── Slash `/` command palette ────────────────────────────────────────────
+  // A line is a slash query while it's a leading `/` followed only by name
+  // characters (no space yet). The moment a space is typed the user is entering
+  // arguments, so the menu closes and `submit` expands the template.
+  const slashActive = /^\/[A-Za-z0-9_-]*$/.test(input)
+  const slashQuery = slashActive ? input.slice(1).toLowerCase() : ''
+
+  // Lazily (re)load commands + enabled skills whenever a slash query begins, so
+  // anything added via Settings or a plugin install shows up without a restart.
+  useEffect(() => {
+    if (!slashActive) return
+    let alive = true
+    void (async () => {
+      try {
+        const [cmds, sks] = await Promise.all([
+          window.sylor.commands.list(),
+          window.sylor.skills.list()
+        ])
+        if (!alive) return
+        setCommands(cmds)
+        setSkills(sks.filter((s) => s.enabled))
+      } catch (err) {
+        console.error('[sylor] failed to load slash sources:', err)
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [slashActive])
+
+  // The full, unfiltered palette: the built-in /install, then user commands,
+  // then enabled skills. Filtering by the typed name happens below.
+  const slashItems = useMemo<SlashItem[]>(() => {
+    const all: SlashItem[] = [
+      {
+        kind: 'builtin',
+        name: 'install',
+        description: 'Install a plugin (skills, commands, connectors) from a repo',
+        hint: '<owner/repo> [project]'
+      }
+    ]
+    for (const c of commands) {
+      all.push({
+        kind: 'command',
+        name: c.name,
+        description: c.description,
+        hint: c.argumentHint,
+        body: c.body
+      })
+    }
+    for (const s of skills) {
+      all.push({
+        kind: 'skill',
+        name: s.name,
+        title: s.title || s.name,
+        description: s.description,
+        hint: ''
+      })
+    }
+    const q = slashQuery
+    const matched = q
+      ? all.filter(
+          (it) =>
+            it.name.toLowerCase().includes(q) || it.description.toLowerCase().includes(q)
+        )
+      : all
+    return matched.slice(0, 8)
+  }, [commands, skills, slashQuery])
+
+  const menuOpen = slashActive && !menuDismissed && slashItems.length > 0
+
+  // Keep the highlight in range as the filter narrows, and let a new `/` reopen
+  // a menu that was dismissed with Escape.
+  useEffect(() => {
+    setMenuIndex(0)
+  }, [slashQuery])
+  useEffect(() => {
+    if (!slashActive) setMenuDismissed(false)
+  }, [slashActive])
+
+  // Pick an item: drop `/<name> ` into the composer (trailing space closes the
+  // menu and positions the caret for arguments) and refocus the textarea.
+  const applySlash = (item: SlashItem): void => {
+    setInput(`/${item.name} `)
+    setMenuDismissed(false)
+    setMenuIndex(0)
+    requestAnimationFrame(() => textareaRef.current?.focus())
+  }
+
+  // Expand a slash line into what actually gets sent. A user command expands its
+  // template (`$ARGUMENTS`/`$1`…); `/install` becomes an install instruction; a
+  // skill becomes a "use this skill" instruction; anything else is sent as-is.
+  const resolveSlash = (text: string): string => {
+    const parsed = parseSlash(text)
+    if (!parsed) return text
+    const lc = parsed.name.toLowerCase()
+    const cmd = commands.find((c) => c.name.toLowerCase() === lc)
+    if (cmd) return expandCommand(cmd.body, parsed.args)
+    if (lc === 'install') return buildInstallPrompt(parsed.args)
+    const skill = skills.find((s) => s.name.toLowerCase() === lc)
+    if (skill) {
+      const base = `Use the ${skill.title || skill.name} skill.`
+      return parsed.args ? `${base}\n\n${parsed.args}` : base
+    }
+    return text
+  }
+
   // Auto-scroll to the newest content as it streams in (messages or tool cards).
   useLayoutEffect(() => {
     const el = scrollRef.current
@@ -1645,8 +2016,11 @@ export function ChatPanel() {
   }
 
   const submit = async (): Promise<void> => {
-    const text = input.trim()
-    if ((!text && pending.length === 0) || running || needsFolder) return
+    const raw = input.trim()
+    if ((!raw && pending.length === 0) || running || needsFolder) return
+    // Expand a leading `/command` into its prompt before sending (Claude-CLI
+    // style). Non-slash text and unknown slashes pass through unchanged.
+    const text = resolveSlash(raw)
     const outgoing: OutgoingAttachment[] = pending.map((p) => ({
       attachment: p.attachment,
       ...(p.textContent != null ? { textContent: p.textContent } : {})
@@ -1680,6 +2054,31 @@ export function ChatPanel() {
   }
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
+    // While the slash menu is open it owns the arrows, Enter/Tab (select), and
+    // Escape (dismiss); Enter must not also submit the raw `/name` line.
+    if (menuOpen) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault()
+        setMenuIndex((i) => (i + 1) % slashItems.length)
+        return
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault()
+        setMenuIndex((i) => (i - 1 + slashItems.length) % slashItems.length)
+        return
+      }
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        event.preventDefault()
+        const item = slashItems[menuIndex]
+        if (item) applySlash(item)
+        return
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setMenuDismissed(true)
+        return
+      }
+    }
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       void submit()
@@ -1745,10 +2144,18 @@ export function ChatPanel() {
         ) : (
           <div
             className={
-              'flex items-end gap-2 rounded-lg border bg-surface px-3 py-2 focus-within:border-primary/50 ' +
+              'relative flex items-end gap-2 rounded-lg border bg-surface px-3 py-2 focus-within:border-primary/50 ' +
               (dragging ? 'border-primary' : 'border-border')
             }
           >
+            {menuOpen && (
+              <SlashMenu
+                items={slashItems}
+                activeIndex={menuIndex}
+                onSelect={applySlash}
+                onHover={setMenuIndex}
+              />
+            )}
             <input
               ref={fileInputRef}
               type="file"

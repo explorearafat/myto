@@ -42,7 +42,10 @@ export type ParsedTool =
   | { tool: 'read_file'; path: string; offset?: number; limit?: number }
   | { tool: 'list_files'; path: string }
   | { tool: 'search_files'; query: string; path: string; glob?: string }
+  | { tool: 'find_files'; glob: string; path: string }
   | { tool: 'run_command'; command: string }
+  | { tool: 'web_fetch'; url: string }
+  | { tool: 'install_plugin'; source: string; scope: 'global' | 'project' }
   | { tool: 'remember'; note: string }
   | { tool: 'remember_user'; note: string }
   | { tool: 'mcp_call'; server: string; name: string; arguments: Record<string, unknown> }
@@ -179,9 +182,36 @@ export function parseToolBlock(raw: string): ParsedTool | null {
     }
     return null
   }
+  if (rec.tool === 'find_files') {
+    // `glob` is the query here (the name/path pattern); `path` optionally narrows
+    // the search root, defaulting to the whole project.
+    if (typeof rec.glob === 'string' && rec.glob.trim()) {
+      const path = typeof rec.path === 'string' && rec.path.trim() ? rec.path : '.'
+      return { tool: 'find_files', glob: rec.glob, path }
+    }
+    return null
+  }
   if (rec.tool === 'run_command') {
     if (typeof rec.command === 'string' && rec.command.trim()) {
       return { tool: 'run_command', command: rec.command }
+    }
+    return null
+  }
+  if (rec.tool === 'web_fetch') {
+    // Accept an http/https URL; other schemes and non-strings are rejected here so
+    // a malformed block never reaches the fetcher.
+    if (typeof rec.url === 'string' && /^https?:\/\/\S+$/i.test(rec.url.trim())) {
+      return { tool: 'web_fetch', url: rec.url.trim() }
+    }
+    return null
+  }
+  if (rec.tool === 'install_plugin') {
+    // `source` is the repo/URL/folder to install; validated for shape only here
+    // (normalizePluginSource does the real parsing downstream). `scope` defaults to
+    // 'global' — a plugin usually applies everywhere — and only 'project' overrides.
+    if (typeof rec.source === 'string' && rec.source.trim()) {
+      const scope = rec.scope === 'project' ? 'project' : 'global'
+      return { tool: 'install_plugin', source: rec.source.trim(), scope }
     }
     return null
   }

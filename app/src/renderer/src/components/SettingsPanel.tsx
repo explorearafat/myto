@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type {
   AuthSchema,
+  CommandInfo,
   ConfigScope,
   GatewayConfig,
+  InstalledPlugin,
   McpCategory,
   McpConnectionState,
   McpRisk,
@@ -27,7 +29,14 @@ const AUTH_SCHEMA_LABELS: Record<AuthSchema, string> = {
 }
 
 /** The Settings window's left-rail categories (Claude-Desktop style). */
-type SettingsCategory = 'general' | 'appearance' | 'model' | 'connectors' | 'skills'
+type SettingsCategory =
+  | 'general'
+  | 'appearance'
+  | 'model'
+  | 'connectors'
+  | 'skills'
+  | 'commands'
+  | 'plugins'
 
 /** Title + one-line subtitle shown in each category pane's header. */
 const CATEGORY_META: Record<SettingsCategory, { label: string; subtitle: string }> = {
@@ -35,7 +44,9 @@ const CATEGORY_META: Record<SettingsCategory, { label: string; subtitle: string 
   appearance: { label: 'Appearance', subtitle: 'Theme and visual style.' },
   model: { label: 'Model', subtitle: 'Provider connection and the model Sylor talks to.' },
   connectors: { label: 'Connectors', subtitle: 'MCP servers that add tools, configured on disk.' },
-  skills: { label: 'Skills', subtitle: 'Capability folders the model can invoke on demand.' }
+  skills: { label: 'Skills', subtitle: 'Capability folders the model can invoke on demand.' },
+  commands: { label: 'Commands', subtitle: 'Reusable slash-command prompts, surfaced with “/”.' },
+  plugins: { label: 'Plugins', subtitle: 'Install a repo of skills, commands, and connectors at once.' }
 }
 
 /** Small monochrome glyph for each category, tinted by the nav's active state. */
@@ -92,10 +103,43 @@ function CategoryIcon({ id }: { id: SettingsCategory }): ReactNode {
           />
         </svg>
       )
+    case 'commands':
+      return (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <rect x="2.5" y="3" width="11" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+          <path
+            d="M5 6.5l2 1.5-2 1.5M8.5 10h2.5"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )
+    case 'plugins':
+      return (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path
+            d="M6 2.5v2.2M10 2.5v2.2M4.5 4.7h7v3.1a3.5 3.5 0 0 1-7 0V4.7ZM8 11.3v2.2"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )
   }
 }
 
-const CATEGORY_ORDER: SettingsCategory[] = ['general', 'appearance', 'model', 'connectors', 'skills']
+const CATEGORY_ORDER: SettingsCategory[] = [
+  'general',
+  'appearance',
+  'model',
+  'connectors',
+  'skills',
+  'commands',
+  'plugins'
+]
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Reusable controls (Claude-settings row vocabulary)
@@ -1345,8 +1389,358 @@ function SkillsSection() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Commands + Plugins panes
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Modal to author a new slash command written to `<scope>/commands/<name>.md`. */
+function AddCommandModal({
+  hasProject,
+  onClose,
+  onAdded
+}: {
+  hasProject: boolean
+  onClose: () => void
+  onAdded: (commands: CommandInfo[]) => void
+}) {
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [argumentHint, setArgumentHint] = useState('')
+  const [body, setBody] = useState('')
+  const [scope, setScope] = useState<ConfigScope>('global')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const submit = async (): Promise<void> => {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await window.sylor.commands.add({ name, description, argumentHint, body, scope })
+      if (res.ok) onAdded(res.commands)
+      else setError(res.error ?? 'Could not add the command.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      title="Add a command"
+      subtitle="A command is a reusable prompt you trigger by typing “/name” in the composer. Use $ARGUMENTS or $1, $2… to drop in whatever you type after it."
+      onClose={onClose}
+    >
+      <div className="flex flex-col gap-3">
+        <Field label="Name" value={name} onChange={setName} placeholder="e.g. review" />
+        <Field
+          label="Description"
+          value={description}
+          onChange={setDescription}
+          placeholder="One line shown in the / menu"
+        />
+        <Field
+          label="Argument hint (optional)"
+          value={argumentHint}
+          onChange={setArgumentHint}
+          placeholder="e.g. [file] or <branch>"
+        />
+        <TextArea
+          label="Prompt"
+          value={body}
+          onChange={setBody}
+          placeholder="Review the changes in $ARGUMENTS for correctness and style…"
+          rows={7}
+          hint="Sent as your message when you run the command. $ARGUMENTS / $1… expand to your input."
+        />
+        <ScopePicker scope={scope} hasProject={hasProject} onChange={setScope} />
+        {error && <p className="text-[12px] text-red-300">{error}</p>}
+        <ModalActions
+          onClose={onClose}
+          onSubmit={() => void submit()}
+          submitLabel="Add command"
+          busy={busy}
+          disabled={!name.trim() || !body.trim()}
+        />
+      </div>
+    </Modal>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The Settings window
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Plugins pane. A plugin is a git repo (or local folder) bundling skills,
+ * commands, and connectors; installing unpacks them into the ordinary `.sylor`
+ * locations. The user pastes an `owner/repo`, a git URL, or a local path, picks
+ * a scope, and installs; the list shows what each plugin added and offers a
+ * clean uninstall. Mirrors the in-chat `install_plugin` tool.
+ */
+function PluginsSection() {
+  const [plugins, setPlugins] = useState<InstalledPlugin[]>([])
+  const [source, setSource] = useState('')
+  const [scope, setScope] = useState<ConfigScope>('global')
+  const [hasProject, setHasProject] = useState(false)
+  const [installing, setInstalling] = useState(false)
+  const [removing, setRemoving] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void window.sylor.plugins.list().then((p) => {
+      if (!cancelled) setPlugins(p)
+    })
+    // Reuse the skills config paths purely to learn whether a project is open
+    // (so the project-scope option is offered only when it can be written).
+    void window.sylor.skills.configPaths().then((p) => {
+      if (!cancelled) setHasProject(!!p.project)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const handleInstall = async (): Promise<void> => {
+    if (installing || !source.trim()) return
+    setInstalling(true)
+    setError(null)
+    try {
+      const res = await window.sylor.plugins.install({ source: source.trim(), scope })
+      if (res.ok) {
+        setPlugins(res.plugins)
+        setSource('')
+      } else {
+        setError(res.error ?? 'Could not install the plugin.')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setInstalling(false)
+    }
+  }
+
+  const handleRemove = async (plugin: InstalledPlugin): Promise<void> => {
+    if (!window.confirm(`Remove "${plugin.name}"? This deletes the skills, commands, and connectors it installed.`))
+      return
+    setRemoving(plugin.name)
+    try {
+      setPlugins(await window.sylor.plugins.remove(plugin.name))
+    } finally {
+      setRemoving(null)
+    }
+  }
+
+  // PLUGINS_SECTION_RENDER
+  return (
+    <section className="space-y-4">
+      <div className="space-y-2 rounded-md border border-border bg-bg px-3 py-3">
+        <Field
+          label="Repository or folder"
+          value={source}
+          onChange={setSource}
+          placeholder="owner/repo, https://…​.git, or a local folder path"
+          hint="A GitHub owner/repo, any git URL, or a path to a local folder bundling skills / commands / an mcp.json."
+        />
+        <ScopePicker scope={scope} hasProject={hasProject} onChange={setScope} />
+        {error && <p className="text-[12px] text-red-300">{error}</p>}
+        <button
+          type="button"
+          onClick={() => void handleInstall()}
+          disabled={installing || !source.trim()}
+          className="w-full rounded-md bg-primary py-2 text-[13px] font-semibold text-bg transition-colors hover:bg-primary/90 disabled:opacity-50"
+        >
+          {installing ? 'Installing…' : 'Install plugin'}
+        </button>
+      </div>
+
+      {plugins.length === 0 ? (
+        <p className="text-[12px] text-muted">
+          No plugins installed. Paste a repo above, or just tell Sylor “install this skill:
+          owner/repo” in chat.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {plugins.map((p) => {
+            const counts = [
+              [p.contents.skills.length, 'skill'],
+              [p.contents.commands.length, 'command'],
+              [p.contents.connectors.length, 'connector']
+            ] as const
+            const summary = counts
+              .filter(([n]) => n > 0)
+              .map(([n, label]) => `${n} ${label}${n === 1 ? '' : 's'}`)
+              .join(' · ')
+            return (
+              <li key={p.name} className="rounded-md border border-border bg-bg px-3 py-2.5">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="truncate text-[13px] font-medium text-text">{p.name}</span>
+                      <Chip tone={p.scope === 'project' ? 'info' : 'muted'}>
+                        {p.scope === 'project' ? 'Project' : 'Global'}
+                      </Chip>
+                    </div>
+                    <p className="mt-1 truncate font-mono text-[11px] text-muted">{p.source}</p>
+                    {summary && <p className="mt-0.5 text-[11px] text-muted/80">Added {summary}</p>}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleRemove(p)}
+                    disabled={removing === p.name}
+                    className="shrink-0 text-[10px] font-medium text-muted transition-colors hover:text-red-300 disabled:opacity-50"
+                  >
+                    {removing === p.name ? 'Removing…' : 'Remove'}
+                  </button>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+
+      <p className="text-[11px] text-muted">
+        Installing clones the source and unpacks its skills, commands, and connectors into your
+        {scope === 'project' ? ' project' : ' global'} .sylor folder. Removing withdraws exactly what
+        it added. Requires git on your PATH for remote repos.
+      </p>
+    </section>
+  )
+}
+
+/**
+ * Commands pane. Commands are disk-authored Markdown prompt templates in
+ * `~/.sylor/commands/*.md` (global) + `<root>/.sylor/commands/*.md` (project);
+ * the composer surfaces them in the `/` menu and expands `/name args` into the
+ * body before the turn runs. This lists them, authors new ones, and removes
+ * them — mirroring the Skills pane. Self-contained fetch state.
+ */
+function CommandsSection() {
+  const [commands, setCommands] = useState<CommandInfo[]>([])
+  const [paths, setPaths] = useState<{ global: string; project: string | null } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [removing, setRemoving] = useState<string | null>(null)
+  const [showAdd, setShowAdd] = useState(false)
+  const [query, setQuery] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    void window.sylor.commands.list().then((c) => {
+      if (!cancelled) setCommands(c)
+    })
+    void window.sylor.commands.configPaths().then((p) => {
+      if (!cancelled) setPaths(p)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const handleReload = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      setCommands(await window.sylor.commands.reload())
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleRemove = async (cmd: CommandInfo): Promise<void> => {
+    if (!window.confirm(`Remove the "/${cmd.name}" command? This deletes its .md file.`)) return
+    setRemoving(cmd.name)
+    try {
+      setCommands(await window.sylor.commands.remove(cmd.name))
+    } finally {
+      setRemoving(null)
+    }
+  }
+
+  const hasProject = !!paths?.project
+  const q = query.trim().toLowerCase()
+  const filtered = q
+    ? commands.filter((c) => [c.name, c.description].some((f) => f.toLowerCase().includes(q)))
+    : commands
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[12px] text-muted">
+          {commands.length} command{commands.length === 1 ? '' : 's'}
+        </span>
+        <button
+          type="button"
+          onClick={handleReload}
+          disabled={busy}
+          className="text-[12px] font-medium text-primary transition-colors hover:text-primary/80 disabled:opacity-50"
+        >
+          {busy ? 'Reloading…' : 'Reload'}
+        </button>
+      </div>
+
+      <SearchInput value={query} onChange={setQuery} placeholder="Search commands…" />
+
+      {commands.length === 0 ? (
+        <p className="text-[12px] text-muted">
+          No commands yet. Use “Add a command” below, then type “/” in the composer to run it.
+        </p>
+      ) : filtered.length === 0 ? (
+        <p className="text-[12px] text-muted">No commands match “{query}”.</p>
+      ) : (
+        <ul className="space-y-2">
+          {filtered.map((c) => (
+            <li key={c.name} className="rounded-md border border-border bg-bg px-3 py-2.5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="truncate font-mono text-[13px] font-medium text-text">
+                      /{c.name}
+                    </span>
+                    {c.argumentHint && (
+                      <span className="truncate font-mono text-[11px] text-muted">{c.argumentHint}</span>
+                    )}
+                    <Chip tone={c.source === 'project' ? 'info' : 'muted'}>
+                      {c.source === 'project' ? 'Project' : 'Global'}
+                    </Chip>
+                  </div>
+                  {c.description && (
+                    <p className="mt-1 text-[11px] leading-relaxed text-muted">{c.description}</p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleRemove(c)}
+                  disabled={removing === c.name}
+                  className="shrink-0 text-[10px] font-medium text-muted transition-colors hover:text-red-300 disabled:opacity-50"
+                >
+                  {removing === c.name ? 'Removing…' : 'Remove'}
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <AddButton label="+ Add a command" onClick={() => setShowAdd(true)} />
+
+      <p className="text-[11px] text-muted">
+        Type “/” at the start of the composer to pick a command; its prompt is sent as your message,
+        with $ARGUMENTS / $1… replaced by whatever you type after the name.
+      </p>
+
+      {showAdd && (
+        <AddCommandModal
+          hasProject={hasProject}
+          onClose={() => setShowAdd(false)}
+          onAdded={(next) => {
+            setCommands(next)
+            setShowAdd(false)
+          }}
+        />
+      )}
+    </section>
+  )
+}
 
 export function SettingsPanel() {
   const storedSettings = useAppStore((s) => s.settings)
@@ -1512,6 +1906,8 @@ export function SettingsPanel() {
             {category === 'appearance' && <AppearancePane />}
             {category === 'connectors' && <McpSection />}
             {category === 'skills' && <SkillsSection />}
+            {category === 'commands' && <CommandsSection />}
+            {category === 'plugins' && <PluginsSection />}
 
             {category === 'model' && (
               <div className="space-y-5">

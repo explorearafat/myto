@@ -219,6 +219,67 @@ describe('parseToolBlock', () => {
     expect(parseToolBlock('{ "tool": "search_files", "path": "src" }')).toBeNull()
     expect(parseToolBlock('{ "tool": "search_files", "query": "" }')).toBeNull()
   })
+
+  it('parses a find_files block, defaulting the search root and keeping the glob', () => {
+    expect(parseToolBlock('{ "tool": "find_files", "glob": "**/*.ts" }')).toEqual({
+      tool: 'find_files',
+      glob: '**/*.ts',
+      path: '.'
+    })
+    expect(parseToolBlock('{ "tool": "find_files", "glob": "*.tsx", "path": "src" }')).toEqual({
+      tool: 'find_files',
+      glob: '*.tsx',
+      path: 'src'
+    })
+  })
+
+  it('rejects a find_files with a blank or missing glob', () => {
+    expect(parseToolBlock('{ "tool": "find_files", "path": "src" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "find_files", "glob": "  " }')).toBeNull()
+  })
+
+  it('parses a web_fetch block, trimming and requiring an http(s) URL', () => {
+    expect(parseToolBlock('{ "tool": "web_fetch", "url": " https://example.com/doc " }')).toEqual({
+      tool: 'web_fetch',
+      url: 'https://example.com/doc'
+    })
+    expect(parseToolBlock('{ "tool": "web_fetch", "url": "http://example.com" }')).toEqual({
+      tool: 'web_fetch',
+      url: 'http://example.com'
+    })
+  })
+
+  it('rejects a web_fetch with a non-http(s) or missing URL', () => {
+    expect(parseToolBlock('{ "tool": "web_fetch", "url": "file:///etc/passwd" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "web_fetch", "url": "ftp://host/x" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "web_fetch", "url": "example.com" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "web_fetch" }')).toBeNull()
+  })
+
+  it('parses an install_plugin block, trimming the source and defaulting scope to global', () => {
+    expect(parseToolBlock('{ "tool": "install_plugin", "source": "  owner/repo  " }')).toEqual({
+      tool: 'install_plugin',
+      source: 'owner/repo',
+      scope: 'global'
+    })
+  })
+
+  it('honours an explicit project scope on install_plugin', () => {
+    expect(
+      parseToolBlock('{ "tool": "install_plugin", "source": "owner/repo", "scope": "project" }')
+    ).toEqual({ tool: 'install_plugin', source: 'owner/repo', scope: 'project' })
+  })
+
+  it('coerces an unknown install_plugin scope back to global', () => {
+    expect(
+      parseToolBlock('{ "tool": "install_plugin", "source": "owner/repo", "scope": "weird" }')
+    ).toEqual({ tool: 'install_plugin', source: 'owner/repo', scope: 'global' })
+  })
+
+  it('rejects an install_plugin with a blank or missing source', () => {
+    expect(parseToolBlock('{ "tool": "install_plugin", "source": "   " }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "install_plugin" }')).toBeNull()
+  })
 })
 
 describe('ToolStreamParser', () => {

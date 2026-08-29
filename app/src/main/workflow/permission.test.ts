@@ -6,25 +6,28 @@ import { decideAuto } from '@main/workflow/permission'
  * The full permission matrix. `auto` = runs without asking (but still surfaced
  * to the UI); `ask` = pauses for an explicit user decision.
  *
- * | mode         | read | write_file | run_command | mcp_call |
- * |--------------|------|------------|-------------|----------|
- * | `ask`        | auto | ask        | ask         | ask      |
- * | `auto-edit`  | auto | auto       | ask         | ask      |
- * | `autonomous` | auto | auto       | auto        | auto     |
+ * | mode         | read | write_file | run_command | mcp_call | web_fetch |
+ * |--------------|------|------------|-------------|----------|-----------|
+ * | `ask`        | auto | ask        | ask         | ask      | ask       |
+ * | `auto-edit`  | auto | auto       | ask         | ask      | ask       |
+ * | `autonomous` | auto | auto       | auto        | auto     | auto      |
  */
 const cases: Array<[PermissionMode, ToolKind, 'auto' | 'ask']> = [
   ['ask', 'read', 'auto'],
   ['ask', 'write_file', 'ask'],
   ['ask', 'run_command', 'ask'],
   ['ask', 'mcp_call', 'ask'],
+  ['ask', 'web_fetch', 'ask'],
   ['auto-edit', 'read', 'auto'],
   ['auto-edit', 'write_file', 'auto'],
   ['auto-edit', 'run_command', 'ask'],
   ['auto-edit', 'mcp_call', 'ask'],
+  ['auto-edit', 'web_fetch', 'ask'],
   ['autonomous', 'read', 'auto'],
   ['autonomous', 'write_file', 'auto'],
   ['autonomous', 'run_command', 'auto'],
-  ['autonomous', 'mcp_call', 'auto']
+  ['autonomous', 'mcp_call', 'auto'],
+  ['autonomous', 'web_fetch', 'auto']
 ]
 
 describe('decideAuto (permission matrix)', () => {

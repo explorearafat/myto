@@ -138,6 +138,26 @@ export const IpcChannel = {
   /** Renderer → main (invoke): absolute paths of the global + project skills dirs. */
   SkillsConfigPaths: 'skills:config-paths',
 
+  // Commands (disk-authored slash-command templates; extensibility)
+  /** Renderer → main (invoke): every discovered command (global + project). */
+  CommandsList: 'commands:list',
+  /** Renderer → main (invoke): re-scan disk for commands; returns the fresh list. */
+  CommandsReload: 'commands:reload',
+  /** Renderer → main (invoke): author a new command `.md` on disk, then re-scan. */
+  CommandsAdd: 'commands:add',
+  /** Renderer → main (invoke): delete a command's `.md`, then re-scan; returns list. */
+  CommandsRemove: 'commands:remove',
+  /** Renderer → main (invoke): absolute paths of the global + project commands dirs. */
+  CommandsConfigPaths: 'commands:config-paths',
+
+  // Plugins (git-installed bundles of skills / commands / connectors)
+  /** Renderer → main (invoke): every installed plugin. */
+  PluginsList: 'plugins:list',
+  /** Renderer → main (invoke): clone + unpack a plugin's contents; returns the record. */
+  PluginsInstall: 'plugins:install',
+  /** Renderer → main (invoke): withdraw a plugin's contents + its record. */
+  PluginsRemove: 'plugins:remove',
+
   // Workspace (folder-first Code mode; requirement A)
   /** Renderer → main (invoke): open the OS folder picker; retarget the agent root. */
   WorkspaceSelect: 'workspace:select',

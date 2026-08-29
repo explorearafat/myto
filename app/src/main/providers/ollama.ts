@@ -1,12 +1,26 @@
 import type {
   ChatMessage,
   CompletionChunk,
+  CompletionOptions,
   ListModelsResult,
   OllamaConfig,
   TestConnectionResult
 } from '../../shared/types'
 import { httpFetch, httpJson, normaliseBaseUrl, toErrorMessage } from './http'
 import { modelInfo, type Provider } from './provider'
+
+/**
+ * Ollama sampling. It has no `reasoning_effort` (that's a gateway concept), so we
+ * map the caller's temperature into Ollama's native `options.temperature`. A
+ * missing temperature leaves Ollama on its own defaults. `reasoningEffort` is
+ * intentionally ignored here.
+ */
+function ollamaOptions(options?: CompletionOptions): Record<string, unknown> {
+  if (options && typeof options.temperature === 'number') {
+    return { options: { temperature: options.temperature } }
+  }
+  return {}
+}
 interface OllamaTag {
   name: string
   model?: string
@@ -78,11 +92,15 @@ export class OllamaProvider implements Provider {
     }
   }
 
-  async getCompletion(modelId: string, messages: ChatMessage[]): Promise<string> {
+  async getCompletion(
+    modelId: string,
+    messages: ChatMessage[],
+    options?: CompletionOptions
+  ): Promise<string> {
     const data = await httpJson<OllamaChatChunk>(`${this.baseUrl}/api/chat`, {
       method: 'POST',
       timeoutMs: 120_000,
-      body: { model: modelId, stream: false, messages }
+      body: { model: modelId, stream: false, messages, ...ollamaOptions(options) }
     })
     if (data.error) throw new Error(data.error)
     return data.message?.content ?? ''
@@ -92,13 +110,14 @@ export class OllamaProvider implements Provider {
     modelId: string,
     messages: ChatMessage[],
     onChunk: (chunk: Omit<CompletionChunk, 'streamId'>) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: CompletionOptions
   ): Promise<void> {
     const res = await httpFetch(`${this.baseUrl}/api/chat`, {
       method: 'POST',
       timeoutMs: 120_000,
       signal,
-      body: { model: modelId, stream: true, messages }
+      body: { model: modelId, stream: true, messages, ...ollamaOptions(options) }
     })
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => '')

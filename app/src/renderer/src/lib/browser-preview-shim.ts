@@ -225,6 +225,21 @@ function installShim(): void {
       remove: () => Promise.resolve([]),
       configPaths: () => Promise.resolve({ global: '', project: null })
     },
+    // No commands outside Electron: nothing is discovered from disk here.
+    commands: {
+      list: () => Promise.resolve([]),
+      reload: () => Promise.resolve([]),
+      add: () => Promise.resolve({ ok: true, commands: [] }),
+      remove: () => Promise.resolve([]),
+      configPaths: () => Promise.resolve({ global: '', project: null })
+    },
+    // No plugin install outside Electron (no git / no disk to unpack into).
+    plugins: {
+      list: () => Promise.resolve([]),
+      install: () =>
+        Promise.resolve({ ok: false, error: 'Plugins are unavailable in the browser preview.', plugins: [] }),
+      remove: () => Promise.resolve([])
+    },
     // No folder picker outside Electron: the workspace stays the cwd default
     // (never "chosen"), select is unavailable, and no change events ever fire.
     workspace: {

@@ -147,6 +147,8 @@ const MAX_LIST_ENTRIES = 400
 const MAX_SEARCH_MATCHES = 60
 const MAX_SEARCH_FILES = 3_000
 const MAX_SEARCH_DEPTH = 12
+/** Longest list a `find_files` glob returns before it's clipped. */
+const MAX_FIND_MATCHES = 200
 /** Longest single matched line echoed back (a minified bundle line is useless). */
 const MAX_MATCH_LINE_CHARS = 300
 
@@ -369,6 +371,82 @@ export function searchProject(query: string, relPath = '.', glob?: string): Read
       matchCount === 0
         ? 'no matches'
         : `${matchCount} match${matchCount === 1 ? '' : 'es'} in ${fileHitCount} file${fileHitCount === 1 ? '' : 's'}`
+  }
+}
+
+// ── File discovery by name (find_files) ────────────────────────────────────
+
+/**
+ * Enumerates project files whose path matches a shell glob — the analogue of a
+ * ripgrep `--files -g` / Claude Code's Glob tool. Where {@link searchProject}
+ * greps file *contents*, this finds files by *name/path*, which is how you locate
+ * "every test file", "the config", or "all the components" without knowing a
+ * symbol to search for.
+ *
+ * The glob follows {@link globToRegExp}: `*` within a segment, `**` across
+ * segments, `?`, and `{a,b}`. A pattern with no `/` matches the basename anywhere
+ * (so `*.ts` finds TypeScript at any depth); a pattern with a `/` matches the
+ * project-relative POSIX path. Walks fresh from `relPath`, skipping
+ * {@link IGNORED_DIRS} and hidden directories exactly like the search walker, and
+ * is bounded by {@link MAX_SEARCH_FILES} scanned and {@link MAX_FIND_MATCHES}
+ * returned. Results are sorted for stable output. Throws {@link PathEscapeError}
+ * on a sandbox escape.
+ */
+export function findFiles(pattern: string, relPath = '.'): ReadOutcome {
+  const root = resolveSafe(relPath || '.')
+  const projectRoot = contextManager.getRoot()
+  const { re, basenameOnly } = globToRegExp(pattern)
+
+  const matches: string[] = []
+  let scanned = 0
+  let capped = false
+
+  const walk = (dir: string, depth: number): void => {
+    if (capped || depth > MAX_SEARCH_DEPTH) return
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return // unreadable dir — skip silently, same as the search walker
+    }
+    for (const entry of entries) {
+      if (capped) return
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (IGNORED_DIRS.has(entry.name) || entry.name.startsWith('.')) continue
+        walk(full, depth + 1)
+        continue
+      }
+      if (!entry.isFile()) continue
+      if (++scanned > MAX_SEARCH_FILES) {
+        capped = true
+        return
+      }
+      const rel = relative(projectRoot, full).split(sep).join('/')
+      if (re.test(basenameOnly ? entry.name : rel)) {
+        if (matches.length >= MAX_FIND_MATCHES) {
+          capped = true
+          return
+        }
+        matches.push(rel)
+      }
+    }
+  }
+  walk(root, 0)
+  matches.sort()
+
+  const body =
+    matches.length > 0
+      ? matches.join('\n') + (capped ? `\n… (stopped at ${MAX_FIND_MATCHES} files)` : '')
+      : `No files match ${pattern}`
+  const { text, truncated } = clip(body)
+  return {
+    output: text,
+    truncated: truncated || capped,
+    summary:
+      matches.length === 0
+        ? 'no files'
+        : `${matches.length} file${matches.length === 1 ? '' : 's'}`
   }
 }
 

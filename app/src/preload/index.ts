@@ -147,6 +147,18 @@ const api: SylorApi = {
     remove: (name) => ipcRenderer.invoke(IpcChannel.SkillsRemove, name),
     configPaths: () => ipcRenderer.invoke(IpcChannel.SkillsConfigPaths)
   },
+  commands: {
+    list: () => ipcRenderer.invoke(IpcChannel.CommandsList),
+    reload: () => ipcRenderer.invoke(IpcChannel.CommandsReload),
+    add: (input) => ipcRenderer.invoke(IpcChannel.CommandsAdd, input),
+    remove: (name) => ipcRenderer.invoke(IpcChannel.CommandsRemove, name),
+    configPaths: () => ipcRenderer.invoke(IpcChannel.CommandsConfigPaths)
+  },
+  plugins: {
+    list: () => ipcRenderer.invoke(IpcChannel.PluginsList),
+    install: (input) => ipcRenderer.invoke(IpcChannel.PluginsInstall, input),
+    remove: (name) => ipcRenderer.invoke(IpcChannel.PluginsRemove, name)
+  },
   workspace: {
     select: () => ipcRenderer.invoke(IpcChannel.WorkspaceSelect),
     get: () => ipcRenderer.invoke(IpcChannel.WorkspaceGet),

@@ -73,10 +73,35 @@ const writeProjectFile = vi.fn<(path: string, content: string) => void>((path, c
   mkdirSync(dirname(abs), { recursive: true })
   writeFileSync(abs, content)
 })
+const findFiles = vi.fn<(glob: string, path: string) => { output: string; truncated: boolean; summary: string }>(
+  () => ({ output: 'src/a.ts\nsrc/b.ts', truncated: false, summary: '2 files' })
+)
+// Sandbox reader used by detectVerifyCommand (package.json), readPlanMd (plan.md),
+// and buildRepoInstructionsPreamble (.sylor/SYLOR.md et al.). Default: throw, i.e.
+// "no such file" — every engine call site catches, so the baseline behaves as if
+// none of those files exist. A test overrides it to exercise repo instructions.
+const readProjectFile = vi.fn<(path: string) => string>(() => {
+  throw new Error('ENOENT')
+})
 vi.mock('@main/fs/operations', () => ({
   proposeWrite: (path: string, content: string) => proposeWrite(path, content),
   writeProjectFile: (path: string, content: string) => writeProjectFile(path, content),
-  resolveSafe: (path: string) => join(fsRoot, path)
+  resolveSafe: (path: string) => join(fsRoot, path),
+  findFiles: (glob: string, path: string) => findFiles(glob, path),
+  readProjectFile: (path: string) => readProjectFile(path)
+}))
+
+// Web fetch — mocked so engine tests never touch the network. `fetchUrl` is a
+// controllable spy: an approved web_fetch resolves deterministically to this
+// outcome. Reset in beforeEach.
+const fetchUrl = vi.fn<(url: string, signal?: AbortSignal) => Promise<{
+  ok: boolean
+  output: string
+  truncated: boolean
+  error?: string
+}>>(async (url) => ({ ok: true, output: `URL: ${url}\n\nfetched body`, truncated: false }))
+vi.mock('@main/web/fetch', () => ({
+  fetchUrl: (url: string, signal?: AbortSignal) => fetchUrl(url, signal)
 }))
 
 afterAll(() => {
@@ -169,7 +194,8 @@ const {
   resolveToolDecision,
   capWords,
   buildConversationRecap,
-  compactHistory
+  compactHistory,
+  compactHistoryWithModel
 } = await import('@main/workflow/engine')
 
 // ---- Helpers ----------------------------------------------------------------
@@ -359,6 +385,70 @@ describe('compactHistory (mid-run context compaction, §17)', () => {
     // 14 unique paths, capped at 12 shown, remainder elided.
     expect(note).toContain('+2 more')
     expect(note.match(/f0\.ts/g) ?? []).toHaveLength(1)
+  })
+})
+
+describe('compactHistoryWithModel (model-written compaction note)', () => {
+  const m = (role: ChatMessage['role'], content: string): ChatMessage => ({ role, content })
+  const tool = (obj: Record<string, unknown>): string =>
+    '```sylor-tool\n' + JSON.stringify(obj) + '\n```'
+  const wrote = (path: string): ChatMessage =>
+    m('assistant', `Writing ${path}.\n` + tool({ tool: 'write_file', path, content: 'x' }))
+
+  const foldingHistory = (): ChatMessage[] => {
+    const head = [m('system', 'SYSTEM'), m('user', 'the original request')]
+    const appended = [
+      wrote('src/a.ts'), m('user', 'a applied'),
+      wrote('src/b.ts'), m('user', 'b applied'),
+      wrote('src/z.ts'), m('user', 'z applied') // last pair kept verbatim
+    ]
+    return [...head, ...appended]
+  }
+
+  it('returns the SAME array (a no-op) and never calls the model when under budget', async () => {
+    const msgs = [m('system', 'S'), m('user', 'do a thing'), m('assistant', 'done')]
+    const summarize = vi.fn(async () => 'unused')
+    const out = await compactHistoryWithModel(msgs, 1, summarize)
+    expect(out).toBe(msgs)
+    expect(summarize).not.toHaveBeenCalled()
+  })
+
+  it('uses the model summary as the note body, keeping framing and hard facts', async () => {
+    const msgs = foldingHistory()
+    const summarize = vi.fn(async () => 'Set up the two source modules and wired them together.')
+    const out = await compactHistoryWithModel(msgs, 2, summarize, 150, 10)
+
+    expect(summarize).toHaveBeenCalledOnce()
+    const note = out.find((x) => x.content.startsWith('[Context note'))!.content
+    // The model's prose is the body…
+    expect(note).toContain('Set up the two source modules and wired them together.')
+    // …and the deterministic file anchors are still appended, so exact paths survive.
+    expect(note).toContain('src/a.ts')
+    expect(note).toContain('src/b.ts')
+    expect(note).toMatch(/Files changed:/)
+    // The pinned head and the latest pair are preserved verbatim by reference.
+    expect(out[0]).toBe(msgs[0])
+    expect(out.at(-1)).toBe(msgs.at(-1))
+  })
+
+  it('falls back to the deterministic note when the model call throws', async () => {
+    const msgs = foldingHistory()
+    const summarize = vi.fn(async () => {
+      throw new Error('gateway offline')
+    })
+    const out = await compactHistoryWithModel(msgs, 2, summarize, 150, 10)
+    const note = out.find((x) => x.content.startsWith('[Context note'))!.content
+    // Identical to the deterministic path — the build continues offline.
+    expect(note).toBe(compactHistory(msgs, 2, 150, 10)[2].content)
+    expect(note).toContain('src/a.ts')
+  })
+
+  it('falls back to the deterministic note when the model returns empty text', async () => {
+    const msgs = foldingHistory()
+    const summarize = vi.fn(async () => '   ')
+    const out = await compactHistoryWithModel(msgs, 2, summarize, 150, 10)
+    const note = out.find((x) => x.content.startsWith('[Context note'))!.content
+    expect(note).toBe(compactHistory(msgs, 2, 150, 10)[2].content)
   })
 })
 
@@ -594,6 +684,18 @@ function firstToolResult(events: WorkflowEvent[]) {
   return e
 }
 
+/**
+ * All message content the engine ever sent to the provider, concatenated. The
+ * synthesized "Results of the actions…" turn is fed back on a later step, so a
+ * robust assertion searches every outbound call rather than guessing which index
+ * carried it (start/continue nudges can shift the exact position).
+ */
+function feedbackText(): string {
+  return streamCompletion.mock.calls
+    .flatMap((c) => (c[1] as ChatMessage[]).map((m) => m.content))
+    .join('\n')
+}
+
 const WRITE_BLOCK =
   '```sylor-tool\n{ "tool": "write_file", "path": "src/new.ts", "content": "export const x = 1" }\n```\n'
 const CMD_BLOCK = '```sylor-tool\n{ "tool": "run_command", "command": "npm test" }\n```\n'
@@ -602,6 +704,9 @@ const REMEMBER_BLOCK =
 const MCP_BLOCK =
   '```sylor-tool\n{ "tool": "mcp_call", "server": "fs", "name": "read_file", "arguments": { "path": "a.txt" } }\n```\n'
 const USE_SKILL_BLOCK = '```sylor-tool\n{ "tool": "use_skill", "name": "pdf-tools" }\n```\n'
+const FIND_BLOCK = '```sylor-tool\n{ "tool": "find_files", "glob": "**/*.ts" }\n```\n'
+const WEB_FETCH_BLOCK =
+  '```sylor-tool\n{ "tool": "web_fetch", "url": "https://example.com/doc" }\n```\n'
 
 /** A write_file block for an arbitrary path/content (for multi-block completions). */
 function writeBlock(path: string, content: string): string {
@@ -615,6 +720,14 @@ describe('runWorkflow tool execution', () => {
     proposeWrite.mockClear()
     writeProjectFile.mockClear()
     runCommand.mockClear()
+    findFiles.mockClear()
+    fetchUrl.mockClear()
+    // Re-establish the "no such file" default so a test that made a repo-instruction
+    // file exist doesn't leak into the next.
+    readProjectFile.mockReset()
+    readProjectFile.mockImplementation(() => {
+      throw new Error('ENOENT')
+    })
     appendProjectMemory.mockClear()
     mcpCallTool.mockClear()
     mcpTools = []
@@ -942,6 +1055,132 @@ describe('runWorkflow tool execution', () => {
     expect(mcpCallTool).not.toHaveBeenCalled()
     const result = firstToolResult(events)
     expect(result.result).toMatchObject({ kind: 'mcp_call', ok: false, error: 'Skipped by user' })
+  })
+
+  it('executes a find_files read (auto-approved) and feeds the matches back to the model', async () => {
+    // find_files is modelled as a read, so it auto-approves in every mode and must
+    // be recognised as an executable side effect — the bug this locks in was the
+    // engine dropping find_files from its side-effect filter, so it never ran.
+    streamCompletion.mockImplementationOnce(emitsText('Locating the sources.\n' + FIND_BLOCK))
+    streamCompletion.mockImplementation(emitsText('Found them.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('find1', { permissionMode: 'ask' }), emit, noTerminal)
+
+    const request = firstToolRequest(events)
+    expect(request.auto).toBe(true) // a read never asks
+    expect(request.proposal).toMatchObject({ kind: 'read', op: 'find_files', glob: '**/*.ts' })
+    expect(findFiles).toHaveBeenCalledWith('**/*.ts', '.')
+
+    const result = firstToolResult(events)
+    expect(result.result).toMatchObject({ kind: 'read', ok: true, summary: '2 files' })
+
+    // The loop continued (a second completion ran) and the matches were fed back
+    // to the model as a synthesized user turn.
+    expect(streamCompletion.mock.calls.length).toBeGreaterThan(1)
+    expect(feedbackText()).toContain('find_files "**/*.ts"')
+    expect(feedbackText()).toContain('src/a.ts')
+  })
+
+  it('gates a web_fetch behind approval, then fetches and feeds the page back', async () => {
+    // web_fetch reaches the network, so — like a command — it asks in ask mode and
+    // must be executed as a side effect (the other half of the dropped-filter bug).
+    streamCompletion.mockImplementationOnce(emitsText('Reading the docs.\n' + WEB_FETCH_BLOCK))
+    streamCompletion.mockImplementation(emitsText('Done reading.'))
+
+    const { events, emit } = collector()
+    const p = runWorkflow(req('web1', { permissionMode: 'ask' }), emit, noTerminal)
+
+    await vi.waitFor(() => firstToolRequest(events))
+    const request = firstToolRequest(events)
+    expect(request.auto).toBe(false) // network egress asks
+    expect(request.proposal).toMatchObject({ kind: 'web_fetch', url: 'https://example.com/doc' })
+    resolveToolDecision('web1', request.proposal.id, 'approve')
+    await p
+
+    expect(fetchUrl).toHaveBeenCalledWith('https://example.com/doc', expect.anything())
+    const result = firstToolResult(events)
+    expect(result.result).toMatchObject({ kind: 'web_fetch', ok: true })
+
+    // Its outcome is fed back into the loop so the model can react to what it read.
+    expect(feedbackText()).toContain('web_fetch https://example.com/doc → ok')
+    expect(feedbackText()).toContain('fetched body')
+  })
+
+  it('skips a user-rejected web_fetch without touching the network', async () => {
+    streamCompletion.mockImplementationOnce(emitsText(WEB_FETCH_BLOCK))
+
+    const { events, emit } = collector()
+    const p = runWorkflow(req('web2', { permissionMode: 'ask' }), emit, noTerminal)
+
+    await vi.waitFor(() => firstToolRequest(events))
+    resolveToolDecision('web2', firstToolRequest(events).proposal.id, 'reject')
+    await p
+
+    expect(fetchUrl).not.toHaveBeenCalled()
+    const result = firstToolResult(events)
+    expect(result.result).toMatchObject({ kind: 'web_fetch', ok: false, error: 'Skipped by user' })
+  })
+
+  it('auto-approves a web_fetch in autonomous (hands-free) mode', async () => {
+    streamCompletion.mockImplementationOnce(emitsText(WEB_FETCH_BLOCK))
+    streamCompletion.mockImplementation(emitsText('Summarised.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('web3', { permissionMode: 'autonomous' }), emit, noTerminal)
+
+    const request = firstToolRequest(events)
+    expect(request.auto).toBe(true)
+    expect(fetchUrl).toHaveBeenCalledWith('https://example.com/doc', expect.anything())
+  })
+
+  it('injects .sylor/SYLOR.md repository instructions into the system prompt', async () => {
+    // The repo's checked-in guidance (.sylor/SYLOR.md, first slot) must frame the
+    // whole run — read once up front and appended to the lead's system prompt.
+    readProjectFile.mockImplementation((rel) => {
+      if (rel === '.sylor/SYLOR.md') return 'Always use tabs.\nRun `npm test` before finishing.'
+      throw new Error('ENOENT')
+    })
+    streamCompletion.mockResolvedValue(undefined)
+
+    const { emit } = collector()
+    await runWorkflow(req('repo1', { permissionMode: 'ask' }), emit, noTerminal)
+
+    const system = (streamCompletion.mock.calls[0][1] as ChatMessage[])[0].content
+    expect(system).toContain('## Repository instructions (from .sylor/SYLOR.md)')
+    expect(system).toContain('Always use tabs.')
+    expect(system).toContain('Follow these repository instructions as standing guidance')
+  })
+
+  it('prefers .sylor/SYLOR.md over a legacy AGENTS.md when both exist', async () => {
+    // .sylor is the canonical slot; a bare AGENTS.md is still honoured so an
+    // existing repo works, but only its own content — dedup keeps distinct files.
+    readProjectFile.mockImplementation((rel) => {
+      if (rel === '.sylor/SYLOR.md') return 'Sylor rules win.'
+      if (rel === 'AGENTS.md') return 'Legacy agents guidance.'
+      throw new Error('ENOENT')
+    })
+    streamCompletion.mockResolvedValue(undefined)
+
+    const { emit } = collector()
+    await runWorkflow(req('repo2', { permissionMode: 'ask' }), emit, noTerminal)
+
+    const system = (streamCompletion.mock.calls[0][1] as ChatMessage[])[0].content
+    // Both distinct files are included, .sylor first.
+    expect(system).toContain('## Repository instructions (from .sylor/SYLOR.md)')
+    expect(system.indexOf('Sylor rules win.')).toBeLessThan(system.indexOf('Legacy agents guidance.'))
+  })
+
+  it('adds no repository-instructions section when the repo has none', async () => {
+    // The default throwing readProjectFile means every candidate is absent, so a
+    // repo without any guidance file adds nothing to the prompt.
+    streamCompletion.mockResolvedValue(undefined)
+
+    const { emit } = collector()
+    await runWorkflow(req('repo3', { permissionMode: 'ask' }), emit, noTerminal)
+
+    const system = (streamCompletion.mock.calls[0][1] as ChatMessage[])[0].content
+    expect(system).not.toContain('## Repository instructions')
   })
 
   it('lists connected MCP tools in the Code-mode system prompt', async () => {

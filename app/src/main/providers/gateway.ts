@@ -1,12 +1,32 @@
 import type {
   ChatMessage,
   CompletionChunk,
+  CompletionOptions,
   GatewayConfig,
   ListModelsResult,
   TestConnectionResult
 } from '../../shared/types'
 import { httpFetch, httpJson, normaliseBaseUrl, toErrorMessage } from './http'
 import { modelInfo, type Provider } from './provider'
+
+/**
+ * OpenAI-compatible sampling fields for the request body. We prefer
+ * `reasoning_effort` (a capable gateway maps it to the model's extended-thinking
+ * budget — the single biggest quality lever) and, because Anthropic-backed
+ * proxies reject a custom temperature while thinking is on, send `temperature`
+ * ONLY when no reasoning effort is requested. Unknown fields are ignored by
+ * spec-compliant gateways, so this can only help a capable backend.
+ */
+function samplingBody(options?: CompletionOptions): Record<string, unknown> {
+  if (!options) return {}
+  if (options.reasoningEffort) {
+    // 'max' is Sylor-internal; the wire vocabulary tops out at 'high'.
+    const effort = options.reasoningEffort === 'max' ? 'high' : options.reasoningEffort
+    return { reasoning_effort: effort }
+  }
+  if (typeof options.temperature === 'number') return { temperature: options.temperature }
+  return {}
+}
 interface GatewayModelsResponse {
   data?: Array<{ id: string }>
 }
@@ -90,12 +110,16 @@ export class GatewayProvider implements Provider {
     }
   }
 
-  async getCompletion(modelId: string, messages: ChatMessage[]): Promise<string> {
+  async getCompletion(
+    modelId: string,
+    messages: ChatMessage[],
+    options?: CompletionOptions
+  ): Promise<string> {
     const data = await httpJson<ChatCompletionResponse>(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.authHeaders(),
       timeoutMs: 120_000,
-      body: { model: modelId, stream: false, messages }
+      body: { model: modelId, stream: false, messages, ...samplingBody(options) }
     })
     if (data.error?.message) throw new Error(data.error.message)
     return data.choices?.[0]?.message?.content ?? ''
@@ -105,7 +129,8 @@ export class GatewayProvider implements Provider {
     modelId: string,
     messages: ChatMessage[],
     onChunk: (chunk: Omit<CompletionChunk, 'streamId'>) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: CompletionOptions
   ): Promise<void> {
     const res = await httpFetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -114,7 +139,7 @@ export class GatewayProvider implements Provider {
       headers: { Accept: 'text/event-stream', ...this.authHeaders() },
       timeoutMs: 120_000,
       signal,
-      body: { model: modelId, stream: true, messages }
+      body: { model: modelId, stream: true, messages, ...samplingBody(options) }
     })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
