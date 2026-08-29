@@ -313,10 +313,22 @@ export interface ChatState {
   resetTo: (sessionId: string, projectId?: string | null) => void
 }
 
+/**
+ * A salt fixed once per app launch, mixed into every id that gets persisted as a
+ * DB primary key (messages, runs). The counters below reset to 0 on every launch,
+ * so a bare `msg-1` minted in a fresh session reuses an id a PREVIOUS run already
+ * wrote — and `appendMessage`'s `INSERT … ON CONFLICT(id) DO UPDATE` then
+ * overwrites that other session's row and saves nothing to the new one: the turn
+ * vanishes AND the older chat is silently corrupted. The launch-time salt makes
+ * ids globally unique across runs, exactly like the main-process generators that
+ * embed `Date.now()` (`sess-`/`att-`/`proj-`). base36 keeps it compact.
+ */
+const ID_SALT = Date.now().toString(36)
 let idCounter = 0
-const nextId = (): string => `msg-${++idCounter}`
+const nextId = (): string => `msg-${ID_SALT}-${++idCounter}`
 let runCounter = 0
-const nextRunId = (): string => `run-${++runCounter}`
+const nextRunId = (): string => `run-${ID_SALT}-${++runCounter}`
+// Activity-step ids are render-only (never persisted), so they need no salt.
 let activityCounter = 0
 const nextActivityId = (): string => `act-${++activityCounter}`
 

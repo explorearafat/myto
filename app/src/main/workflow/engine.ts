@@ -625,9 +625,18 @@ function hasPlainCodeFence(prose: string): boolean {
   return PLAIN_CODE_FENCE_RE.test(prose)
 }
 
-/** Monotonic counter for tool ids (unique within a process run). */
+/**
+ * Monotonic counter for tool ids, salted with the launch time. `tool_ops.id` is a
+ * DB PRIMARY KEY, but toolCounter resets to 0 on every app start — so a bare
+ * `tool-1` collides with an op a prior run persisted, and `appendToolOp`'s
+ * `ON CONFLICT(id) DO UPDATE` would rewrite that other session's op instead of
+ * inserting. The per-launch salt makes ids globally unique, matching the salted
+ * `msg-`/`run-` ids in the renderer and the timestamped `sess-`/`att-` ids in the
+ * db layer.
+ */
+const TOOL_ID_SALT = Date.now().toString(36)
 let toolCounter = 0
-const nextToolId = (): string => `tool-${++toolCounter}`
+const nextToolId = (): string => `tool-${TOOL_ID_SALT}-${++toolCounter}`
 
 /** Monotonic counter for subagent ids (unique within a process run). */
 let agentCounter = 0

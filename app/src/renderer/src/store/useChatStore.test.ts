@@ -22,7 +22,7 @@ function loadedSession(id: string): PersistedSession {
 }
 
 describe('useChatStore hydration', () => {
-  it('reconciles id counters past the highest rehydrated msg/run id', () => {
+  it('mints ids that never collide with rehydrated ones (per-run salt)', () => {
     // Simulate loading a session that had msg-5, msg-8 and run-3.
     const loaded: PersistedSession = {
       session: {
@@ -60,26 +60,31 @@ describe('useChatStore hydration', () => {
     expect(useChatStore.getState().messages[1].id).toBe('msg-8')
 
     // Now send a new message (which internally mints a new user + assistant id).
-    // The new ids must be msg-9, msg-10 (not collide with msg-5/msg-8).
+    // The whole point of the per-run salt: these ids must never reuse a restored
+    // one — a bare `msg-<n>` counter resets each launch and would remint msg-5/
+    // msg-8, whose DB rows (the primary key) belong to an already-saved turn, so
+    // the new write would overwrite that row instead of inserting a new one.
     useChatStore.getState().send('test')
     const after = useChatStore.getState().messages
     expect(after).toHaveLength(4) // 2 old + 2 new
     const newUserMsg = after[2]
     const newAssistantMsg = after[3]
-    expect(newUserMsg.id).toMatch(/^msg-\d+$/)
-    expect(newAssistantMsg.id).toMatch(/^msg-\d+$/)
 
-    // Parse the numeric suffix to confirm it's > 8.
-    const userNum = Number(newUserMsg.id.replace('msg-', ''))
-    const assistantNum = Number(newAssistantMsg.id.replace('msg-', ''))
-    expect(userNum).toBeGreaterThan(8)
-    expect(assistantNum).toBeGreaterThan(8)
+    // Salted shape (`msg-<salt>-<n>`), not the bare collision-prone `msg-<n>`.
+    expect(newUserMsg.id).toMatch(/^msg-.+-\d+$/)
+    expect(newUserMsg.id).not.toMatch(/^msg-\d+$/)
+    expect(newAssistantMsg.id).toMatch(/^msg-.+-\d+$/)
 
-    // The runId should be > 3.
+    // Collide with neither the restored ids nor each other.
+    const restored = ['msg-5', 'msg-8']
+    expect(restored).not.toContain(newUserMsg.id)
+    expect(restored).not.toContain(newAssistantMsg.id)
+    expect(newUserMsg.id).not.toBe(newAssistantMsg.id)
+
+    // The runId is salted the same way, so it can't reuse the restored run-3.
     const newRunId = useChatStore.getState().runId
-    expect(newRunId).toMatch(/^run-\d+$/)
-    const runNum = Number(newRunId?.replace('run-', '') ?? '0')
-    expect(runNum).toBeGreaterThan(3)
+    expect(newRunId).toMatch(/^run-.+-\d+$/)
+    expect(newRunId).not.toBe('run-3')
   })
 })
 
