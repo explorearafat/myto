@@ -1644,13 +1644,20 @@ export function ChatPanel() {
     void stageFiles(files)
   }
 
-  const submit = (): void => {
+  const submit = async (): Promise<void> => {
     const text = input.trim()
     if ((!text && pending.length === 0) || running || needsFolder) return
     const outgoing: OutgoingAttachment[] = pending.map((p) => ({
       attachment: p.attachment,
       ...(p.textContent != null ? { textContent: p.textContent } : {})
     }))
+    // A turn needs a session to persist into. Boot normally set one long ago; this
+    // only bites the first-launch race (a send before boot() resolves), where the
+    // user turn would otherwise be dropped AND a late boot() would replace these
+    // very messages. Ensure one exists first, then send into it.
+    if (useChatStore.getState().sessionId == null) {
+      await useSessionStore.getState().boot()
+    }
     send(text, outgoing)
     // Title a still-unnamed session from its first prompt (fire-and-forget;
     // no-ops once the session already has a real title). See useSessionStore.
@@ -1675,7 +1682,7 @@ export function ChatPanel() {
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
-      submit()
+      void submit()
     }
   }
 
@@ -1794,7 +1801,7 @@ export function ChatPanel() {
             ) : (
               <button
                 type="button"
-                onClick={submit}
+                onClick={() => void submit()}
                 disabled={!canSend}
                 aria-label="Send"
                 className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-primary text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"

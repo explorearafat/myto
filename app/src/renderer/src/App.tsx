@@ -14,7 +14,6 @@ export default function App() {
   const initWorkspace = useAppStore((s) => s.initWorkspace)
   const setWorkspace = useAppStore((s) => s.setWorkspace)
   const boot = useSessionStore((s) => s.boot)
-  const createSession = useSessionStore((s) => s.create)
   const refreshProjects = useProjectStore((s) => s.refresh)
 
   // Load persisted provider settings first (so the provider is ready), restore
@@ -27,17 +26,20 @@ export default function App() {
     void refreshProjects()
 
     // React to the user picking a new folder (main-process broadcast): mirror the
-    // new root into state and start a fresh chat scoped to it — like opening a
-    // folder in an IDE. MCP + skills are already repointed/reloaded in the main
-    // process (applyRoot) and re-read when Settings is next opened. On startup the
-    // main process sets the root silently (no broadcast), so this never fires an
-    // extra chat at boot.
+    // new root into state, then restore THAT folder's own most-recent conversation
+    // — like reopening a project in an IDE — instead of dropping a blank 'New
+    // session' every time (which made prior work look lost). boot() re-reads the
+    // now-repointed root and clears any stale project filter. Background runs keep
+    // going and stay reachable on return: applyLoaded deliberately preserves
+    // in-flight runs, and liveRuns is keyed by session, not by folder. On startup
+    // the main process sets the root silently (no broadcast), so this never fires
+    // an extra restore at boot.
     const dispose = window.sylor?.workspace?.onChanged?.((info) => {
       setWorkspace(info)
-      void createSession()
+      void boot()
     })
     return () => dispose?.()
-  }, [loadSettings, initWorkspace, setWorkspace, boot, createSession, refreshProjects])
+  }, [loadSettings, initWorkspace, setWorkspace, boot, refreshProjects])
 
   return (
     <div className="relative flex h-full flex-col">
