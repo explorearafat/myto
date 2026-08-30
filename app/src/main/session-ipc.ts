@@ -26,8 +26,10 @@ import {
 /**
  * Wires the Phase 5 session-persistence IPC. Query-style ops use handle/invoke;
  * high-frequency appends use on/send (fire-and-forget, no round-trip) — the same
- * split as terminal vs providers. All ops scope to the active project root via
- * {@link contextManager}, and every append is defensively wrapped so a DB fault
+ * split as terminal vs providers. Reads (list/search/most-recent) are GLOBAL —
+ * history is one flat, cross-folder list so switching workspaces never hides
+ * chats; only a new session is stamped with the active project root via
+ * {@link contextManager}. Every append is defensively wrapped so a DB fault
  * degrades to a log line instead of breaking the live chat or terminal.
  *
  * Loading or creating a session also marks it {@link setActiveSession active} so
@@ -35,7 +37,7 @@ import {
  */
 export function registerSessionIpc(): void {
   ipcMain.handle(IpcChannel.SessionsList, (_event, projectId?: string | null): SessionSummary[] => {
-    return listSessions(contextManager.getRoot(), projectId)
+    return listSessions(projectId)
   })
 
   ipcMain.handle(IpcChannel.SessionsCreate, (_event, projectId?: string | null): SessionSummary => {
@@ -73,13 +75,13 @@ export function registerSessionIpc(): void {
   })
 
   ipcMain.handle(IpcChannel.SessionsMostRecent, (): string | null => {
-    return mostRecentSession(contextManager.getRoot())
+    return mostRecentSession()
   })
 
   ipcMain.handle(
     IpcChannel.SessionsSearch,
     (_event, query: string, projectId?: string | null): SessionSummary[] => {
-      return searchSessions(contextManager.getRoot(), query, projectId)
+      return searchSessions(query, projectId)
     }
   )
 

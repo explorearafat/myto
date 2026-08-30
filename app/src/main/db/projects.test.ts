@@ -60,9 +60,12 @@ describe('projects CRUD', () => {
     createSession(ROOT, 'Two', tick(), p.id)
     createSession(ROOT, 'Unfiled', tick(), null)
     expect(getProject(p.id)?.sessionCount).toBe(2)
-    // The unfiled chat is not counted.
-    expect(listSessions(ROOT, null).some((s) => s.id === s1.id)).toBe(false)
-    expect(listSessions(ROOT, p.id)).toHaveLength(2)
+    // Listing by project id returns exactly its two filed chats…
+    expect(listSessions(p.id)).toHaveLength(2)
+    // …while the global list (null) spans every chat, filed or not.
+    const all = listSessions(null)
+    expect(all.some((s) => s.id === s1.id)).toBe(true)
+    expect(all).toHaveLength(3)
   })
 
   it('renames and updates instructions', () => {

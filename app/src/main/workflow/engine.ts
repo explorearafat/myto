@@ -59,6 +59,7 @@ import {
   type NodeRunResult,
   type VerifyOutcome
 } from './orchestrator/orchestrator'
+import { classifyComplexityHeuristic } from './orchestrator/complexity'
 
 /** Sink the engine emits events to (wired to IPC in workflow-ipc.ts). */
 export type EventSink = (event: WorkflowEvent) => void
@@ -308,6 +309,18 @@ function effortDirective(effort: ReasoningEffort): string {
 }
 
 /**
+ * The output ceiling for Sylor's "no compromise" tier. A gateway that isn't told
+ * otherwise caps output conservatively (often ~4096 tokens), which silently
+ * truncates a large file or a whole scaffold mid-generation — the model just
+ * stops. When the effort is `max` (auto-forced for from-scratch/multi-domain
+ * builds, or picked by hand), we lift that ceiling well clear of any single file
+ * so project creation runs to completion. Tuned for current-generation Claude
+ * models (this app's default), which support outputs far above this; a smaller
+ * self-hosted model simply generates up to its own limit.
+ */
+const MAX_OUTPUT_TOKENS = 32_000
+
+/**
  * Turns the composer's reasoning effort into concrete sampling/thinking hints for
  * the provider. `reasoningEffort` is the primary lever — a capable gateway maps it
  * to the model's extended-thinking budget, which is most of what makes replies
@@ -315,10 +328,15 @@ function effortDirective(effort: ReasoningEffort): string {
  * default (kept in a precise range) that only backends without a reasoning knob —
  * e.g. Ollama — actually apply; the gateway drops it in favour of the effort. Both
  * are best-effort: a backend that understands neither is unaffected.
+ *
+ * The `max` tier additionally raises the output cap (see {@link MAX_OUTPUT_TOKENS})
+ * so a big build isn't truncated — the one place tokens must not be compromised.
  */
 function completionOptions(effort: ReasoningEffort): CompletionOptions {
   const temperature = effort === 'low' ? 0.3 : effort === 'medium' ? 0.5 : 0.7
-  return { reasoningEffort: effort, temperature }
+  const options: CompletionOptions = { reasoningEffort: effort, temperature }
+  if (effort === 'max') options.maxTokens = MAX_OUTPUT_TOKENS
+  return options
 }
 
 /**
@@ -856,11 +874,25 @@ export async function runWorkflow(
       skillsRegistry.getSkills(contextManager.getRoot())
     ).filter((s) => isSkillEnabled(s.name, s.defaultOn ?? true))
 
+    // Project creation must not be starved of thinking budget. When the turn is a
+    // build (edit intent) that the cheap heuristic sizes as `complex` — "from
+    // scratch", broadly-scoped, multi-domain, or several deliverables — force the
+    // `max` tier regardless of the composer setting. That lifts both levers at
+    // once: extended-thinking budget (via effortDirective + the gateway) and the
+    // output cap (via completionOptions → MAX_OUTPUT_TOKENS), so a whole scaffold
+    // reasons hard and generates to completion instead of being cut short. Smaller
+    // turns keep the requested effort so everyday edits stay fast.
+    const requestedEffort = effort ?? 'medium'
+    const effectiveEffort: ReasoningEffort =
+      intent.kind === 'edit' && classifyComplexityHeuristic(lastUser) === 'complex'
+        ? 'max'
+        : requestedEffort
+
     const outbound = buildMessages(
       messages,
       overview,
       projectPreamble,
-      effort ?? 'medium',
+      effectiveEffort,
       intent.kind,
       planFirst ?? false,
       mcpTools,
@@ -879,7 +911,7 @@ export async function runWorkflow(
     const spawnContext: SpawnContext = {
       overview,
       projectPreamble,
-      effort: effort ?? 'medium',
+      effort: effectiveEffort,
       mcpTools,
       enabledSkills,
       // Condensed prior-turn context (no LLM) so a fresh-context subagent can

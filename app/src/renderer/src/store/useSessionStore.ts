@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { StoreApi } from 'zustand'
 import type { ChatMessage, SessionSummary } from '@shared/types'
 import { useChatStore } from './useChatStore'
 
@@ -95,6 +96,29 @@ async function suggestAiTitle(prompt: string): Promise<string> {
 }
 
 /**
+ * Load a session by id, rehydrate the chat, and make it active. Returns `true`
+ * on success; on a missing/deleted id it falls back to a fresh draft and returns
+ * `false`. Shared by {@link SessionState.open}, `back`, and `forward` so the
+ * back/forward arrows and a direct click load a session through one code path.
+ */
+async function loadInto(
+  id: string,
+  set: StoreApi<SessionState>['setState'],
+  get: StoreApi<SessionState>['getState']
+): Promise<boolean> {
+  const loaded = await window.sylor.sessions.load(id)
+  if (!loaded) {
+    // Deleted out from under us — fall back to a fresh landing page.
+    await get().newDraft()
+    return false
+  }
+  useChatStore.getState().applyLoaded(loaded)
+  set({ activeSessionId: loaded.session.id, listOpen: false })
+  await get().refresh()
+  return true
+}
+
+/**
  * Session-history state (Phase 5): the sidebar list, which session is active,
  * and the flyout's open/closed state.
  *
@@ -115,16 +139,44 @@ export interface SessionState {
   /** Whether the Sessions flyout is open. */
   listOpen: boolean
 
+  /**
+   * Browser-style back/forward navigation across the sessions the user has
+   * opened this launch. `navStack` holds session ids oldest→newest and `navPos`
+   * points at the currently-shown entry; opening a chat truncates any forward
+   * history (a fresh branch), while back()/forward() move `navPos` without
+   * re-recording. Purely in-memory — a foundation for the sidebar arrows.
+   */
+  navStack: string[]
+  navPos: number
+
   setListOpen: (open: boolean) => void
   /** Scope the recents list to a project (or `null` for all chats) and reload. */
   setActiveProject: (projectId: string | null) => Promise<void>
-  /** Restore the most-recent session on startup, or create a fresh one. */
+  /**
+   * Startup entry point: open a fresh, unsaved landing page (never restore the
+   * last chat) with the full, global history loaded in the rail.
+   */
   boot: () => Promise<void>
-  /** Reload the session list from the main process (scoped to the active project). */
+  /**
+   * Show a fresh landing page (Claude-Desktop style): an empty, unsaved draft —
+   * no DB row is written until the first message is sent. Used by boot, the
+   * "New chat" button, and the deleted/empty fallbacks. Keeps the current project
+   * scope and reloads the (global) list.
+   */
+  newDraft: () => Promise<void>
+  /** Reload the session list from the main process (global; a project scope narrows it). */
   refresh: () => Promise<void>
   /** Load a session by id and make it active (rehydrates the chat). */
   open: (id: string) => Promise<void>
-  /** Create a fresh session and switch to it. */
+  /**
+   * Step back to the previously-opened session (sidebar ◄ arrow). No-op when
+   * there's no earlier entry. Moves `navPos` without re-recording, so repeated
+   * back/forward walks the same stack instead of branching it.
+   */
+  back: () => Promise<void>
+  /** Step forward to the next session in the nav stack (sidebar ► arrow). No-op at the tip. */
+  forward: () => Promise<void>
+  /** Persist a new session and switch to it (the lazy first-send path). */
   create: () => Promise<void>
   /** Rename a session (optimistic; re-sorts by the bumped updatedAt). */
   rename: (id: string, title: string) => Promise<void>
@@ -147,6 +199,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   activeSessionId: null,
   activeProjectId: null,
   listOpen: false,
+  navStack: [],
+  navPos: -1,
 
   setListOpen: (listOpen) => set({ listOpen }),
 
@@ -156,16 +210,22 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   boot: async () => {
-    // Opening the app — or switching to a newly-opened folder — starts from that
-    // root's own history. Clear any stale project filter so the recents list
-    // reflects the current folder (a no-op on first launch, already null).
+    // Opening the app always lands on a fresh, unsaved chat — never the last
+    // conversation restored — with the full history (global, not folder-scoped)
+    // loaded in the rail. Clear any stale project filter so "All chats" is shown.
     set({ activeProjectId: null })
-    const recent = await window.sylor.sessions.mostRecent()
-    if (recent) {
-      await get().open(recent)
-    } else {
-      await get().create()
-    }
+    await get().newDraft()
+  },
+
+  newDraft: async () => {
+    // A fresh landing page: clear the chat to an empty draft (sessionId = null →
+    // the composer shows the EmptyState hero). No row is written yet — the first
+    // send lazily calls create() to persist it, so the sidebar never fills with
+    // empty 'New session' rows the way an eager create would (Claude-Desktop
+    // parity). The recents list is untouched apart from a refresh.
+    useChatStore.getState().resetTo(null)
+    set({ activeSessionId: null, listOpen: false })
+    await get().refresh()
   },
 
   refresh: async () => {
@@ -174,15 +234,33 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   open: async (id) => {
-    const loaded = await window.sylor.sessions.load(id)
-    if (!loaded) {
-      // Deleted out from under us — fall back to a fresh session.
-      await get().create()
-      return
-    }
-    useChatStore.getState().applyLoaded(loaded)
-    set({ activeSessionId: loaded.session.id, listOpen: false })
-    await get().refresh()
+    const ok = await loadInto(id, set, get)
+    if (!ok) return
+    // Record in the back/forward stack: drop any forward history (this is a new
+    // branch), skip a no-op re-open of the current entry, then advance the tip.
+    const { navStack, navPos } = get()
+    if (navStack[navPos] === id) return
+    const trimmed = navStack.slice(0, navPos + 1)
+    trimmed.push(id)
+    set({ navStack: trimmed, navPos: trimmed.length - 1 })
+  },
+
+  back: async () => {
+    const { navStack, navPos } = get()
+    if (navPos <= 0) return
+    const target = navPos - 1
+    set({ navPos: target })
+    // If the recorded session was deleted, loadInto falls back to a draft; the
+    // pointer still moved, so a second back keeps walking the stack.
+    await loadInto(navStack[target], set, get)
+  },
+
+  forward: async () => {
+    const { navStack, navPos } = get()
+    if (navPos >= navStack.length - 1) return
+    const target = navPos + 1
+    set({ navPos: target })
+    await loadInto(navStack[target], set, get)
   },
 
   create: async () => {
@@ -228,12 +306,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     useChatStore.getState().cancelSession(id)
     await window.sylor.sessions.remove(id)
     if (get().activeSessionId === id) {
-      // The open session was deleted: reopen the next most-recent, or start fresh.
+      // The open session was deleted: reopen the next most-recent, or — if none
+      // remain — drop to a fresh landing page.
       const remaining = await window.sylor.sessions.list(get().activeProjectId)
       if (remaining.length > 0) {
         await get().open(remaining[0].id)
       } else {
-        await get().create()
+        await get().newDraft()
       }
     } else {
       await get().refresh()

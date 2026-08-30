@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionSummary } from '@shared/types'
 import { cleanModelTitle, deriveTitle, useSessionStore } from './useSessionStore'
+import { useChatStore } from './useChatStore'
 
 // A SessionSummary with the fields the store touches; overridable per test.
 function summary(overrides: Partial<SessionSummary> = {}): SessionSummary {
@@ -180,17 +181,38 @@ describe('autoName (heuristic first, AI refinement)', () => {
   })
 })
 
-describe('boot (clears a stale project filter for the current folder)', () => {
-  it('resets activeProjectId before restoring, then opens the most-recent session', async () => {
-    useSessionStore.setState({ activeProjectId: 'proj-old' })
+describe('boot (fresh landing page, never restores the last chat)', () => {
+  it('clears any stale project filter, shows an empty draft, and does NOT reopen mostRecent', async () => {
+    useSessionStore.setState({ activeProjectId: 'proj-old', activeSessionId: 'sess-old' })
     window.sylor.sessions.mostRecent = vi.fn().mockResolvedValue('sess-recent')
-    const open = vi.fn().mockResolvedValue(undefined)
-    // Spy on open via the store action so we don't drive the whole chat rehydrate.
-    useSessionStore.setState({ open })
+    window.sylor.sessions.list = vi.fn().mockResolvedValue([])
 
     await useSessionStore.getState().boot()
 
+    // A fresh landing page: the project scope is reset to "All chats"…
     expect(useSessionStore.getState().activeProjectId).toBeNull()
-    expect(open).toHaveBeenCalledWith('sess-recent')
+    // …no persisted session is active, and the chat is an unsaved draft
+    // (sessionId null → the composer renders the EmptyState hero).
+    expect(useSessionStore.getState().activeSessionId).toBeNull()
+    expect(useChatStore.getState().sessionId).toBeNull()
+    // The last conversation is deliberately NOT restored (reopen = clean slate).
+    expect(window.sylor.sessions.mostRecent).not.toHaveBeenCalled()
+  })
+})
+
+describe('newDraft (Claude-Desktop "New chat": no row until the first send)', () => {
+  it('drops to an unsaved draft, keeps the project scope, and refreshes the list', async () => {
+    useSessionStore.setState({ activeSessionId: 'sess-old', activeProjectId: 'proj-x' })
+    window.sylor.sessions.list = vi.fn().mockResolvedValue([summary({ id: 'sess-x' })])
+
+    await useSessionStore.getState().newDraft()
+
+    expect(useSessionStore.getState().activeSessionId).toBeNull()
+    // Only boot clears the scope; a plain New chat stays within the active project.
+    expect(useSessionStore.getState().activeProjectId).toBe('proj-x')
+    expect(useChatStore.getState().sessionId).toBeNull()
+    // The (global) recents list is reloaded so the rail stays current.
+    expect(window.sylor.sessions.list).toHaveBeenCalledWith('proj-x')
+    expect(useSessionStore.getState().sessions.map((s) => s.id)).toEqual(['sess-x'])
   })
 })

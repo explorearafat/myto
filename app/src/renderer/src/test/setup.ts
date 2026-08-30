@@ -17,6 +17,7 @@ const sylorMock: SylorApi = {
     onMaximizedChange: vi.fn().mockReturnValue(() => {})
   },
   platform: 'win32',
+  userName: 'Tester',
   providers: {
     getSettings: vi.fn().mockResolvedValue(DEFAULT_PROVIDER_SETTINGS),
     // Echo the settings back, mirroring the main-process normalise-and-return.

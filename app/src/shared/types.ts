@@ -85,6 +85,54 @@ export interface GatewayConfig {
 export type Theme = 'light' | 'dark'
 
 /**
+ * A pane in the Settings surface. Settings has no visible top-level entry point
+ * anymore (the gear was removed from the UI); instead the sidebar's quick-access
+ * rows deep-link straight into one of these tabs, so the underlying settings
+ * infrastructure stays fully intact while the generic "Settings" label is gone.
+ */
+export type SettingsTab =
+  | 'general'
+  | 'appearance'
+  | 'model'
+  | 'connectors'
+  | 'skills'
+  | 'commands'
+  | 'plugins'
+
+/**
+ * The top-level destination the workspace shows. `chat` is the conversation
+ * surface (the default); `sylorium` is Sylor's own web environment — a real,
+ * user-usable browser that Sylor can also perceive and drive under a permission
+ * gate. Both are primary sidebar destinations.
+ */
+export type AppView = 'chat' | 'sylorium'
+
+/**
+ * A class of action inside Sylorium that the permission system gates. The
+ * defaults deliberately escalate with blast radius: reading a page is cheap and
+ * reversible; sending a message, deleting data, or making a payment are not.
+ */
+export type SyloriumAction =
+  | 'read' // read/observe page content (DOM / a11y / vision)
+  | 'navigate' // follow links, go to URLs, switch tabs
+  | 'click' // click non-destructive elements
+  | 'fill' // type into inputs / fill forms (not submit)
+  | 'send' // submit a form / post / send a message
+  | 'delete' // delete data
+  | 'payment' // any purchase / payment / checkout
+
+/**
+ * How a {@link SyloriumAction} is authorised when Sylor (not the user) initiates
+ * it. `allow` runs it silently, `ask` surfaces an approval prompt first, `block`
+ * refuses outright. Sensitive actions default to `ask`/`block` and payment can
+ * never be silently allowed — see DEFAULT_SYLORIUM_PERMISSIONS.
+ */
+export type SyloriumPermission = 'allow' | 'ask' | 'block'
+
+/** The AI-control permission policy for Sylorium, one setting per action class. */
+export type SyloriumPermissions = Record<SyloriumAction, SyloriumPermission>
+
+/**
  * Reasoning effort the model should spend before answering. Threaded from the
  * composer into the workflow run and turned into a system-prompt directive:
  *  - `low`    → answer directly, minimal deliberation (fast).
@@ -210,6 +258,13 @@ export interface CompletionOptions {
   reasoningEffort?: ReasoningEffort
   /** Sampling temperature; lower is more precise/deterministic. */
   temperature?: number
+  /**
+   * Upper bound on output tokens. Left unset for normal turns (the backend uses
+   * its own default); set only for the `max` "no compromise" tier so a large file
+   * or whole scaffold isn't truncated by a gateway's conservative default cap.
+   * Best-effort: forwarded as `max_tokens` (gateway) / `num_predict` (Ollama).
+   */
+  maxTokens?: number
 }
 
 // ── AI core & workflow engine (Phase 3) ───────────────────────────────────
@@ -984,6 +1039,12 @@ export interface SylorApi {
   window: WindowApi
   /** Host platform string (e.g. 'win32', 'darwin', 'linux'). */
   platform: Platform
+  /**
+   * The OS account display name (from `USERNAME`/`USER`), used only to greet the
+   * user on the zero-state dashboard. Empty string when unavailable. Never sent
+   * anywhere — read-only, renderer-facing convenience like {@link platform}.
+   */
+  userName: string
   /** Model provider configuration, listing, and completions (Phase 2). */
   providers: ProvidersApi
   /** AI workflow engine: intent analysis + streamed responses (Phase 3). */

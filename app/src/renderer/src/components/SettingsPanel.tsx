@@ -1749,8 +1749,12 @@ export function SettingsPanel() {
   const models = useAppStore((s) => s.models)
   const modelsLoading = useAppStore((s) => s.modelsLoading)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
+  // The sidebar's Connectors/Skills/Commands/Plugins/Model rows deep-link here
+  // via openSettings(tab). The panel is mounted fresh on each open, so seeding
+  // the initial category from the requested tab is all it takes to land there.
+  const settingsTab = useAppStore((s) => s.settingsTab)
 
-  const [category, setCategory] = useState<SettingsCategory>('general')
+  const [category, setCategory] = useState<SettingsCategory>(settingsTab ?? 'general')
 
   // Local draft copy so provider/model edits aren't persisted until "Save".
   const [draft, setDraft] = useState<ProviderSettings>(storedSettings)

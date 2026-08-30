@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { isBundlerEntryHtml } from '@shared/preview'
+import { parseSlash } from '@shared/commands'
 import type {
   AgentRole,
   Attachment,
@@ -61,6 +62,14 @@ export interface ChatMessageUI {
   feedback?: 'like' | 'dislike'
   /** Local-only "reported" marker the user toggled. Never transmitted. */
   flagged?: boolean
+  /**
+   * When the user turn began as a `/command` (Claude-CLI style), this is the
+   * recognized command token (sans slash). The composer sends the *expanded*
+   * prompt to the engine but stores the raw `/name …` here for display, so the
+   * bubble can render the command as a highlighted mention chip instead of the
+   * expanded text. Live-only (not persisted) — a reloaded turn shows plain text.
+   */
+  slashCommand?: string
 }
 
 /** Lifecycle of a proposed tool op as shown in the chat thread. */
@@ -172,6 +181,59 @@ function appendActivity(
   return next
 }
 
+/** Last path segment of a POSIX/Windows path, for a compact status label. */
+function baseName(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean)
+  return parts[parts.length - 1] || path
+}
+
+/** Clip a long string for a single status line. */
+function clip(text: string, max: number): string {
+  const t = text.trim()
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t
+}
+
+/**
+ * Turns a proposed tool op into the live status line the top bar shows — an
+ * active-voice "what's happening now" with the concrete target, e.g. "Creating
+ * index.html", "Editing App.tsx", "Reading types.ts", "Reviewing engine.ts".
+ * When the acting agent is the reviewer, a file read reads as "Reviewing" rather
+ * than "Reading", so the four verbs mirror what the user actually sees happening.
+ */
+function describeProposal(
+  proposal: ToolProposal,
+  role?: AgentRole
+): { stage: WorkflowStage; message: string } {
+  switch (proposal.kind) {
+    case 'write_file':
+      return {
+        stage: 'executing',
+        message: `${proposal.exists ? 'Editing' : 'Creating'} ${baseName(proposal.path)}`
+      }
+    case 'read': {
+      if (proposal.op === 'read_file') {
+        return {
+          stage: 'reading',
+          message: `${role === 'reviewer' ? 'Reviewing' : 'Reading'} ${baseName(proposal.path)}`
+        }
+      }
+      if (proposal.op === 'list_files') {
+        const where = !proposal.path || proposal.path === '.' ? 'the project' : baseName(proposal.path)
+        return { stage: 'reading', message: `Scanning ${where}` }
+      }
+      return { stage: 'reading', message: `Searching ${clip(proposal.query || proposal.glob || '…', 40)}` }
+    }
+    case 'run_command':
+      return { stage: 'executing', message: `Running ${clip(proposal.command, 48)}` }
+    case 'mcp_call':
+      return { stage: 'executing', message: `Calling ${proposal.name}` }
+    case 'web_fetch':
+      return { stage: 'executing', message: `Fetching ${clip(proposal.url, 48)}` }
+    case 'install_plugin':
+      return { stage: 'executing', message: `Installing ${clip(proposal.source, 48)}` }
+  }
+}
+
 /**
  * An attachment being sent with a user turn. `textContent` is the decoded body
  * for text-like files (read by the composer), inlined into the engine history so
@@ -274,8 +336,13 @@ export interface ChatState {
    * Send a user turn and start a workflow run. No-op while already running or
    * when both text and attachments are empty. Attachments are bound to the user
    * message and their content is folded into the engine history.
+   *
+   * `text` is what the user sees (stored on the message). `engineText`, when
+   * given, is what the engine actually receives instead — used for `/command`
+   * expansion, where the bubble shows the raw `/name …` but the model gets the
+   * expanded prompt.
    */
-  send: (text: string, attachments?: OutgoingAttachment[]) => void
+  send: (text: string, attachments?: OutgoingAttachment[], engineText?: string) => void
   /** Approve or reject a pending tool proposal. */
   decideTool: (toolId: string, decision: ToolDecision) => void
   /** Cancel the active run, keeping whatever was streamed so far. */
@@ -309,8 +376,12 @@ export interface ChatState {
    * new ids never collide with restored ones. Orchestrated by the session store.
    */
   applyLoaded: (loaded: PersistedSession) => void
-  /** Reset to an empty conversation bound to a fresh session id (synchronous). */
-  resetTo: (sessionId: string, projectId?: string | null) => void
+  /**
+   * Reset to an empty conversation (synchronous). Pass a session id to bind to a
+   * freshly-created row, or `null` for an unsaved draft — the landing page shown
+   * on launch and after "New chat", before the first message persists a row.
+   */
+  resetTo: (sessionId: string | null, projectId?: string | null) => void
 }
 
 /**
@@ -686,7 +757,20 @@ export const useChatStore = create<ChatState>((set, get) => {
             ...(agent ? { agentRole: agent.role } : {})
           }
           run.tools.push(card)
-          if (isVisible()) set((state) => ({ tools: [...state.tools, card] }))
+          // Surface the concrete op on the top-level line (Creating/Editing/
+          // Reading/Reviewing <file>), replacing the generic delegating/generating
+          // text — for the lead and for a subagent alike, so the user sees the
+          // actual file work rather than "Delegating to the frontend…".
+          const desc = describeProposal(event.proposal, agent?.role)
+          run.status = { stage: desc.stage, message: desc.message }
+          run.activity = appendActivity(run.activity, desc.stage, desc.message)
+          if (isVisible()) {
+            set((state) => ({
+              tools: [...state.tools, card],
+              status: run.status,
+              activity: run.activity
+            }))
+          }
           break
         }
         case 'tool-result': {
@@ -753,10 +837,14 @@ export const useChatStore = create<ChatState>((set, get) => {
             contentOffset: run.content.length
           }
           run.agents.push(card)
-          // Surface the hand-off on the top-level line; the lead is blocked here
-          // until the subagent reports back, so this stays put meanwhile.
-          run.status = { stage: 'generating', message: `Delegating to the ${event.role}…` }
-          run.activity = appendActivity(run.activity, 'generating', run.status.message)
+          // Show what the subagent is about to do, not "Delegating to the
+          // frontend…". Concrete file ops (Creating/Editing/Reading/Reviewing
+          // <file>) replace this within a step or two — see the tool-request case;
+          // the reviewer gets its own verb up front so its read phase reads right.
+          const startStage: WorkflowStage = event.role === 'reviewer' ? 'verifying' : 'generating'
+          const startMsg = event.role === 'reviewer' ? 'Reviewing the changes…' : 'Working…'
+          run.status = { stage: startStage, message: startMsg }
+          run.activity = appendActivity(run.activity, startStage, startMsg)
           if (isVisible()) {
             // Push a copy so the store and the run's source-of-truth card never
             // share a mutable reference (flush updates each independently).
@@ -923,11 +1011,19 @@ export const useChatStore = create<ChatState>((set, get) => {
     projectId: null,
     liveSessionIds: [],
 
-    send: (text, attachments = []) => {
+    send: (text, attachments = [], engineText) => {
       const trimmed = text.trim()
       if ((!trimmed && attachments.length === 0) || get().running) return
 
-      const userMsg: ChatMessageUI = { id: nextId(), role: 'user', content: trimmed }
+      // A resolved `/command` sends its expansion to the engine but shows the raw
+      // `/name …` in the bubble as a mention chip. `slashCommand` marks that turn.
+      const slash = engineText != null ? parseSlash(trimmed) : null
+      const userMsg: ChatMessageUI = {
+        id: nextId(),
+        role: 'user',
+        content: trimmed,
+        ...(slash ? { slashCommand: slash.name } : {})
+      }
       const assistantId = nextId()
       const assistantMsg: ChatMessageUI = {
         id: assistantId,
@@ -937,16 +1033,18 @@ export const useChatStore = create<ChatState>((set, get) => {
       }
 
       // History sent to the engine: prior turns + this user turn. The user turn's
-      // content is augmented with attachment context (inline text for text files, a
-      // note for binaries/images) so the model can see what was attached — the
-      // *displayed* content stays as the user typed it.
+      // content is the engine text (a `/command`'s expansion, else what was typed)
+      // augmented with attachment context (inline text for text files, a note for
+      // binaries/images) so the model can see what was attached — the *displayed*
+      // content stays as the user typed it.
       const historyBase: ChatMessage[] = get().messages.map((m) => ({
         role: m.role,
         content: m.content
       }))
+      const engineBase = (engineText ?? trimmed).trim()
       const attachmentContext = buildAttachmentContext(attachments)
       const userContentForEngine =
-        attachmentContext === '' ? trimmed : `${trimmed}\n\n${attachmentContext}`.trim()
+        attachmentContext === '' ? engineBase : `${engineBase}\n\n${attachmentContext}`.trim()
       const history: ChatMessage[] = [
         ...historyBase,
         { role: 'user', content: userContentForEngine }

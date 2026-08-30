@@ -59,6 +59,7 @@ function installShim(): void {
       onMaximizedChange: () => () => {}
     },
     platform: 'win32',
+    userName: 'ARAFAT',
     providers: {
       getSettings: () => Promise.resolve(DEFAULT_PROVIDER_SETTINGS),
       saveSettings: (s) => Promise.resolve(s),

@@ -1,4 +1,4 @@
-import type { ProviderSettings } from './types'
+import type { ProviderSettings, SyloriumPermissions } from './types'
 
 /** Ollama's default local endpoint. */
 export const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434'
@@ -34,4 +34,21 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
     // terminal; the user switches to Code to work on a folder.
     mode: 'cowork'
   }
+}
+
+/**
+ * Default AI-control permissions for Sylorium (requirement: never let the AI
+ * silently perform highly sensitive actions). Observing and low-risk navigation
+ * are allowed so Sylor is useful out of the box; anything that mutates state,
+ * sends a message, or spends money starts gated. Payment is `block` by default —
+ * the strongest posture — and the UI never lets it drop below `ask`.
+ */
+export const DEFAULT_SYLORIUM_PERMISSIONS: SyloriumPermissions = {
+  read: 'allow',
+  navigate: 'allow',
+  click: 'ask',
+  fill: 'ask',
+  send: 'ask',
+  delete: 'ask',
+  payment: 'block'
 }

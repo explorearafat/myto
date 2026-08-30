@@ -17,26 +17,24 @@ export default function App() {
   const refreshProjects = useProjectStore((s) => s.refresh)
 
   // Load persisted provider settings first (so the provider is ready), restore
-  // the current working folder (requirement A), then restore the most-recent
-  // session — or create a fresh one — from the DB, and load the projects rail.
+  // the current working folder, then open a fresh landing page (boot never
+  // restores the last chat) with the full global history in the rail, and load
+  // the projects list.
   useEffect(() => {
     void loadSettings()
     void initWorkspace()
     void boot()
     void refreshProjects()
 
-    // React to the user picking a new folder (main-process broadcast): mirror the
-    // new root into state, then restore THAT folder's own most-recent conversation
-    // — like reopening a project in an IDE — instead of dropping a blank 'New
-    // session' every time (which made prior work look lost). boot() re-reads the
-    // now-repointed root and clears any stale project filter. Background runs keep
-    // going and stay reachable on return: applyLoaded deliberately preserves
-    // in-flight runs, and liveRuns is keyed by session, not by folder. On startup
-    // the main process sets the root silently (no broadcast), so this never fires
-    // an extra restore at boot.
+    // React to the user picking a new folder (main-process broadcast): just mirror
+    // the new root into state. History is GLOBAL now — one flat, cross-folder list
+    // — so switching folders (or code↔cowork) must never hide chats or disturb the
+    // open conversation. We deliberately do NOT re-boot here: the current chat (and
+    // any background run, keyed by session not folder) keeps going, and the rail is
+    // unchanged since it isn't scoped to the root. New chats created after the
+    // switch are simply stamped with the new root.
     const dispose = window.sylor?.workspace?.onChanged?.((info) => {
       setWorkspace(info)
-      void boot()
     })
     return () => dispose?.()
   }, [loadSettings, initWorkspace, setWorkspace, boot, refreshProjects])

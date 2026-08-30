@@ -119,6 +119,18 @@ describe('OllamaProvider', () => {
     expect(body.options).toBeUndefined()
     expect(body.reasoning_effort).toBeUndefined()
   })
+
+  it('maps a requested maxTokens into native options.num_predict', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ message: { content: 'ok' } }))
+    const provider = new OllamaProvider({ baseUrl: 'http://localhost:11434' })
+    await provider.getCompletion('llama3.1:8b', [{ role: 'user', content: 'hi' }], {
+      temperature: 0.7,
+      maxTokens: 32_000
+    })
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.options).toEqual({ temperature: 0.7, num_predict: 32_000 })
+  })
 })
 
 describe('GatewayProvider', () => {
@@ -306,6 +318,21 @@ describe('GatewayProvider', () => {
 
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
     expect(body.reasoning_effort).toBe('high')
+  })
+
+  it('adds max_tokens alongside reasoning_effort when a cap is set (the "max" tier)', async () => {
+    // max_tokens is orthogonal to the effort/temperature split — it must ride
+    // together with reasoning_effort so a big build isn't truncated.
+    fetchMock.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'ok' } }] }))
+    const provider = new GatewayProvider(baseConfig)
+    await provider.getCompletion('gpt-4o-mini', [{ role: 'user', content: 'hi' }], {
+      reasoningEffort: 'max',
+      maxTokens: 32_000
+    })
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.reasoning_effort).toBe('high')
+    expect(body.max_tokens).toBe(32_000)
   })
 
   it('sends temperature only when no reasoning effort is requested', async () => {

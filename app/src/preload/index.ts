@@ -21,6 +21,8 @@ const api: SylorApi = {
     }
   },
   platform: process.platform,
+  // OS account name, used only to greet the user on the zero-state dashboard.
+  userName: process.env.USERNAME || process.env.USER || '',
   providers: {
     getSettings: () => ipcRenderer.invoke(IpcChannel.ProvidersGetSettings),
     saveSettings: (settings) => ipcRenderer.invoke(IpcChannel.ProvidersSaveSettings, settings),

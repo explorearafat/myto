@@ -2,6 +2,7 @@ import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panel
 import { ConversationRail } from '@renderer/components/ConversationRail'
 import { ChatPanel } from '@renderer/components/ChatPanel'
 import { PreviewPanel } from '@renderer/components/PreviewPanel'
+import { SyloriumView } from '@renderer/components/sylorium/SyloriumView'
 import { useAppStore } from '@renderer/store/useAppStore'
 
 /**
@@ -26,6 +27,8 @@ export function AppLayout() {
   const root = useDefaultLayout({ id: 'sylor.root' })
   const railOpen = useAppStore((s) => s.railOpen)
   const previewOpen = useAppStore((s) => s.previewOpen)
+  const activeView = useAppStore((s) => s.activeView)
+  const inChat = activeView === 'chat'
 
   return (
     <Group
@@ -44,11 +47,24 @@ export function AppLayout() {
         </>
       )}
 
+      {/*
+        Both destinations stay mounted and are toggled with `hidden` so their
+        live state survives view switches — the ChatPanel's scroll/stream and,
+        crucially, Sylorium's `<webview>` logins and page state are preserved.
+      */}
       <Panel id="chat" defaultSize="82" minSize="30">
-        <ChatPanel />
+        <div className="relative h-full">
+          <div className={inChat ? 'h-full' : 'hidden'}>
+            <ChatPanel />
+          </div>
+          <div className={inChat ? 'hidden' : 'h-full'}>
+            <SyloriumView />
+          </div>
+        </div>
       </Panel>
 
-      {previewOpen && (
+      {/* The live preview only belongs to the chat workspace. */}
+      {previewOpen && inChat && (
         <>
           <Handle />
           <Panel id="preview" defaultSize="42" minSize="24" maxSize="62">

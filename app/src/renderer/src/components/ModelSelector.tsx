@@ -7,13 +7,19 @@ export function Selector({
   label,
   value,
   onClick,
-  tone = 'default'
+  tone = 'default',
+  chevron = false
 }: {
-  label: string
+  /** Optional caption (e.g. "Mode"). Omit it to show the value alone — the
+   * composer's model/effort pills do this so they read as "Opus 4.8" / "High"
+   * rather than "MODEL Opus 4.8". */
+  label?: string
   value: string
   onClick?: () => void
   /** `warn` tints the value amber — used to flag the hands-free Autonomous mode. */
   tone?: 'default' | 'warn'
+  /** Show a small caret hinting the pill opens a menu (used when the label is hidden). */
+  chevron?: boolean
 }) {
   return (
     <button
@@ -26,12 +32,30 @@ export function Selector({
           : 'border-border hover:border-primary/60')
       }
     >
-      <span className="text-[10px] uppercase tracking-wider text-muted">{label}</span>
+      {label && <span className="text-[10px] uppercase tracking-wider text-muted">{label}</span>}
       <span
         className={'text-[12px] font-medium ' + (tone === 'warn' ? 'text-amber-400' : 'text-text')}
       >
         {value}
       </span>
+      {chevron && (
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 12 12"
+          fill="none"
+          aria-hidden="true"
+          className="text-muted transition-transform group-hover:text-text"
+        >
+          <path
+            d="M3 4.5L6 7.5l3-3"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )}
     </button>
   )
 }
@@ -44,7 +68,7 @@ export function ModelSelector({ openUp = false }: { openUp?: boolean } = {}) {
   const activeModelId = useAppStore((s) => s.settings.modelId)
   const refreshModels = useAppStore((s) => s.refreshModels)
   const selectModel = useAppStore((s) => s.selectModel)
-  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
+  const openSettings = useAppStore((s) => s.openSettings)
 
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -71,7 +95,7 @@ export function ModelSelector({ openUp = false }: { openUp?: boolean } = {}) {
 
   return (
     <div ref={ref} className="relative">
-      <Selector label="Model" value={model || 'Select model'} onClick={toggle} />
+      <Selector value={model || 'Select model'} onClick={toggle} chevron />
       {open && (
         <div
           className={`absolute left-0 z-30 w-64 overflow-hidden rounded-lg border border-border bg-surface shadow-xl ${menuPosition}`}
@@ -121,7 +145,7 @@ export function ModelSelector({ openUp = false }: { openUp?: boolean } = {}) {
               type="button"
               onClick={() => {
                 setOpen(false)
-                setSettingsOpen(true)
+                openSettings('model')
               }}
               className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-muted transition-colors hover:bg-surface-2 hover:text-text"
             >
@@ -177,7 +201,7 @@ export function EffortSelector({ openUp = false }: { openUp?: boolean } = {}) {
 
   return (
     <div ref={ref} className="relative">
-      <Selector label="Effort" value={current.label} onClick={() => setOpen((v) => !v)} />
+      <Selector value={current.label} onClick={() => setOpen((v) => !v)} chevron />
       {open && (
         <div
           className={`absolute left-0 z-30 w-52 overflow-hidden rounded-lg border border-border bg-surface py-1 shadow-xl ${menuPosition}`}

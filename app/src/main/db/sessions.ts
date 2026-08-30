@@ -72,32 +72,24 @@ export function createSession(
 }
 
 /**
- * Sessions for a project root, newest-updated first, with message counts. When
- * `projectId` is provided, the list is further scoped to chats filed under that
- * project (pass `null` explicitly to list only *unfiled* chats).
+ * All sessions, newest-updated first, with message counts. History is GLOBAL —
+ * never scoped to a project root — so switching the working folder (or toggling
+ * cowork/code) never hides past chats; they stay in one flat, chronological list
+ * like Claude's desktop app. Pass a `projectId` to narrow to chats filed under
+ * that project; `null`/`undefined` both mean "every chat" (what the rail's
+ * "All chats" entry uses).
  */
-export function listSessions(
-  projectRoot: string,
-  projectId?: string | null
-): SessionSummary[] {
-  // `projectId === undefined` → no project filter; `null` → only unfiled chats;
-  // a string → that project. SQLite can't bind IS NULL, so branch the clause.
-  const filterByProject = projectId !== undefined
-  const projectClause = filterByProject
-    ? projectId === null
-      ? ' AND s.project_id IS NULL'
-      : ' AND s.project_id = ?'
-    : ''
+export function listSessions(projectId?: string | null): SessionSummary[] {
+  // Only a concrete project id filters; null/undefined list every chat globally.
+  const byProject = typeof projectId === 'string'
   const stmt = getDb().prepare(
     `SELECT s.id, s.title, s.project_root, s.project_id, s.created_at, s.updated_at,
             (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count
      FROM sessions s
-     WHERE s.project_root = ?${projectClause}
+     ${byProject ? 'WHERE s.project_id = ?' : ''}
      ORDER BY s.updated_at DESC`
   )
-  const rows = (
-    filterByProject && projectId !== null ? stmt.all(projectRoot, projectId) : stmt.all(projectRoot)
-  ) as Array<{
+  const rows = (byProject ? stmt.all(projectId) : stmt.all()) as Array<{
     id: string
     title: string
     project_root: string
@@ -118,36 +110,25 @@ export function listSessions(
 }
 
 /**
- * Search a project root's sessions by substring, newest-updated first: a session
- * matches when its title OR any of its message bodies contains `query`
- * (case-insensitive). Scoped like {@link listSessions} — `projectId` narrows to a
- * project (`null` → only unfiled chats, `undefined` → all chats under the root).
- * Returns `[]` for a blank query. Substring `LIKE` (FTS5 deferred; fine at the
- * local, single-user scale).
+ * Search all sessions by substring, newest-updated first: a session matches when
+ * its title OR any of its message bodies contains `query` (case-insensitive).
+ * Global like {@link listSessions} — a `projectId` narrows to one project;
+ * `null`/`undefined` search every chat. Returns `[]` for a blank query. Substring
+ * `LIKE` (FTS5 deferred; fine at the local, single-user scale).
  */
-export function searchSessions(
-  projectRoot: string,
-  query: string,
-  projectId?: string | null
-): SessionSummary[] {
+export function searchSessions(query: string, projectId?: string | null): SessionSummary[] {
   const trimmed = query.trim()
   if (trimmed === '') return []
   // Escape LIKE wildcards so a literal %, _, or \ in the query matches itself.
   const pattern = `%${trimmed.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`
 
-  // Same project-scope branching as listSessions (SQLite can't bind IS NULL).
-  const filterByProject = projectId !== undefined
-  const projectClause = filterByProject
-    ? projectId === null
-      ? ' AND s.project_id IS NULL'
-      : ' AND s.project_id = ?'
-    : ''
+  // Only a concrete project id filters; null/undefined search all chats globally.
+  const byProject = typeof projectId === 'string'
   const stmt = getDb().prepare(
     `SELECT s.id, s.title, s.project_root, s.project_id, s.created_at, s.updated_at,
             (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count
      FROM sessions s
-     WHERE s.project_root = ?${projectClause}
-       AND (
+     WHERE ${byProject ? 's.project_id = ? AND ' : ''}(
          s.title LIKE ? ESCAPE '\\'
          OR EXISTS (
            SELECT 1 FROM messages mm
@@ -157,9 +138,7 @@ export function searchSessions(
      ORDER BY s.updated_at DESC`
   )
   const rows = (
-    filterByProject && projectId !== null
-      ? stmt.all(projectRoot, projectId, pattern, pattern)
-      : stmt.all(projectRoot, pattern, pattern)
+    byProject ? stmt.all(projectId, pattern, pattern) : stmt.all(pattern, pattern)
   ) as Array<{
     id: string
     title: string
@@ -193,31 +172,27 @@ export function deleteSession(id: string): void {
 }
 
 /**
- * The session to reopen on startup for a project root, or null when there are
- * none.
+ * The most-recently-updated session that has messages, or null when history is
+ * empty. Global (never project-scoped).
  *
- * Prefers the most-recently-updated session that actually has messages. A blank
- * session — the one the New Chat button creates, then left unused — carries a
- * fresh `updated_at` and would otherwise win, booting the user into an empty
- * chat and making the work they left behind look deleted. Falls back to the
- * newest session of any kind so a genuinely empty history still opens something.
+ * Prefers a session that actually has messages so a stray empty draft never wins,
+ * falling back to the newest session of any kind. Retained for callers that want
+ * to resume the last real chat; startup no longer calls it — the app opens on a
+ * fresh landing page instead (see the store's `boot`).
  */
-export function mostRecentSession(projectRoot: string): string | null {
+export function mostRecentSession(): string | null {
   const withMessages = getDb()
     .prepare(
       `SELECT s.id FROM sessions s
-       WHERE s.project_root = ?
-         AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)
+       WHERE EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)
        ORDER BY s.updated_at DESC LIMIT 1`
     )
-    .get(projectRoot) as { id: string } | undefined
+    .get() as { id: string } | undefined
   if (withMessages) return withMessages.id
 
   const newest = getDb()
-    .prepare(
-      `SELECT id FROM sessions WHERE project_root = ? ORDER BY updated_at DESC LIMIT 1`
-    )
-    .get(projectRoot) as { id: string } | undefined
+    .prepare(`SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 1`)
+    .get() as { id: string } | undefined
   return newest?.id ?? null
 }
 

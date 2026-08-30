@@ -227,15 +227,18 @@ describe('sessions CRUD', () => {
   it('creates and lists sessions newest-updated first', () => {
     const a = createSession(ROOT, 'First', tick())
     const b = createSession(ROOT, 'Second', tick())
-    const list = listSessions(ROOT)
+    const list = listSessions()
     expect(list.map((s) => s.id)).toEqual([b.id, a.id])
     expect(list[0].messageCount).toBe(0)
   })
 
-  it('scopes the list to the project root', () => {
+  it('lists sessions from every folder — history is global, not project-scoped', () => {
+    // The heart of the fix: switching the working folder must never hide chats, so
+    // the list spans all roots (newest-updated first) regardless of where each was
+    // created.
     createSession(ROOT, 'Mine', tick())
     createSession('/other/root', 'Theirs', tick())
-    expect(listSessions(ROOT).map((s) => s.title)).toEqual(['Mine'])
+    expect(listSessions().map((s) => s.title)).toEqual(['Theirs', 'Mine'])
   })
 
   it('rename bumps updated_at and reorders the list', () => {
@@ -243,17 +246,21 @@ describe('sessions CRUD', () => {
     const b = createSession(ROOT, 'B', tick())
     // b is newest; renaming a with a later clock makes it newest.
     renameSession(a.id, 'A renamed', tick())
-    const list = listSessions(ROOT)
+    const list = listSessions()
     expect(list[0].id).toBe(a.id)
     expect(list[0].title).toBe('A renamed')
     expect(list[0].updatedAt).toBeGreaterThan(b.updatedAt)
   })
 
-  it('mostRecent picks the latest-updated session', () => {
+  it('mostRecent picks the latest-updated session across every folder', () => {
     createSession(ROOT, 'A', tick())
-    const b = createSession(ROOT, 'B', tick())
-    expect(mostRecentSession(ROOT)).toBe(b.id)
-    expect(mostRecentSession('/nothing/here')).toBeNull()
+    const b = createSession('/other/root', 'B', tick())
+    // Global: the newest wins even though it lives under a different root.
+    expect(mostRecentSession()).toBe(b.id)
+  })
+
+  it('mostRecent returns null when there are no sessions', () => {
+    expect(mostRecentSession()).toBeNull()
   })
 
   it('mostRecent skips a newer EMPTY session in favour of one with messages', () => {
@@ -264,7 +271,7 @@ describe('sessions CRUD', () => {
     const blank = createSession(ROOT, 'New session', tick())
 
     expect(blank.updatedAt).toBeGreaterThan(work.updatedAt)
-    expect(mostRecentSession(ROOT)).toBe(work.id)
+    expect(mostRecentSession()).toBe(work.id)
   })
 })
 
@@ -380,13 +387,13 @@ describe('search', () => {
     const b = createSession(ROOT, 'Parser edge cases', tick())
     createSession(ROOT, 'Unrelated notes', tick())
     // Both titles contain "parser"; b is newer so it sorts first.
-    expect(searchSessions(ROOT, 'PARSER').map((s) => s.id)).toEqual([b.id, a.id])
+    expect(searchSessions('PARSER').map((s) => s.id)).toEqual([b.id, a.id])
   })
 
   it('matches on message content even when the title does not', () => {
     const s = createSession(ROOT, 'Chat', tick())
     appendMessage(s.id, { id: 'm1', role: 'user', content: 'how do I use zustand?' }, tick())
-    const hits = searchSessions(ROOT, 'zustand')
+    const hits = searchSessions('zustand')
     expect(hits.map((h) => h.id)).toEqual([s.id])
     expect(hits[0].messageCount).toBe(1)
   })
@@ -395,29 +402,33 @@ describe('search', () => {
     const s = createSession(ROOT, 'Chat', tick())
     appendMessage(s.id, { id: 'm1', role: 'user', content: 'alpha alpha' }, tick())
     appendMessage(s.id, { id: 'm2', role: 'assistant', content: 'alpha again' }, tick())
-    expect(searchSessions(ROOT, 'alpha')).toHaveLength(1)
+    expect(searchSessions('alpha')).toHaveLength(1)
   })
 
-  it('scopes to the project root and returns [] for a blank query', () => {
+  it('searches every folder and returns [] for a blank query', () => {
     createSession(ROOT, 'Mine parser', tick())
     createSession('/other/root', 'Theirs parser', tick())
-    expect(searchSessions(ROOT, 'parser').map((s) => s.title)).toEqual(['Mine parser'])
-    expect(searchSessions(ROOT, '   ')).toEqual([])
+    // Global: matches come back from every root (newest-updated first).
+    expect(searchSessions('parser').map((s) => s.title)).toEqual(['Theirs parser', 'Mine parser'])
+    expect(searchSessions('   ')).toEqual([])
   })
 
-  it('filters by project id when provided (null = unfiled only)', () => {
+  it('filters by project id when provided (null = every chat)', () => {
     const proj = createProject('Parsers', tick())
     const filed = createSession(ROOT, 'Filed parser', tick(), proj.id)
     const unfiled = createSession(ROOT, 'Unfiled parser', tick())
-    expect(searchSessions(ROOT, 'parser', proj.id).map((s) => s.id)).toEqual([filed.id])
-    expect(searchSessions(ROOT, 'parser', null).map((s) => s.id)).toEqual([unfiled.id])
+    // A concrete id narrows to that project…
+    expect(searchSessions('parser', proj.id).map((s) => s.id)).toEqual([filed.id])
+    // …while null (the rail's "All chats") returns every match, filed or not,
+    // newest first.
+    expect(searchSessions('parser', null).map((s) => s.id)).toEqual([unfiled.id, filed.id])
   })
 
   it('treats LIKE wildcards in the query as literals', () => {
     const pct = createSession(ROOT, '100% done', tick())
     createSession(ROOT, '100 tasks', tick())
     // Without escaping, "100%" would match "100 tasks" too; it must not.
-    expect(searchSessions(ROOT, '100%').map((s) => s.id)).toEqual([pct.id])
+    expect(searchSessions('100%').map((s) => s.id)).toEqual([pct.id])
   })
 })
 
@@ -433,7 +444,7 @@ describe('delete cascade', () => {
     deleteSession(gone.id)
 
     expect(loadSession(gone.id)).toBeNull()
-    expect(listSessions(ROOT).map((s) => s.id)).toEqual([keep.id])
+    expect(listSessions().map((s) => s.id)).toEqual([keep.id])
     // Child rows for the deleted session are gone (cascade).
     const orphans = getDb()
       .prepare('SELECT COUNT(*) AS c FROM messages WHERE session_id = ?')

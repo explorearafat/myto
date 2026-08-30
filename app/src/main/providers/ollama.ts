@@ -11,15 +11,17 @@ import { modelInfo, type Provider } from './provider'
 
 /**
  * Ollama sampling. It has no `reasoning_effort` (that's a gateway concept), so we
- * map the caller's temperature into Ollama's native `options.temperature`. A
- * missing temperature leaves Ollama on its own defaults. `reasoningEffort` is
+ * map the caller's temperature into Ollama's native `options.temperature` and the
+ * caller's output cap into `options.num_predict` (Ollama's max-tokens knob). A
+ * missing value leaves Ollama on its own defaults. `reasoningEffort` is
  * intentionally ignored here.
  */
 function ollamaOptions(options?: CompletionOptions): Record<string, unknown> {
-  if (options && typeof options.temperature === 'number') {
-    return { options: { temperature: options.temperature } }
-  }
-  return {}
+  if (!options) return {}
+  const inner: Record<string, unknown> = {}
+  if (typeof options.temperature === 'number') inner.temperature = options.temperature
+  if (typeof options.maxTokens === 'number') inner.num_predict = options.maxTokens
+  return Object.keys(inner).length > 0 ? { options: inner } : {}
 }
 interface OllamaTag {
   name: string

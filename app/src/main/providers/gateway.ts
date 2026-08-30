@@ -14,18 +14,22 @@ import { modelInfo, type Provider } from './provider'
  * `reasoning_effort` (a capable gateway maps it to the model's extended-thinking
  * budget — the single biggest quality lever) and, because Anthropic-backed
  * proxies reject a custom temperature while thinking is on, send `temperature`
- * ONLY when no reasoning effort is requested. Unknown fields are ignored by
+ * ONLY when no reasoning effort is requested. `max_tokens` is orthogonal to both
+ * and is added whenever the caller sets it (the `max` tier), lifting the output
+ * ceiling so a big generation isn't truncated. Unknown fields are ignored by
  * spec-compliant gateways, so this can only help a capable backend.
  */
 function samplingBody(options?: CompletionOptions): Record<string, unknown> {
   if (!options) return {}
+  const body: Record<string, unknown> = {}
   if (options.reasoningEffort) {
     // 'max' is Sylor-internal; the wire vocabulary tops out at 'high'.
-    const effort = options.reasoningEffort === 'max' ? 'high' : options.reasoningEffort
-    return { reasoning_effort: effort }
+    body.reasoning_effort = options.reasoningEffort === 'max' ? 'high' : options.reasoningEffort
+  } else if (typeof options.temperature === 'number') {
+    body.temperature = options.temperature
   }
-  if (typeof options.temperature === 'number') return { temperature: options.temperature }
-  return {}
+  if (typeof options.maxTokens === 'number') body.max_tokens = options.maxTokens
+  return body
 }
 interface GatewayModelsResponse {
   data?: Array<{ id: string }>

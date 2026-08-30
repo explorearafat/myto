@@ -19,15 +19,9 @@ import {
 } from '../store/useChatStore'
 import { useSessionStore } from '../store/useSessionStore'
 import { useAppStore } from '../store/useAppStore'
-import { SylorLogo } from './SylorLogo'
 import { Markdown } from './Markdown'
-import {
-  ModelSelector,
-  EffortSelector,
-  ModeSelector,
-  PlanFirstToggle,
-  WorkModeSelector
-} from './ModelSelector'
+import { ZeroStateDashboard } from './ZeroState'
+import { ModelSelector, EffortSelector, ModeSelector, PlanFirstToggle } from './ModelSelector'
 import { monacoThemeFor } from '../lib/monaco-theme'
 import { lineDiffStats, estimateTokens, formatCount } from '../lib/diff-stats'
 import type {
@@ -917,8 +911,8 @@ function AgentCard({ agent, tools }: { agent: AgentCardUI; tools: ToolCardUI[] }
             working
           </span>
         ) : agent.ok ? (
-          <span className="shrink-0 text-[12px] font-semibold text-emerald-500" title="Done">
-            ✓
+          <span className="shrink-0 text-[10px] font-medium text-muted" title="Done">
+            done
           </span>
         ) : (
           <span
@@ -934,11 +928,7 @@ function AgentCard({ agent, tools }: { agent: AgentCardUI; tools: ToolCardUI[] }
             block.kind === 'card' ? (
               <ToolCard key={block.card.id} card={block.card} />
             ) : block.kind === 'prose' ? (
-              <ProseBlock
-                key={`prose-${i}`}
-                text={block.text}
-                showCaret={running && i === blocks.length - 1}
-              />
+              <ProseBlock key={`prose-${i}`} text={block.text} />
             ) : null
           )
         ) : running ? (
@@ -1123,27 +1113,12 @@ function MessageActions({ message }: { message: ChatMessageUI }) {
 /**
  * One prose segment of an assistant turn (before/between/after tool cards).
  * Applies the same sylor-tool fence backstop + trim as the whole-message path
- * and renders nothing when empty (e.g. two cards emitted back-to-back). Shows
- * the streaming caret when it's the tail of a still-streaming turn.
+ * and renders nothing when empty (e.g. two cards emitted back-to-back).
  */
-const ProseBlock = memo(function ProseBlock({
-  text,
-  showCaret
-}: {
-  text: string
-  showCaret: boolean
-}) {
+const ProseBlock = memo(function ProseBlock({ text }: { text: string }) {
   const content = useMemo(() => text.replace(TOOL_FENCE_RE, '').trim(), [text])
-  const caret = showCaret ? (
-    <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-primary/70 align-middle" />
-  ) : null
-  if (content.length === 0) return caret
-  return (
-    <>
-      <Markdown content={content} />
-      {caret}
-    </>
-  )
+  if (content.length === 0) return null
+  return <Markdown content={content} />
 })
 
 /**
@@ -1183,6 +1158,25 @@ function ClampedUserText({ text }: { text: string }) {
   )
 }
 
+/**
+ * A user turn that began as a `/command`: the command renders as a blue mention
+ * chip (Claude-CLI style) rather than the expanded prompt the engine actually
+ * received. Any text the user typed after the command name follows the chip.
+ */
+function SlashUserText({ content, name }: { content: string; name: string }): ReactNode {
+  const parsed = parseSlash(content)
+  const label = parsed?.name ?? name
+  const args = parsed?.args ?? ''
+  return (
+    <div className="text-[13px] leading-relaxed text-text">
+      <span className="rounded bg-blue-500/15 px-1.5 py-0.5 font-medium text-blue-500">
+        /{label}
+      </span>
+      {args && <span className="ml-1.5 whitespace-pre-wrap break-words">{args}</span>}
+    </div>
+  )
+}
+
 /** A user turn: right-aligned bubble with its attachments (requirement F). */
 function UserMessage({ message, attachments }: MessageProps) {
   const displayContent = useMemo(
@@ -1201,7 +1195,11 @@ function UserMessage({ message, attachments }: MessageProps) {
       )}
       {displayContent.length > 0 && (
         <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-surface-2 px-3.5 py-2">
-          <ClampedUserText text={displayContent} />
+          {message.slashCommand ? (
+            <SlashUserText content={displayContent} name={message.slashCommand} />
+          ) : (
+            <ClampedUserText text={displayContent} />
+          )}
         </div>
       )}
     </div>
@@ -1256,11 +1254,12 @@ function AssistantMessage({ message, isActive, status, cards, agents, agentTools
   }, [message.content, cards, agents])
 
   // Claude-Code-style flat turn: the assistant reply renders directly on the
-  // surface — no avatar, no name badge, no left-gutter indent. Only the user's
-  // turn keeps a bubble, so the two speakers still read distinctly (user =
-  // right-aligned pill, Sylor = flat full-width prose on the background).
+  // surface — no avatar, no name badge. Only the user's turn keeps a bubble, so
+  // the two speakers still read distinctly (user = right-aligned pill, Sylor =
+  // flat full-width prose on the background). A small `pl-4` gives the prose a
+  // little breathing room from the left edge without reintroducing a gutter.
   return (
-    <div className="min-w-0">
+    <div className="min-w-0 pl-4">
       {message.error && (
         <div className="mb-1.5 rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-300">
           {message.error}
@@ -1279,11 +1278,7 @@ function AssistantMessage({ message, isActive, status, cards, agents, agentTools
                 tools={agentTools.get(block.agent.agentId) ?? []}
               />
             ) : (
-              <ProseBlock
-                key={`prose-${i}`}
-                text={block.text}
-                showCaret={message.pending === true && i === blocks.length - 1}
-              />
+              <ProseBlock key={`prose-${i}`} text={block.text} />
             )
           )}
         </div>
@@ -1436,18 +1431,7 @@ function PermissionBar({
 }
 
 function EmptyState() {
-  return (
-    <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-      <div className="mb-3 grid h-14 w-14 place-items-center rounded-2xl bg-primary/12">
-        <SylorLogo size={40} />
-      </div>
-      <div className="mb-1 text-[14px] font-semibold text-text">Ask Sylor about your project</div>
-      <p className="max-w-xs text-[12px] leading-relaxed text-muted">
-        Sylor can read your files, propose edits as reviewable diffs, and run commands — each gated
-        by your permission mode.
-      </p>
-    </div>
-  )
+  return <ZeroStateDashboard />
 }
 
 /** Theme toggle: sun in light, moon in dark. */
@@ -1729,7 +1713,10 @@ export function ChatPanel() {
   const sessionId = useChatStore((s) => s.sessionId)
   const decideTool = useChatStore((s) => s.decideTool)
   const cancel = useChatStore((s) => s.cancel)
-  const newSession = useSessionStore((s) => s.create)
+  // "New chat" opens a fresh landing page (an unsaved draft) — the row is created
+  // lazily on the first send, so the rail never fills with empty 'New session'
+  // entries (Claude-Desktop parity).
+  const newSession = useSessionStore((s) => s.newDraft)
   const workMode = useAppStore((s) => s.workMode)
   const workspaceChosen = useAppStore((s) => s.workspaceChosen)
   const workspaceRoot = useAppStore((s) => s.workspaceRoot)
@@ -2025,14 +2012,19 @@ export function ChatPanel() {
       attachment: p.attachment,
       ...(p.textContent != null ? { textContent: p.textContent } : {})
     }))
-    // A turn needs a session to persist into. Boot normally set one long ago; this
-    // only bites the first-launch race (a send before boot() resolves), where the
-    // user turn would otherwise be dropped AND a late boot() would replace these
-    // very messages. Ensure one exists first, then send into it.
+    // A turn needs a persisted session to save into. On a fresh landing page the
+    // chat is an unsaved draft (sessionId == null, showing the EmptyState); create
+    // the row now — lazily, on this first send — so the user turn and its run have
+    // somewhere durable to persist. This also covers the first-launch race (a send
+    // before boot() resolves). create() files the new chat under the rail's active
+    // project and stamps the current working folder.
     if (useChatStore.getState().sessionId == null) {
-      await useSessionStore.getState().boot()
+      await useSessionStore.getState().create()
     }
-    send(text, outgoing)
+    // Show the raw `/command …` in the bubble (rendered as a mention chip) but
+    // send its expansion to the engine. A non-slash message expands to itself, so
+    // no engine override is passed then.
+    send(raw, outgoing, text !== raw ? text : undefined)
     // Title a still-unnamed session from its first prompt (fire-and-forget;
     // no-ops once the session already has a real title). See useSessionStore.
     void useSessionStore.getState().autoName(text)
@@ -2228,7 +2220,6 @@ export function ChatPanel() {
         )}
         <div className="mt-2 flex items-center justify-between gap-2">
           <div className="flex items-center gap-1.5">
-            <WorkModeSelector />
             {/* Folder chip (requirement A): which folder Code mode is scoped to. */}
             {workMode === 'code' && workspaceChosen && workspaceRoot && (
               <button

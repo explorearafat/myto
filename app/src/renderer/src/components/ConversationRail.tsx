@@ -1,11 +1,25 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import type { Project, SessionSummary } from '@shared/types'
+import type { Project, SessionSummary, WorkMode } from '@shared/types'
 import { useAppStore } from '@renderer/store/useAppStore'
 import { useSessionStore } from '@renderer/store/useSessionStore'
 import { useProjectStore } from '@renderer/store/useProjectStore'
 import { useChatStore } from '@renderer/store/useChatStore'
 import { ProjectDialog } from '@renderer/components/ProjectDialog'
 import { SylorLogo } from '@renderer/components/SylorLogo'
+
+/** The two top-level working modes, shown as the sidebar's nav-level toggle (item 1). */
+const WORK_MODES: { value: WorkMode; label: string; title: string }[] = [
+  {
+    value: 'cowork',
+    label: 'Cowork',
+    title: 'Cowork: chat only — Sylor answers and writes code in the message. No file or terminal access.'
+  },
+  {
+    value: 'code',
+    label: 'Code',
+    title: 'Code: work on your folder — Sylor reads files, edits, and runs commands (with approval).'
+  }
+]
 
 /** Relative "8m ago" style timestamp for a recents row. */
 function relativeTime(ms: number): string {
@@ -77,6 +91,78 @@ function RailLabel({ children }: { children: ReactNode }) {
 }
 
 /**
+ * A borderless icon button for the sidebar's control row (item 2). Interaction is
+ * conveyed by a subtle background tint on hover/active — never a persistent
+ * border — and disabled arrows dim to make their unavailable state obvious.
+ */
+function NavIconButton({
+  label,
+  onClick,
+  children,
+  active = false,
+  disabled = false
+}: {
+  label: string
+  onClick: () => void
+  children: ReactNode
+  active?: boolean
+  disabled?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      disabled={disabled}
+      aria-pressed={active}
+      className={
+        'grid h-8 w-8 place-items-center rounded-md transition-colors ' +
+        (disabled
+          ? 'cursor-not-allowed text-muted/40'
+          : active
+            ? 'bg-surface-2 text-text'
+            : 'text-muted hover:bg-surface-2 hover:text-text')
+      }
+    >
+      {children}
+    </button>
+  )
+}
+
+/**
+ * A borderless destination row for the sidebar nav (item 1): Sylorium plus the
+ * Connectors/Skills/Commands/Plugins/Model deep-links into Settings. Active rows
+ * get a soft background tint (no heavy border, per the design brief).
+ */
+function NavRow({
+  icon,
+  label,
+  onClick,
+  active = false
+}: {
+  icon: ReactNode
+  label: string
+  onClick: () => void
+  active?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={
+        'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[12px] transition-colors ' +
+        (active ? 'bg-primary/12 font-medium text-primary' : 'text-text hover:bg-surface-2')
+      }
+    >
+      <span className={'shrink-0 ' + (active ? 'text-primary' : 'text-muted')}>{icon}</span>
+      <span className="truncate">{label}</span>
+    </button>
+  )
+}
+
+/**
  * The left conversation rail (Claude-desktop style): brand + collapse control, a
  * prominent "New chat" button, a search box that filters recents by title, the
  * Projects list, and the recents grouped into date buckets (Today / Yesterday /
@@ -89,23 +175,50 @@ export function ConversationRail() {
   const activeProjectId = useSessionStore((s) => s.activeProjectId)
   const setActiveProject = useSessionStore((s) => s.setActiveProject)
   const open = useSessionStore((s) => s.open)
-  const create = useSessionStore((s) => s.create)
+  const newDraft = useSessionStore((s) => s.newDraft)
   const rename = useSessionStore((s) => s.rename)
   const remove = useSessionStore((s) => s.remove)
+  const back = useSessionStore((s) => s.back)
+  const forward = useSessionStore((s) => s.forward)
+  const navStack = useSessionStore((s) => s.navStack)
+  const navPos = useSessionStore((s) => s.navPos)
   const projects = useProjectStore((s) => s.projects)
   const removeProject = useProjectStore((s) => s.remove)
-  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
+  const openSettings = useAppStore((s) => s.openSettings)
   const toggleRail = useAppStore((s) => s.toggleRail)
+  const activeView = useAppStore((s) => s.activeView)
+  const setActiveView = useAppStore((s) => s.setActiveView)
+  const workMode = useAppStore((s) => s.workMode)
+  const setWorkMode = useAppStore((s) => s.setWorkMode)
   // Chats with a run still in flight — including ones started here and left behind
   // by a New Chat. Badging them is what makes background work visible; without it
   // a still-running task read as paused the moment it left the screen.
   const liveSessionIds = useChatStore((s) => s.liveSessionIds)
 
   const [query, setQuery] = useState('')
+  // The search field is revealed by the nav-row search icon (item 2), so the
+  // controls stay a compact icon cluster until the user actually searches.
+  const [searchShown, setSearchShown] = useState(false)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   // `undefined` = dialog closed; `null` = create mode; a Project = edit mode.
   const [dialogFor, setDialogFor] = useState<Project | null | undefined>(undefined)
+
+  // Back/forward availability for the nav arrows (item 2): clear disabled states.
+  const canBack = navPos > 0
+  const canForward = navPos >= 0 && navPos < navStack.length - 1
+
+  // Opening a chat (or starting one) always returns to the chat surface — the
+  // recents live in the same rail as the Sylorium destination, so a click has to
+  // pull the view back from Sylorium.
+  const openSession = (id: string): void => {
+    setActiveView('chat')
+    void open(id)
+  }
+  const startNewChat = (): void => {
+    setActiveView('chat')
+    void newDraft()
+  }
 
   // Backend search results for a non-blank query. `null` means "not searching" —
   // the list falls back to the full recents. Debounced so we don't hit the DB on
@@ -185,7 +298,7 @@ export function ConversationRail() {
             className="min-w-0 flex-1 rounded border border-primary/60 bg-bg px-1.5 py-0.5 text-[12px] text-text outline-none"
           />
         ) : (
-          <button type="button" onClick={() => void open(s.id)} className="min-w-0 flex-1 text-left">
+          <button type="button" onClick={() => openSession(s.id)} className="min-w-0 flex-1 text-left">
             <div className="flex min-w-0 items-center gap-1.5">
               {isRunning && (
                 <span
@@ -240,33 +353,79 @@ export function ConversationRail() {
 
   return (
     <div className="flex h-full flex-col border-r border-border bg-surface">
-      {/* Brand + collapse */}
-      <div className="flex items-center justify-between gap-2 px-3 pb-2 pt-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <SylorLogo size={22} showBubbles={false} />
-          <span className="truncate text-[13px] font-semibold tracking-wide text-text">Sylor</span>
-        </div>
-        <button
-          type="button"
-          aria-label="Collapse sidebar"
-          title="Collapse sidebar"
-          onClick={toggleRail}
-          className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-text"
-        >
-          <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-            <rect x="2.5" y="3.5" width="15" height="13" rx="2" stroke="currentColor" strokeWidth="1.4" />
-            <path d="M7.5 3.5v13" stroke="currentColor" strokeWidth="1.4" />
-            <path d="M13 7.5L10.5 10 13 12.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </button>
+      {/* Brand */}
+      <div className="flex min-w-0 items-center gap-2 px-3 pb-1 pt-3">
+        <SylorLogo size={22} showBubbles={false} />
+        <span className="truncate text-[13px] font-semibold tracking-wide text-text">Sylor</span>
       </div>
 
+      {/* Controls: collapse · search · back · forward (item 2) */}
+      <div className="flex items-center gap-0.5 px-2 pb-1">
+        <NavIconButton label="Collapse sidebar" onClick={toggleRail}>
+          <svg width="16" height="16" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <path d="M3 5.5h14M3 10h14M3 14.5h14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
+        </NavIconButton>
+        <NavIconButton
+          label="Search chats"
+          active={searchShown}
+          onClick={() => setSearchShown((v) => !v)}
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.4" />
+            <path d="M11 11l3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+          </svg>
+        </NavIconButton>
+        <div className="mx-1 h-4 w-px bg-border" aria-hidden="true" />
+        <NavIconButton label="Back" disabled={!canBack} onClick={() => void back()}>
+          <svg width="16" height="16" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <path d="M12 4.5L6.5 10l5.5 5.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </NavIconButton>
+        <NavIconButton label="Forward" disabled={!canForward} onClick={() => void forward()}>
+          <svg width="16" height="16" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <path d="M8 4.5L13.5 10 8 15.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </NavIconButton>
+      </div>
+      {/* Search field — revealed by the search control */}
+      {searchShown && (
+        <div className="px-2 pb-1">
+          <div className="flex items-center gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5 ring-1 ring-transparent transition-shadow focus-within:ring-primary/40">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="shrink-0 text-muted">
+              <circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.4" />
+              <path d="M11 11l3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+            </svg>
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search chats"
+              autoFocus
+              className="min-w-0 flex-1 bg-transparent text-[12px] text-text placeholder:text-muted focus:outline-none"
+            />
+            {query && (
+              <button
+                type="button"
+                aria-label="Clear search"
+                onClick={() => setQuery('')}
+                className="grid h-4 w-4 shrink-0 place-items-center rounded text-muted transition-colors hover:text-text"
+              >
+                <svg width="10" height="10" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                </svg>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* New chat */}
-      <div className="px-2">
+      <div className="px-2 pt-1">
         <button
           type="button"
-          onClick={() => void create()}
-          className="flex w-full items-center gap-2 rounded-lg border border-border bg-bg px-3 py-2 text-[12px] font-medium text-text transition-colors hover:border-primary/60 hover:bg-surface-2"
+          onClick={startNewChat}
+          className="flex w-full items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-[12px] font-medium text-primary transition-colors hover:bg-primary/16"
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
@@ -275,37 +434,129 @@ export function ConversationRail() {
         </button>
       </div>
 
-      {/* Search */}
-      <div className="px-2 pt-2">
-        <div className="flex items-center gap-2 rounded-lg border border-border bg-bg px-2.5 py-1.5 focus-within:border-primary/50">
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="shrink-0 text-muted">
-            <circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.4" />
-            <path d="M11 11l3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-          </svg>
-          <input
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search chats"
-            className="min-w-0 flex-1 bg-transparent text-[12px] text-text placeholder:text-muted focus:outline-none"
-          />
-          {query && (
-            <button
-              type="button"
-              aria-label="Clear search"
-              onClick={() => setQuery('')}
-              className="grid h-4 w-4 shrink-0 place-items-center rounded text-muted transition-colors hover:text-text"
-            >
-              <svg width="10" height="10" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-              </svg>
-            </button>
-          )}
+      {/* Scroll region: mode · destinations · projects · recents (items 1, 10, 16) */}
+      <div className="mt-2 min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+        {/* Working mode: Cowork / Code (item 1) */}
+        <div
+          role="group"
+          aria-label="Working mode"
+          className="flex items-center gap-0.5 rounded-lg bg-surface-2/70 p-0.5"
+        >
+          {WORK_MODES.map((m) => {
+            const active = m.value === workMode
+            return (
+              <button
+                key={m.value}
+                type="button"
+                onClick={() => void setWorkMode(m.value)}
+                aria-pressed={active}
+                title={m.title}
+                className={
+                  'flex-1 rounded-md px-2 py-1 text-[12px] font-medium transition-colors ' +
+                  (active ? 'bg-primary text-bg shadow-sm' : 'text-muted hover:text-text')
+                }
+              >
+                {m.label}
+              </button>
+            )
+          })}
         </div>
-      </div>
+
+        {/* Destinations: Sylorium + Settings deep-links (items 1, 3, 10) */}
+        <div className="mt-2 space-y-0.5">
+          <NavRow
+            active={activeView === 'sylorium'}
+            onClick={() => setActiveView('sylorium')}
+            label="Sylorium"
+            icon={
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.3" />
+                <path
+                  d="M2 8h12M8 2c1.8 1.7 2.8 3.8 2.8 6S9.8 12.3 8 14C6.2 12.3 5.2 10.2 5.2 8S6.2 3.7 8 2Z"
+                  stroke="currentColor"
+                  strokeWidth="1.3"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            }
+          />
+          <NavRow
+            onClick={() => openSettings('connectors')}
+            label="Connectors"
+            icon={
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path
+                  d="M6 2v3M10 2v3M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0V5ZM8 11v3"
+                  stroke="currentColor"
+                  strokeWidth="1.3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            }
+          />
+          <NavRow
+            onClick={() => openSettings('skills')}
+            label="Skills"
+            icon={
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path
+                  d="M8 1.5l1.8 3.7 4.1.6-3 2.9.7 4L8 10.8 4.4 12.7l.7-4-3-2.9 4.1-.6L8 1.5Z"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            }
+          />
+          <NavRow
+            onClick={() => openSettings('commands')}
+            label="Commands"
+            icon={
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path
+                  d="M3.5 5l3 3-3 3M8 11h4.5"
+                  stroke="currentColor"
+                  strokeWidth="1.4"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            }
+          />
+          <NavRow
+            onClick={() => openSettings('plugins')}
+            label="Plugins"
+            icon={
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path
+                  d="M6 2.5v2M10 2.5v2M4 4.5h8v4a4 4 0 0 1-8 0v-4Z"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            }
+          />
+          <NavRow
+            onClick={() => openSettings('model')}
+            label="Model"
+            icon={
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <rect x="4" y="4" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+                <path
+                  d="M6.5 1.5v2M9.5 1.5v2M6.5 12.5v2M9.5 12.5v2M1.5 6.5h2M1.5 9.5h2M12.5 6.5h2M12.5 9.5h2"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                  strokeLinecap="round"
+                />
+              </svg>
+            }
+          />
+        </div>
 
       {/* Projects */}
-      <div className="mt-3 px-2">
+      <div className="mt-4">
         <div className="flex items-center justify-between px-1 pb-1">
           <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">
             Projects
@@ -392,7 +643,7 @@ export function ConversationRail() {
       </div>
 
       {/* Recents */}
-      <div className="mt-2 min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+      <div className="mt-4">
         {resultCount === 0 ? (
           <div className="px-1 py-4 text-[11px] text-muted">
             {searching ? 'No chats match your search.' : 'No chats yet. Start a new one.'}
@@ -411,25 +662,7 @@ export function ConversationRail() {
           ))
         )}
       </div>
-
-      {/* Settings */}
-      <div className="border-t border-border p-2">
-        <button
-          type="button"
-          onClick={() => setSettingsOpen(true)}
-          className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-[12px] text-muted transition-colors hover:bg-surface-2 hover:text-text"
-        >
-          <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-            <circle cx="10" cy="10" r="2.5" stroke="currentColor" strokeWidth="1.4" />
-            <path
-              d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4"
-              stroke="currentColor"
-              strokeWidth="1.4"
-              strokeLinecap="round"
-            />
-          </svg>
-          Settings
-        </button>
+      {/* end scroll region */}
       </div>
 
       {dialogFor !== undefined && (

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type {
+  AppView,
   EnvStatus,
   ModelInfo,
   PermissionMode,
@@ -7,11 +8,40 @@ import type {
   ProviderKind,
   ProviderSettings,
   ReasoningEffort,
+  SettingsTab,
+  SyloriumAction,
+  SyloriumPermission,
+  SyloriumPermissions,
   Theme,
   WorkMode,
   WorkspaceInfo
 } from '@shared/types'
-import { DEFAULT_PROVIDER_SETTINGS } from '@shared/defaults'
+import { DEFAULT_PROVIDER_SETTINGS, DEFAULT_SYLORIUM_PERMISSIONS } from '@shared/defaults'
+
+/** localStorage keys for the renderer-only Sylorium prefs (no main-process round-trip). */
+const SYLORIUM_INIT_KEY = 'sylor.sylorium.initialized'
+const SYLORIUM_PERMS_KEY = 'sylor.sylorium.permissions'
+
+/** Read the persisted "Sylorium onboarding done" flag (false when unset/SSR). */
+function readSyloriumInitialized(): boolean {
+  try {
+    return localStorage.getItem(SYLORIUM_INIT_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+/** Read persisted Sylorium permissions, merged over the safe defaults. */
+function readSyloriumPermissions(): SyloriumPermissions {
+  try {
+    const raw = localStorage.getItem(SYLORIUM_PERMS_KEY)
+    if (!raw) return { ...DEFAULT_SYLORIUM_PERMISSIONS }
+    const parsed = JSON.parse(raw) as Partial<SyloriumPermissions>
+    return { ...DEFAULT_SYLORIUM_PERMISSIONS, ...parsed }
+  } catch {
+    return { ...DEFAULT_SYLORIUM_PERMISSIONS }
+  }
+}
 
 /** Lifecycle phase of the live preview, mirrored from main-process events. */
 export type PreviewPhase = PreviewEvent['phase'] | 'idle'
@@ -48,6 +78,19 @@ export interface AppState {
   modelsLoading: boolean
   /** Whether the Settings panel overlay is open. */
   settingsOpen: boolean
+  /**
+   * Which Settings pane to show when the overlay opens. The sidebar's
+   * quick-access rows deep-link into a specific tab; `null` lets the panel keep
+   * its own last/opening default.
+   */
+  settingsTab: SettingsTab | null
+
+  /** The top-level workspace destination: the chat surface or Sylorium. */
+  activeView: AppView
+  /** Whether Sylorium's first-run onboarding has been completed (persisted). */
+  syloriumInitialized: boolean
+  /** AI-control permission policy for Sylorium actions (persisted, per action). */
+  syloriumPermissions: SyloriumPermissions
 
   /** Environment badge derived from the active provider (local/remote). */
   envStatus: EnvStatus
@@ -93,6 +136,17 @@ export interface AppState {
   setPermissionMode: (mode: PermissionMode) => void
   setMaximized: (isMaximized: boolean) => void
   setSettingsOpen: (open: boolean) => void
+  /**
+   * Open the Settings overlay directly to a specific tab (the sidebar's
+   * quick-access rows use this). Passing no tab just opens it.
+   */
+  openSettings: (tab?: SettingsTab) => void
+  /** Switch the top-level workspace view (chat ↔ sylorium). */
+  setActiveView: (view: AppView) => void
+  /** Mark Sylorium onboarding complete and persist it (so it never replays). */
+  completeSyloriumOnboarding: () => void
+  /** Update one Sylorium action's AI-control permission and persist it. */
+  setSyloriumPermission: (action: SyloriumAction, permission: SyloriumPermission) => void
   setPreviewOpen: (open: boolean) => void
   /** Open the preview panel (does not itself start a server). */
   openPreview: () => void
@@ -162,6 +216,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   models: [],
   modelsLoading: false,
   settingsOpen: false,
+  settingsTab: null,
+  activeView: 'chat',
+  syloriumInitialized: readSyloriumInitialized(),
+  syloriumPermissions: readSyloriumPermissions(),
 
   envStatus: envForProvider(DEFAULT_PROVIDER_SETTINGS.activeProvider),
   model: DEFAULT_PROVIDER_SETTINGS.modelName,
@@ -182,6 +240,26 @@ export const useAppStore = create<AppState>((set, get) => ({
   setPermissionMode: (permissionMode) => set({ permissionMode }),
   setMaximized: (isMaximized) => set({ isMaximized }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  openSettings: (tab) => set({ settingsOpen: true, settingsTab: tab ?? null }),
+  setActiveView: (activeView) => set({ activeView }),
+  completeSyloriumOnboarding: () => {
+    try {
+      localStorage.setItem(SYLORIUM_INIT_KEY, '1')
+    } catch {
+      // Non-fatal: the flag just won't persist across restarts.
+    }
+    set({ syloriumInitialized: true })
+  },
+  setSyloriumPermission: (action, permission) =>
+    set((state) => {
+      const next = { ...state.syloriumPermissions, [action]: permission }
+      try {
+        localStorage.setItem(SYLORIUM_PERMS_KEY, JSON.stringify(next))
+      } catch {
+        // Non-fatal: falls back to defaults next launch.
+      }
+      return { syloriumPermissions: next }
+    }),
   setPreviewOpen: (previewOpen) => set({ previewOpen }),
   openPreview: () => set({ previewOpen: true }),
   closePreview: () => {
@@ -242,8 +320,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   selectWorkspace: async () => {
-    // Fire-and-forget: the main process persists + broadcasts, and App's
-    // onChanged subscription updates state and opens a fresh chat in the folder.
+    // Fire-and-forget: the main process persists + broadcasts, and App's onChanged
+    // subscription mirrors the new root into state. History is global, so the open
+    // chat and the recents list are left untouched — only new chats pick up the
+    // new folder as their root.
     await window.sylor.workspace.select()
   },
 
@@ -257,8 +337,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       model: settings.modelName || settings.modelId,
       theme: settings.ui.theme,
       effort: settings.ui.effort,
-      planFirst: settings.ui.planFirst,
-      workMode: settings.ui.mode
+      planFirst: settings.ui.planFirst
+      // workMode is intentionally NOT restored from settings: every launch starts
+      // in cowork (the store default), regardless of the last-used mode. This is a
+      // deliberate product choice — reopening the app always lands on the cowork
+      // landing page — and it also removes a load-vs-boot race. setWorkMode still
+      // updates it for the session (and persists it), but that value is never read
+      // back here, so a saved 'code' can't flip the fresh launch out of cowork.
     })
     // Populate the model list in the background; failures are non-fatal.
     void get().refreshModels()
@@ -273,8 +358,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       model: saved.modelName || saved.modelId,
       theme: saved.ui.theme,
       effort: saved.ui.effort,
-      planFirst: saved.ui.planFirst,
-      workMode: saved.ui.mode
+      planFirst: saved.ui.planFirst
+      // workMode deliberately omitted (see loadSettings): a theme/effort/plan save
+      // must never silently flip the live work mode back to a persisted value.
     })
   },
 

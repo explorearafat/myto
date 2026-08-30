@@ -159,11 +159,39 @@ body,
   color: var(--color-text);
 }
 
+/*
+ * Global typography (item 9). A thinner, airier sans close to Claude's mobile
+ * type: a lighter default weight, comfortable line height, a whisper of negative
+ * letter-spacing so text reads refined rather than cramped, and Inter's optical
+ * sizing + humanist stylistic sets (cv05 = single-story a, cv11 = single-story g)
+ * for a warmer, less geometric feel. Explicit font-weight/leading utilities on a
+ * component still win, so dense UI chrome is untouched — this only lifts the
+ * unstyled baseline. Numerals default to proportional; `tabular-nums` opts in
+ * where columns must align (stats, timers).
+ */
 body {
   font-family: var(--font-sans);
+  font-weight: 380;
+  line-height: 1.55;
+  letter-spacing: -0.006em;
+  font-optical-sizing: auto;
+  font-feature-settings: 'cv05', 'cv11', 'ss01';
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+}
+
+/*
+ * Tighten tracking as type scales up so headings read as elegant, not blown-up —
+ * the understated hierarchy the brief asks for (no oversized, robotic headings).
+ * Applies to the semantic heading tags; utility-driven text keeps its own tracking.
+ */
+h1,
+h2,
+h3 {
+  letter-spacing: -0.02em;
+  line-height: 1.2;
 }
 
 /* Slim, unobtrusive scrollbars that track the active theme's border color. */
@@ -348,6 +376,81 @@ body {
   animation: sylor-step-in 0.28s ease-out both;
 }
 
+/*
+ * Micro-interactions (item 18). Fast, understated entrances used across the
+ * redesign: the zero-state dashboard, view swaps (chat ↔ Sylorium), new browser
+ * tabs, and the sidebar drawer. All are short (≤ 0.32s) and single-run, and all
+ * collapse to no motion under prefers-reduced-motion (below). `fill-in` is the
+ * generic fade-and-rise the dashboard applies via `animate-[fill-in_...]`.
+ */
+@keyframes fill-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes sylor-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes sylor-view-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes sylor-tab-in {
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+@keyframes sylor-drawer-in {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+.sylor-view-in {
+  animation: sylor-view-in 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.sylor-tab-in {
+  animation: sylor-tab-in 0.2s ease-out both;
+}
+.sylor-drawer-in {
+  animation: sylor-drawer-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.sylor-fade-in {
+  animation: sylor-fade-in 0.24s ease-out both;
+}
+/* A calm "press" affordance any interactive control can opt into (item 18). */
+.sylor-press {
+  transition:
+    transform 0.08s ease-out,
+    background-color 0.15s ease-out;
+}
+.sylor-press:active {
+  transform: scale(0.97);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sylor-splash,
   .sylor-splash__mark,
@@ -374,5 +477,17 @@ body {
   }
   .sylor-step-in {
     animation: none;
+  }
+  .sylor-view-in,
+  .sylor-tab-in,
+  .sylor-drawer-in,
+  .sylor-fade-in {
+    animation-duration: 0.01ms;
+  }
+  .sylor-press {
+    transition: none;
+  }
+  .sylor-press:active {
+    transform: none;
   }
 }
