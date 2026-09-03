@@ -21,7 +21,7 @@ export const SylorLogo: React.FC<SylorLogoProps> = ({
         viewBox="0 0 100 100"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
-        className="w-full h-full overflow-visible drop-shadow-[0_1px_2px_rgba(0,0,0,0.06)]"
+        className="w-full h-full overflow-visible"
       >
         {/* Floating Bubbles on top-right */}
         {showBubbles && (

@@ -1,50 +1,36 @@
-import React from 'react';
-import { ArrowUp } from 'lucide-react';
 import { SylorLogo } from './SylorLogo';
+import { LINKS } from '../data';
 
-export const Footer: React.FC = () => {
-  const scrollToTop = () => {
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
+const FOOTER_LINKS = [
+  { label: 'Download', href: LINKS.downloadPage, external: false },
+  { label: 'GitHub', href: LINKS.repo, external: true },
+  { label: 'Releases', href: LINKS.releases, external: true },
+  { label: 'Try in browser', href: LINKS.web, external: true },
+];
 
+export function Footer() {
   return (
-    <footer
-      id="footer"
-      aria-label="Footer"
-      className="py-8 border-t border-[#e8e6e2] bg-[#faf9f7] text-[12px] font-mono text-[#8a8880]"
-    >
-      <div className="max-w-[1200px] mx-auto px-6 md:px-8 flex flex-col sm:flex-row items-center justify-between gap-4">
-        
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <SylorLogo size={20} showBubbles={false} />
-            <span className="font-semibold text-[#141413] tracking-tight text-[13px]">
-              Sylor
-            </span>
-          </div>
-          <span className="text-[#c8c5bc]">/</span>
-          <span>© 2026</span>
-          <span className="text-[#c8c5bc]">/</span>
-          <span className="hidden sm:inline">The Architecture of Intent</span>
+    <footer className="border-t border-[#e4e1d8]">
+      <div className="mx-auto flex max-w-3xl flex-col gap-3 px-6 py-8 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2">
+          <SylorLogo size={20} showBubbles={false} />
+          <span className="text-[14px] font-medium text-[#141413]">Sylor</span>
+          <span className="text-[13px] text-[#6b675e]">© 2026</span>
         </div>
-
-        
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-1.5 text-[#5e5d58]">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-            <span>All Systems Nominal</span>
-          </div>
-
-          <button
-            onClick={scrollToTop}
-            aria-label="Back to top of page"
-            className="flex items-center gap-1 text-[#6e6d68] hover:text-[#141413] transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-[#141413] rounded p-1"
-          >
-            <span>Top</span>
-            <ArrowUp className="w-3.5 h-3.5" />
-          </button>
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-[14px]">
+          {FOOTER_LINKS.map((l) => (
+            <a
+              key={l.label}
+              href={l.href}
+              target={l.external ? '_blank' : undefined}
+              rel={l.external ? 'noopener noreferrer' : undefined}
+              className="text-[#6b675e] no-underline transition-colors duration-150 hover:text-[#141413]"
+            >
+              {l.label}
+            </a>
+          ))}
         </div>
       </div>
     </footer>
   );
-};
+}

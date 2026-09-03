@@ -1,0 +1,55 @@
+# Sylor
+
+> Sylor is a local-first AI coding workspace. It reads your project, uses the tools you approve, and helps carry work through implementation and verification.
+
+## Primary pages
+
+- Product page: /
+- Download page: /download — the platform chooser; every "Download" control on the site leads here
+- Machine-readable guide: /llms.txt
+
+## Product facts
+
+- Platform: Windows 10 and 11 (64-bit) are supported today; macOS and Linux are planned. A browser build is available at https://trysylor.vercel.app.
+- Current release: v0.1.5, published 30 August 2026, a 116 MB Windows installer (Sylor-Setup.exe).
+- Price: the app is free; the only cost is whatever model provider you choose to use.
+- Privacy: Sylor is local-first — it works from your project on your machine, with the integrations you configure.
+- Models: a local Ollama endpoint (http://localhost:11434 by default) or any OpenAI-compatible endpoint configured in Settings. Reasoning effort is a per-turn setting from low to max.
+- Core workflow: understand the repository, plan, use approved tools, edit, and verify the build.
+- Approvals: reads run automatically, edits are shown as a diff before they are written, and commands, network access, and destructive steps ask first. Permission modes are ask-every-time, auto-approve-edits, and autonomous.
+- Extensibility: Model Context Protocol (MCP) servers and Markdown Skills extend the workspace; slash commands and plugins are available in the chat.
+- Also included: a real terminal, a live dev-server preview it can inspect, the Sylorium browser, sub-agents with git-worktree isolation, background runs, SYLOR.md project memory, hooks and scheduled tasks, image input, and a headless CLI (`sylor -p "<prompt>"`, with `--json`).
+
+## Page map
+
+The product page is a single main landmark with labelled sections. Read the headings in DOM order:
+
+1. Build with your tools still in reach — the hero: what Sylor is, an example turn, four facts at a glance, plus Download and "try in browser".
+2. A look inside — three screenshots of the app: the diff-first chat, the built-in Sylorium browser, and permission-gated connectors.
+3. What it does — capabilities grouped as Understand, Plan & edit, Use tools, Verify, Work in parallel, and Automate.
+4. Everything in one window — a flat list of the workspace surface, from diffs and the terminal to memory, automation, and headless mode.
+5. Questions — answers on privacy, model choice, approvals, cost, platforms, and offline use.
+6. Install — download for Windows, four steps to a first task, what you need, the headless invocation, and the self-signed note.
+
+The download page (/download) is a separate document with its own heading, "Download Sylor", then one block per platform under #platforms:
+
+- Windows — Available now. Windows 10 or 11, 64-bit. Direct link to the Sylor-Setup.exe installer. Self-signed, so SmartScreen warns on first run (More info → Run anyway).
+- macOS — Planned. Not built yet; packaging and signing work, not a rewrite. No download link.
+- Linux — Planned. x86-64. Same position as macOS. No download link.
+- Android — Browser only. There is no native Android app and none is planned; the link opens the browser build instead.
+
+## Links
+
+- Download page: /download
+- Download (Windows, direct): https://github.com/explorearafat/sylor/releases/latest/download/Sylor-Setup.exe
+- All releases: https://github.com/explorearafat/sylor/releases/latest
+- Source: https://github.com/explorearafat/sylor
+- Try in browser: https://trysylor.vercel.app
+
+## Reading guidance
+
+- All content is present in the initial document. Sections fade in on scroll, but that is a CSS opacity change only — nothing is loaded, injected, or gated behind it.
+- Stable anchors: #top (hero), #inside (screenshots), #features (what it does), #workspace (everything in one window), #faq (questions), #install (download and steps). On /download: #top and #platforms.
+- The FAQ answers are always expanded; there is nothing to click open.
+- Screenshots in "A look inside" are real captures of the app; their alt text describes each one, and the sample project shown in them is illustrative.
+- The Download controls are supplementary; both pages read without operating them. Every one of them navigates to /download, except the direct installer link on /download itself.
