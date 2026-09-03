@@ -126,14 +126,14 @@ async function loadInto(
     useAppStore.getState().setWorkspace(info)
   }
   useChatStore.getState().applyLoaded(loaded)
-  set({ activeSessionId: loaded.session.id, listOpen: false })
+  set({ activeSessionId: loaded.session.id })
   await get().refresh()
   return true
 }
 
 /**
- * Session-history state (Phase 5): the sidebar list, which session is active,
- * and the flyout's open/closed state.
+ * Session-history state (Phase 5): the recents list, which session is active,
+ * and the back/forward navigation across the ones opened this launch.
  *
  * This store is the single orchestrator for switching conversations: it calls
  * the persistence IPC and then drives {@link useChatStore} synchronously via its
@@ -149,8 +149,6 @@ export interface SessionState {
    * store) so the project→session coupling stays one-directional.
    */
   activeProjectId: string | null
-  /** Whether the Sessions flyout is open. */
-  listOpen: boolean
 
   /**
    * Browser-style back/forward navigation across the sessions the user has
@@ -162,7 +160,6 @@ export interface SessionState {
   navStack: string[]
   navPos: number
 
-  setListOpen: (open: boolean) => void
   /** Scope the recents list to a project (or `null` for all chats) and reload. */
   setActiveProject: (projectId: string | null) => Promise<void>
   /**
@@ -211,11 +208,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
   activeProjectId: null,
-  listOpen: false,
   navStack: [],
   navPos: -1,
-
-  setListOpen: (listOpen) => set({ listOpen }),
 
   setActiveProject: async (projectId) => {
     set({ activeProjectId: projectId })
@@ -237,7 +231,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // empty 'New session' rows the way an eager create would (Claude-Desktop
     // parity). The recents list is untouched apart from a refresh.
     useChatStore.getState().resetTo(null)
-    set({ activeSessionId: null, listOpen: false })
+    set({ activeSessionId: null })
     await get().refresh()
   },
 
@@ -280,7 +274,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // New chats are filed under the project the rail is scoped to (or none).
     const summary = await window.sylor.sessions.create(get().activeProjectId)
     useChatStore.getState().resetTo(summary.id, summary.projectId)
-    set({ activeSessionId: summary.id, listOpen: false })
+    set({ activeSessionId: summary.id })
     await get().refresh()
   },
 

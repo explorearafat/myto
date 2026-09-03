@@ -1,6 +1,0 @@
-{
-  "name": "Sylor — AI Coding Agent",
-  "description": "An intelligent, configurable AI coding agent designed to understand codebases, plan workflows, orchestrate MCP tools, and build production software.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
