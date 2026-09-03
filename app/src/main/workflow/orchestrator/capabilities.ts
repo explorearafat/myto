@@ -164,9 +164,20 @@ export function scopeSkills(
  *  - `read`        → always. Every role must be able to look at the project it is
  *    working on; a reviewer that couldn't read files could not review, and reading
  *    is not a side effect. Scoping applies to what an agent may CHANGE.
+ *  - `preview_inspect` → always, for the same reason as `read`: verifying the live
+ *    preview (a screenshot, a computed style, a console error) is a look-like
+ *    affordance that changes nothing on disk. A reviewer especially must be able to
+ *    SEE the running result it's signing off on.
  *  - `write_file`  → needs `filesystem`.
  *  - `run_command` → needs `terminal`, `code-exec`, or `testing`.
  *  - `web_fetch`   → needs `web` (network egress; the lead is unrestricted).
+ *  - `web_search`  → needs `web` (network egress, like web_fetch).
+ *  - `browse`      → needs `web`. Driving a real browser is network egress too, and
+ *    it can act on a live site, so a role without `web` must not reach it.
+ *  - `diagnostics` → needs `terminal`, `code-exec`, or `testing`, exactly like
+ *    `run_command`: it changes nothing, but it does spawn a process out of the
+ *    project's own `node_modules`, and an ESLint config is executable JavaScript.
+ *    So it is gated as the command it really is, not as the read it resembles.
  *  - `mcp_call`    → needs any MCP-granting capability (finer per-server scoping
  *    already happens in {@link scopeMcpTools}, so the role only ever sees tools
  *    it may call).
@@ -176,12 +187,20 @@ export function allowsTool(capabilities: readonly Capability[], toolKind: ToolKi
   switch (toolKind) {
     case 'read':
       return true
+    case 'preview_inspect':
+      return true
     case 'write_file':
       return has.has('filesystem')
     case 'run_command':
       return has.has('terminal') || has.has('code-exec') || has.has('testing')
     case 'web_fetch':
       return has.has('web')
+    case 'web_search':
+      return has.has('web')
+    case 'browse':
+      return has.has('web')
+    case 'diagnostics':
+      return has.has('terminal') || has.has('code-exec') || has.has('testing')
     case 'install_plugin':
       // Installing a plugin mutates global/project config and is user-initiated;
       // only the unrestricted lead ever does it — a scoped specialist never may.

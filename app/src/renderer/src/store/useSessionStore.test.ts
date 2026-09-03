@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { SessionSummary } from '@shared/types'
+import type { PersistedSession, SessionSummary } from '@shared/types'
 import { cleanModelTitle, deriveTitle, useSessionStore } from './useSessionStore'
 import { useChatStore } from './useChatStore'
+import { useAppStore } from './useAppStore'
 
 // A SessionSummary with the fields the store touches; overridable per test.
 function summary(overrides: Partial<SessionSummary> = {}): SessionSummary {
@@ -61,8 +62,7 @@ describe('deriveTitle (instant heuristic)', () => {
   })
 
   it('clips an over-long line at a word boundary with an ellipsis', () => {
-    const long =
-      'please build me a really elaborate dashboard with charts and tables and filters'
+    const long = 'please build me a really elaborate dashboard with charts and tables and filters'
     const out = deriveTitle(long)
     expect(out.length).toBeLessThanOrEqual(49) // 48 + the ellipsis
     expect(out.endsWith('…')).toBe(true)
@@ -97,7 +97,9 @@ describe('cleanModelTitle (sanitize a model reply)', () => {
   })
 
   it('clips an over-long AI title like the heuristic', () => {
-    const out = cleanModelTitle('A Ridiculously Long Title That No Sensible Model Would Ever Emit Here')
+    const out = cleanModelTitle(
+      'A Ridiculously Long Title That No Sensible Model Would Ever Emit Here'
+    )
     expect(out.endsWith('…')).toBe(true)
     expect(out.length).toBeLessThanOrEqual(49)
   })
@@ -214,5 +216,57 @@ describe('newDraft (Claude-Desktop "New chat": no row until the first send)', ()
     // The (global) recents list is reloaded so the rail stays current.
     expect(window.sylor.sessions.list).toHaveBeenCalledWith('proj-x')
     expect(useSessionStore.getState().sessions.map((s) => s.id)).toEqual(['sess-x'])
+  })
+})
+
+describe('open — restores each conversation’s own folder (Problem 2)', () => {
+  /** A loaded-session payload carrying the folder the chat was created in. */
+  function loadedIn(projectRoot: string): PersistedSession {
+    return {
+      session: summary({ id: 'sess-1', projectRoot }),
+      messages: [],
+      tools: [],
+      terminal: [],
+      attachments: []
+    }
+  }
+
+  beforeEach(() => {
+    // A *different* folder is active than the one the chat belongs to (the repro:
+    // last worked in "3d page", now reopening the "Training" chat).
+    useAppStore.setState({ workspaceRoot: '/3d-page', workspaceChosen: true })
+    window.sylor.workspace.setRoot = vi
+      .fn()
+      .mockImplementation((dir: string) => Promise.resolve({ root: dir, chosen: false }))
+  })
+
+  it('re-points the active root to the chat’s projectRoot when it differs', async () => {
+    window.sylor.sessions.load = vi.fn().mockResolvedValue(loadedIn('/training'))
+
+    await useSessionStore.getState().open('sess-1')
+
+    // The chat's own folder is restored (non-dialog IPC) and mirrored into app state,
+    // so the next send + project scan target Training — not the last-opened 3d page.
+    expect(window.sylor.workspace.setRoot).toHaveBeenCalledWith('/training')
+    expect(useAppStore.getState().workspaceRoot).toBe('/training')
+  })
+
+  it('does not re-point when the chat’s folder is already active (no redundant IPC)', async () => {
+    useAppStore.setState({ workspaceRoot: '/training' })
+    window.sylor.sessions.load = vi.fn().mockResolvedValue(loadedIn('/training'))
+
+    await useSessionStore.getState().open('sess-1')
+
+    expect(window.sylor.workspace.setRoot).not.toHaveBeenCalled()
+    expect(useAppStore.getState().workspaceRoot).toBe('/training')
+  })
+
+  it('leaves the active folder untouched for a folderless session (empty projectRoot)', async () => {
+    window.sylor.sessions.load = vi.fn().mockResolvedValue(loadedIn(''))
+
+    await useSessionStore.getState().open('sess-1')
+
+    expect(window.sylor.workspace.setRoot).not.toHaveBeenCalled()
+    expect(useAppStore.getState().workspaceRoot).toBe('/3d-page')
   })
 })

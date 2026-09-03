@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '@renderer/store/useAppStore'
+import { setPreviewWebview } from '@renderer/lib/preview/inspector'
 import type { WebviewElement } from '@renderer/types/webview'
 
 /** True for the localhost origins the preview server is ever allowed to serve. */
@@ -93,6 +94,13 @@ export function PreviewPanel() {
   const showLocalPreviewUrl = useAppStore((s) => s.showLocalPreviewUrl)
 
   const webviewRef = useRef<WebviewElement | null>(null)
+  // Register the live guest with the inspector so engine `preview_inspect`
+  // requests can drive it. React calls this with null on unmount (and before a
+  // `key={url}` remount), which clears the inspector's ref + console buffer.
+  const registerWebview = (el: WebviewElement | null): void => {
+    webviewRef.current = el
+    setPreviewWebview(el)
+  }
   // Draft text for the editable address bar, kept in sync with the live URL so it
   // always reflects what's actually loaded until the user starts editing.
   const [address, setAddress] = useState('')
@@ -203,7 +211,7 @@ export function PreviewPanel() {
           // new port); same-URL file-change reloads go through reload() above.
           <webview
             key={url}
-            ref={webviewRef}
+            ref={registerWebview}
             src={url}
             partition="preview"
             className="h-full w-full border-0 bg-white"

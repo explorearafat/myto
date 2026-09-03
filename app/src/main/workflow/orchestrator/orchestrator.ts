@@ -3,6 +3,9 @@
  * hierarchical multi-agent run.
  *
  * ```
+ * PHASE     → read project memory: which phase of the roadmap is this? (no LLM)
+ * AUDIT     → describe the project once: FILEMAP, ARCHITECTURE, CONVENTIONS
+ * SPEC      → a short request becomes PROJECT.md, once per project
  * PLAN      → complexity router + planner (≤1 LLM call; SIMPLE spends none)
  * ASSIGN    → build the TaskGraph, announce it, record it on the blackboard
  * EXECUTE   → the scheduler runs the ready set IN PARALLEL, each node a scoped
@@ -10,6 +13,8 @@
  * INTEGRATE → deterministic gather (no LLM): reports, files, failures
  * VERIFY    → run the project's own checks when it has some and files changed
  * REVIEW    → mandatory verdict: PASS, or FAIL routed back as bounded rework
+ * CLOSE     → state, TASKS.md, archive, checkpoint, and the NEXT phase's plan
+ *             (and, when the roadmap finishes, the final project audit)
  * RESPOND   → synthesize the closing answer from shared context
  * ```
  *
@@ -23,6 +28,11 @@
  *    single node, but plan → execute → verify → review → respond still runs.
  *  - **Honest completion.** A failed node, a failed check, or rework exhaustion
  *    is reported to the user. The run never claims success it didn't achieve.
+ *  - **Memory-first, staged progress.** When a {@link MemoryPort} is supplied the
+ *    run is one phase of a roadmap rather than a one-shot: it reads where the work
+ *    stands, plans only that phase, and closes it by updating memory instead of
+ *    re-deriving the project next turn. Without a port every staged stage is
+ *    skipped and the machine behaves exactly as it did before.
  *
  * Dependency injection is deliberate: this module never imports the engine.
  * Everything with a side effect — running an agent, writing plan.md, running a
@@ -35,14 +45,30 @@ import type {
   Complexity,
   Finding,
   ProviderSettings,
+  RunProgress,
   TaskNode,
   WorkflowEvent
 } from '../../../shared/types'
+import type { ProjectState } from '../../context/projectState'
 import { classifyComplexity } from './complexity'
 import { buildPlan } from './planner'
 import { SharedContext } from './sharedContext'
 import { TaskGraph, runScheduler, type NodeOutcome } from './taskGraph'
 import { resolveRole } from './roles'
+import {
+  auditProject,
+  authorPhasePlan,
+  closePhase,
+  expandSpec,
+  memoryDigest,
+  phaseBrief,
+  phaseLabel,
+  resolvePhase,
+  type AuditInventory,
+  type MemoryPort,
+  type PhaseCloseOutcome,
+  type ScribeFn
+} from './staging'
 import {
   ORCHESTRATOR,
   blocked,
@@ -107,6 +133,10 @@ export interface VerifyOutcome {
   output?: string
 }
 
+/** How the checks stood, in the shape the live status row reports (§33). */
+const checksOf = (v: VerifyOutcome): RunProgress['checks'] =>
+  v.ran ? (v.ok ? 'PASSING' : 'FAILING') : 'UNKNOWN'
+
 /** Everything the orchestrator needs from the engine. */
 export interface OrchestratorDeps {
   runId: string
@@ -129,6 +159,27 @@ export interface OrchestratorDeps {
   verify: (filesChanged: string[]) => Promise<VerifyOutcome>
   /** One non-streaming completion, used for the review verdict. */
   judge: (messages: ChatMessage[]) => Promise<string>
+  /**
+   * The project's persistent memory. Supplying it turns the run into one phase of a
+   * roadmap (§12–§13, §25–§27); omitting it keeps the pre-staging behaviour.
+   */
+  memory?: MemoryPort
+  /**
+   * One non-streaming completion used to AUTHOR documents (the spec, the phase
+   * plan). Deliberately separate from {@link judge} so the two costs stay visible
+   * and a test can tell them apart.
+   */
+  scribe?: ScribeFn
+  /** The project's own check commands, named in the plan's verification checklist. */
+  verifyCommands?: readonly string[]
+  /** What the preview pane is actually showing right now (§23), when known. */
+  previewHealth?: () => ProjectState['preview']
+  /**
+   * The one-time project audit (§3): the file map and the digest ARCHITECTURE.md and
+   * CONVENTIONS.md are written from. Injected because walking the project is
+   * filesystem work; omitting it skips the AUDIT stage entirely.
+   */
+  auditInventory?: () => AuditInventory
 }
 
 /** The reviewer's parsed verdict. */
@@ -154,6 +205,12 @@ export interface OrchestratorResult {
   usedPlannerLlm: boolean
   /** Every file the team wrote this turn. */
   filesChanged: string[]
+  /** The phase this run worked on, when the project is running a roadmap (§33). */
+  phase?: { n: number; total: number; name: string }
+  /** True when that phase closed this turn and the next one was planned (§25). */
+  phaseCompleted?: boolean
+  /** The phase that comes next, when the roadmap continues. */
+  nextPhase?: string
 }
 
 /**
@@ -171,6 +228,58 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
   const complexity = await classifyComplexity(request, settings)
   if (signal.aborted) return aborted(complexity)
 
+  // ── PHASE ───────────────────────────────────────────────────────────────
+  // Where does the work stand? Read, never re-audit (§1/§9). The roadmap is sized
+  // by the complexity RECORDED for this project, so it can't resize between turns.
+  const memory = deps.memory
+  const phase = memory ? resolvePhase(memory.readState(), complexity) : null
+  // A one-off edit to a project with no roadmap gets none of the staged machinery:
+  // no audit, no spec, no plan document. Everything else is a phase of a build.
+  const stageable = !!memory && !!phase && (phase.complexity !== 'simple' || !phase.fresh)
+
+  // ── AUDIT (§3) ──────────────────────────────────────────────────────────
+  // The one inspection an unfamiliar project is allowed, persisted so it is never
+  // repeated: the file map (free — the files describe themselves) plus, once ever,
+  // the architecture and conventions. Runs BEFORE the plan, so the plan is written
+  // from the audit rather than from a project nobody has looked at.
+  if (stageable && memory) {
+    // Best-effort by construction: the audit is an optimisation — it stops later
+    // reads — so a project it cannot walk, or a document it cannot write, must never
+    // be able to fail the work this turn was actually asked to do.
+    try {
+      const audit = await auditProject({
+        inventory: deps.auditInventory?.(),
+        memory,
+        scribe: deps.scribe,
+        signal
+      })
+      if (audit.wrote.includes('architecture') || audit.wrote.includes('conventions')) {
+        emit({ type: 'status', runId, stage: 'planning', message: 'Recorded the project’s architecture.' })
+      }
+    } catch {
+      // Nothing recorded: the later stages read the placeholders, exactly as before.
+    }
+    if (signal.aborted) return aborted(complexity)
+  }
+
+  // ── SPEC (§2) ───────────────────────────────────────────────────────────
+  // Once per project: a short request becomes the specification a senior team
+  // would work from, so no later turn has to guess what is being built.
+  if (memory && phase) {
+    const spec = await expandSpec({
+      request,
+      overview,
+      complexity: phase.complexity,
+      memory,
+      scribe: deps.scribe,
+      signal
+    })
+    if (signal.aborted) return aborted(complexity)
+    if (spec.wrote) {
+      emit({ type: 'status', runId, stage: 'planning', message: 'Wrote the project specification.' })
+    }
+  }
+
   emit({
     type: 'status',
     runId,
@@ -182,13 +291,61 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
   // surprise file to every small edit.
   let planMarkdown = ''
   const plan = await buildPlan(request, complexity, settings, {
-    overview,
+    // The phase brief scopes the planner to THIS phase; project memory tells it
+    // what already exists so it doesn't plan work that is already done.
+    overview: phase ? [phaseBrief(phase), overview].filter(Boolean).join('\n\n') : overview,
     writePlan: (markdown) => {
       planMarkdown = markdown
     }
   })
   if (signal.aborted) return aborted(complexity)
-  if (plan.tasks.length > 1 && planMarkdown) {
+
+  // In staged mode the phase plan REPLACES the planner's thin markdown: same file,
+  // but every §14 section, written from recorded memory. Skipped for a single-node
+  // simple turn on a project with no roadmap — that is an edit, not a phase.
+  const staged =
+    stageable &&
+    !!memory &&
+    !!phase &&
+    (plan.tasks.length > 1 || phase.complexity !== 'simple' || !phase.fresh)
+
+  /**
+   * §33 — where the whole build stands, for the live status row. Sticky in the UI, so
+   * it is sent when it changes rather than on every line: at the start of the phase,
+   * and again once the checks have run. A run with no roadmap sends nothing, which is
+   * what makes a one-off edit look like an edit.
+   */
+  const progressOf = (checks?: RunProgress['checks']): RunProgress | undefined => {
+    if (!staged || !phase) return undefined
+    return {
+      phase: { n: phase.spec.n, total: phase.total, name: phase.spec.name },
+      ...(checks ? { checks } : {}),
+      ...(deps.previewHealth ? { preview: deps.previewHealth() } : {})
+    }
+  }
+  if (staged && memory && phase) {
+    // The one-line progress label (§33): which phase of how many, by name.
+    emit({
+      type: 'status',
+      runId,
+      stage: 'planning',
+      message: phaseLabel(phase),
+      progress: progressOf()
+    })
+
+    const markdown = await authorPhasePlan({
+      phase,
+      request,
+      tasks: plan.tasks,
+      memoryDigest: memoryDigest(memory),
+      verifyCommands: deps.verifyCommands,
+      scribe: deps.scribe,
+      signal
+    })
+    if (signal.aborted) return aborted(complexity)
+    await deps.writePlan(markdown)
+    if (signal.aborted) return aborted(complexity)
+  } else if (plan.tasks.length > 1 && planMarkdown) {
     await deps.writePlan(planMarkdown)
     if (signal.aborted) return aborted(complexity)
   }
@@ -272,7 +429,8 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
       type: 'status',
       runId,
       stage: 'executing',
-      message: `Reworking after review (${reworks}/${MAX_REWORK})…`
+      message: `Reworking after review (${reworks}/${MAX_REWORK})…`,
+      progress: progressOf(checksOf(verification))
     })
 
     // Rebuild the graph with the rework node appended. The constructor preserves
@@ -300,6 +458,55 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
     if (signal.aborted) return aborted(complexity, graph.all)
   }
 
+  // ── CLOSE (§25–§27) ─────────────────────────────────────────────────────
+  // The phase's bookkeeping: STATE.md, TASKS.md, the checkpoint, the archive and the
+  // NEXT phase's plan. All of it rendered from what actually happened — closing a
+  // phase costs no model call — and it is what stops the next turn re-deriving the
+  // project.
+  let close: PhaseCloseOutcome | null = null
+  if (staged && memory && phase) {
+    emit({
+      type: 'status',
+      runId,
+      stage: 'verifying',
+      message: 'Recording progress…',
+      progress: progressOf(checksOf(verification))
+    })
+    const state = memory.readState()
+    close = await closePhase({
+      phase,
+      request,
+      tasks: graph.all,
+      filesChanged,
+      passed: verdict.pass,
+      verify: verification,
+      build: verification.ran ? (verification.ok ? 'PASSING' : 'FAILING') : state.build,
+      // The orchestrator can't know what the preview pane is showing; whoever owns
+      // it reports in, so STATE.md never claims a stale preview is current (§23).
+      preview: deps.previewHealth?.() ?? state.preview,
+      reviewNotes: verdict.pass ? '' : verdict.reason,
+      memory,
+      writePlan: deps.writePlan,
+      verifyCommands: deps.verifyCommands,
+      // Spent only if this close finishes the roadmap: the final audit (§35).
+      scribe: deps.scribe,
+      signal
+    })
+    if (close.completed) {
+      emit({
+        type: 'status',
+        runId,
+        stage: 'verifying',
+        message: close.next
+          ? `${phaseLabel(phase)} complete — next: ${close.next.name}.`
+          : close.projectComplete
+            ? 'Final phase complete — wrote the project audit.'
+            : 'Final phase complete.',
+        progress: progressOf(checksOf(verification))
+      })
+    }
+  }
+
   // ── RESPOND ─────────────────────────────────────────────────────────────
   const result: OrchestratorResult = {
     complexity,
@@ -308,7 +515,12 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
     reworks,
     reviewNotes: verdict.pass ? '' : verdict.reason,
     usedPlannerLlm: plan.usedLlm,
-    filesChanged: [...new Set(filesChanged)]
+    filesChanged: [...new Set(filesChanged)],
+    // Reported only for a staged run: a one-off edit on a project with no recorded
+    // roadmap isn't "phase 1 of 3", and saying so would be noise.
+    ...(staged && phase ? { phase: { n: phase.spec.n, total: phase.total, name: phase.spec.name } } : {}),
+    ...(close ? { phaseCompleted: close.completed } : {}),
+    ...(close?.next ? { nextPhase: close.next.name } : {})
   }
   respond(deps, graph, result, verification)
   return result
@@ -522,8 +734,8 @@ function parseVerdict(raw: unknown, graph: TaskGraph): Verdict | null {
  * Streams the closing message — but only when it tells the user something the
  * stream hasn't already shown. A clean single-node turn ends on the agent's own
  * prose (adding a summary of a summary is noise); a multi-node build, a failed
- * task, a failed check, or an exhausted review gate always gets an explicit,
- * honest roll-up.
+ * task, a failed check, an exhausted review gate, or a phase that just closed
+ * always gets an explicit, honest roll-up.
  */
 function respond(
   deps: OrchestratorDeps,
@@ -535,9 +747,18 @@ function respond(
   const problems = graph.all.filter((n) => n.state === 'failed' || n.state === 'blocked')
   const multi = graph.size > 1
   const verifyFailed = verification.ran && !verification.ok
-  if (!multi && !problems.length && !verifyFailed && result.passed) return
+  // Where the roadmap now stands (§33) — the one thing the stream can't have said,
+  // because it is only true once the phase is closed and the next one is planned.
+  const phaseLine = result.phase
+    ? result.phaseCompleted
+      ? `✓ **Phase ${result.phase.n} of ${result.phase.total} — ${result.phase.name}** complete` +
+        (result.nextPhase ? ` — next: ${result.nextPhase}.` : ' — the roadmap is finished.')
+      : `**Phase ${result.phase.n} of ${result.phase.total} — ${result.phase.name}** — still in progress.`
+    : ''
+  if (!multi && !problems.length && !verifyFailed && result.passed && !phaseLine) return
 
   const lines: string[] = ['']
+  if (phaseLine) lines.push(phaseLine, '')
   if (multi) {
     lines.push(`**Team result** (${result.complexity}, ${graph.size} tasks)`)
     for (const node of graph.all) {

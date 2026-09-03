@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import type {
-  AppView,
+  BrowserAction,
+  BrowserPermission,
+  BrowserPermissions,
   EnvStatus,
   ModelInfo,
   PermissionMode,
@@ -9,39 +11,11 @@ import type {
   ProviderSettings,
   ReasoningEffort,
   SettingsTab,
-  SyloriumAction,
-  SyloriumPermission,
-  SyloriumPermissions,
   Theme,
   WorkMode,
   WorkspaceInfo
 } from '@shared/types'
-import { DEFAULT_PROVIDER_SETTINGS, DEFAULT_SYLORIUM_PERMISSIONS } from '@shared/defaults'
-
-/** localStorage keys for the renderer-only Sylorium prefs (no main-process round-trip). */
-const SYLORIUM_INIT_KEY = 'sylor.sylorium.initialized'
-const SYLORIUM_PERMS_KEY = 'sylor.sylorium.permissions'
-
-/** Read the persisted "Sylorium onboarding done" flag (false when unset/SSR). */
-function readSyloriumInitialized(): boolean {
-  try {
-    return localStorage.getItem(SYLORIUM_INIT_KEY) === '1'
-  } catch {
-    return false
-  }
-}
-
-/** Read persisted Sylorium permissions, merged over the safe defaults. */
-function readSyloriumPermissions(): SyloriumPermissions {
-  try {
-    const raw = localStorage.getItem(SYLORIUM_PERMS_KEY)
-    if (!raw) return { ...DEFAULT_SYLORIUM_PERMISSIONS }
-    const parsed = JSON.parse(raw) as Partial<SyloriumPermissions>
-    return { ...DEFAULT_SYLORIUM_PERMISSIONS, ...parsed }
-  } catch {
-    return { ...DEFAULT_SYLORIUM_PERMISSIONS }
-  }
-}
+import { DEFAULT_BROWSER_PERMISSIONS, DEFAULT_PROVIDER_SETTINGS } from '@shared/defaults'
 
 /** Lifecycle phase of the live preview, mirrored from main-process events. */
 export type PreviewPhase = PreviewEvent['phase'] | 'idle'
@@ -85,12 +59,12 @@ export interface AppState {
    */
   settingsTab: SettingsTab | null
 
-  /** The top-level workspace destination: the chat surface or Sylorium. */
-  activeView: AppView
-  /** Whether Sylorium's first-run onboarding has been completed (persisted). */
-  syloriumInitialized: boolean
-  /** AI-control permission policy for Sylorium actions (persisted, per action). */
-  syloriumPermissions: SyloriumPermissions
+  /**
+   * Whether the right-side BROWSER panel is open. Shares the panel slot with the
+   * live preview: opening one closes the other, because both draw over the same
+   * region and only one can own it.
+   */
+  browserOpen: boolean
 
   /** Environment badge derived from the active provider (local/remote). */
   envStatus: EnvStatus
@@ -141,12 +115,20 @@ export interface AppState {
    * quick-access rows use this). Passing no tab just opens it.
    */
   openSettings: (tab?: SettingsTab) => void
-  /** Switch the top-level workspace view (chat ↔ sylorium). */
-  setActiveView: (view: AppView) => void
-  /** Mark Sylorium onboarding complete and persist it (so it never replays). */
-  completeSyloriumOnboarding: () => void
-  /** Update one Sylorium action's AI-control permission and persist it. */
-  setSyloriumPermission: (action: SyloriumAction, permission: SyloriumPermission) => void
+  /**
+   * The AI-control browsing policy, read from settings with the safe defaults
+   * filled in — so a settings file written before this feature existed still
+   * yields a complete policy.
+   */
+  browserPermissions: () => BrowserPermissions
+  /** Update one browse risk class's permission and persist it in settings. */
+  setBrowserPermission: (action: BrowserAction, permission: BrowserPermission) => Promise<void>
+  /** Show/hide the right-side browser panel (also drives the main-process view). */
+  setBrowserOpen: (open: boolean) => void
+  /** Open the browser panel, closing the live preview if it owned the slot. */
+  openBrowser: () => void
+  /** Close the browser panel and hide the main-process page view. */
+  closeBrowser: () => void
   setPreviewOpen: (open: boolean) => void
   /** Open the preview panel (does not itself start a server). */
   openPreview: () => void
@@ -217,9 +199,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   modelsLoading: false,
   settingsOpen: false,
   settingsTab: null,
-  activeView: 'chat',
-  syloriumInitialized: readSyloriumInitialized(),
-  syloriumPermissions: readSyloriumPermissions(),
+  browserOpen: false,
 
   envStatus: envForProvider(DEFAULT_PROVIDER_SETTINGS.activeProvider),
   model: DEFAULT_PROVIDER_SETTINGS.modelName,
@@ -241,27 +221,39 @@ export const useAppStore = create<AppState>((set, get) => ({
   setMaximized: (isMaximized) => set({ isMaximized }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   openSettings: (tab) => set({ settingsOpen: true, settingsTab: tab ?? null }),
-  setActiveView: (activeView) => set({ activeView }),
-  completeSyloriumOnboarding: () => {
-    try {
-      localStorage.setItem(SYLORIUM_INIT_KEY, '1')
-    } catch {
-      // Non-fatal: the flag just won't persist across restarts.
-    }
-    set({ syloriumInitialized: true })
+
+  browserPermissions: () => ({ ...DEFAULT_BROWSER_PERMISSIONS, ...get().settings.browser }),
+
+  setBrowserPermission: async (action, permission) => {
+    const { settings } = get()
+    const browser = { ...DEFAULT_BROWSER_PERMISSIONS, ...settings.browser, [action]: permission }
+    await get().saveSettings({ ...settings, browser })
   },
-  setSyloriumPermission: (action, permission) =>
-    set((state) => {
-      const next = { ...state.syloriumPermissions, [action]: permission }
-      try {
-        localStorage.setItem(SYLORIUM_PERMS_KEY, JSON.stringify(next))
-      } catch {
-        // Non-fatal: falls back to defaults next launch.
-      }
-      return { syloriumPermissions: next }
-    }),
+
+  setBrowserOpen: (open) => {
+    if (open) {
+      get().openBrowser()
+    } else {
+      get().closeBrowser()
+    }
+  },
+
+  openBrowser: () => {
+    // The preview and the browser share one panel slot: whichever opens last owns
+    // it. Stopping the preview server here would be too aggressive (the user may
+    // still be building), so we only take the slot back.
+    set({ browserOpen: true, previewOpen: false })
+    void window.sylor?.browser?.open()
+  },
+
+  closeBrowser: () => {
+    // Hide, don't destroy: the page view keeps its cookies, scroll position and
+    // history, so re-opening the panel resumes exactly where the user left off.
+    void window.sylor?.browser?.setVisible(false)
+    set({ browserOpen: false })
+  },
   setPreviewOpen: (previewOpen) => set({ previewOpen }),
-  openPreview: () => set({ previewOpen: true }),
+  openPreview: () => set({ previewOpen: true, browserOpen: false }),
   closePreview: () => {
     // Tearing down the server stops the file watcher and frees the port; the
     // panel returns to its idle empty state until the next auto-open.
@@ -421,11 +413,17 @@ window.sylor?.preview?.onEvent((event: PreviewEvent) => {
       // Auto-open the panel as soon as a dev server begins spawning, so the
       // engine-driven preview (it owns startDev) surfaces without a separate
       // openPreview call. Same on `ready` below.
-      useAppStore.setState({ previewOpen: true, previewPhase: 'starting', previewError: null })
+      useAppStore.setState({
+        previewOpen: true,
+        browserOpen: false,
+        previewPhase: 'starting',
+        previewError: null
+      })
       break
     case 'ready':
       useAppStore.setState((s) => ({
         previewOpen: true,
+        browserOpen: false,
         previewPhase: 'ready',
         previewUrl: event.url ?? s.previewUrl,
         previewError: null

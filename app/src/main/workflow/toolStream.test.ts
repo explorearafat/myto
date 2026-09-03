@@ -220,6 +220,33 @@ describe('parseToolBlock', () => {
     expect(parseToolBlock('{ "tool": "search_files", "query": "" }')).toBeNull()
   })
 
+  it('parses the richer search_files options: context lines, multiline, and mode', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "search_files", "query": "foo", "before": 2, "after": 3, "context": 1, "multiline": true, "mode": "count" }'
+      )
+    ).toEqual({
+      tool: 'search_files',
+      query: 'foo',
+      path: '.',
+      before: 2,
+      after: 3,
+      context: 1,
+      multiline: true,
+      mode: 'count'
+    })
+  })
+
+  it('drops invalid search_files options rather than failing the whole block', () => {
+    // Negative/non-numeric context, an unknown mode, and a non-boolean multiline all
+    // fall back to undefined — the grep still runs, just without the bad refinement.
+    expect(
+      parseToolBlock(
+        '{ "tool": "search_files", "query": "foo", "before": -5, "after": "x", "mode": "bogus", "multiline": "yes" }'
+      )
+    ).toEqual({ tool: 'search_files', query: 'foo', path: '.' })
+  })
+
   it('parses a find_files block, defaulting the search root and keeping the glob', () => {
     expect(parseToolBlock('{ "tool": "find_files", "glob": "**/*.ts" }')).toEqual({
       tool: 'find_files',
@@ -256,6 +283,19 @@ describe('parseToolBlock', () => {
     expect(parseToolBlock('{ "tool": "web_fetch" }')).toBeNull()
   })
 
+  it('parses a web_search block, trimming the query', () => {
+    expect(parseToolBlock('{ "tool": "web_search", "query": "  vite base path  " }')).toEqual({
+      tool: 'web_search',
+      query: 'vite base path'
+    })
+  })
+
+  it('rejects a web_search with an empty or missing query', () => {
+    expect(parseToolBlock('{ "tool": "web_search", "query": "   " }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "web_search" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "web_search", "query": 42 }')).toBeNull()
+  })
+
   it('parses an install_plugin block, trimming the source and defaulting scope to global', () => {
     expect(parseToolBlock('{ "tool": "install_plugin", "source": "  owner/repo  " }')).toEqual({
       tool: 'install_plugin',
@@ -279,6 +319,275 @@ describe('parseToolBlock', () => {
   it('rejects an install_plugin with a blank or missing source', () => {
     expect(parseToolBlock('{ "tool": "install_plugin", "source": "   " }')).toBeNull()
     expect(parseToolBlock('{ "tool": "install_plugin" }')).toBeNull()
+  })
+
+  it('parses a preview_inspect screenshot (action-only)', () => {
+    expect(parseToolBlock('{ "tool": "preview_inspect", "action": "screenshot" }')).toEqual({
+      tool: 'preview_inspect',
+      action: 'screenshot',
+      selector: undefined,
+      styles: undefined,
+      value: undefined,
+      level: undefined,
+      filter: undefined,
+      preset: undefined,
+      width: undefined,
+      height: undefined
+    })
+  })
+
+  it('parses a preview_inspect inspect with a selector and styles', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "preview_inspect", "action": "inspect", "selector": " .cta ", "styles": ["color", "font-size"] }'
+      )
+    ).toMatchObject({
+      tool: 'preview_inspect',
+      action: 'inspect',
+      selector: '.cta',
+      styles: ['color', 'font-size']
+    })
+  })
+
+  it('parses a preview_inspect fill, keeping the value (empty string clears the field)', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "preview_inspect", "action": "fill", "selector": "#email", "value": "a@b.com" }'
+      )
+    ).toMatchObject({ tool: 'preview_inspect', action: 'fill', selector: '#email', value: 'a@b.com' })
+    expect(
+      parseToolBlock('{ "tool": "preview_inspect", "action": "fill", "selector": "#q", "value": "" }')
+    ).toMatchObject({ tool: 'preview_inspect', action: 'fill', selector: '#q', value: '' })
+  })
+
+  it('parses preview_inspect console_logs / network filters and resize dims', () => {
+    expect(
+      parseToolBlock('{ "tool": "preview_inspect", "action": "console_logs", "level": "error" }')
+    ).toMatchObject({ action: 'console_logs', level: 'error' })
+    expect(
+      parseToolBlock('{ "tool": "preview_inspect", "action": "network", "filter": "failed" }')
+    ).toMatchObject({ action: 'network', filter: 'failed' })
+    expect(
+      parseToolBlock('{ "tool": "preview_inspect", "action": "resize", "width": 375, "height": 812 }')
+    ).toMatchObject({ action: 'resize', width: 375, height: 812 })
+    expect(
+      parseToolBlock('{ "tool": "preview_inspect", "action": "resize", "preset": "mobile" }')
+    ).toMatchObject({ action: 'resize', preset: 'mobile' })
+  })
+
+  it('rejects preview_inspect with an unknown action', () => {
+    expect(parseToolBlock('{ "tool": "preview_inspect", "action": "hack" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "preview_inspect" }')).toBeNull()
+  })
+
+  it('rejects inspect/click/fill without a selector, and fill without a value', () => {
+    expect(parseToolBlock('{ "tool": "preview_inspect", "action": "inspect" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "preview_inspect", "action": "click" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "preview_inspect", "action": "fill", "selector": "#q" }')).toBeNull()
+  })
+
+  it('drops invalid preview_inspect refinements rather than failing the block', () => {
+    // A bogus level/filter/preset and non-positive dims all fall back to undefined;
+    // the action itself is still well-defined, so the check still runs.
+    expect(
+      parseToolBlock(
+        '{ "tool": "preview_inspect", "action": "console_logs", "level": "loud", "filter": "weird", "preset": "watch", "width": -1 }'
+      )
+    ).toEqual({
+      tool: 'preview_inspect',
+      action: 'console_logs',
+      selector: undefined,
+      styles: undefined,
+      value: undefined,
+      level: undefined,
+      filter: undefined,
+      preset: undefined,
+      width: undefined,
+      height: undefined
+    })
+  })
+
+  // ── browse ──
+  // The parse is the first gate a browse step passes: a block missing the one field
+  // its action cannot work without is rejected here, before it reaches a browser.
+
+  it('parses a browse read, the simplest step there is', () => {
+    expect(parseToolBlock('{ "tool": "browse", "action": "read" }')).toMatchObject({
+      tool: 'browse',
+      action: 'read',
+      visual: undefined
+    })
+  })
+
+  it('parses a visual read, which rides the vision path', () => {
+    expect(
+      parseToolBlock('{ "tool": "browse", "action": "read", "visual": true }')
+    ).toMatchObject({ tool: 'browse', action: 'read', visual: true })
+    // `visual` only means anything on a read.
+    expect(
+      parseToolBlock('{ "tool": "browse", "action": "scroll", "visual": true }')
+    ).toMatchObject({ action: 'scroll', visual: undefined })
+  })
+
+  it('parses a navigate and trims the url', () => {
+    expect(
+      parseToolBlock('{ "tool": "browse", "action": "navigate", "url": "  example.com  " }')
+    ).toMatchObject({ tool: 'browse', action: 'navigate', url: 'example.com' })
+  })
+
+  it('parses a click by index or by label', () => {
+    expect(
+      parseToolBlock('{ "tool": "browse", "action": "click", "target": "#12" }')
+    ).toMatchObject({ action: 'click', target: '#12' })
+    expect(
+      parseToolBlock('{ "tool": "browse", "action": "click", "target": " Compose " }')
+    ).toMatchObject({ action: 'click', target: 'Compose' })
+  })
+
+  it('parses a type, keeping an empty string (that is "clear the field")', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "browse", "action": "type", "target": "Search", "text": "electron", "submit": true }'
+      )
+    ).toMatchObject({ action: 'type', target: 'Search', text: 'electron', submit: true })
+    expect(
+      parseToolBlock('{ "tool": "browse", "action": "type", "target": "Search", "text": "" }')
+    ).toMatchObject({ action: 'type', text: '', submit: undefined })
+  })
+
+  it('defaults a scroll to down, and only accepts the two directions', () => {
+    expect(parseToolBlock('{ "tool": "browse", "action": "scroll" }')).toMatchObject({
+      action: 'scroll',
+      direction: 'down'
+    })
+    expect(
+      parseToolBlock('{ "tool": "browse", "action": "scroll", "direction": "up" }')
+    ).toMatchObject({ direction: 'up' })
+    expect(
+      parseToolBlock('{ "tool": "browse", "action": "scroll", "direction": "sideways" }')
+    ).toMatchObject({ direction: 'down' })
+  })
+
+  it('rejects a browse block that cannot be carried out', () => {
+    // Each of these is missing the one field its action is meaningless without.
+    expect(parseToolBlock('{ "tool": "browse" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "browse", "action": "teleport" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "browse", "action": "navigate" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "browse", "action": "navigate", "url": "   " }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "browse", "action": "click" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "browse", "action": "type", "target": "q" }')).toBeNull()
+  })
+
+  it('ignores fields that belong to another action', () => {
+    // A navigate carrying `text` must not silently become a type.
+    expect(
+      parseToolBlock(
+        '{ "tool": "browse", "action": "navigate", "url": "example.com", "text": "hi", "target": "Search" }'
+      )
+    ).toMatchObject({ action: 'navigate', text: undefined, direction: undefined })
+  })
+
+  it('parses the three debug reads', () => {
+    // level/filter are left unset when unstated; the read applies its own default.
+    expect(parseToolBlock('{ "tool": "browse", "action": "console" }')).toMatchObject({
+      action: 'console',
+      level: undefined
+    })
+    expect(
+      parseToolBlock('{ "tool": "browse", "action": "console", "level": "error" }')
+    ).toMatchObject({ action: 'console', level: 'error' })
+    expect(parseToolBlock('{ "tool": "browse", "action": "network" }')).toMatchObject({
+      action: 'network',
+      filter: undefined
+    })
+    expect(
+      parseToolBlock('{ "tool": "browse", "action": "network", "filter": "failed" }')
+    ).toMatchObject({ action: 'network', filter: 'failed' })
+    expect(
+      parseToolBlock(
+        '{ "tool": "browse", "action": "inspect", "selector": " .hero h1 ", "styles": ["gap", 7] }'
+      )
+    ).toMatchObject({ action: 'inspect', selector: '.hero h1', styles: ['gap'] })
+  })
+
+  it('drops a debug value it does not recognize', () => {
+    expect(
+      parseToolBlock('{ "tool": "browse", "action": "console", "level": "loud" }')
+    ).toMatchObject({ level: undefined })
+    expect(
+      parseToolBlock('{ "tool": "browse", "action": "network", "filter": "slow" }')
+    ).toMatchObject({ filter: undefined })
+    expect(
+      parseToolBlock('{ "tool": "browse", "action": "inspect", "selector": "h1", "styles": [3] }')
+    ).toMatchObject({ styles: undefined })
+  })
+
+  it('accepts `target` as the selector for an inspect, but requires one of them', () => {
+    // The model reaches for `target` out of habit from click/type; an inspect with
+    // no element at all is not a read, so it is rejected here.
+    expect(
+      parseToolBlock('{ "tool": "browse", "action": "inspect", "target": "#total" }')
+    ).toMatchObject({ action: 'inspect', selector: '#total' })
+    expect(parseToolBlock('{ "tool": "browse", "action": "inspect" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "browse", "action": "inspect", "selector": "  " }')).toBeNull()
+  })
+
+  it('keeps a debug field out of an action it does not belong to', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "browse", "action": "click", "target": "Save", "level": "error", "filter": "failed", "selector": "h1" }'
+      )
+    ).toMatchObject({ action: 'click', level: undefined, filter: undefined, selector: undefined })
+  })
+
+  // ── diagnostics ──
+  // Unlike browse, every field is optional: the bare block is the common case
+  // ("check the whole project"), so nothing here may reject it.
+  it('parses a bare diagnostics block', () => {
+    expect(parseToolBlock('{ "tool": "diagnostics" }')).toEqual({
+      tool: 'diagnostics',
+      scope: undefined,
+      files: undefined
+    })
+  })
+
+  it('keeps a known scope and drops an invented one', () => {
+    expect(parseToolBlock('{ "tool": "diagnostics", "scope": "typescript" }')).toMatchObject({
+      scope: 'typescript'
+    })
+    expect(parseToolBlock('{ "tool": "diagnostics", "scope": "eslint" }')).toMatchObject({
+      scope: 'eslint'
+    })
+    expect(parseToolBlock('{ "tool": "diagnostics", "scope": "all" }')).toMatchObject({
+      scope: 'all'
+    })
+    // Left undefined, not defaulted here — the runner owns the default.
+    expect(parseToolBlock('{ "tool": "diagnostics", "scope": "prettier" }')).toMatchObject({
+      scope: undefined
+    })
+  })
+
+  it('accepts `paths` as an alias for `files`', () => {
+    expect(
+      parseToolBlock('{ "tool": "diagnostics", "paths": ["src/main/a.ts"] }')
+    ).toMatchObject({ files: ['src/main/a.ts'] })
+    // `files` wins when both are present.
+    expect(
+      parseToolBlock('{ "tool": "diagnostics", "files": ["a.ts"], "paths": ["b.ts"] }')
+    ).toMatchObject({ files: ['a.ts'] })
+  })
+
+  it('keeps the usable paths instead of losing the narrowing to one bad entry', () => {
+    expect(
+      parseToolBlock('{ "tool": "diagnostics", "files": ["src/a.ts", "", 7, null, "src/b.ts"] }')
+    ).toMatchObject({ files: ['src/a.ts', 'src/b.ts'] })
+    // No usable path at all is the same as not narrowing — never an empty check.
+    expect(parseToolBlock('{ "tool": "diagnostics", "files": [] }')).toMatchObject({
+      files: undefined
+    })
+    expect(parseToolBlock('{ "tool": "diagnostics", "files": "src/a.ts" }')).toMatchObject({
+      files: undefined
+    })
   })
 })
 

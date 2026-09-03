@@ -4,6 +4,9 @@ import type {
   CommandInfo,
   ConfigScope,
   GatewayConfig,
+  HookDefinition,
+  HookEvent,
+  HooksConfig,
   InstalledPlugin,
   McpCategory,
   McpConnectionState,
@@ -14,6 +17,8 @@ import type {
   ProviderKind,
   ProviderSettings,
   ReasoningEffort,
+  ScheduledTask,
+  ScheduledTaskInput,
   SkillCategory,
   SkillStatus,
   TestConnectionResult,
@@ -21,6 +26,7 @@ import type {
   WorkMode
 } from '@shared/types'
 import { useAppStore } from '@renderer/store/useAppStore'
+import { BrowserPermissionsSection } from '@renderer/components/browser/BrowserPermissions'
 
 const AUTH_SCHEMA_LABELS: Record<AuthSchema, string> = {
   none: 'None',
@@ -37,6 +43,8 @@ type SettingsCategory =
   | 'skills'
   | 'commands'
   | 'plugins'
+  | 'browsing'
+  | 'automation'
 
 /** Title + one-line subtitle shown in each category pane's header. */
 const CATEGORY_META: Record<SettingsCategory, { label: string; subtitle: string }> = {
@@ -46,7 +54,15 @@ const CATEGORY_META: Record<SettingsCategory, { label: string; subtitle: string 
   connectors: { label: 'Connectors', subtitle: 'MCP servers that add tools, configured on disk.' },
   skills: { label: 'Skills', subtitle: 'Capability folders the model can invoke on demand.' },
   commands: { label: 'Commands', subtitle: 'Reusable slash-command prompts, surfaced with “/”.' },
-  plugins: { label: 'Plugins', subtitle: 'Install a repo of skills, commands, and connectors at once.' }
+  plugins: { label: 'Plugins', subtitle: 'Install a repo of skills, commands, and connectors at once.' },
+  browsing: {
+    label: 'Browsing',
+    subtitle: 'What Sylor may do on a web page on your behalf, and what always asks first.'
+  },
+  automation: {
+    label: 'Automation',
+    subtitle: 'Scheduled prompts and lifecycle hooks that run shell commands around the agent.'
+  }
 }
 
 /** Small monochrome glyph for each category, tinted by the nav's active state. */
@@ -128,6 +144,31 @@ function CategoryIcon({ id }: { id: SettingsCategory }): ReactNode {
           />
         </svg>
       )
+    case 'browsing':
+      return (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path
+            d="M8 1.8l5 1.9v3.4c0 3-2 5.6-5 7-3-1.4-5-4-5-7V3.7l5-1.9Z"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinejoin="round"
+          />
+          <path d="M5.8 8.2l1.6 1.6 3-3.2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )
+    case 'automation':
+      return (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="9" r="5" stroke="currentColor" strokeWidth="1.3" />
+          <path
+            d="M8 6.5V9l1.8 1.1M8 1.5v1.6M5.5 2.3l.8 1.4M10.5 2.3l-.8 1.4"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )
   }
 }
 
@@ -138,7 +179,9 @@ const CATEGORY_ORDER: SettingsCategory[] = [
   'connectors',
   'skills',
   'commands',
-  'plugins'
+  'plugins',
+  'browsing',
+  'automation'
 ]
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -763,7 +806,14 @@ const MCP_JSON_PLACEHOLDER = `{
 
 — or a remote server —
 
-{ "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer …" } }`
+{ "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer \${MCP_TOKEN}" } }
+
+— one that signs you in —
+
+{ "url": "https://example.com/mcp", "oauth": true }
+
+Optional: "type" pins the transport ("stdio", "http" or "sse").
+\${VAR} and \${VAR:-fallback} are read from your environment.`
 
 /**
  * "Add / Import connector" modal. Accepts the flexible JSON shapes a user is
@@ -1742,6 +1792,506 @@ function CommandsSection() {
   )
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Automation pane (Phase 4): scheduled prompts + lifecycle hooks
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Automation pane. Two independent power-user features share one category:
+ *  - **Scheduled tasks** — a stored prompt the main-process scheduler fires on a
+ *    cron cadence into a *fresh* chat (durable ones survive a restart). Listed
+ *    live through `window.sylor.scheduler`; the run still pauses at sensitive
+ *    tools for approval, so nothing runs silently.
+ *  - **Hooks** — shell commands the engine runs around the agent loop (before/
+ *    after a tool, on prompt submit, on finish). They live inside
+ *    `settings.hooks` and are edited through the ordinary settings save.
+ */
+function AutomationSection() {
+  return (
+    <div className="space-y-8">
+      <ScheduledTasksSection />
+      <div className="border-t border-border" />
+      <HooksSection />
+    </div>
+  )
+}
+
+const TASK_MODE_OPTIONS: ReadonlyArray<{ id: WorkMode; label: string }> = [
+  { id: 'cowork', label: 'Cowork' },
+  { id: 'code', label: 'Code' }
+]
+
+/** A few ready-made cron cadences offered as one-click chips in the add modal. */
+const CRON_PRESETS: ReadonlyArray<{ label: string; cron: string }> = [
+  { label: 'Every day 9am', cron: '0 9 * * *' },
+  { label: 'Weekdays 9am', cron: '0 9 * * 1-5' },
+  { label: 'Every hour', cron: '0 * * * *' },
+  { label: 'Mondays 8am', cron: '0 8 * * 1' }
+]
+
+/** Format an epoch-ms instant as a compact local date-time, or “—” when absent. */
+function formatWhen(ms?: number): string {
+  if (ms == null) return '—'
+  try {
+    return new Date(ms).toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+  } catch {
+    return '—'
+  }
+}
+
+/** Lists the main-process scheduler's tasks with add / pause / remove controls. */
+function ScheduledTasksSection() {
+  const [tasks, setTasks] = useState<ScheduledTask[]>([])
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [showAdd, setShowAdd] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    const pull = (): void => {
+      void window.sylor.scheduler.list().then((t) => {
+        if (!cancelled) setTasks(t)
+      })
+    }
+    pull()
+    // A fire updates lastRunAt/nextRunAt on the task; re-pull so the list stays honest.
+    const dispose = window.sylor.scheduler.onTaskFired(() => pull())
+    return () => {
+      cancelled = true
+      dispose?.()
+    }
+  }, [])
+
+  const refresh = (): void => {
+    void window.sylor.scheduler.list().then(setTasks)
+  }
+
+  const handleToggle = async (task: ScheduledTask): Promise<void> => {
+    setBusyId(task.id)
+    try {
+      await window.sylor.scheduler.setEnabled(task.id, !task.enabled)
+      refresh()
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const handleRemove = async (task: ScheduledTask): Promise<void> => {
+    if (!window.confirm(`Remove the scheduled task “${task.name}”?`)) return
+    setBusyId(task.id)
+    try {
+      await window.sylor.scheduler.remove(task.id)
+      refresh()
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  return (
+    <section className="space-y-3">
+      <div>
+        <h3 className="text-[13px] font-semibold text-text">Scheduled tasks</h3>
+        <p className="mt-0.5 text-[11px] leading-relaxed text-muted">
+          A saved prompt Sylor runs on a schedule, in a fresh chat. The run still pauses at
+          sensitive tools for approval — nothing runs silently. Durable tasks survive a restart.
+        </p>
+      </div>
+
+      {tasks.length === 0 ? (
+        <p className="text-[12px] text-muted">
+          No scheduled tasks yet. Use “Add a scheduled task” below to run a prompt on a cadence.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {tasks.map((t) => (
+            <li key={t.id} className="rounded-md border border-border bg-bg px-3 py-2.5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="truncate text-[13px] font-medium text-text">{t.name}</span>
+                    <Chip tone="muted" title="Cron schedule (local time)">
+                      <span className="font-mono">{t.cron}</span>
+                    </Chip>
+                    {t.mode && <Chip tone="info">{t.mode === 'code' ? 'Code' : 'Cowork'}</Chip>}
+                    {t.durable ? (
+                      <Chip tone="accent" title="Saved to disk; reloads on restart">
+                        Durable
+                      </Chip>
+                    ) : (
+                      <Chip tone="muted" title="Cleared when Sylor quits">
+                        Session
+                      </Chip>
+                    )}
+                    {!t.enabled && <Chip tone="warn">Paused</Chip>}
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-muted">
+                    {t.prompt}
+                  </p>
+                  <p className="mt-1 text-[10px] text-muted">
+                    Next {formatWhen(t.nextRunAt)} · Last {formatWhen(t.lastRunAt)}
+                  </p>
+                </div>
+                <div className="flex shrink-0 flex-col items-end gap-2">
+                  <Toggle
+                    on={t.enabled}
+                    disabled={busyId === t.id}
+                    onClick={() => void handleToggle(t)}
+                    label={t.enabled ? `Pause ${t.name}` : `Resume ${t.name}`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleRemove(t)}
+                    disabled={busyId === t.id}
+                    className="text-[10px] font-medium text-muted transition-colors hover:text-red-300 disabled:opacity-50"
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <AddButton label="+ Add a scheduled task" onClick={() => setShowAdd(true)} />
+
+      {showAdd && (
+        <AddScheduledTaskModal
+          onClose={() => setShowAdd(false)}
+          onAdded={() => {
+            refresh()
+            setShowAdd(false)
+          }}
+        />
+      )}
+    </section>
+  )
+}
+
+function AddScheduledTaskModal({
+  onClose,
+  onAdded
+}: {
+  onClose: () => void
+  onAdded: (task: ScheduledTask) => void
+}) {
+  const [name, setName] = useState('')
+  const [prompt, setPrompt] = useState('')
+  const [cron, setCron] = useState('0 9 * * *')
+  const [mode, setMode] = useState<WorkMode>('cowork')
+  const [durable, setDurable] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  // Cheap gate only (five whitespace fields). The main-process scheduler is the
+  // real validator — it rejects a malformed expression and we surface it below.
+  const cronLooksValid = cron.trim().split(/\s+/).length === 5
+
+  const submit = async (): Promise<void> => {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const input: ScheduledTaskInput = {
+        name: name.trim(),
+        prompt: prompt.trim(),
+        cron: cron.trim(),
+        durable,
+        mode
+      }
+      const task = await window.sylor.scheduler.add(input)
+      onAdded(task)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      title="Add a scheduled task"
+      subtitle="Sylor runs the prompt on this cadence in a fresh chat. Times are your local time."
+      onClose={onClose}
+    >
+      <div className="flex flex-col gap-3">
+        <Field label="Name" value={name} onChange={setName} placeholder="e.g. Morning triage" />
+        <TextArea
+          label="Prompt"
+          value={prompt}
+          onChange={setPrompt}
+          placeholder="Summarise what changed in the repo since yesterday…"
+          rows={5}
+          hint="Sent as the first message of a brand-new chat each time the task fires."
+        />
+        <div className="flex flex-col gap-1.5">
+          <Field
+            label="Schedule (cron)"
+            value={cron}
+            onChange={setCron}
+            placeholder="minute hour day month weekday — e.g. 0 9 * * 1-5"
+            hint="Five fields, local time: minute, hour, day-of-month, month, day-of-week."
+          />
+          <div className="flex flex-wrap gap-1.5">
+            {CRON_PRESETS.map((p) => (
+              <button
+                key={p.cron}
+                type="button"
+                onClick={() => setCron(p.cron)}
+                className="rounded border border-border px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-primary/50 hover:text-text"
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[11px] font-medium uppercase tracking-wider text-muted">
+            Working mode
+          </span>
+          <Segmented
+            value={mode}
+            options={TASK_MODE_OPTIONS}
+            onChange={setMode}
+            ariaLabel="Working mode for the task"
+          />
+        </div>
+        <label className="flex items-center justify-between gap-6">
+          <span className="flex flex-col">
+            <span className="text-[12px] font-medium text-text">Keep after restart</span>
+            <span className="text-[11px] text-muted">
+              Durable tasks are saved to disk and reload when Sylor starts.
+            </span>
+          </span>
+          <Switch checked={durable} onChange={setDurable} label="Keep after restart" />
+        </label>
+        {error && <p className="text-[12px] text-red-300">{error}</p>}
+        <ModalActions
+          onClose={onClose}
+          onSubmit={() => void submit()}
+          submitLabel="Add task"
+          busy={busy}
+          disabled={!name.trim() || !prompt.trim() || !cronLooksValid}
+        />
+      </div>
+    </Modal>
+  )
+}
+
+/** The four lifecycle points, in display order, each with a short + long label. */
+const HOOK_EVENT_META: ReadonlyArray<{
+  id: HookEvent
+  short: string
+  label: string
+  blurb: string
+  usesMatcher: boolean
+}> = [
+  {
+    id: 'PreToolUse',
+    short: 'Before tool',
+    label: 'Before a tool runs',
+    blurb:
+      'Runs before a tool is dispatched. A non-zero exit blocks the tool (a timeout counts as a block).',
+    usesMatcher: true
+  },
+  {
+    id: 'PostToolUse',
+    short: 'After tool',
+    label: 'After a tool runs',
+    blurb: 'Runs after a tool finished — e.g. a formatter or linter. It cannot block.',
+    usesMatcher: true
+  },
+  {
+    id: 'UserPromptSubmit',
+    short: 'On prompt',
+    label: 'When a run starts',
+    blurb: 'Runs once when you submit a prompt, with the prompt text in the environment.',
+    usesMatcher: false
+  },
+  {
+    id: 'Stop',
+    short: 'On finish',
+    label: 'When a run finishes',
+    blurb: 'Runs once when a run completes (not when you cancel it).',
+    usesMatcher: false
+  }
+]
+
+/** Reads/writes `settings.hooks`; add / remove per lifecycle event. */
+function HooksSection() {
+  const settings = useAppStore((s) => s.settings)
+  const saveSettings = useAppStore((s) => s.saveSettings)
+  const [showAdd, setShowAdd] = useState(false)
+
+  const hooks = settings.hooks ?? {}
+  const total = HOOK_EVENT_META.reduce((n, e) => n + (hooks[e.id]?.length ?? 0), 0)
+
+  const persist = (next: HooksConfig): void => {
+    void saveSettings({ ...settings, hooks: next })
+  }
+
+  const addHook = (event: HookEvent, def: HookDefinition): void => {
+    persist({ ...hooks, [event]: [...(hooks[event] ?? []), def] })
+  }
+
+  const removeHook = (event: HookEvent, index: number): void => {
+    const list = (hooks[event] ?? []).filter((_, i) => i !== index)
+    const next: HooksConfig = { ...hooks }
+    if (list.length) next[event] = list
+    else delete next[event]
+    persist(next)
+  }
+
+  return (
+    <section className="space-y-3">
+      <div>
+        <h3 className="text-[13px] font-semibold text-text">Hooks</h3>
+        <p className="mt-0.5 text-[11px] leading-relaxed text-muted">
+          Shell commands Sylor runs at lifecycle points, in the workspace root. A “before a tool
+          runs” hook that exits non-zero blocks the tool — handy for guardrails and formatters.
+        </p>
+      </div>
+
+      {total === 0 ? (
+        <p className="text-[12px] text-muted">
+          No hooks yet. Use “Add a hook” below to run a command before/after a tool, on prompt
+          submit, or when a run finishes.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {HOOK_EVENT_META.flatMap((e) =>
+            (hooks[e.id] ?? []).map((def, i) => (
+              <li key={`${e.id}-${i}`} className="rounded-md border border-border bg-bg px-3 py-2.5">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Chip tone="info">{e.label}</Chip>
+                      {e.usesMatcher && (
+                        <Chip tone="muted" title="Regex tested against the tool name">
+                          {def.matcher ? (
+                            <span className="font-mono">{def.matcher}</span>
+                          ) : (
+                            'all tools'
+                          )}
+                        </Chip>
+                      )}
+                      {def.timeoutMs != null && <Chip tone="muted">{def.timeoutMs} ms</Chip>}
+                    </div>
+                    <p className="mt-1 break-words font-mono text-[11px] leading-relaxed text-text">
+                      {def.command}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeHook(e.id, i)}
+                    className="shrink-0 text-[10px] font-medium text-muted transition-colors hover:text-red-300"
+                  >
+                    Remove
+                  </button>
+                </div>
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+
+      <AddButton label="+ Add a hook" onClick={() => setShowAdd(true)} />
+
+      {showAdd && (
+        <AddHookModal
+          onClose={() => setShowAdd(false)}
+          onAdd={(event, def) => {
+            addHook(event, def)
+            setShowAdd(false)
+          }}
+        />
+      )}
+    </section>
+  )
+}
+
+function AddHookModal({
+  onClose,
+  onAdd
+}: {
+  onClose: () => void
+  onAdd: (event: HookEvent, def: HookDefinition) => void
+}) {
+  const [event, setEvent] = useState<HookEvent>('PreToolUse')
+  const [matcher, setMatcher] = useState('')
+  const [command, setCommand] = useState('')
+  const [timeoutText, setTimeoutText] = useState('')
+
+  const meta = HOOK_EVENT_META.find((e) => e.id === event) ?? HOOK_EVENT_META[0]
+
+  const submit = (): void => {
+    const cmd = command.trim()
+    if (!cmd) return
+    const def: HookDefinition = { command: cmd }
+    if (meta.usesMatcher && matcher.trim()) def.matcher = matcher.trim()
+    const ms = Number(timeoutText.trim())
+    if (timeoutText.trim() && Number.isFinite(ms) && ms > 0) def.timeoutMs = Math.floor(ms)
+    onAdd(event, def)
+  }
+
+  return (
+    <Modal
+      title="Add a hook"
+      subtitle="A shell command Sylor runs at a lifecycle point, in the workspace root."
+      onClose={onClose}
+    >
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[11px] font-medium uppercase tracking-wider text-muted">When</span>
+          <Segmented
+            value={event}
+            options={HOOK_EVENT_META.map((e) => ({ id: e.id, label: e.short }))}
+            onChange={setEvent}
+            ariaLabel="When the hook fires"
+          />
+          <span className="text-[11px] leading-relaxed text-muted">{meta.blurb}</span>
+        </div>
+        {meta.usesMatcher && (
+          <Field
+            label="Tool matcher (optional)"
+            value={matcher}
+            onChange={setMatcher}
+            placeholder="Regex on the tool name — e.g. write_file|edit_file. Blank = all tools."
+            hint="Tested against names like write_file, edit_file, run_command, read_file."
+          />
+        )}
+        <TextArea
+          label="Command"
+          value={command}
+          onChange={setCommand}
+          placeholder="npx prettier --write ."
+          rows={3}
+          mono
+          hint="Runs in the workspace root with SYLOR_* context env vars set."
+        />
+        <Field
+          label="Timeout (ms, optional)"
+          value={timeoutText}
+          onChange={setTimeoutText}
+          placeholder="e.g. 5000"
+          hint="Max run time before the hook is killed. A timeout blocks a “before a tool runs” hook."
+        />
+        <ModalActions
+          onClose={onClose}
+          onSubmit={submit}
+          submitLabel="Add hook"
+          busy={false}
+          disabled={!command.trim()}
+        />
+      </div>
+    </Modal>
+  )
+}
+
 export function SettingsPanel() {
   const storedSettings = useAppStore((s) => s.settings)
   const saveSettings = useAppStore((s) => s.saveSettings)
@@ -1912,6 +2462,8 @@ export function SettingsPanel() {
             {category === 'skills' && <SkillsSection />}
             {category === 'commands' && <CommandsSection />}
             {category === 'plugins' && <PluginsSection />}
+            {category === 'browsing' && <BrowserPermissionsSection />}
+            {category === 'automation' && <AutomationSection />}
 
             {category === 'model' && (
               <div className="space-y-5">

@@ -378,7 +378,7 @@ h3 {
 
 /*
  * Micro-interactions (item 18). Fast, understated entrances used across the
- * redesign: the zero-state dashboard, view swaps (chat ↔ Sylorium), new browser
+ * redesign: the zero-state dashboard, view swaps (chat ↔ browser), new browser
  * tabs, and the sidebar drawer. All are short (≤ 0.32s) and single-run, and all
  * collapse to no motion under prefers-reduced-motion (below). `fill-in` is the
  * generic fade-and-rise the dashboard applies via `animate-[fill-in_...]`.

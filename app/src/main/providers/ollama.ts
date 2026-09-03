@@ -23,6 +23,21 @@ function ollamaOptions(options?: CompletionOptions): Record<string, unknown> {
   if (typeof options.maxTokens === 'number') inner.num_predict = options.maxTokens
   return Object.keys(inner).length > 0 ? { options: inner } : {}
 }
+
+/**
+ * Expands our {@link ChatMessage}[] into Ollama's native chat format. Ollama
+ * attaches images out-of-band: a message keeps its string `content` and gains an
+ * `images` array of raw base64 strings (no `data:` prefix) — exactly our
+ * {@link ChatImage.dataBase64}. A text-only message passes through unchanged; a
+ * model without vision ignores the `images` field.
+ */
+function toOllamaMessages(messages: ChatMessage[]): unknown[] {
+  return messages.map((m) =>
+    m.images && m.images.length > 0
+      ? { role: m.role, content: m.content, images: m.images.map((img) => img.dataBase64) }
+      : { role: m.role, content: m.content }
+  )
+}
 interface OllamaTag {
   name: string
   model?: string
@@ -102,7 +117,7 @@ export class OllamaProvider implements Provider {
     const data = await httpJson<OllamaChatChunk>(`${this.baseUrl}/api/chat`, {
       method: 'POST',
       timeoutMs: 120_000,
-      body: { model: modelId, stream: false, messages, ...ollamaOptions(options) }
+      body: { model: modelId, stream: false, messages: toOllamaMessages(messages), ...ollamaOptions(options) }
     })
     if (data.error) throw new Error(data.error)
     return data.message?.content ?? ''
@@ -119,7 +134,7 @@ export class OllamaProvider implements Provider {
       method: 'POST',
       timeoutMs: 120_000,
       signal,
-      body: { model: modelId, stream: true, messages, ...ollamaOptions(options) }
+      body: { model: modelId, stream: true, messages: toOllamaMessages(messages), ...ollamaOptions(options) }
     })
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => '')

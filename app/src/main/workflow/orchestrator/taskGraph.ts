@@ -98,9 +98,9 @@ export class TaskGraph {
   private assertAcyclic(): void {
     const indegree = new Map<string, number>()
     for (const id of this.order) indegree.set(id, 0)
-    for (const node of this.nodes.values()) {
-      for (const _dep of node.dependsOn) indegree.set(node.id, (indegree.get(node.id) ?? 0) + 1)
-    }
+    // Every dep is known to exist (validated above), so a node's indegree is just
+    // how many deps it declares.
+    for (const node of this.nodes.values()) indegree.set(node.id, node.dependsOn.length)
     const queue = [...this.order].filter((id) => (indegree.get(id) ?? 0) === 0)
     let visited = 0
     while (queue.length) {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // `node:fs` is mocked so loadMcpConfigs can be exercised without touching real
 // files. `fsState` is hoisted (a vi.mock factory runs before top-level `let`s
@@ -17,6 +17,7 @@ vi.mock('node:fs', () => {
 })
 
 import {
+  expandEnv,
   globalMcpConfigPath,
   loadMcpConfigs,
   parseMcpConfig,
@@ -82,10 +83,111 @@ describe('parseMcpConfig', () => {
   })
 })
 
+describe('parseMcpConfig — explicit transport type', () => {
+  it('keeps a pinned remote type alongside the url', () => {
+    const sse = parseMcpConfig({ mcpServers: { a: { type: 'sse', url: 'https://e.com/sse' } } })
+    expect(sse.a).toEqual({ url: 'https://e.com/sse', type: 'sse' })
+    const stream = parseMcpConfig({
+      mcpServers: { a: { type: 'streamable-http', url: 'https://e.com/mcp' } }
+    })
+    expect(stream.a).toEqual({ url: 'https://e.com/mcp', type: 'streamable-http' })
+    const http = parseMcpConfig({ mcpServers: { a: { type: 'http', url: 'https://e.com/mcp' } } })
+    expect(http.a).toEqual({ url: 'https://e.com/mcp', type: 'http' })
+  })
+
+  it('lets a pinned stdio type win over a stray url', () => {
+    const bare = parseMcpConfig({ mcpServers: { a: { type: 'stdio', command: 'npx' } } })
+    expect(bare.a).toEqual({ command: 'npx', type: 'stdio' })
+    const both = parseMcpConfig({
+      mcpServers: { a: { type: 'stdio', command: 'npx', url: 'https://e.com' } }
+    })
+    expect(both.a).toEqual({ command: 'npx', type: 'stdio' })
+  })
+
+  it('drops a remote type with no url instead of falling back to stdio', () => {
+    expect(parseMcpConfig({ mcpServers: { a: { type: 'sse', command: 'npx' } } })).toEqual({})
+  })
+
+  it('ignores an unrecognized type', () => {
+    const out = parseMcpConfig({ mcpServers: { a: { type: 'grpc', url: 'https://e.com' } } })
+    expect(out.a).toEqual({ url: 'https://e.com' })
+  })
+
+  it('keeps oauth only when it is exactly true', () => {
+    const on = parseMcpConfig({ mcpServers: { a: { url: 'https://e.com', oauth: true } } })
+    expect(on.a).toEqual({ url: 'https://e.com', oauth: true })
+    const off = parseMcpConfig({ mcpServers: { a: { url: 'https://e.com', oauth: 'yes' } } })
+    expect(off.a).toEqual({ url: 'https://e.com' })
+  })
+})
+
+describe('expandEnv', () => {
+  it('substitutes ${VAR} from the environment', () => {
+    expect(expandEnv('Bearer ${T}', { T: 'secret' })).toBe('Bearer secret')
+  })
+
+  it('uses ${VAR:-fallback} when the variable is unset or empty', () => {
+    expect(expandEnv('${T:-http://localhost}', {})).toBe('http://localhost')
+    expect(expandEnv('${T:-fb}', { T: '' })).toBe('fb')
+    expect(expandEnv('${T:-fb}', { T: 'real' })).toBe('real')
+  })
+
+  it('leaves an unset ${VAR} in place so the failure stays visible', () => {
+    expect(expandEnv('Bearer ${MISSING}', {})).toBe('Bearer ${MISSING}')
+  })
+
+  it('expands every occurrence and leaves non-placeholder text alone', () => {
+    expect(expandEnv('${A}/${A}-$B-{C}', { A: 'x', B: 'y' })).toBe('x/x-$B-{C}')
+  })
+})
+
+describe('parseMcpConfig — env expansion', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('expands placeholders in url, headers, command, args and env', () => {
+    vi.stubEnv('MCP_TOKEN', 'sekret')
+    vi.stubEnv('MCP_HOST', 'example.com')
+    const out = parseMcpConfig({
+      mcpServers: {
+        remote: {
+          url: 'https://${MCP_HOST}/mcp',
+          headers: { Authorization: 'Bearer ${MCP_TOKEN}' }
+        },
+        local: {
+          command: '${MCP_BIN:-npx}',
+          args: ['-y', 'srv', '--token=${MCP_TOKEN}'],
+          env: { KEY: '${MCP_TOKEN}' }
+        }
+      }
+    })
+    expect(out.remote).toEqual({
+      url: 'https://example.com/mcp',
+      headers: { Authorization: 'Bearer sekret' }
+    })
+    expect(out.local).toEqual({
+      command: 'npx',
+      args: ['-y', 'srv', '--token=sekret'],
+      env: { KEY: 'sekret' }
+    })
+  })
+
+  it('drops a server whose command expands to nothing', () => {
+    expect(parseMcpConfig({ mcpServers: { a: { command: '${NOPE:-}' } } })).toEqual({})
+  })
+})
+
 describe('transportOf', () => {
   it('classifies stdio vs http by shape', () => {
     expect(transportOf({ command: 'npx' })).toBe('stdio')
     expect(transportOf({ url: 'https://e.com' })).toBe('http')
+  })
+
+  it('reports sse only when the config pins it', () => {
+    expect(transportOf({ url: 'https://e.com', type: 'sse' })).toBe('sse')
+    expect(transportOf({ url: 'https://e.com', type: 'streamable-http' })).toBe('http')
+    expect(transportOf({ command: 'npx', type: 'stdio' })).toBe('stdio')
   })
 })
 

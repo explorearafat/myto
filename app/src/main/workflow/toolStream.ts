@@ -41,16 +41,52 @@ export type ParsedTool =
   | { tool: 'edit_file'; path: string; oldString: string; newString: string; replaceAll: boolean }
   | { tool: 'read_file'; path: string; offset?: number; limit?: number }
   | { tool: 'list_files'; path: string }
-  | { tool: 'search_files'; query: string; path: string; glob?: string }
+  | { tool: 'search_files'; query: string; path: string; glob?: string; before?: number; after?: number; context?: number; multiline?: boolean; mode?: 'content' | 'files' | 'count' }
   | { tool: 'find_files'; glob: string; path: string }
   | { tool: 'run_command'; command: string }
   | { tool: 'web_fetch'; url: string }
+  | { tool: 'web_search'; query: string }
   | { tool: 'install_plugin'; source: string; scope: 'global' | 'project' }
   | { tool: 'remember'; note: string }
   | { tool: 'remember_user'; note: string }
   | { tool: 'mcp_call'; server: string; name: string; arguments: Record<string, unknown> }
   | { tool: 'use_skill'; name: string }
-  | { tool: 'spawn_agent'; role: string; task: string }
+  | { tool: 'spawn_agent'; role: string; task: string; isolation?: 'worktree'; background?: boolean }
+  | {
+      tool: 'preview_inspect'
+      action:
+        | 'snapshot'
+        | 'screenshot'
+        | 'inspect'
+        | 'console_logs'
+        | 'network'
+        | 'click'
+        | 'fill'
+        | 'resize'
+      selector?: string
+      styles?: string[]
+      value?: string
+      level?: 'all' | 'error' | 'warn'
+      filter?: 'all' | 'failed'
+      preset?: 'mobile' | 'tablet' | 'desktop'
+      width?: number
+      height?: number
+    }
+  | {
+      tool: 'browse'
+      action: 'read' | 'navigate' | 'click' | 'type' | 'scroll' | 'console' | 'network' | 'inspect'
+      url?: string
+      target?: string
+      text?: string
+      submit?: boolean
+      direction?: 'up' | 'down'
+      visual?: boolean
+      selector?: string
+      styles?: string[]
+      level?: 'all' | 'error' | 'warn'
+      filter?: 'all' | 'failed'
+    }
+  | { tool: 'diagnostics'; scope?: 'all' | 'typescript' | 'eslint'; files?: string[] }
 
 /**
  * A positive integer field, or undefined when absent/invalid. Used for the
@@ -178,7 +214,22 @@ export function parseToolBlock(raw: string): ParsedTool | null {
     if (typeof rec.query === 'string' && rec.query.length > 0) {
       const path = typeof rec.path === 'string' && rec.path.trim() ? rec.path : '.'
       const glob = typeof rec.glob === 'string' && rec.glob.trim() ? rec.glob : undefined
-      return { tool: 'search_files', query: rec.query, path, glob }
+      // Context/multiline/mode are all optional refinements: a garbage value is
+      // dropped (falling back to the plain per-line content search) rather than
+      // failing the whole block, since the grep is well-defined without them.
+      const mode =
+        rec.mode === 'files' || rec.mode === 'count' || rec.mode === 'content' ? rec.mode : undefined
+      return {
+        tool: 'search_files',
+        query: rec.query,
+        path,
+        glob,
+        before: positiveInt(rec.before),
+        after: positiveInt(rec.after),
+        context: positiveInt(rec.context),
+        multiline: rec.multiline === true ? true : undefined,
+        mode
+      }
     }
     return null
   }
@@ -202,6 +253,14 @@ export function parseToolBlock(raw: string): ParsedTool | null {
     // a malformed block never reaches the fetcher.
     if (typeof rec.url === 'string' && /^https?:\/\/\S+$/i.test(rec.url.trim())) {
       return { tool: 'web_fetch', url: rec.url.trim() }
+    }
+    return null
+  }
+  if (rec.tool === 'web_search') {
+    // A non-empty natural-language query; the search endpoint itself is fixed, so
+    // there is no URL to validate — just a usable query string.
+    if (typeof rec.query === 'string' && rec.query.trim()) {
+      return { tool: 'web_search', query: rec.query.trim() }
     }
     return null
   }
@@ -260,9 +319,145 @@ export function parseToolBlock(raw: string): ParsedTool | null {
       typeof rec.task === 'string' &&
       rec.task.trim()
     ) {
-      return { tool: 'spawn_agent', role, task: rec.task }
+      // Two optional execution modifiers, validated defensively so a bad value is
+      // dropped rather than failing the whole delegation:
+      //  - isolation: 'worktree' runs the agent in a private git worktree so its
+      //    writes/commands can't collide with the lead's or a sibling's.
+      //  - background: true makes the spawn non-blocking — the lead keeps working
+      //    and receives the report when the agent finishes.
+      const isolation = rec.isolation === 'worktree' ? 'worktree' : undefined
+      const background = rec.background === true ? true : undefined
+      return { tool: 'spawn_agent', role, task: rec.task, isolation, background }
     }
     return null
+  }
+  if (rec.tool === 'preview_inspect') {
+    // Verify a running preview. `action` is the required discriminator; the rest
+    // are per-action refinements validated defensively so a malformed field is
+    // dropped rather than failing the whole block.
+    const ACTIONS = [
+      'snapshot',
+      'screenshot',
+      'inspect',
+      'console_logs',
+      'network',
+      'click',
+      'fill',
+      'resize'
+    ] as const
+    const action = ACTIONS.find((a) => a === rec.action)
+    if (!action) return null
+    const selector =
+      typeof rec.selector === 'string' && rec.selector.trim() ? rec.selector.trim() : undefined
+    // inspect/click/fill act on a specific element — no selector, no action.
+    if ((action === 'inspect' || action === 'click' || action === 'fill') && !selector) return null
+    // fill must carry the text to type (empty string is a valid "clear the field").
+    if (action === 'fill' && typeof rec.value !== 'string') return null
+    const styles =
+      Array.isArray(rec.styles) && rec.styles.every((s) => typeof s === 'string' && s.trim())
+        ? (rec.styles as string[])
+        : undefined
+    const level =
+      rec.level === 'error' || rec.level === 'warn' || rec.level === 'all' ? rec.level : undefined
+    const filter = rec.filter === 'failed' || rec.filter === 'all' ? rec.filter : undefined
+    const preset =
+      rec.preset === 'mobile' || rec.preset === 'tablet' || rec.preset === 'desktop'
+        ? rec.preset
+        : undefined
+    return {
+      tool: 'preview_inspect',
+      action,
+      selector,
+      styles,
+      value: action === 'fill' ? (rec.value as string) : undefined,
+      level,
+      filter,
+      preset,
+      width: positiveInt(rec.width),
+      height: positiveInt(rec.height)
+    }
+  }
+  if (rec.tool === 'browse') {
+    // Drive a real web page. `action` is the required discriminator; the per-action
+    // fields below are the minimum each one cannot work without, so a malformed
+    // block is rejected here rather than reaching a browser.
+    const ACTIONS = [
+      'read',
+      'navigate',
+      'click',
+      'type',
+      'scroll',
+      'console',
+      'network',
+      'inspect'
+    ] as const
+    const action = ACTIONS.find((a) => a === rec.action)
+    if (!action) return null
+    const url = typeof rec.url === 'string' && rec.url.trim() ? rec.url.trim() : undefined
+    const target =
+      typeof rec.target === 'string' && rec.target.trim() ? rec.target.trim() : undefined
+    // `inspect` takes a CSS selector; accept `target` as an alias, since the model
+    // has just spent the whole page brief using `target` to point at things. Any
+    // other action has no use for one, so a stray `selector` is dropped rather
+    // than shown in the step's description.
+    const selector =
+      action !== 'inspect'
+        ? undefined
+        : typeof rec.selector === 'string' && rec.selector.trim()
+          ? rec.selector.trim()
+          : target
+    // navigate needs somewhere to go; click/type need something to act on.
+    if (action === 'navigate' && !url) return null
+    if ((action === 'click' || action === 'type') && !target) return null
+    if (action === 'inspect' && !selector) return null
+    // type must carry the text ('' is a valid "clear the field").
+    if (action === 'type' && typeof rec.text !== 'string') return null
+    const direction = rec.direction === 'up' ? 'up' : rec.direction === 'down' ? 'down' : undefined
+    // Extra style properties are advisory: keep the usable ones rather than losing
+    // the whole list to one bad entry.
+    const wantedStyles =
+      action === 'inspect' && Array.isArray(rec.styles)
+        ? rec.styles.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+        : []
+    const styles = wantedStyles.length > 0 ? wantedStyles : undefined
+    const level =
+      action === 'console' && (rec.level === 'error' || rec.level === 'warn' || rec.level === 'all')
+        ? rec.level
+        : undefined
+    const filter =
+      action === 'network' && (rec.filter === 'failed' || rec.filter === 'all')
+        ? rec.filter
+        : undefined
+    return {
+      tool: 'browse',
+      action,
+      url,
+      target,
+      text: action === 'type' ? (rec.text as string) : undefined,
+      submit: rec.submit === true ? true : undefined,
+      direction: action === 'scroll' ? (direction ?? 'down') : undefined,
+      visual: action === 'read' && rec.visual === true ? true : undefined,
+      selector,
+      styles,
+      level,
+      filter
+    }
+  }
+  if (rec.tool === 'diagnostics') {
+    // Read the project's checkers. Both fields are optional: with neither, every
+    // installed checker runs over the whole project, which is the common case and
+    // must not be rejected. `scope` is left undefined when unstated so the runner
+    // applies its own default (defaulting here would duplicate that rule), and
+    // `paths` is accepted as an alias for `files` — the read tools spell it `path`,
+    // so the model reaches for it.
+    const scope =
+      rec.scope === 'typescript' || rec.scope === 'eslint' || rec.scope === 'all'
+        ? rec.scope
+        : undefined
+    const raw = Array.isArray(rec.files) ? rec.files : Array.isArray(rec.paths) ? rec.paths : []
+    // Keep the usable paths rather than losing the whole narrowing to one bad entry.
+    const files = raw.filter((f): f is string => typeof f === 'string' && f.trim().length > 0)
+    return { tool: 'diagnostics', scope, files: files.length > 0 ? files : undefined }
   }
   return null
 }

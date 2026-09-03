@@ -131,7 +131,7 @@ function NavIconButton({
 }
 
 /**
- * A borderless destination row for the sidebar nav (item 1): Sylorium plus the
+ * A borderless destination row for the sidebar nav (item 1): the Browser plus the
  * Connectors/Skills/Commands/Plugins/Model deep-links into Settings. Active rows
  * get a soft background tint (no heavy border, per the design brief).
  */
@@ -186,8 +186,8 @@ export function ConversationRail() {
   const removeProject = useProjectStore((s) => s.remove)
   const openSettings = useAppStore((s) => s.openSettings)
   const toggleRail = useAppStore((s) => s.toggleRail)
-  const activeView = useAppStore((s) => s.activeView)
-  const setActiveView = useAppStore((s) => s.setActiveView)
+  const browserOpen = useAppStore((s) => s.browserOpen)
+  const setBrowserOpen = useAppStore((s) => s.setBrowserOpen)
   const workMode = useAppStore((s) => s.workMode)
   const setWorkMode = useAppStore((s) => s.setWorkMode)
   // Chats with a run still in flight — including ones started here and left behind
@@ -208,15 +208,12 @@ export function ConversationRail() {
   const canBack = navPos > 0
   const canForward = navPos >= 0 && navPos < navStack.length - 1
 
-  // Opening a chat (or starting one) always returns to the chat surface — the
-  // recents live in the same rail as the Sylorium destination, so a click has to
-  // pull the view back from Sylorium.
+  // The chat is the only destination now — the browser is a side panel beside it,
+  // not somewhere else to be — so opening a chat is just opening a chat.
   const openSession = (id: string): void => {
-    setActiveView('chat')
     void open(id)
   }
   const startNewChat = (): void => {
-    setActiveView('chat')
     void newDraft()
   }
 
@@ -462,17 +459,31 @@ export function ConversationRail() {
           })}
         </div>
 
-        {/* Destinations: Sylorium + Settings deep-links (items 1, 3, 10) */}
+        {/* Destinations: the Browser panel + Settings deep-links (items 1, 3, 10) */}
         <div className="mt-2 space-y-0.5">
           <NavRow
-            active={activeView === 'sylorium'}
-            onClick={() => setActiveView('sylorium')}
-            label="Sylorium"
+            active={browserOpen}
+            onClick={() => setBrowserOpen(!browserOpen)}
+            label="Browser"
             icon={
               <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.3" />
                 <path
                   d="M2 8h12M8 2c1.8 1.7 2.8 3.8 2.8 6S9.8 12.3 8 14C6.2 12.3 5.2 10.2 5.2 8S6.2 3.7 8 2Z"
+                  stroke="currentColor"
+                  strokeWidth="1.3"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            }
+          />
+          <NavRow
+            onClick={() => openSettings('browsing')}
+            label="Browsing rules"
+            icon={
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path
+                  d="M8 1.8l5 1.9v3.4c0 3-2 5.6-5 7-3-1.4-5-4-5-7V3.7l5-1.9Z"
                   stroke="currentColor"
                   strokeWidth="1.3"
                   strokeLinejoin="round"

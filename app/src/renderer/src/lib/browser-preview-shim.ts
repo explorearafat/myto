@@ -14,12 +14,45 @@
  * whenever the genuine preload bridge is present.
  */
 import { DEFAULT_PROVIDER_SETTINGS } from '@shared/defaults'
-import type { Attachment, PersistedSession, Project, SessionSummary, SylorApi } from '@shared/types'
+import type {
+  Attachment,
+  BrowserViewStatus,
+  ChromeStatus,
+  PersistedSession,
+  Project,
+  SessionSummary,
+  SylorApi
+} from '@shared/types'
+import { emptyUsageStats } from '@shared/usage'
 
 declare global {
   interface Window {
     __sylorPreviewShim?: boolean
   }
+}
+
+/** No real browser is reachable from a browser tab, and none ever will be. */
+const PREVIEW_CHROME: ChromeStatus = {
+  available: false,
+  browserName: '',
+  running: false,
+  url: '',
+  title: '',
+  loading: false,
+  signingIn: false,
+  error: 'Sylor can only drive your real browser from the desktop app.'
+}
+
+/** Nor is the main-process page view: it needs a native window to draw into. */
+const PREVIEW_VIEW: BrowserViewStatus = {
+  attached: false,
+  visible: false,
+  url: '',
+  title: '',
+  loading: false,
+  canGoBack: false,
+  canGoForward: false,
+  error: 'The in-app browser needs the Sylor desktop app.'
 }
 
 function installShim(): void {
@@ -66,7 +99,12 @@ function installShim(): void {
       listModels: () => Promise.resolve({ ok: true, models: [] }),
       testConnection: () => Promise.resolve({ ok: true, message: 'preview' }),
       getCompletion: () => Promise.resolve({ ok: true, content: '' }),
-      streamCompletion: () => Promise.resolve(() => {})
+      // Ends the stream immediately instead of never calling back: a consumer that
+      // awaits the terminal chunk (the browse loop) would otherwise hang here.
+      streamCompletion: (_request, onChunk) => {
+        onChunk({ streamId: 'preview', delta: '', done: true })
+        return Promise.resolve(() => {})
+      }
     },
     workflow: {
       run: () => () => {},
@@ -110,7 +148,9 @@ function installShim(): void {
       setFeedback: () => {},
       resetMessage: () => {},
       appendToolOp: () => {},
-      appendTerminal: () => {}
+      appendTerminal: () => {},
+      // The preview stores no history, so the dashboard shows a fresh install.
+      usageStats: () => Promise.resolve(emptyUsageStats(now))
     },
     projects: {
       list: () => Promise.resolve([...projects]),
@@ -203,7 +243,9 @@ function installShim(): void {
           error: 'Live preview is unavailable in the browser preview.'
         }),
       stop: () => {},
-      onEvent: () => () => {}
+      onEvent: () => () => {},
+      onInspectRequest: () => () => {},
+      respondInspect: () => {}
     },
     // No MCP servers outside Electron: the registry is always empty here.
     mcp: {
@@ -245,8 +287,66 @@ function installShim(): void {
     // (never "chosen"), select is unavailable, and no change events ever fire.
     workspace: {
       select: () => Promise.resolve(null),
+      setRoot: (dir) => Promise.resolve({ root: dir, chosen: false }),
       get: () => Promise.resolve({ root: 'C:/Users/ARAFAT/OneDrive/Desktop/Sylor', chosen: false }),
       onChanged: () => () => {}
+    },
+    // Long-term memory is empty in the browser preview (no userData store here).
+    memory: {
+      get: () => Promise.resolve(''),
+      remember: () => Promise.resolve(false)
+    },
+    // No real browser to drive from a browser tab: report "nothing installed" so the
+    // browser panel shows its explain-and-offer card instead of pretending to launch.
+    chrome: {
+      status: () => Promise.resolve(PREVIEW_CHROME),
+      open: () => Promise.reject(new Error('The browser preview cannot launch Chrome.')),
+      close: () => Promise.resolve(PREVIEW_CHROME),
+      navigate: () => Promise.reject(new Error('The browser preview cannot launch Chrome.')),
+      evaluate: () => Promise.resolve(null),
+      screenshot: () => Promise.resolve(''),
+      reload: () => Promise.resolve(),
+      stop: () => Promise.resolve(),
+      go: () => Promise.resolve(false),
+      focus: () => Promise.resolve(),
+      signIn: () => Promise.reject(new Error('The browser preview cannot launch Chrome.')),
+      finishSignIn: () => Promise.resolve(PREVIEW_CHROME),
+      onStatus: () => () => {}
+    },
+    // The in-app page view is a native main-process view; a plain browser tab has
+    // none, so every call is an honest no-op against a detached status.
+    browser: {
+      status: () => Promise.resolve(PREVIEW_VIEW),
+      open: () => Promise.resolve(PREVIEW_VIEW),
+      setBounds: () => Promise.resolve(),
+      setVisible: () => Promise.resolve(),
+      close: () => Promise.resolve(PREVIEW_VIEW),
+      reload: () => Promise.resolve(),
+      stop: () => Promise.resolve(),
+      go: () => Promise.resolve(false),
+      setDriver: () => Promise.resolve(),
+      onStatus: () => () => {}
+    },
+    // No scheduler in the browser preview: an empty list, and mutators are no-ops
+    // (nothing ticks here, so tasks would never fire anyway).
+    scheduler: {
+      list: () => Promise.resolve([]),
+      add: (input) =>
+        Promise.resolve({
+          id: 'preview-task',
+          name: input.name,
+          prompt: input.prompt,
+          cron: input.cron,
+          enabled: input.enabled ?? true,
+          durable: input.durable ?? false,
+          ...(input.mode ? { mode: input.mode } : {}),
+          createdAt: 0,
+          updatedAt: 0
+        }),
+      update: () => Promise.resolve(null),
+      setEnabled: () => Promise.resolve(null),
+      remove: () => Promise.resolve(),
+      onTaskFired: () => () => {}
     }
   }
 

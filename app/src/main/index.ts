@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import { join } from 'node:path'
 import { IpcChannel } from '../shared/ipc'
 import { createWindow } from './window'
@@ -13,14 +13,20 @@ import { registerSkillsIpc } from './skills-ipc'
 import { registerCommandsIpc } from './commands-ipc'
 import { registerPluginsIpc } from './plugins-ipc'
 import { registerWorkspaceIpc } from './workspace-ipc'
+import { registerMemoryIpc } from './memory-ipc'
+import { closeChrome, registerChromeIpc } from './chrome-ipc'
+import { attachBrowserWindow, registerBrowserIpc } from './browser-ipc'
+import { registerSchedulerIpc, stopScheduler } from './scheduler-ipc'
+import { configureBrowserSession } from './browser/session'
+import { destroyBrowserView } from './browser/view'
 import { cancelAllWorkflows } from './workflow/engine'
 import { killAllPtys } from './terminal/pty'
 import { stopPreview } from './preview/server'
-import { mcpManager } from './mcp/manager'
+import { mcpManager, setMcpBrowserOpener } from './mcp/manager'
 import { contextManager } from './context/manager'
 import { closeDb, setDbPath } from './db/db'
 import { reconcileInterruptedRuns } from './db/sessions'
-import { getSettings } from './settings'
+import { getSettings, setUserDataDir } from './settings'
 
 /** Registers window-control IPC handlers used by the custom title bar. */
 function registerWindowControls(): void {
@@ -75,8 +81,12 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.whenReady().then(() => {
-  // Inject the DB path here (not inside db.ts) so the DB layer stays electron-free
-  // and unit-testable. Local-only, outside any OneDrive-synced project dir.
+  // Inject Electron's per-user paths here (not inside the modules) so the DB and
+  // settings layers stay electron-free and unit-testable — the same seam the
+  // headless CLI (Phase 6) uses to drive the engine without a GUI. Local-only,
+  // outside any OneDrive-synced project dir. setUserDataDir must precede the first
+  // settings read (getSettings below) so caches populate from the right place.
+  setUserDataDir(app.getPath('userData'))
   setDbPath(join(app.getPath('userData'), 'sylor.db'))
 
   // Tag any assistant turn left empty by a run that died with the previous
@@ -99,6 +109,11 @@ app.whenReady().then(() => {
     mcpManager.setProjectRoot(savedRoot)
   }
 
+  // An OAuth MCP server's consent screen belongs in the user's real browser, never
+  // in an app window: they can see the address bar and their password manager
+  // works. Wired here so `mcp/oauth.ts` itself stays Electron-free (and testable).
+  setMcpBrowserOpener((url) => shell.openExternal(url))
+
   registerWindowControls()
   registerProviderIpc()
   registerWorkflowIpc()
@@ -111,11 +126,23 @@ app.whenReady().then(() => {
   registerCommandsIpc()
   registerPluginsIpc()
   registerWorkspaceIpc()
-  createWindow()
+  registerMemoryIpc()
+  // The user's real Chrome, driven over DevTools — the path for every site the
+  // embedded page view can't sign in to (see chrome-ipc.ts).
+  registerChromeIpc()
+  // The in-app page view the `browse` tool drives, drawn inside the chat window.
+  registerBrowserIpc()
+  // Scheduled tasks (Phase 4): rehydrate durable tasks from the DB and start the
+  // tick loop. Registered after the DB path is set above so the store can read.
+  registerSchedulerIpc()
+  // Present the browsing partition as ordinary desktop Chrome so real sign-ins
+  // don't reject it as an "insecure" embedded browser.
+  configureBrowserSession()
+  attachBrowserWindow(createWindow())
 
   app.on('activate', () => {
     // On macOS, re-create a window when the dock icon is clicked and none are open.
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (BrowserWindow.getAllWindows().length === 0) attachBrowserWindow(createWindow())
   })
 })
 
@@ -130,8 +157,13 @@ app.on('before-quit', () => {
   // outlives the app.
   cancelAllStreams()
   cancelAllWorkflows()
+  stopScheduler()
   stopPreview()
   void mcpManager.disconnectAll()
+  // Close the controlled browser too: its debugging port is a capability that must
+  // not outlive Sylor.
+  void closeChrome()
+  destroyBrowserView()
   killAllPtys()
   closeDb()
 })

@@ -59,6 +59,8 @@ export const IpcChannel = {
   SessionsAppendToolOp: 'sessions:append-tool-op',
   /** Renderer → main (send): append a raw terminal output chunk. */
   SessionsAppendTerminal: 'sessions:append-terminal',
+  /** Renderer → main (invoke): activity aggregates for the zero-state dashboard. */
+  SessionsUsageStats: 'sessions:usage-stats',
 
   // Projects (chat-first redesign)
   /** Renderer → main (invoke): list all projects with chat counts. */
@@ -103,6 +105,10 @@ export const IpcChannel = {
   PreviewStop: 'preview:stop',
   /** Main → renderer (send): a preview lifecycle event (starting/ready/reload/stopped/error). */
   PreviewEvent: 'preview:event',
+  /** Main → renderer (send): drive one `preview_inspect` action on the live webview. */
+  PreviewInspectRequest: 'preview:inspect-request',
+  /** Renderer → main (send): the result of a `preview_inspect` action (keyed by requestId). */
+  PreviewInspectResult: 'preview:inspect-result',
 
   // MCP client (extensibility)
   /** Renderer → main (invoke): current status of every configured MCP server. */
@@ -161,10 +167,95 @@ export const IpcChannel = {
   // Workspace (folder-first Code mode; requirement A)
   /** Renderer → main (invoke): open the OS folder picker; retarget the agent root. */
   WorkspaceSelect: 'workspace:select',
+  /**
+   * Renderer → main (invoke): re-point the root to a known folder without a
+   * picker (restoring a conversation's own project root). Does NOT persist the
+   * default workspace, unlike {@link WorkspaceSelect}.
+   */
+  WorkspaceSetRoot: 'workspace:set-root',
   /** Renderer → main (invoke): current workspace root + whether it was chosen. */
   WorkspaceGet: 'workspace:get',
   /** Main → renderer (send): the workspace root changed (new WorkspaceInfo). */
-  WorkspaceChanged: 'workspace:changed'
+  WorkspaceChanged: 'workspace:changed',
+
+  // Long-term memory (the GLOBAL, cross-project user profile that powers BOTH the
+  // Code/Cowork engine and the browse tool, so both grow more useful
+  // the more they learn about the person).
+  /** Renderer → main (invoke): the prompt-ready long-term memory (bullets, or ''). */
+  MemoryGet: 'memory:get',
+  /** Renderer → main (invoke): append one durable fact; resolves true when newly saved. */
+  MemoryRemember: 'memory:remember',
+
+  // Real browser (the "use everything that works in Chrome" path): the
+  // user's own Chrome/Edge, launched with a Sylor-only profile and driven over
+  // the DevTools protocol. It is a genuine browser, so Google sign-in and every
+  // logged-in web app work there — which the embedded <webview> cannot do.
+  /** Renderer → main (invoke): current status; starts nothing. */
+  ChromeGetStatus: 'chrome:get-status',
+  /** Renderer → main (invoke): launch (or reuse) the window, optionally at a url. */
+  ChromeOpen: 'chrome:open',
+  /** Renderer → main (invoke): close the window and drop the debugging port. */
+  ChromeClose: 'chrome:close',
+  /** Renderer → main (invoke): navigate the controlled tab. */
+  ChromeNavigate: 'chrome:navigate',
+  /** Renderer → main (invoke): run JS in the page and return its value. */
+  ChromeEvaluate: 'chrome:evaluate',
+  /** Renderer → main (invoke): PNG data URL of the visible page (vision fallback). */
+  ChromeScreenshot: 'chrome:screenshot',
+  /** Renderer → main (invoke): reload the tab. */
+  ChromeReload: 'chrome:reload',
+  /** Renderer → main (invoke): stop loading. */
+  ChromeStop: 'chrome:stop',
+  /** Renderer → main (invoke): step history by a delta (-1 back, +1 forward). */
+  ChromeGo: 'chrome:go',
+  /** Renderer → main (invoke): bring the browser window forward (for sign-in). */
+  ChromeFocus: 'chrome:focus',
+  /** Renderer → main (invoke): open a clean, undriven window so the user can sign in. */
+  ChromeSignIn: 'chrome:sign-in',
+  /** Renderer → main (invoke): stop waiting on that window and resume driving. */
+  ChromeFinishSignIn: 'chrome:finish-sign-in',
+  /** Main → renderer (send): the browser's url/title/loading/lifecycle changed. */
+  ChromeStatusChanged: 'chrome:status-changed',
+
+  // The in-app browser: a WebContentsView the MAIN process owns and draws over the
+  // renderer. Main owns it so the engine's `browse` tool drives it directly — no
+  // main → renderer → main round-trip like preview_inspect needs. The renderer only
+  // says where to put it and whether it is showing.
+  /** Renderer → main (invoke): current view status; creates nothing. */
+  BrowserGetStatus: 'browser:get-status',
+  /** Renderer → main (invoke): create the view if needed and load a url. */
+  BrowserOpen: 'browser:open',
+  /** Renderer → main (invoke): position the view over the panel's rect. */
+  BrowserSetBounds: 'browser:set-bounds',
+  /** Renderer → main (invoke): show/hide the view without destroying the page. */
+  BrowserSetVisible: 'browser:set-visible',
+  /** Renderer → main (invoke): destroy the view and its page. */
+  BrowserClose: 'browser:close',
+  /** Renderer → main (invoke): reload the page. */
+  BrowserReload: 'browser:reload',
+  /** Renderer → main (invoke): stop loading. */
+  BrowserStop: 'browser:stop',
+  /** Renderer → main (invoke): step history by a delta (-1 back, +1 forward). */
+  BrowserGo: 'browser:go',
+  /** Renderer → main (invoke): choose which browser the agent's `browse` drives. */
+  BrowserSetDriver: 'browser:set-driver',
+  /** Main → renderer (send): the in-app view's url/title/loading changed. */
+  BrowserStatusChanged: 'browser:status-changed',
+
+  // Scheduled tasks (Phase 4): a stored prompt the scheduler enqueues on a cron
+  // cadence, opening a fresh chat each time it fires.
+  /** Renderer → main (invoke): every task (durable + session-only), soonest-due first. */
+  SchedulerList: 'scheduler:list',
+  /** Renderer → main (invoke): add a task; resolves the stored row (rejects on bad cron). */
+  SchedulerAdd: 'scheduler:add',
+  /** Renderer → main (invoke): replace a task's editable fields; resolves the row or null. */
+  SchedulerUpdate: 'scheduler:update',
+  /** Renderer → main (invoke): pause/resume a task; resolves the row or null. */
+  SchedulerSetEnabled: 'scheduler:set-enabled',
+  /** Renderer → main (invoke): delete a task. */
+  SchedulerRemove: 'scheduler:remove',
+  /** Main → renderer (send): a task came due — the renderer opens a chat and sends it. */
+  SchedulerTaskFired: 'scheduler:task-fired'
 } as const
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel]

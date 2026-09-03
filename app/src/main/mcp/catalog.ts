@@ -25,6 +25,7 @@ import type {
   McpServerConfig,
   McpTransport
 } from '../../shared/types'
+import { transportOf } from './config'
 
 /** One curated built-in server. `build`/`needs*` are code, never persisted. */
 export interface McpCatalogEntry {
@@ -55,7 +56,7 @@ export interface McpCatalogEntry {
 
 /** Transport a catalog entry uses (for the UI badge, without building the config). */
 export function catalogTransport(entry: McpCatalogEntry): McpTransport {
-  return 'url' in entry.build(null) ? 'http' : 'stdio'
+  return transportOf(entry.build(null))
 }
 
 /**

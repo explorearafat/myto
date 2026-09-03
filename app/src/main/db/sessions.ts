@@ -343,12 +343,19 @@ export function loadSession(id: string): PersistedSession | null {
   return { session, messages, tools, terminal, attachments }
 }
 
-/** Append (or replace, by id) a chat message and bump the session. */
+/**
+ * Append (or replace, by id) a chat message and bump the session.
+ *
+ * `created_at` and `model` are written only on the first insert — deliberately
+ * absent from the ON CONFLICT update — so the streaming checkpoints that re-upsert
+ * the same assistant row (and a Rewrite that reuses it) keep the moment the turn
+ * actually started rather than sliding it forward on every flush.
+ */
 export function appendMessage(sessionId: string, msg: PersistedMessage, now: number): void {
   getDb()
     .prepare(
-      `INSERT INTO messages (id, session_id, seq, role, content, error)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO messages (id, session_id, seq, role, content, error, created_at, model)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET content = excluded.content, error = excluded.error`
     )
     .run(
@@ -357,7 +364,9 @@ export function appendMessage(sessionId: string, msg: PersistedMessage, now: num
       nextSeq('messages', sessionId),
       msg.role,
       msg.content,
-      msg.error ?? null
+      msg.error ?? null,
+      now,
+      msg.model ?? null
     )
   touch(sessionId, now)
 }

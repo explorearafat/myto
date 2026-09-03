@@ -11,18 +11,46 @@ import {
   unlinkSync
 } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { app } from 'electron'
+import * as electron from 'electron'
+import { MemoryStore } from './memory/store'
 import { DEFAULT_PROVIDER_SETTINGS } from '../shared/defaults'
 import type {
   AuthSchema,
+  HookDefinition,
+  HookEvent,
+  HooksConfig,
   ProviderKind,
   ProviderSettings,
   ReasoningEffort,
   Theme,
   WorkMode
 } from '../shared/types'
+
+/**
+ * Injected userData directory (mirrors {@link setDbPath} in db.ts). The Electron
+ * main process calls {@link setUserDataDir} at startup with
+ * `app.getPath('userData')`; the headless CLI (Phase 6) calls it with a resolved
+ * path. When set, every per-user file below — settings, the skills/MCP override
+ * files, and the memory store — reads from here and `app` is never dereferenced,
+ * so this module works under plain Node (Vitest, the CLI) where
+ * `require('electron')` yields a path string rather than the `app` module. With
+ * nothing injected it falls back to Electron's own path — the GUI's historical
+ * behavior, and what settings.test.ts relies on through its `electron` mock.
+ */
+let userDataDirOverride: string | null = null
+
+/** The active userData directory: the injected override, else Electron's path. */
+function userDataDir(): string {
+  // Namespace import (not `import { app }`): under plain Node the `electron`
+  // package is a CJS module whose default export is a path string with no named
+  // `app`, so a named import fails to LINK — a namespace import binds cleanly and
+  // `electron.app` is simply undefined there. It's only dereferenced on this
+  // fallback, which the CLI never reaches (it always injects an override).
+  return userDataDirOverride ?? electron.app.getPath('userData')
+}
+
 function settingsPath(): string {
-  return join(app.getPath('userData'), 'sylor-settings.json')
+  return join(userDataDir(), 'sylor-settings.json')
 }
 
 /**
@@ -97,6 +125,38 @@ const VALID_SCHEMAS: AuthSchema[] = ['none', 'bearer', 'header']
 const VALID_THEMES: Theme[] = ['light', 'dark']
 const VALID_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'max']
 const VALID_WORK_MODES: WorkMode[] = ['cowork', 'code']
+const VALID_HOOK_EVENTS: HookEvent[] = ['PreToolUse', 'PostToolUse', 'Stop', 'UserPromptSubmit']
+
+/**
+ * Validate the persisted hooks blob into a clean {@link HooksConfig}. Every
+ * entry is dropped unless it has a non-empty string `command`; `matcher` is kept
+ * only when a non-empty string and `timeoutMs` only when a positive finite
+ * number. An event whose entries all drop out is omitted entirely, so the result
+ * is byte-clean and the engine can treat an absent event as "no hooks". Never
+ * throws — a garbage value degrades to `{}`.
+ */
+function normaliseHooks(raw: unknown): HooksConfig {
+  const out: HooksConfig = {}
+  const o = (raw ?? {}) as Record<string, unknown>
+  for (const event of VALID_HOOK_EVENTS) {
+    const list = o[event]
+    if (!Array.isArray(list)) continue
+    const defs: HookDefinition[] = []
+    for (const item of list) {
+      const d = (item ?? {}) as Partial<HookDefinition>
+      if (typeof d.command !== 'string' || !d.command.trim()) continue
+      const def: HookDefinition = { command: d.command }
+      if (typeof d.matcher === 'string' && d.matcher.trim()) def.matcher = d.matcher
+      if (typeof d.timeoutMs === 'number' && Number.isFinite(d.timeoutMs) && d.timeoutMs > 0) {
+        def.timeoutMs = Math.floor(d.timeoutMs)
+      }
+      defs.push(def)
+    }
+    if (defs.length > 0) out[event] = defs
+  }
+  return out
+}
+
 /**
  * Merges a raw (possibly partial or stale) settings object onto the defaults,
  * validating every field. Exported for unit tests; also the single normalisation
@@ -144,7 +204,8 @@ export function normalise(raw: unknown): ProviderSettings {
     },
     modelName: typeof o.modelName === 'string' ? o.modelName : d.modelName,
     modelId: typeof o.modelId === 'string' ? o.modelId : d.modelId,
-    ui: { theme, effort, planFirst, mode, ...(workspaceRoot ? { workspaceRoot } : {}) }
+    ui: { theme, effort, planFirst, mode, ...(workspaceRoot ? { workspaceRoot } : {}) },
+    hooks: normaliseHooks(o.hooks)
   }
 }
 let cache: ProviderSettings | null = null
@@ -232,7 +293,7 @@ function applyEnabled(o: EnableOverrides, name: string, enabled: boolean): Enabl
 // ── Skills overrides (`sylor-skills.json`) ─────────────────────────────────
 
 function skillsStatePath(): string {
-  return join(app.getPath('userData'), 'sylor-skills.json')
+  return join(userDataDir(), 'sylor-skills.json')
 }
 
 let skillOverridesCache: EnableOverrides | null = null
@@ -266,7 +327,7 @@ export function resetSkillOverrides(): void {
 // ── MCP overrides (`sylor-mcp.json`) ───────────────────────────────────────
 
 function mcpStatePath(): string {
-  return join(app.getPath('userData'), 'sylor-mcp.json')
+  return join(userDataDir(), 'sylor-mcp.json')
 }
 
 let mcpOverridesCache: EnableOverrides | null = null
@@ -297,61 +358,129 @@ export function resetMcpOverrides(): void {
   mcpOverridesCache = empty
 }
 
-// ── User profile (`sylor-profile.json`) ────────────────────────────────────
+// ── User profile (structured long-term memory under `<userData>/memory`) ────
 
 /**
  * A GLOBAL, cross-project memory of the person using Sylor — their name, how
  * they like to work, the kind of sites they build, their style and typography
  * taste. Unlike project memory (scoped to one folder), this follows the user
- * everywhere, so Sylor gets more useful the more it learns. Stored as a small
- * append-only list of short facts in userData, and injected into the system
- * prompt at the start of every run. Deliberately its own file (not
- * ProviderSettings): a Settings-modal save must never clobber a fact learned
- * mid-conversation, exactly as the skills/MCP override files are kept separate.
+ * everywhere, so Sylor gets more useful the more it learns.
+ *
+ * Phase 5 backs it with a structured {@link MemoryStore}: one Markdown file per
+ * fact (plus a human-readable `MEMORY.md` index) under `<userData>/memory`,
+ * mirroring how this assistant keeps its own memory. That makes what Sylor knows
+ * inspectable/editable on disk and enables relevance recall — a large profile
+ * injects only the facts relevant to the current turn (see
+ * {@link getUserProfileForPrompt}) instead of every one. Deliberately its own
+ * store (not ProviderSettings): a Settings-modal save must never clobber a fact
+ * learned mid-conversation, exactly as the skills/MCP override files are kept
+ * separate. The legacy flat `sylor-profile.json` is migrated in once on upgrade.
  */
-function userProfilePath(): string {
-  return join(app.getPath('userData'), 'sylor-profile.json')
-}
 
-/** Most facts kept before the oldest are dropped — bounds the prompt cost. */
+/** Most facts kept before the oldest are pruned — bounds on-disk + prompt cost. */
 const MAX_PROFILE_NOTES = 80
 
-let userProfileCache: string[] | null = null
+/** Facts injected verbatim before recall kicks in; a small profile ships whole. */
+const MAX_PROFILE_PROMPT_FACTS = 24
 
-/** Reads the raw profile notes (defensive: a missing/garbage file → no notes). */
-function readUserProfileNotes(): string[] {
-  if (userProfileCache) return userProfileCache
-  const parsed = readJsonFile<{ notes?: unknown }>(userProfilePath())
-  const notes = Array.isArray(parsed?.notes)
-    ? parsed.notes.filter((n): n is string => typeof n === 'string' && !!n.trim())
-    : []
-  userProfileCache = notes
-  return notes
+let memoryStoreSingleton: MemoryStore | null = null
+
+/** Directory backing the structured memory (one `NNNN-slug.md` file per fact). */
+function memoryDir(): string {
+  return join(userDataDir(), 'memory')
+}
+
+/** The legacy flat profile file, folded into {@link memoryDir} once on upgrade. */
+function legacyProfilePath(): string {
+  return join(userDataDir(), 'sylor-profile.json')
 }
 
 /**
- * The user profile as prompt-ready text — one fact per bullet, or '' when
- * nothing has been learned yet (so callers can omit the section entirely).
+ * The process-wide memory store, created lazily (userData isn't known at import
+ * time) and memoized. On first creation — and only when the store is still empty
+ * — any legacy `sylor-profile.json` notes are folded in, in order, so upgrading
+ * keeps everything Sylor already learned. Best-effort throughout.
+ */
+function memoryStore(): MemoryStore {
+  if (memoryStoreSingleton) return memoryStoreSingleton
+  const store = new MemoryStore(memoryDir(), { maxFacts: MAX_PROFILE_NOTES })
+  try {
+    if (store.list().length === 0) {
+      const legacy = readJsonFile<{ notes?: unknown }>(legacyProfilePath())
+      const notes = Array.isArray(legacy?.notes)
+        ? legacy.notes.filter((n): n is string => typeof n === 'string' && !!n.trim())
+        : []
+      const now = new Date().toISOString()
+      for (const n of notes) store.remember(n, now)
+    }
+  } catch {
+    // best-effort — a missing/garbage legacy file just means nothing to migrate
+  }
+  memoryStoreSingleton = store
+  return store
+}
+
+/**
+ * The full user profile as prompt-ready text — one fact per bullet in insertion
+ * order, or '' when nothing has been learned yet (so callers can omit the section
+ * entirely). This is the stable contract the browser's memory IPC depends on; for
+ * turn-scoped injection prefer {@link getUserProfileForPrompt}. Never throws.
  */
 export function getUserProfile(): string {
-  const notes = readUserProfileNotes()
-  return notes.length ? notes.map((n) => `- ${n}`).join('\n') : ''
+  try {
+    return memoryStore().asBullets()
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * The user profile trimmed for one turn's system prompt. A small profile
+ * (≤ {@link MAX_PROFILE_PROMPT_FACTS} facts) ships whole — byte-identical to
+ * {@link getUserProfile} — so nothing changes for the common case. A larger one
+ * is narrowed to the `limit` facts most relevant to `query` (with the newest
+ * facts filling any remainder), so memory stays useful without flooding the
+ * prompt. Returns '' when empty. Never throws.
+ */
+export function getUserProfileForPrompt(query = '', limit = MAX_PROFILE_PROMPT_FACTS): string {
+  try {
+    const store = memoryStore()
+    if (store.list().length <= limit) return store.asBullets()
+    return store
+      .recall(query, limit)
+      .map((f) => `- ${f.text}`)
+      .join('\n')
+  } catch {
+    return ''
+  }
 }
 
 /**
  * Records one durable fact about the user, returning true when it was actually
- * added (false for a blank or exact-duplicate note). Append-only and deduped
- * (case-insensitive), capped at {@link MAX_PROFILE_NOTES} keeping the most
- * recent. Best-effort: a write failure is swallowed by the atomic writer's own
- * guards, never thrown, so a persistence hiccup can't abort a run.
+ * added (false for a blank or exact-duplicate note). Deduped case-insensitively
+ * and capped at {@link MAX_PROFILE_NOTES} (oldest pruned). Best-effort: a write
+ * failure returns false rather than throwing, so a persistence hiccup can't abort
+ * a run.
  */
 export function appendUserProfile(note: string): boolean {
-  const trimmed = note.trim().replace(/\s+/g, ' ')
-  if (!trimmed) return false
-  const notes = readUserProfileNotes()
-  if (notes.some((n) => n.toLowerCase() === trimmed.toLowerCase())) return false
-  const next = [...notes, trimmed].slice(-MAX_PROFILE_NOTES)
-  writeJsonAtomic(userProfilePath(), { notes: next })
-  userProfileCache = next
-  return true
+  try {
+    return memoryStore().remember(note, new Date().toISOString()).added
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Inject the userData directory the per-user files live under, and drop every
+ * cache derived from the previous location. Called once at startup by the Electron
+ * main process (`app.getPath('userData')`) and by the headless CLI (a resolved
+ * path) — the settings analogue of db.ts's {@link setDbPath}, and the seam that
+ * lets the engine run without a GUI. Must run before the first read below.
+ */
+export function setUserDataDir(dir: string): void {
+  userDataDirOverride = dir
+  cache = null
+  skillOverridesCache = null
+  mcpOverridesCache = null
+  memoryStoreSingleton = null
 }

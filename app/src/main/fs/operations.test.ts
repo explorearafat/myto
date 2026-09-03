@@ -19,6 +19,7 @@ import {
   PathEscapeError,
   proposeWrite,
   readFileSlice,
+  readMediaFile,
   readProjectFile,
   resolveSafe,
   searchProject,
@@ -188,6 +189,69 @@ describe('readFileSlice', () => {
   })
 })
 
+describe('readMediaFile', () => {
+  beforeAll(() => {
+    // Raw writeFileSync (unlike writeProjectFile) does not create parent dirs.
+    mkdirSync(join(root, 'media'), { recursive: true })
+  })
+
+  it('returns base64 bytes + a caption for an image, tagged with its MIME type', () => {
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3])
+    writeFileSync(join(root, 'media', 'tiny.png'), bytes)
+    const out = readMediaFile('media/tiny.png')
+    expect(out).not.toBeNull()
+    expect(out?.media).toEqual({
+      kind: 'image',
+      mediaType: 'image/png',
+      dataBase64: bytes.toString('base64')
+    })
+    expect(out?.summary).toContain('image')
+    expect(out?.output).toContain('tiny.png')
+    expect(out?.truncated).toBe(false)
+  })
+
+  it('maps .jpg and .jpeg both to image/jpeg, and .gif/.webp to their types', () => {
+    writeFileSync(join(root, 'media', 'p.jpg'), Buffer.from([1]))
+    writeFileSync(join(root, 'media', 'p.jpeg'), Buffer.from([2]))
+    writeFileSync(join(root, 'media', 'p.gif'), Buffer.from([3]))
+    writeFileSync(join(root, 'media', 'p.webp'), Buffer.from([4]))
+    expect(readMediaFile('media/p.jpg')?.media?.mediaType).toBe('image/jpeg')
+    expect(readMediaFile('media/p.jpeg')?.media?.mediaType).toBe('image/jpeg')
+    expect(readMediaFile('media/p.gif')?.media?.mediaType).toBe('image/gif')
+    expect(readMediaFile('media/p.webp')?.media?.mediaType).toBe('image/webp')
+  })
+
+  it('is case-insensitive about the extension', () => {
+    writeFileSync(join(root, 'media', 'CAP.PNG'), Buffer.from([9]))
+    expect(readMediaFile('media/CAP.PNG')?.media?.mediaType).toBe('image/png')
+  })
+
+  it('returns null for an ordinary text file so the caller reads it as text', () => {
+    writeProjectFile('media/code.ts', 'const x = 1\n')
+    expect(readMediaFile('media/code.ts')).toBeNull()
+  })
+
+  it('refuses an image past the size ceiling, with no bytes attached', () => {
+    // 6 MB is over the 5 MB vision ceiling — a caption, not the bytes, comes back.
+    writeFileSync(join(root, 'media', 'huge.png'), Buffer.alloc(6 * 1024 * 1024, 0))
+    const out = readMediaFile('media/huge.png')
+    expect(out?.media).toBeUndefined()
+    expect(out?.summary).toBe('image too large')
+  })
+
+  it('recognises a PDF but returns a caption without bytes (not renderable)', () => {
+    writeProjectFile('media/doc.pdf', '%PDF-1.4\n')
+    const out = readMediaFile('media/doc.pdf')
+    expect(out?.media).toBeUndefined()
+    expect(out?.summary).toBe('pdf (not viewable)')
+    expect(out?.output).toContain('PDF')
+  })
+
+  it('is sandbox-checked for an image path that escapes the root', () => {
+    expect(() => readMediaFile('../outside.png')).toThrow(PathEscapeError)
+  })
+})
+
 describe('listDirectory', () => {
   it('lists folders first, then files with sizes, skipping build/vendor noise', () => {
     writeProjectFile('ls/b.ts', 'xx')
@@ -243,6 +307,69 @@ describe('searchProject', () => {
     const out = searchProject('zzz-nothing-here', 'grep')
     expect(out.summary).toBe('no matches')
     expect(out.output).toContain('No matches')
+  })
+})
+
+describe('searchProject — context lines, multiline, and output modes', () => {
+  beforeAll(() => {
+    writeProjectFile(
+      'ctx/story.ts',
+      ['line one', 'MATCH here', 'line three', 'line four', 'line five', 'MATCH again', 'line seven'].join(
+        '\n'
+      )
+    )
+    writeProjectFile('ctx/multi.ts', 'function f() {\n  return 42\n}\n')
+    writeProjectFile('ctx/counts-a.ts', 'foo\nfoo\nbar\n')
+    writeProjectFile('ctx/counts-b.ts', 'foo\n')
+  })
+
+  it('prints trailing context (-A) with a dash separator for the context line', () => {
+    const out = searchProject('MATCH here', 'ctx', undefined, { after: 1 })
+    expect(out.output).toContain('ctx/story.ts:2: MATCH here')
+    expect(out.output).toContain('ctx/story.ts:3- line three')
+  })
+
+  it('prints leading context (-B)', () => {
+    const out = searchProject('MATCH here', 'ctx', undefined, { before: 1 })
+    expect(out.output).toContain('ctx/story.ts:1- line one')
+    expect(out.output).toContain('ctx/story.ts:2: MATCH here')
+  })
+
+  it('prints symmetric context (-C) and divides non-adjacent groups with --', () => {
+    const out = searchProject('MATCH', 'ctx', undefined, { context: 1 })
+    expect(out.output).toContain('ctx/story.ts:2: MATCH here')
+    expect(out.output).toContain('ctx/story.ts:6: MATCH again')
+    // The two hits are far apart, so a -- divider separates their context groups.
+    expect(out.output).toContain('\n--\n')
+  })
+
+  it('matches a pattern that spans lines when multiline is set', () => {
+    // `function … {  return` crosses a newline — a per-line grep would never see it.
+    // Only ctx/multi.ts contains it, so searching the whole ctx dir isolates it.
+    const out = searchProject('function f\\(\\)\\s*\\{\\s*return', 'ctx', undefined, {
+      multiline: true
+    })
+    expect(out.summary).toBe('1 match in 1 file')
+    expect(out.output).toContain('ctx/multi.ts:1')
+  })
+
+  it('mode "files" returns only the matching paths, sorted', () => {
+    const out = searchProject('foo', 'ctx', undefined, { mode: 'files' })
+    expect(out.output).toBe(['ctx/counts-a.ts', 'ctx/counts-b.ts'].join('\n'))
+    expect(out.summary).toBe('2 files')
+  })
+
+  it('mode "count" tallies matches per file', () => {
+    const out = searchProject('foo', 'ctx', undefined, { mode: 'count' })
+    expect(out.output).toContain('ctx/counts-a.ts:2')
+    expect(out.output).toContain('ctx/counts-b.ts:1')
+    expect(out.summary).toBe('3 matches in 2 files')
+  })
+
+  it('with no options, output stays the plain per-line search (no -- separators)', () => {
+    const out = searchProject('MATCH', 'ctx')
+    expect(out.output).not.toContain('--')
+    expect(out.output).toBe('ctx/story.ts:2: MATCH here\nctx/story.ts:6: MATCH again')
   })
 })
 

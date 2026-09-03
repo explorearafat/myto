@@ -1,7 +1,32 @@
 import '@testing-library/jest-dom/vitest'
 import { vi } from 'vitest'
 import { DEFAULT_PROVIDER_SETTINGS } from '@shared/defaults'
-import type { SylorApi } from '@shared/types'
+import type { BrowserViewStatus, ChromeStatus, SylorApi } from '@shared/types'
+import { emptyUsageStats } from '@shared/usage'
+
+/** A located-but-not-running real browser: what tests see unless they override it. */
+const CHROME_IDLE: ChromeStatus = {
+  available: true,
+  browserName: 'Google Chrome',
+  running: false,
+  url: '',
+  title: '',
+  loading: false,
+  signingIn: false,
+  error: null
+}
+
+/** No in-app page view exists under vitest (it is a main-process native view). */
+const BROWSER_IDLE: BrowserViewStatus = {
+  attached: false,
+  visible: false,
+  url: '',
+  title: '',
+  loading: false,
+  canGoBack: false,
+  canGoForward: false,
+  error: null
+}
 
 /**
  * jsdom has no Electron preload bridge, so stub `window.sylor` with a minimal
@@ -25,7 +50,12 @@ const sylorMock: SylorApi = {
     listModels: vi.fn().mockResolvedValue({ ok: true, models: [] }),
     testConnection: vi.fn().mockResolvedValue({ ok: true, message: 'ok' }),
     getCompletion: vi.fn().mockResolvedValue({ ok: true, content: '' }),
-    streamCompletion: vi.fn().mockResolvedValue(() => {})
+    // Terminates the stream at once so a consumer awaiting the final chunk resolves
+    // rather than hanging; tests that need real deltas override this per-test.
+    streamCompletion: vi.fn((_request, onChunk) => {
+      onChunk({ streamId: 'test', delta: '', done: true })
+      return Promise.resolve(() => {})
+    })
   },
   workflow: {
     // No-op run that immediately hands back a disposer.
@@ -69,7 +99,8 @@ const sylorMock: SylorApi = {
     setFeedback: vi.fn(),
     resetMessage: vi.fn(),
     appendToolOp: vi.fn(),
-    appendTerminal: vi.fn()
+    appendTerminal: vi.fn(),
+    usageStats: vi.fn().mockResolvedValue(emptyUsageStats(0))
   },
   projects: {
     list: vi.fn().mockResolvedValue([]),
@@ -118,7 +149,9 @@ const sylorMock: SylorApi = {
     startAuto: vi.fn().mockResolvedValue({ ok: true, url: 'http://127.0.0.1:5173/' }),
     stop: vi.fn(),
     // No lifecycle events in tests; hand back a no-op disposer.
-    onEvent: vi.fn().mockReturnValue(() => {})
+    onEvent: vi.fn().mockReturnValue(() => {}),
+    onInspectRequest: vi.fn().mockReturnValue(() => {}),
+    respondInspect: vi.fn()
   },
   mcp: {
     listServers: vi.fn().mockResolvedValue([]),
@@ -155,8 +188,52 @@ const sylorMock: SylorApi = {
     // No folder picker in jsdom: the workspace stays the cwd default (never
     // "chosen"), select resolves null, and no change events fire.
     select: vi.fn().mockResolvedValue(null),
+    setRoot: vi.fn().mockImplementation((dir: string) => Promise.resolve({ root: dir, chosen: false })),
     get: vi.fn().mockResolvedValue({ root: '/test', chosen: false }),
     onChanged: vi.fn().mockReturnValue(() => {})
+  },
+  memory: {
+    // Empty long-term memory in tests; remember() reports "newly saved".
+    get: vi.fn().mockResolvedValue(''),
+    remember: vi.fn().mockResolvedValue(true)
+  },
+  chrome: {
+    // No real browser under vitest: available, never running, every call a no-op.
+    status: vi.fn().mockResolvedValue(CHROME_IDLE),
+    open: vi.fn().mockResolvedValue({ ...CHROME_IDLE, running: true }),
+    close: vi.fn().mockResolvedValue(CHROME_IDLE),
+    navigate: vi.fn().mockResolvedValue({ ...CHROME_IDLE, running: true }),
+    evaluate: vi.fn().mockResolvedValue(null),
+    screenshot: vi.fn().mockResolvedValue(''),
+    reload: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
+    go: vi.fn().mockResolvedValue(false),
+    focus: vi.fn().mockResolvedValue(undefined),
+    signIn: vi.fn().mockResolvedValue({ ...CHROME_IDLE, signingIn: true }),
+    finishSignIn: vi.fn().mockResolvedValue(CHROME_IDLE),
+    onStatus: vi.fn().mockReturnValue(() => {})
+  },
+  browser: {
+    // The in-app page view is a native main-process view: absent under vitest.
+    status: vi.fn().mockResolvedValue(BROWSER_IDLE),
+    open: vi.fn().mockResolvedValue({ ...BROWSER_IDLE, attached: true, visible: true }),
+    setBounds: vi.fn().mockResolvedValue(undefined),
+    setVisible: vi.fn().mockResolvedValue(undefined),
+    close: vi.fn().mockResolvedValue(BROWSER_IDLE),
+    reload: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
+    go: vi.fn().mockResolvedValue(false),
+    setDriver: vi.fn().mockResolvedValue(undefined),
+    onStatus: vi.fn().mockReturnValue(() => {})
+  },
+  scheduler: {
+    // No scheduled tasks in tests; mutators echo back a benign shape / null.
+    list: vi.fn().mockResolvedValue([]),
+    add: vi.fn().mockResolvedValue(null),
+    update: vi.fn().mockResolvedValue(null),
+    setEnabled: vi.fn().mockResolvedValue(null),
+    remove: vi.fn().mockResolvedValue(undefined),
+    onTaskFired: vi.fn().mockReturnValue(() => {})
   }
 }
 

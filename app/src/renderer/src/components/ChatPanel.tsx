@@ -15,6 +15,7 @@ import {
   type AgentCardUI,
   type ChatMessageUI,
   type OutgoingAttachment,
+  type RunProgressUI,
   type ToolCardUI
 } from '../store/useChatStore'
 import { useSessionStore } from '../store/useSessionStore'
@@ -33,7 +34,7 @@ import type {
   ToolProposal,
   WorkflowStage
 } from '@shared/types'
-import { parseSlash, expandCommand } from '@shared/commands'
+import { parseSlash, expandCommand, buildRememberPrompt } from '@shared/commands'
 
 /** Human-readable byte size for an attachment chip (e.g. "12.4 KB"). */
 function formatBytes(bytes: number): string {
@@ -275,6 +276,99 @@ function StageIcon({ stage }: { stage: WorkflowStage }): ReactNode {
   }
 }
 
+/** A faint interpunct between two stats on the status row. */
+function Sep(): ReactNode {
+  return (
+    <span aria-hidden className="text-muted/50">
+      ·
+    </span>
+  )
+}
+
+/**
+ * How each preview state reads on the status row (§23/§33). A preview that isn't
+ * showing the current code says so — the whole point is that a stale or broken
+ * preview is never presented as if it were live. UNAVAILABLE/UNKNOWN render
+ * nothing at all: there's no preview to report on, so the row stays quiet.
+ */
+const PREVIEW_CHIPS: Partial<
+  Record<NonNullable<RunProgressUI['preview']>, { label: string; tone: string; title: string }>
+> = {
+  RUNNING: {
+    label: 'preview live',
+    tone: 'bg-emerald-400',
+    title: 'The preview is serving the current code'
+  },
+  STALE: {
+    label: 'preview stale',
+    tone: 'bg-amber-400',
+    title: 'The preview is still showing an older build — not the current code'
+  },
+  COMPILE_ERROR: {
+    label: 'preview broken',
+    tone: 'bg-amber-400',
+    title: 'The current code does not compile, so the preview cannot show it'
+  },
+  RUNTIME_ERROR: {
+    label: 'preview erroring',
+    tone: 'bg-amber-400',
+    title: 'The preview loaded but threw a runtime error'
+  }
+}
+
+/**
+ * Where the whole build stands, as compact chips on the SAME single status row
+ * (§33): which phase of how many, how far through the phase's tasks, whether the
+ * project's own checks passed, and what the preview is really showing. Never a
+ * second row and never an accumulating list — the row re-labels itself, so one
+ * glance answers "where are we" without the internal tool output being dumped
+ * into the chat. Each chip is omitted when there's nothing honest to say about it.
+ */
+function ProgressChips({ progress }: { progress: RunProgressUI }): ReactNode {
+  const { tasks, checks } = progress
+  const preview = progress.preview ? PREVIEW_CHIPS[progress.preview] : undefined
+  return (
+    <>
+      {tasks && (
+        <>
+          <Sep />
+          <span
+            className="tabular-nums"
+            title={`${tasks.done} of ${tasks.total} planned tasks finished`}
+          >
+            {tasks.done}/{tasks.total} tasks
+          </span>
+        </>
+      )}
+      {checks === 'PASSING' && (
+        <>
+          <Sep />
+          <span className="text-emerald-400" title="The project's own checks passed this turn">
+            checks ✓
+          </span>
+        </>
+      )}
+      {checks === 'FAILING' && (
+        <>
+          <Sep />
+          <span className="text-amber-300" title="The project's own checks did not pass this turn">
+            checks !
+          </span>
+        </>
+      )}
+      {preview && (
+        <>
+          <Sep />
+          <span className="inline-flex items-center gap-1" title={preview.title}>
+            <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${preview.tone}`} />
+            {preview.label}
+          </span>
+        </>
+      )}
+    </>
+  )
+}
+
 /**
  * The live status line shown at the BOTTOM of the active turn (Claude-Code style):
  * a SINGLE evolving row — pulsing phase icon, the current phase message, elapsed
@@ -283,12 +377,20 @@ function StageIcon({ stage }: { stage: WorkflowStage }): ReactNode {
  * rows and never shows a ✓, so it can't claim a phase finished that didn't, and it
  * can't stack a second block of text above the model's own prose. The model's
  * natural reply is the acknowledgment; this line only reports what is happening now.
+ *
+ * When the turn is a phase of a staged build, `progress` adds the sticky
+ * where-are-we chips (§33) to the same row — phase, tasks, checks, preview.
+ *
+ * Exported for the row's own test: the "one evolving row, never a second block"
+ * shape is a requirement, so it's worth pinning independently of the panel.
  */
-function StatusLine({
+export function StatusLine({
   status,
+  progress,
   tokens
 }: {
   status: ActivityStatus | null
+  progress: RunProgressUI | null
   tokens: number
 }): ReactNode {
   const [elapsed, setElapsed] = useState(0)
@@ -307,12 +409,14 @@ function StatusLine({
   // icon stops pulsing — a quiet "holding, will resume" state rather than the
   // active shimmer, so a stalled request reads as paused, not working.
   const retrying = status?.retrying === true
+  const phase = progress?.phase
 
   return (
     <div
       className={`mt-1.5 flex items-center gap-2 text-[12px] transition-opacity ${
         retrying ? 'opacity-45' : ''
       }`}
+      role="status"
       aria-live="polite"
     >
       <span
@@ -322,6 +426,17 @@ function StatusLine({
       >
         <StageIcon stage={stage} />
       </span>
+      {phase && (
+        <span
+          className="shrink-0 rounded-sm bg-border/50 px-1 py-px text-[10px] font-medium text-muted"
+          title={`Phase ${phase.n} of ${phase.total} — ${phase.name}`}
+        >
+          <span className="tabular-nums">
+            {phase.n}/{phase.total}
+          </span>{' '}
+          <span className="inline-block max-w-[7rem] truncate align-bottom">{phase.name}</span>
+        </span>
+      )}
       <span
         className={`min-w-0 truncate font-medium ${retrying ? 'text-muted' : 'sylor-thinking'}`}
       >
@@ -329,11 +444,10 @@ function StatusLine({
       </span>
       <span className="ml-0.5 flex shrink-0 items-center gap-1.5 text-[11px] text-muted">
         <span className="tabular-nums">{formatElapsed(elapsed)}</span>
+        {progress && <ProgressChips progress={progress} />}
         {tokens > 0 && (
           <>
-            <span aria-hidden className="text-muted/50">
-              ·
-            </span>
+            <Sep />
             <span className="tabular-nums">~{formatTokens(tokens)} tokens</span>
           </>
         )}
@@ -425,11 +539,54 @@ function toolLabel(card: ToolCardUI): string {
   if (proposal.kind === 'web_fetch') {
     return `${tense('Fetch', 'Fetching', 'Fetched')} ${hostOf(proposal.url)}`
   }
+  if (proposal.kind === 'web_search') {
+    return `${tense('Search', 'Searching', 'Searched')} "${proposal.query}"`
+  }
   if (proposal.kind === 'install_plugin') {
     return `${tense('Install', 'Installing', 'Installed')} ${proposal.source}`
   }
+  if (proposal.kind === 'preview_inspect') {
+    return `${tense('Check', 'Checking', 'Checked')} preview · ${proposal.action}`
+  }
+  if (proposal.kind === 'browse') {
+    return browseLabel(proposal, tense)
+  }
+  if (proposal.kind === 'diagnostics') {
+    const what = proposal.scope === 'all' ? 'for problems' : `${proposal.scope} problems`
+    return `${tense('Check', 'Checking', 'Checked')} ${what}`
+  }
   const head = proposal.command.trim().split(/\s+/).slice(0, 3).join(' ')
   return `${tense('Run', 'Running', 'Ran')} ${head}`
+}
+
+/**
+ * Row label for a browse step, phrased the way the user would say it ("Open
+ * gmail.com", "Click Compose"). Mirrors the main process's `describeBrowse` but
+ * tensed like every other card, so a running step reads "Clicking Compose".
+ */
+function browseLabel(
+  proposal: Extract<ToolProposal, { kind: 'browse' }>,
+  tense: (verb: string, gerund: string, past: string) => string
+): string {
+  const what = proposal.target ? ` ${proposal.target}` : ''
+  switch (proposal.action) {
+    case 'navigate':
+      return `${tense('Open', 'Opening', 'Opened')} ${hostOf(proposal.url ?? '')}`
+    case 'click':
+      return `${tense('Click', 'Clicking', 'Clicked')}${what}`
+    case 'type':
+      return `${tense('Type', 'Typing', 'Typed')} into${what}`
+    case 'scroll':
+      return `${tense('Scroll', 'Scrolling', 'Scrolled')} ${proposal.direction ?? 'down'}`
+    case 'console':
+      return `${tense('Check', 'Checking', 'Checked')} the page console`
+    case 'network':
+      return `${tense('Check', 'Checking', 'Checked')} the page requests`
+    case 'inspect':
+      return `${tense('Inspect', 'Inspecting', 'Inspected')} ${proposal.selector ?? 'an element'}`
+    default:
+      return `${tense('Read', 'Reading', 'Read')} the page`
+  }
 }
 
 /** The host of a URL for a compact label, falling back to the raw string. */
@@ -453,7 +610,27 @@ function proposalFullTitle(proposal: ToolProposal): string {
         : proposal.path
   }
   if (proposal.kind === 'web_fetch') return proposal.url
+  if (proposal.kind === 'web_search') return `search "${proposal.query}"`
   if (proposal.kind === 'install_plugin') return `install ${proposal.source} (${proposal.scope})`
+  if (proposal.kind === 'preview_inspect') {
+    return `preview ${proposal.action}${proposal.selector ? ` ${proposal.selector}` : ''}`
+  }
+  if (proposal.kind === 'browse') {
+    const bits = [
+      proposal.action,
+      proposal.url,
+      proposal.target,
+      proposal.selector,
+      proposal.direction,
+      proposal.level,
+      proposal.filter
+    ].filter(Boolean)
+    return `browse · ${bits.join(' ')}`
+  }
+  if (proposal.kind === 'diagnostics') {
+    const where = proposal.files?.length ? ` · ${proposal.files.join(', ')}` : ''
+    return `diagnostics · ${proposal.scope}${where}`
+  }
   return proposal.command
 }
 
@@ -469,7 +646,13 @@ function cardError(card: ToolCardUI): string | null {
   if (r?.kind === 'read' && !r.ok) return r.error ?? 'read failed'
   if (r?.kind === 'mcp_call' && !r.ok) return r.error ?? 'call failed'
   if (r?.kind === 'web_fetch' && !r.ok) return r.error ?? 'fetch failed'
+  if (r?.kind === 'web_search' && !r.ok) return r.error ?? 'search failed'
   if (r?.kind === 'install_plugin' && !r.ok) return r.error ?? 'install failed'
+  if (r?.kind === 'preview_inspect' && !r.ok) return r.error ?? 'preview check failed'
+  if (r?.kind === 'browse' && !r.ok) return r.error ?? 'could not do that on the page'
+  // A diagnostics run is only "failed" when NO checker could run — findings are a
+  // successful check, and reporting them as an error would be a lie about the tool.
+  if (r?.kind === 'diagnostics' && !r.ok) return r.error ?? 'nothing was checked'
   if (r?.kind === 'run_command' && r.exitCode !== 0 && r.exitCode !== null) return `exit ${r.exitCode}`
   return null
 }
@@ -584,6 +767,25 @@ function ToolResultFooter({ card }: { card: ToolCardUI }) {
       </div>
     )
   }
+  if (result.kind === 'web_search') {
+    if (!result.ok) {
+      return (
+        <div className="border-t border-border bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-200/90">
+          {result.error ?? 'Search failed.'}
+        </div>
+      )
+    }
+    return (
+      <div className="border-t border-border bg-bg px-3 py-1.5">
+        {result.truncated && (
+          <div className="mb-1 text-[10px] text-amber-300">results truncated</div>
+        )}
+        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-text/80">
+          {result.output.trimEnd()}
+        </pre>
+      </div>
+    )
+  }
   if (result.kind === 'install_plugin') {
     if (!result.ok) {
       return (
@@ -602,6 +804,43 @@ function ToolResultFooter({ card }: { card: ToolCardUI }) {
         {installOut.length > 0 && (
           <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-text/80">
             {installOut}
+          </pre>
+        )}
+      </div>
+    )
+  }
+  if (result.kind === 'preview_inspect') {
+    // Preview checks are rendered by PreviewInspectCard (a quiet row with the
+    // screenshot/output inline), never inside a bordered card, so nothing here.
+    return null
+  }
+  if (result.kind === 'browse') {
+    // Same as preview_inspect: BrowseCard owns the rendering (a quiet row), because
+    // a browse step is a look/act on a page the user can already see beside the chat.
+    return null
+  }
+  if (result.kind === 'diagnostics') {
+    // `ok: false` means NO checker ran. That is the one thing the user must not read
+    // as a clean project, so it gets the amber note; findings are an ordinary result.
+    if (!result.ok) {
+      return (
+        <div className="border-t border-border bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-200/90">
+          {result.error ?? 'No checker could be run.'}
+        </div>
+      )
+    }
+    const report = result.output.trimEnd()
+    return (
+      <div className="border-t border-border bg-bg px-3 py-1.5">
+        <div className="mb-1 flex items-center gap-2 text-[10px] text-muted">
+          <span className={result.errors > 0 ? 'text-amber-300' : 'text-emerald-300'}>
+            {result.summary}
+          </span>
+          {result.truncated && <span className="text-amber-300">list truncated</span>}
+        </div>
+        {report.length > 0 && (
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-text/80">
+            {report}
           </pre>
         )}
       </div>
@@ -662,9 +901,122 @@ function ReadCard({ card }: { card: ToolCardUI }) {
       </button>
 
       {expanded && result?.ok && (
-        <pre className="mt-0.5 max-h-64 overflow-auto rounded border border-border bg-bg px-2 py-1.5 font-mono text-[11px] leading-relaxed text-text/80">
-          {result.output.trimEnd()}
-        </pre>
+        <div className="mt-0.5 space-y-1.5">
+          {result.media?.kind === 'image' && (
+            <img
+              src={`data:${result.media.mediaType};base64,${result.media.dataBase64}`}
+              alt={toolLabel(card)}
+              className="max-h-64 rounded border border-border object-contain"
+            />
+          )}
+          <pre className="max-h-64 overflow-auto rounded border border-border bg-bg px-2 py-1.5 font-mono text-[11px] leading-relaxed text-text/80">
+            {result.output.trimEnd()}
+          </pre>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * A `preview_inspect` op rendered as a quiet line, like {@link ReadCard} — it is
+ * auto-approved observation/interaction of the user's own live preview, carries
+ * no diff and no approval. A `screenshot` shows the rendered image; the other
+ * actions show their text result (snapshot, computed styles, console/network).
+ */
+function PreviewInspectCard({ card }: { card: ToolCardUI }) {
+  const [expanded, setExpanded] = useState(false)
+  const result = card.result?.kind === 'preview_inspect' ? card.result : null
+  const failed = result !== null && !result.ok
+
+  return (
+    <div className="my-0.5">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        title={proposalFullTitle(card.proposal)}
+        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left transition-colors hover:bg-surface-2"
+      >
+        <span className="shrink-0 text-[11px] text-muted">🔍</span>
+        <span className="min-w-0 truncate text-[11.5px] text-text/70">{toolLabel(card)}</span>
+        <span
+          className={
+            'min-w-0 shrink truncate text-[10.5px] ' + (failed ? 'text-red-300' : 'text-muted')
+          }
+        >
+          {result ? `· ${failed ? (result.error ?? 'failed') : result.summary}` : '· …'}
+        </span>
+      </button>
+
+      {expanded && result?.ok && (
+        <div className="mt-0.5 space-y-1.5">
+          {result.media?.kind === 'image' && (
+            <img
+              src={`data:${result.media.mediaType};base64,${result.media.dataBase64}`}
+              alt={toolLabel(card)}
+              className="max-h-64 rounded border border-border object-contain"
+            />
+          )}
+          {result.output.trim().length > 0 && (
+            <pre className="max-h-64 overflow-auto rounded border border-border bg-bg px-2 py-1.5 font-mono text-[11px] leading-relaxed text-text/80">
+              {result.output.trimEnd()}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * A `browse` step rendered as a quiet line, like {@link PreviewInspectCard}. The
+ * page itself is right there in the BROWSER panel beside the chat, so the card's
+ * job is only to say what Sylor did and let the user open up what it actually saw
+ * — the perceived page text, and the screenshot when it took a visual read.
+ *
+ * Unlike a write there is no diff and (for read/navigate) no approval; a step the
+ * user was asked about and declined still lands here, flagged "skipped" by the
+ * shared {@link StatusBadge} logic through `cardError`.
+ */
+function BrowseCard({ card }: { card: ToolCardUI }) {
+  const [expanded, setExpanded] = useState(false)
+  const result = card.result?.kind === 'browse' ? card.result : null
+  const failed = result !== null && !result.ok
+
+  return (
+    <div className="my-0.5">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        title={proposalFullTitle(card.proposal)}
+        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left transition-colors hover:bg-surface-2"
+      >
+        <span className="shrink-0 text-[11px] text-muted">🌐</span>
+        <span className="min-w-0 truncate text-[11.5px] text-text/70">{toolLabel(card)}</span>
+        <span
+          className={
+            'min-w-0 shrink truncate text-[10.5px] ' + (failed ? 'text-amber-300' : 'text-muted')
+          }
+        >
+          {result ? `· ${failed ? (result.error ?? 'failed') : result.summary}` : '· …'}
+        </span>
+      </button>
+
+      {expanded && result?.ok && (
+        <div className="mt-0.5 space-y-1.5">
+          {result.media?.kind === 'image' && (
+            <img
+              src={`data:${result.media.mediaType};base64,${result.media.dataBase64}`}
+              alt={toolLabel(card)}
+              className="max-h-64 rounded border border-border object-contain"
+            />
+          )}
+          {result.output.trim().length > 0 && (
+            <pre className="max-h-64 overflow-auto rounded border border-border bg-bg px-2 py-1.5 font-mono text-[11px] leading-relaxed text-text/80">
+              {result.output.trimEnd()}
+            </pre>
+          )}
+        </div>
       )}
     </div>
   )
@@ -686,6 +1038,12 @@ function ToolCard({ card }: { card: ToolCardUI }) {
   const [expanded, setExpanded] = useState(false)
   // Reads get their own much quieter row — they carry no diff and no approval.
   if (proposal.kind === 'read') return <ReadCard card={card} />
+  // Preview checks are auto-approved observation of the user's own live preview
+  // — a quiet row like a read, showing the screenshot/console/style result.
+  if (proposal.kind === 'preview_inspect') return <PreviewInspectCard card={card} />
+  // Browsing is a look/act on a page the user can already see in the BROWSER panel
+  // — also a quiet row, with the perceived page (and screenshot) behind a tap.
+  if (proposal.kind === 'browse') return <BrowseCard card={card} />
   const language = proposal.kind === 'write_file' ? languageForPath(proposal.path) : 'plaintext'
   const icon =
     proposal.kind === 'write_file'
@@ -694,9 +1052,13 @@ function ToolCard({ card }: { card: ToolCardUI }) {
         ? '⚙'
         : proposal.kind === 'web_fetch'
           ? '🌐'
-          : proposal.kind === 'install_plugin'
-            ? '📦'
-            : '❯'
+          : proposal.kind === 'web_search'
+            ? '🔎'
+            : proposal.kind === 'install_plugin'
+              ? '📦'
+              : proposal.kind === 'diagnostics'
+                ? '🩺'
+                : '❯'
   const stats =
     proposal.kind === 'write_file' ? lineDiffStats(proposal.oldContent, proposal.newContent) : null
   const error = cardError(card)
@@ -782,11 +1144,24 @@ function ToolCard({ card }: { card: ToolCardUI }) {
               <span className="text-muted">🌐 </span>
               {proposal.url}
             </div>
+          ) : proposal.kind === 'web_search' ? (
+            <div className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
+              <span className="text-muted">🔎 </span>
+              {proposal.query}
+            </div>
           ) : proposal.kind === 'install_plugin' ? (
             <div className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
               <span className="text-muted">📦 </span>
               {proposal.source}
               <span className="text-muted"> · {proposal.scope}</span>
+            </div>
+          ) : proposal.kind === 'diagnostics' ? (
+            <div className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
+              <span className="text-muted">🩺 </span>
+              {proposal.scope === 'all' ? 'typescript + eslint' : proposal.scope}
+              {proposal.files?.length ? (
+                <span className="text-muted"> · {proposal.files.join(', ')}</span>
+              ) : null}
             </div>
           ) : (
             <pre className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
@@ -905,6 +1280,22 @@ function AgentCard({ agent, tools }: { agent: AgentCardUI; tools: ToolCardUI[] }
         <span className="min-w-0 flex-1 truncate text-[11px] text-muted" title={agent.task}>
           {agent.task}
         </span>
+        {agent.background && (
+          <span
+            className="shrink-0 rounded-sm bg-border/50 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-muted"
+            title="Running in the background — the lead kept working while this ran"
+          >
+            bg
+          </span>
+        )}
+        {agent.isolation && (
+          <span
+            className="shrink-0 rounded-sm bg-border/50 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-muted"
+            title="Isolated in a private git worktree; changes merged back when done"
+          >
+            isolated
+          </span>
+        )}
         {running ? (
           <span className="inline-flex shrink-0 items-center gap-1 text-[10px] text-primary">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
@@ -945,6 +1336,8 @@ interface MessageProps {
   isActive: boolean
   /** The live status of the active run — a single evolving phase line. */
   status: ActivityStatus | null
+  /** Sticky where-are-we chips for the active run (§33), or null for a one-off turn. */
+  progress: RunProgressUI | null
   /** Lead (top-level) tool cards anchored beneath this message, in stream order. */
   cards: ToolCardUI[]
   /** Subagent cards anchored beneath this message (requirement B), in stream order. */
@@ -1210,7 +1603,15 @@ function UserMessage({ message, attachments }: MessageProps) {
  * An assistant turn: left-aligned with avatar, and a body that interleaves prose,
  * lead tool cards, and nested subagent cards (requirement B) in stream order.
  */
-function AssistantMessage({ message, isActive, status, cards, agents, agentTools }: MessageProps) {
+function AssistantMessage({
+  message,
+  isActive,
+  status,
+  progress,
+  cards,
+  agents,
+  agentTools
+}: MessageProps) {
   // Backstop: never show raw sylor-tool JSON if a fence leaked past the extractor.
   const displayContent = useMemo(
     () => message.content.replace(TOOL_FENCE_RE, '').trimEnd(),
@@ -1248,6 +1649,8 @@ function AssistantMessage({ message, isActive, status, cards, agents, agentTools
       // costs context too.
       if (c.result?.kind === 'read') chars += c.result.output.length
       if (c.result?.kind === 'web_fetch') chars += c.result.output.length
+      if (c.result?.kind === 'web_search') chars += c.result.output.length
+      if (c.result?.kind === 'diagnostics') chars += c.result.output.length
     }
     for (const a of agents) chars += a.content.length
     return Math.round(chars / 4)
@@ -1284,7 +1687,9 @@ function AssistantMessage({ message, isActive, status, cards, agents, agentTools
         </div>
       )}
 
-      {isActive && message.pending && <StatusLine status={status} tokens={tokenEstimate} />}
+      {isActive && message.pending && (
+        <StatusLine status={status} progress={progress} tokens={tokenEstimate} />
+      )}
 
       {!message.pending && (displayContent.length > 0 || message.error != null) && (
         <MessageActions message={message} />
@@ -1385,9 +1790,13 @@ function PermissionBar({
                 ? '⚙'
                 : card.proposal.kind === 'web_fetch'
                   ? '🌐'
-                  : card.proposal.kind === 'read'
-                    ? '⌕'
-                    : '❯'
+                  : card.proposal.kind === 'web_search'
+                    ? '🔎'
+                    : card.proposal.kind === 'read'
+                      ? '⌕'
+                      : card.proposal.kind === 'diagnostics'
+                        ? '🩺'
+                        : '❯'
           return (
             <div
               key={card.id}
@@ -1542,7 +1951,7 @@ function ChatHeader({ onNewChat }: { onNewChat: () => void }) {
 /**
  * One entry in the composer's `/` menu. `command` is a disk-authored template,
  * `skill` an enabled skill surfaced as a quick "use this skill" shortcut, and
- * `builtin` a hard-wired action (currently just `/install`). All three carry a
+ * `builtin` a hard-wired action (`/install`, `/remember`). All three carry a
  * `name` (typed after the slash), a one-line `description`, and an optional
  * `hint` shown after the name to preview expected arguments.
  */
@@ -1709,6 +2118,7 @@ export function ChatPanel() {
   const attachments = useChatStore((s) => s.attachments)
   const running = useChatStore((s) => s.running)
   const status = useChatStore((s) => s.status)
+  const progress = useChatStore((s) => s.progress)
   const send = useChatStore((s) => s.send)
   const sessionId = useChatStore((s) => s.sessionId)
   const decideTool = useChatStore((s) => s.decideTool)
@@ -1858,8 +2268,8 @@ export function ChatPanel() {
     }
   }, [slashActive])
 
-  // The full, unfiltered palette: the built-in /install, then user commands,
-  // then enabled skills. Filtering by the typed name happens below.
+  // The full, unfiltered palette: the built-in /install and /remember, then user
+  // commands, then enabled skills. Filtering by the typed name happens below.
   const slashItems = useMemo<SlashItem[]>(() => {
     const all: SlashItem[] = [
       {
@@ -1867,6 +2277,12 @@ export function ChatPanel() {
         name: 'install',
         description: 'Install a plugin (skills, commands, connectors) from a repo',
         hint: '<owner/repo> [project]'
+      },
+      {
+        kind: 'builtin',
+        name: 'remember',
+        description: 'Save a durable fact about you to Sylor’s long-term memory',
+        hint: '<fact to remember>'
       }
     ]
     for (const c of commands) {
@@ -1918,8 +2334,9 @@ export function ChatPanel() {
   }
 
   // Expand a slash line into what actually gets sent. A user command expands its
-  // template (`$ARGUMENTS`/`$1`…); `/install` becomes an install instruction; a
-  // skill becomes a "use this skill" instruction; anything else is sent as-is.
+  // template (`$ARGUMENTS`/`$1`…); `/install` becomes an install instruction;
+  // `/remember` becomes a save-to-memory instruction; a skill becomes a "use this
+  // skill" instruction; anything else is sent as-is.
   const resolveSlash = (text: string): string => {
     const parsed = parseSlash(text)
     if (!parsed) return text
@@ -1927,6 +2344,7 @@ export function ChatPanel() {
     const cmd = commands.find((c) => c.name.toLowerCase() === lc)
     if (cmd) return expandCommand(cmd.body, parsed.args)
     if (lc === 'install') return buildInstallPrompt(parsed.args)
+    if (lc === 'remember') return buildRememberPrompt(parsed.args)
     const skill = skills.find((s) => s.name.toLowerCase() === lc)
     if (skill) {
       const base = `Use the ${skill.title || skill.name} skill.`
@@ -2095,6 +2513,7 @@ export function ChatPanel() {
                 message={message}
                 isActive={message.id === lastId && message.role === 'assistant'}
                 status={status}
+                progress={progress}
                 cards={leadCardsByMessage.get(message.id) ?? []}
                 agents={agentsByMessage.get(message.id) ?? []}
                 agentTools={toolsByAgent}

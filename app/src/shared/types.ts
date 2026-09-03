@@ -98,21 +98,18 @@ export type SettingsTab =
   | 'skills'
   | 'commands'
   | 'plugins'
+  | 'browsing'
 
 /**
- * The top-level destination the workspace shows. `chat` is the conversation
- * surface (the default); `sylorium` is Sylor's own web environment — a real,
- * user-usable browser that Sylor can also perceive and drive under a permission
- * gate. Both are primary sidebar destinations.
- */
-export type AppView = 'chat' | 'sylorium'
-
-/**
- * A class of action inside Sylorium that the permission system gates. The
- * defaults deliberately escalate with blast radius: reading a page is cheap and
+ * A class of browser action that the permission system gates. The defaults
+ * deliberately escalate with blast radius: reading a page is cheap and
  * reversible; sending a message, deleting data, or making a payment are not.
+ *
+ * These are the *risk classes*, not the tool's actions — a single `browse`
+ * `click` maps onto `click`, `send`, `delete` or `payment` depending on what the
+ * element looks like (see `classifyClick` in `main/browser/actions.ts`).
  */
-export type SyloriumAction =
+export type BrowserAction =
   | 'read' // read/observe page content (DOM / a11y / vision)
   | 'navigate' // follow links, go to URLs, switch tabs
   | 'click' // click non-destructive elements
@@ -122,15 +119,15 @@ export type SyloriumAction =
   | 'payment' // any purchase / payment / checkout
 
 /**
- * How a {@link SyloriumAction} is authorised when Sylor (not the user) initiates
+ * How a {@link BrowserAction} is authorised when Sylor (not the user) initiates
  * it. `allow` runs it silently, `ask` surfaces an approval prompt first, `block`
  * refuses outright. Sensitive actions default to `ask`/`block` and payment can
- * never be silently allowed — see DEFAULT_SYLORIUM_PERMISSIONS.
+ * never be silently allowed — see DEFAULT_BROWSER_PERMISSIONS.
  */
-export type SyloriumPermission = 'allow' | 'ask' | 'block'
+export type BrowserPermission = 'allow' | 'ask' | 'block'
 
-/** The AI-control permission policy for Sylorium, one setting per action class. */
-export type SyloriumPermissions = Record<SyloriumAction, SyloriumPermission>
+/** The AI-control permission policy for browsing, one setting per action class. */
+export type BrowserPermissions = Record<BrowserAction, BrowserPermission>
 
 /**
  * Reasoning effort the model should spend before answering. Threaded from the
@@ -169,6 +166,40 @@ export interface UiSettings {
   workspaceRoot?: string
 }
 
+// ---------------------------------------------------------------------------
+// Automation hooks (Phase 4) — user shell commands fired around the agent loop
+// ---------------------------------------------------------------------------
+
+/**
+ * The four lifecycle points a hook can attach to (mirrors Claude Code):
+ * - `PreToolUse`      — before a tool is dispatched; a non-zero exit BLOCKS it.
+ * - `PostToolUse`     — after a tool ran (cannot block; react, e.g. run a formatter).
+ * - `UserPromptSubmit`— once when a run starts, with the prompt in the env.
+ * - `Stop`            — once when a run finishes (not on user-cancel).
+ */
+export type HookEvent = 'PreToolUse' | 'PostToolUse' | 'Stop' | 'UserPromptSubmit'
+
+/**
+ * One hook: a shell `command` optionally scoped by `matcher` to certain tools.
+ * `matcher` is a regular expression tested against the tool name (`write_file`,
+ * `edit_file`, `run_command`, `read_file`, `web_fetch`, …); an empty/absent
+ * matcher — or `*` — matches every tool. It is ignored for `Stop` /
+ * `UserPromptSubmit` (no tool is in play). The command runs in the workspace
+ * root with `SYLOR_*` context env vars set, bounded by `timeoutMs` — a timeout
+ * counts as a block for `PreToolUse` (fail-closed).
+ */
+export interface HookDefinition {
+  /** Regex tested against the tool name; empty/absent or `*` matches all tools. */
+  matcher?: string
+  /** The shell command to run. */
+  command: string
+  /** Max run time in ms before the hook is killed (engine applies a default). */
+  timeoutMs?: number
+}
+
+/** All configured hooks, grouped by the event they fire on. */
+export type HooksConfig = Partial<Record<HookEvent, HookDefinition[]>>
+
 /** The full, persisted provider configuration. */
 export interface ProviderSettings {
   /** The provider used for completions. */
@@ -181,6 +212,21 @@ export interface ProviderSettings {
   modelId: string
   /** UI preferences (theme). Persisted in the same settings file. */
   ui: UiSettings
+  /**
+   * Automation hooks: user shell commands fired around the agent loop
+   * (Phase 4). Absent/empty by default. Edited only in the Settings modal — so
+   * unlike skills/MCP overrides it safely rides inside ProviderSettings rather
+   * than a separate file (no mid-run mutation to clobber).
+   */
+  hooks?: HooksConfig
+  /**
+   * Per-action policy for the `browse` tool (what Sylor may do to a real web
+   * page on its own). Absent means {@link DEFAULT_BROWSER_PERMISSIONS}. Lives
+   * here rather than in the renderer store because the engine runs in main and
+   * has to enforce it; like `hooks` it is only edited in the Settings modal, so
+   * there is no mid-run mutation to clobber.
+   */
+  browser?: BrowserPermissions
 }
 
 /** A model advertised by a provider's list endpoint. */
@@ -212,6 +258,23 @@ export interface TestConnectionResult {
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
   content: string
+  /**
+   * Optional image attachments for a vision-capable model. Absent for the
+   * text-only common case; when present, the provider layer expands the message
+   * into its native multimodal shape (OpenAI `image_url` parts for the gateway,
+   * a base64 `images` array for Ollama). Transient — never persisted — so an
+   * image is seen only within the run that read it. `content` still carries a
+   * text caption, so a model that can't see images degrades cleanly.
+   */
+  images?: ChatImage[]
+}
+
+/** One image attached to a {@link ChatMessage} (raw base64, no data: prefix). */
+export interface ChatImage {
+  /** MIME type, e.g. 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'. */
+  mediaType: string
+  /** The image bytes, base64-encoded (no `data:...;base64,` prefix). */
+  dataBase64: string
 }
 
 /** Input to a (non-streaming or streaming) completion call. */
@@ -311,7 +374,17 @@ export type WorkflowStage =
  * side-effecting and permission-gated; `read` only inspects the project (see
  * {@link ReadProposal}) and is always auto-approved.
  */
-export type ToolKind = 'write_file' | 'run_command' | 'mcp_call' | 'web_fetch' | 'install_plugin' | 'read'
+export type ToolKind =
+  | 'write_file'
+  | 'run_command'
+  | 'mcp_call'
+  | 'web_fetch'
+  | 'web_search'
+  | 'install_plugin'
+  | 'read'
+  | 'preview_inspect'
+  | 'browse'
+  | 'diagnostics'
 
 /** A proposed file write: full new contents for a project-relative path. */
 export interface WriteFileProposal {
@@ -362,6 +435,20 @@ export interface WebFetchProposal {
   kind: 'web_fetch'
   /** The http/https URL to fetch (validated; internal hosts refused). */
   url: string
+}
+
+/**
+ * A proposed web search — the discovery sibling of {@link WebFetchProposal}
+ * (Sylor's analogue of Claude Code's WebSearch). Turns a natural-language query
+ * into a ranked list of results the agent can then fetch. Permission-gated
+ * exactly like web_fetch (network egress): never auto-approved outside hands-free
+ * `autonomous`, and a scoped subagent needs the `web` capability.
+ */
+export interface WebSearchProposal {
+  id: string
+  kind: 'web_search'
+  /** The natural-language search query. */
+  query: string
 }
 
 /**
@@ -422,6 +509,176 @@ export interface ReadProposal {
   offset?: number
   /** How many lines to return — `read_file` only (default: a bounded window). */
   limit?: number
+  /** Lines of trailing context to print around each hit (grep -A) — `search_files`. */
+  after?: number
+  /** Lines of leading context to print around each hit (grep -B) — `search_files`. */
+  before?: number
+  /** Lines of context on BOTH sides (grep -C); sets before+after when they're unset. */
+  context?: number
+  /** Match a pattern that can SPAN lines (grep -U/rg multiline) — `search_files`. */
+  multiline?: boolean
+  /**
+   * What a `search_files` returns: `content` (matching lines, the default),
+   * `files` (just the paths that matched, like `rg -l`), or `count` (per-file
+   * match tallies, like `rg -c`). Ignored by the other read ops.
+   */
+  mode?: 'content' | 'files' | 'count'
+}
+
+/**
+ * Which browser-verification action a {@link PreviewInspectProposal} performs
+ * against the LIVE preview (the `<webview>` in the preview pane). This is Sylor's
+ * analogue of Claude Code's `preview_*` toolset: it lets the coding engine SEE
+ * and DRIVE the running app it just changed instead of guessing whether an edit
+ * worked. Read-like actions observe; `click`/`fill`/`resize` interact.
+ *
+ *  - `snapshot`      — an accessibility/DOM text snapshot (structure + text).
+ *  - `screenshot`    — a rendered PNG of the current viewport (vision path).
+ *  - `inspect`       — computed CSS for an element (best for verifying styles).
+ *  - `console_logs`  — recent guest `console.*` output (optionally error/warn).
+ *  - `network`       — recent resource requests (optionally only failed ones).
+ *  - `click`         — click an element by CSS selector, then re-observe.
+ *  - `fill`          — type a value into an input by CSS selector.
+ *  - `resize`        — emulate a viewport (mobile/tablet/desktop or W×H) to test
+ *                       responsive layout; reflows the real preview element.
+ */
+export type PreviewInspectAction =
+  | 'snapshot'
+  | 'screenshot'
+  | 'inspect'
+  | 'console_logs'
+  | 'network'
+  | 'click'
+  | 'fill'
+  | 'resize'
+
+/**
+ * A request to LOOK AT or DRIVE the live browser preview — the verification
+ * affordance behind "check that the button is actually blue now". Like
+ * {@link ReadProposal} it is auto-approved in every mode and allowed for every
+ * role: it only observes/interacts with the user's own running preview, touches
+ * no filesystem and makes no outbound network egress. The one hard safety rule
+ * lives in the executor: `fill` refuses credential-looking fields.
+ */
+export interface PreviewInspectProposal {
+  id: string
+  kind: 'preview_inspect'
+  action: PreviewInspectAction
+  /** CSS selector for `inspect` / `click` / `fill` (the target element). */
+  selector?: string
+  /** Which computed-style properties to report — `inspect` (default: a useful set). */
+  styles?: string[]
+  /** The value to type — `fill` only. */
+  value?: string
+  /** Filter guest console output by level — `console_logs` (default: all). */
+  level?: 'all' | 'error' | 'warn'
+  /** Filter captured requests — `network` (default: all). */
+  filter?: 'all' | 'failed'
+  /** A device preset — `resize`; `desktop` clears any emulated width. */
+  preset?: 'mobile' | 'tablet' | 'desktop'
+  /** Explicit emulated width in px — `resize` (overrides `preset` when set). */
+  width?: number
+  /** Explicit emulated height in px — `resize`. */
+  height?: number
+}
+
+/**
+ * One thing the agent can do to a real web page. Deliberately smaller than
+ * {@link PreviewInspectAction}: this drives the live web, not the user's own
+ * localhost preview, so the surface is only what browsing actually needs.
+ *
+ *  - `read`     — perceive the page (DOM/accessibility text, or a screenshot).
+ *  - `navigate` — go to a url (or a search, for anything that isn't one).
+ *  - `click`    — click an element found by its perceived index or its text.
+ *  - `type`     — type into a field, then optionally press Enter.
+ *  - `scroll`   — move the viewport up or down.
+ *  - `console`  — the page's own console messages and uncaught errors.
+ *  - `network`  — the requests the page made (method, url, status, timing).
+ *  - `inspect`  — one element's text, classes, box and computed styles.
+ *
+ * The last three are the debugging half: `read` says what the page *shows*,
+ * they say what it is *doing*. All three are reads — auto-approved, no mutation.
+ */
+export type BrowseAction =
+  | 'read'
+  | 'navigate'
+  | 'click'
+  | 'type'
+  | 'scroll'
+  | 'console'
+  | 'network'
+  | 'inspect'
+
+/**
+ * A request to USE THE WEB in a real browser — the capability that used to live
+ * in the separate browser destination, now an ordinary permission-gated tool in both Cowork
+ * and Code.
+ *
+ * `read`, `navigate` and `scroll` are auto-approved (cheap and reversible, like
+ * {@link ReadProposal}); `click` and `type` go through the per-action policy in
+ * {@link ProviderSettings.browser}. Two rules live in the executor and cannot be
+ * configured away: a click classified as a payment is refused outright, and a
+ * `type` into a credential-looking field is refused — Sylor never types secrets.
+ */
+export interface BrowseProposal {
+  id: string
+  kind: 'browse'
+  action: BrowseAction
+  /** Where to go — `navigate`. A bare host is https'd; anything else is searched. */
+  url?: string
+  /**
+   * Which element to act on — `click` / `type`. Either a perceived index
+   * (`'12'`, as tagged by the last `read`) or a label to match on the page.
+   */
+  target?: string
+  /** The text to type — `type` only. */
+  text?: string
+  /** Press Enter after typing — `type` only. */
+  submit?: boolean
+  /** Which way to move — `scroll` (default `down`). */
+  direction?: 'up' | 'down'
+  /** Ask for a screenshot instead of text — `read` only (rides the vision path). */
+  visual?: boolean
+  /** CSS selector of the element to report on — `inspect` only. */
+  selector?: string
+  /** Extra computed CSS properties to include — `inspect` only. */
+  styles?: string[]
+  /** Which console messages to report — `console` only (default `all`). */
+  level?: 'all' | 'error' | 'warn'
+  /** Which requests to report — `network` only (default `all`). */
+  filter?: 'all' | 'failed'
+  /**
+   * How this action was classified for the permission gate — set by the engine,
+   * not the model. `payment` is always refused; `send`/`delete` always ask.
+   */
+  risk?: BrowserAction
+}
+
+/**
+ * Which checkers a {@link DiagnosticsProposal} asks for. `all` runs every one the
+ * project actually has installed; the single values narrow it when only one
+ * matters (e.g. after a lint-only fix).
+ */
+export type DiagnosticsScope = 'all' | 'typescript' | 'eslint'
+
+/**
+ * A request to RUN THE PROJECT'S OWN CHECKERS and read the problems back as
+ * structured data — Sylor's stand-in for an editor's language server (Claude
+ * Code reads diagnostics from the IDE; there is no IDE here, so the checkers are
+ * invoked directly).
+ *
+ * Permission-gated exactly like {@link RunCommandProposal}, and for the same
+ * reason: it spawns a process out of the project's own `node_modules`, and an
+ * ESLint config/plugin is executable JavaScript. Nothing is written, so a scoped
+ * subagent needs only the capabilities that already allow a command.
+ */
+export interface DiagnosticsProposal {
+  id: string
+  kind: 'diagnostics'
+  /** Which checkers to run (default `all`). */
+  scope: DiagnosticsScope
+  /** Project-relative paths to narrow the report to; empty/absent = whole project. */
+  files?: string[]
 }
 
 /** Discriminated union of everything the engine can ask to do. */
@@ -430,8 +687,12 @@ export type ToolProposal =
   | RunCommandProposal
   | McpCallProposal
   | WebFetchProposal
+  | WebSearchProposal
   | InstallPluginProposal
   | ReadProposal
+  | PreviewInspectProposal
+  | BrowseProposal
+  | DiagnosticsProposal
 
 /** The user's (or permission-mode's) verdict on a proposal. */
 export type ToolDecision = 'approve' | 'reject'
@@ -491,6 +752,13 @@ export interface ReadResult {
   truncated: boolean
   /** One-line human summary for the card ('240 lines', '8 matches in 3 files'). */
   summary: string
+  /**
+   * Set when `read_file` targeted an IMAGE (PNG/JPEG/GIF/WebP): the raw base64
+   * bytes and their MIME type, handed to a vision-capable model as an attached
+   * image (see the provider layer). `output` still carries a short text caption
+   * so a non-vision model — and the transcript — always has something to read.
+   */
+  media?: { kind: 'image'; mediaType: string; dataBase64: string }
   /** Present when `ok` is false. */
   error?: string
 }
@@ -509,6 +777,20 @@ export interface WebFetchResult {
   error?: string
 }
 
+/** Outcome of a `web_search` proposal (a ranked result list, or the failure). */
+export interface WebSearchResult {
+  id: string
+  kind: 'web_search'
+  /** Whether the search completed (an empty-but-reachable search is still ok). */
+  ok: boolean
+  /** The ranked `title / url / snippet` list (bounded), or a "no results" note. */
+  output: string
+  /** True when the list was clipped at the cap. */
+  truncated: boolean
+  /** Present when `ok` is false (non-2xx, network error, timeout, empty query). */
+  error?: string
+}
+
 /** Outcome of an `install_plugin` proposal (what got installed, or the failure). */
 export interface InstallPluginResult {
   id: string
@@ -523,14 +805,123 @@ export interface InstallPluginResult {
   error?: string
 }
 
+/**
+ * Outcome of a `preview_inspect` proposal — the text the engine reads back
+ * (snapshot/console/network/computed-style) and, for `screenshot`, the rendered
+ * image on the shared vision {@link ReadResult.media} channel so a vision model
+ * can literally see the preview. `output` always carries a text description too,
+ * so a non-vision model — and the transcript — always has something to read.
+ */
+export interface PreviewInspectResult {
+  id: string
+  kind: 'preview_inspect'
+  /** False when no preview is running, the selector missed, or the action errored. */
+  ok: boolean
+  /** Which action produced this result (echoed for the card + feedback). */
+  action: PreviewInspectAction
+  /** The textual result (snapshot text, log lines, computed styles, a note). */
+  output: string
+  /** True when `output` was clipped at the cap. */
+  truncated: boolean
+  /** One-line human summary for the card ('12 elements', 'clicked .save'). */
+  summary: string
+  /** Set for `screenshot`: the rendered PNG bytes, handed to the vision path. */
+  media?: { kind: 'image'; mediaType: string; dataBase64: string }
+  /** Present when `ok` is false (no preview, bad selector, blocked field, timeout). */
+  error?: string
+}
+
+/**
+ * Outcome of a `browse` proposal. Shaped like {@link PreviewInspectResult} on
+ * purpose: `output` is the text the model reads back (the perceived page, or a
+ * note about what the action did), and a `read` with `visual` puts the rendered
+ * PNG on the shared vision {@link ReadResult.media} channel.
+ */
+export interface BrowseResult {
+  id: string
+  kind: 'browse'
+  /** False when no browser is available, the element missed, or the action was refused. */
+  ok: boolean
+  /** Which action produced this result (echoed for the card + feedback). */
+  action: BrowseAction
+  /** The perceived page text, or a description of what happened. */
+  output: string
+  /** True when `output` was clipped at the cap. */
+  truncated: boolean
+  /** One-line human summary for the card ('read mail.google.com', 'clicked Compose'). */
+  summary: string
+  /** Where the browser ended up, so the transcript shows real navigation. */
+  url?: string
+  /** Set when `visual` was asked for: the rendered PNG, handed to the vision path. */
+  media?: { kind: 'image'; mediaType: string; dataBase64: string }
+  /** Present when `ok` is false (no browser, element not found, refused, timeout). */
+  error?: string
+}
+
+/**
+ * One problem reported by a checker, normalized so a TypeScript error and an
+ * ESLint error read identically. `code` is the machine identifier the checker
+ * used — `TS2345` for tsc, the rule id for eslint — and is absent only when the
+ * checker didn't give one (a fatal parse error).
+ */
+export interface DiagnosticEntry {
+  /** Which checker produced this. */
+  source: 'typescript' | 'eslint'
+  severity: 'error' | 'warning'
+  /** Project-relative POSIX path, or '' for a project-level (config) problem. */
+  file: string
+  /** 1-based line, or 0 when the checker reported no position. */
+  line: number
+  /** 1-based column, or 0 when the checker reported no position. */
+  column: number
+  /** `TS2345`, `no-unused-vars`, … */
+  code?: string
+  message: string
+}
+
+/**
+ * Outcome of a `diagnostics` proposal. `ok` means the checkers RAN — never that
+ * the project is clean: a clean project is `ok: true` with zero counts, while a
+ * project where nothing could be run is `ok: false` with an `error` saying so.
+ * That distinction is the point of the tool; silence must never read as health.
+ */
+export interface DiagnosticsResult {
+  id: string
+  kind: 'diagnostics'
+  /** False when no checker could be run at all (none installed, or one crashed). */
+  ok: boolean
+  /** Every problem found, capped for context safety (errors before warnings). */
+  entries: DiagnosticEntry[]
+  /** Total error count BEFORE the cap. */
+  errors: number
+  /** Total warning count BEFORE the cap. */
+  warnings: number
+  /** True when `entries` (and `output`) were clipped at the cap. */
+  truncated: boolean
+  /** Human labels of what actually ran ('typescript (tsconfig.node.json)', 'eslint'). */
+  ran: string[]
+  /** What was NOT run and why ('eslint (not installed in this project)'). */
+  skipped: string[]
+  /** The formatted report fed back to the model and shown in the card. */
+  output: string
+  /** One-line human summary for the card ('3 errors, 2 warnings' / 'clean'). */
+  summary: string
+  /** Present when `ok` is false. */
+  error?: string
+}
+
 /** Discriminated union of tool outcomes reported back to the renderer. */
 export type ToolResult =
   | WriteFileResult
   | RunCommandResult
   | McpCallResult
   | WebFetchResult
+  | WebSearchResult
   | InstallPluginResult
   | ReadResult
+  | PreviewInspectResult
+  | BrowseResult
+  | DiagnosticsResult
 
 /**
  * The role an agent plays in a Code build (requirement B). `lead` is the
@@ -678,6 +1069,26 @@ export interface AgentMessage {
   nextAction?: string
 }
 
+/**
+ * §33 — the standing progress of a staged run, for the live status row.
+ *
+ * The engine sends this alongside the transient status message: the message says
+ * what is happening *right now* and is replaced constantly, while this says where
+ * the whole build stands and is therefore STICKY in the UI — the renderer keeps the
+ * last one it received for the rest of the turn. It carries only what the renderer
+ * cannot work out for itself (the task counter it derives from `plan` +
+ * `task-update`), and every field is optional so a one-off edit — which has no
+ * phase and no roadmap — simply sends nothing.
+ */
+export interface RunProgress {
+  /** Which phase of how many, by name, when the run is a phase of a build. */
+  phase?: { n: number; total: number; name: string }
+  /** How the project's own checks stood the last time they ran this turn. */
+  checks?: 'PASSING' | 'FAILING' | 'UNKNOWN'
+  /** What the preview is actually showing (§23 — never presented as current when it isn't). */
+  preview?: 'RUNNING' | 'STALE' | 'COMPILE_ERROR' | 'RUNTIME_ERROR' | 'UNAVAILABLE' | 'UNKNOWN'
+}
+
 /** Discriminated union of events streamed from the engine to the renderer. */
 export type WorkflowEvent =
   | { type: 'intent'; runId: string; intent: IntentAnalysis }
@@ -693,6 +1104,8 @@ export type WorkflowEvent =
       message: string
       agentId?: string
       retrying?: boolean
+      /** §33 — where the build stands. Sticky: sent when it changes, not every time. */
+      progress?: RunProgress
     }
   | { type: 'delta'; runId: string; text: string; agentId?: string }
   /**
@@ -706,8 +1119,20 @@ export type WorkflowEvent =
   /**
    * The lead delegated a task to a subagent (requirement B): the UI opens a
    * nested card. `agentId` correlates the subagent's status/delta/tool events.
+   * `background` marks a non-blocking spawn (the lead keeps working, so its card
+   * must not hijack the lead's status line); `isolation` marks an agent running
+   * in a private git worktree. Both optional and additive — an older renderer, or
+   * a plain foreground spawn, simply omits them.
    */
-  | { type: 'agent-start'; runId: string; agentId: string; role: AgentRole; task: string }
+  | {
+      type: 'agent-start'
+      runId: string
+      agentId: string
+      role: AgentRole
+      task: string
+      background?: boolean
+      isolation?: 'worktree'
+    }
   /** A subagent finished; `report` is its final summary handed back to the lead. */
   | { type: 'agent-end'; runId: string; agentId: string; role: AgentRole; report: string; ok: boolean }
   /**
@@ -753,6 +1178,13 @@ export interface WorkflowRunRequest {
    * agent behavior the engine tests assume.
    */
   mode?: WorkMode
+  /**
+   * Folder this run is pinned to (the conversation's own `projectRoot`). When
+   * provided, the engine wraps the whole run in `contextManager.runWithRoot`, so
+   * reads/writes stay under this root even if the user opens a different folder
+   * mid-run (background-run isolation). Omitted → uses the live global root.
+   */
+  root?: string
 }
 
 /** Renderer-facing API for the AI workflow engine. */
@@ -832,6 +1264,13 @@ export interface PersistedMessage {
   feedback?: 'like' | 'dislike'
   /** Local-only "report/flag" marker the user toggled. Absent when not flagged. */
   flagged?: boolean
+  /**
+   * Display label of the model that produced this turn (assistant rows only),
+   * stamped by the main process from the active provider settings at append time.
+   * Absent on user turns and on rows written before the stat columns existed —
+   * the activity dashboard simply leaves those out of its model tally.
+   */
+  model?: string
 }
 
 /**
@@ -946,6 +1385,79 @@ export interface SessionsApi {
   appendToolOp: (sessionId: string, op: PersistedToolOp) => void
   /** Append a raw terminal output chunk (fire-and-forget). */
   appendTerminal: (sessionId: string, data: string) => void
+  /**
+   * Aggregate activity figures for the zero-state dashboard, computed from the
+   * real history in SQLite. Read-only and cheap (a handful of aggregate queries);
+   * never throws — a DB fault resolves to an all-zero snapshot.
+   */
+  usageStats: () => Promise<UsageStats>
+}
+
+// ---------------------------------------------------------------------------
+// Activity & usage analytics (zero-state dashboard)
+// ---------------------------------------------------------------------------
+
+/**
+ * Raw, un-bucketed activity facts read straight out of SQLite. Deliberately
+ * dumb: every derived figure (streaks, active days, peak hour, the contribution
+ * grid) is computed from these by the pure `computeUsageStats` in
+ * `shared/usage.ts`, so all the calendar logic is unit-testable without a DB.
+ */
+export interface UsageFacts {
+  /** Conversations that contain at least one message (empty drafts excluded). */
+  sessions: number
+  /** Total chat messages stored, both roles. */
+  messages: number
+  /**
+   * Estimated tokens (~4 characters each) across message bodies and tool
+   * payloads. An estimate, not a provider-reported count — Sylor never asks the
+   * gateway for usage figures — so the UI always prefixes it with `~`.
+   */
+  tokens: number
+  /**
+   * Epoch ms per message, one entry each, in no particular order. Messages
+   * written before the timestamp column existed fall back to their session's
+   * creation time so old history still lands on the calendar.
+   */
+  timestamps: number[]
+  /** Assistant-turn counts per model label; models are absent, never blank. */
+  models: Array<{ model: string; count: number }>
+}
+
+/** One cell of the contribution grid. */
+export interface DayBucket {
+  /** Local calendar day, `YYYY-MM-DD`. */
+  date: string
+  /** Messages written that day. */
+  count: number
+  /** True for cells past today — they pad the current week and render blank. */
+  future: boolean
+}
+
+/** Everything the zero-state activity dashboard renders. */
+export interface UsageStats {
+  sessions: number
+  messages: number
+  /** Estimated tokens; see {@link UsageFacts.tokens}. */
+  tokens: number
+  /** Distinct local calendar days with at least one message, all-time. */
+  activeDays: number
+  /** Consecutive active days ending today or yesterday; 0 once the run breaks. */
+  currentStreak: number
+  /** The longest run of consecutive active days ever recorded. */
+  longestStreak: number
+  /** Local hour (0–23) with the most messages, or null when there are none. */
+  peakHour: number | null
+  /** Most-used model label, or null when no turn recorded one. */
+  favoriteModel: string | null
+  /** Epoch ms of the most recent message, or null when history is empty. */
+  lastActiveAt: number | null
+  /**
+   * The grid window: exactly `GRID_WEEKS * 7` days, oldest first, starting on a
+   * Sunday and ending on the Saturday of the current week. Ordered so a
+   * `grid-flow-col` layout with 7 rows draws one week per column.
+   */
+  days: DayBucket[]
 }
 
 // ---------------------------------------------------------------------------
@@ -982,6 +1494,43 @@ export interface PreviewStartResult {
 }
 
 /**
+ * One `preview_inspect` action dispatched main → renderer over
+ * `IpcChannel.PreviewInspectRequest`. The renderer owns the live `<webview>`, so
+ * the engine (main) cannot drive it directly — it posts a request keyed by
+ * `requestId` and awaits the matching {@link PreviewInspectResponse}. Carries the
+ * fields the renderer needs to run the action; the executor validated them first.
+ */
+export interface PreviewInspectRequest {
+  /** Correlates the response back to the awaiting engine call. */
+  requestId: string
+  action: PreviewInspectAction
+  selector?: string
+  styles?: string[]
+  value?: string
+  level?: 'all' | 'error' | 'warn'
+  filter?: 'all' | 'failed'
+  preset?: 'mobile' | 'tablet' | 'desktop'
+  width?: number
+  height?: number
+}
+
+/**
+ * The renderer's reply to a {@link PreviewInspectRequest}, sent back over
+ * `IpcChannel.PreviewInspectResult`. Mirrors {@link PreviewInspectResult} minus
+ * the proposal id/kind/action (which the engine re-attaches), plus the
+ * `requestId` that unblocks the pending main-side promise.
+ */
+export interface PreviewInspectResponse {
+  requestId: string
+  ok: boolean
+  output: string
+  truncated: boolean
+  summary: string
+  media?: { kind: 'image'; mediaType: string; dataBase64: string }
+  error?: string
+}
+
+/**
  * Renderer-facing API for the right-side live preview (chat-first redesign). A
  * built-in `node:http` server serves the project's static files; dev-server
  * commands are spawned and their localhost URL scraped from stdout. Everything
@@ -1009,6 +1558,15 @@ export interface PreviewApi {
   stop: () => void
   /** Subscribe to preview lifecycle events; returns a disposer. */
   onEvent: (callback: (event: PreviewEvent) => void) => () => void
+  /**
+   * Subscribe to `preview_inspect` requests the engine (main) posts when it wants
+   * to verify the live preview. The renderer owns the `<webview>`, so it runs the
+   * action and replies via {@link respondInspect} keyed by `request.requestId`.
+   * Returns a disposer. (No-op outside the packaged app.)
+   */
+  onInspectRequest: (callback: (request: PreviewInspectRequest) => void) => () => void
+  /** Reply to a {@link PreviewInspectRequest}, unblocking the awaiting engine call. */
+  respondInspect: (response: PreviewInspectResponse) => void
 }
 
 /**
@@ -1028,10 +1586,261 @@ export interface WorkspaceInfo {
 export interface WorkspaceApi {
   /** Open the OS folder picker; on pick, retarget the root. Null if cancelled. */
   select: () => Promise<WorkspaceInfo | null>
+  /**
+   * Re-point the active root to an already-known folder WITHOUT a picker (used
+   * when opening a past conversation, to restore its own `projectRoot`). Unlike
+   * {@link select}, this does NOT persist the default workspace — the folder for
+   * brand-new chats / next launch stays the user's last explicit pick. Returns
+   * the resulting info; a missing/invalid dir leaves the current root unchanged.
+   */
+  setRoot: (dir: string) => Promise<WorkspaceInfo>
   /** Current workspace root + whether it was explicitly chosen. */
   get: () => Promise<WorkspaceInfo>
   /** Subscribe to workspace-root changes; returns a disposer. */
   onChanged: (callback: (info: WorkspaceInfo) => void) => () => void
+}
+
+/**
+ * Global long-term memory: the cross-project profile of durable facts about the
+ * person (name, working/style taste, the sites and groups they use). It is the
+ * SAME store the Code/Cowork engine reads and writes via `remember_user`, now
+ * also reachable from the renderer so the browser panel can read it (to
+ * act faster and more personally) and add to it (so what it learns while browsing
+ * carries into every future Sylor session). Never holds secrets.
+ */
+export interface MemoryApi {
+  /** The memory as prompt-ready bullets, or '' when nothing has been learned yet. */
+  get: () => Promise<string>
+  /**
+   * Append one durable fact. Resolves true when it was newly stored, false for a
+   * blank or exact-duplicate note. Best-effort: a persistence hiccup resolves
+   * false rather than throwing, so it can never abort the caller's task.
+   */
+  remember: (note: string) => Promise<boolean>
+}
+
+// ---------------------------------------------------------------------------
+// Real browser — the user's own Chrome, driven over the DevTools protocol
+// ---------------------------------------------------------------------------
+
+/**
+ * State of the one real-Chrome window Sylor drives.
+ *
+ * An embedded browser cannot sign in to Google — measured, and not fixable
+ * by presenting a better browser identity. So for "everything that works in Chrome"
+ * Sylor drives the user's actual Chrome/Edge instead: a real browser window, opened
+ * with a Sylor-only profile and an unguessable loopback debugging port, killed when
+ * Sylor quits. The user signs in there once; every logged-in web app then just works.
+ */
+export interface ChromeStatus {
+  /** A drivable browser (Chrome/Edge/Chromium) exists on this computer. */
+  available: boolean
+  /** Display name of that browser, or '' when none was found. */
+  browserName: string
+  /** The window is up and Sylor is attached to it. */
+  running: boolean
+  /** Current page url (mirrored from the browser, so reads are free). */
+  url: string
+  /** Current page title. */
+  title: string
+  /** True while the page is still loading. */
+  loading: boolean
+  /**
+   * True while a **clean** sign-in window is open on the same profile.
+   *
+   * Google refuses to sign in to a browser that has a debugging port open — the same
+   * anti-automation check that blocks the embedded webview. So signing in happens in a
+   * stock window with nothing attached (see `launchForSignIn`), and Sylor is *not*
+   * driving anything while that is true.
+   */
+  signingIn: boolean
+  /** Last lifecycle failure, for the UI to explain; null when healthy. */
+  error: string | null
+}
+
+/**
+ * Drive that browser from the renderer. Deliberately the same primitives the in-app
+ * page view exposes (navigate / evaluate / screenshot / history), so the
+ * permission gate, the perception pass and the agent loop work against either one.
+ */
+export interface ChromeApi {
+  /** Current status. Cheap — starts nothing. */
+  status: () => Promise<ChromeStatus>
+  /** Launch (or reuse) the window, optionally at a url. Rejects when none is installed. */
+  open: (url?: string) => Promise<ChromeStatus>
+  /** Close the window and drop the debugging port. */
+  close: () => Promise<ChromeStatus>
+  /** Navigate the controlled tab, starting the browser first if needed. */
+  navigate: (url: string) => Promise<ChromeStatus>
+  /** Run JS in the page and resolve with its value; rejects on a page-side error. */
+  evaluate: (expression: string) => Promise<unknown>
+  /** PNG data URL of the visible page. */
+  screenshot: () => Promise<string>
+  reload: (ignoreCache?: boolean) => Promise<void>
+  stop: () => Promise<void>
+  /** Step history; resolves false when there is nowhere to go. */
+  go: (delta: number) => Promise<boolean>
+  /** Bring the browser window forward — sign-in is the user's to do, never Sylor's. */
+  focus: () => Promise<void>
+  /**
+   * Open a **clean** window on the same profile so the user can sign in.
+   *
+   * The controlled window is closed first: Chrome allows one process per profile
+   * directory, and more importantly Google rejects sign-in while a debugging port is
+   * open. Nothing is attached to the window this opens — it is stock Chrome — and when
+   * the user closes it Sylor reopens the controlled window, now with their session
+   * on disk.
+   */
+  signIn: (url?: string) => Promise<ChromeStatus>
+  /** Give up waiting for that window and go back to driving (closes it if still open). */
+  finishSignIn: () => Promise<ChromeStatus>
+  /** Subscribe to status pushes (url/title/loading and lifecycle). */
+  onStatus: (callback: (status: ChromeStatus) => void) => () => void
+}
+
+// ---------------------------------------------------------------------------
+// In-app browser — the page view main owns and the agent drives
+// ---------------------------------------------------------------------------
+
+/** Where in the window the in-app page view should sit, in CSS pixels. */
+export interface BrowserBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/**
+ * Which browser the agent drives.
+ *
+ * `app` is the in-app page view (instant, in-window, but still an embedded browser
+ * — Google refuses to sign in to one); `chrome` is the user's real Chrome, launched
+ * by Sylor and driven over the DevTools protocol, where every logged-in web app
+ * works. More than a UI preference: it changes what the agent should do about a
+ * signed-out page. Sylor never types credentials in either.
+ */
+export type BrowserDriver = 'app' | 'chrome'
+
+/** What the in-app page view is currently showing. */
+export interface BrowserViewStatus {
+  /** True once a page view exists (it is created lazily, on first use). */
+  attached: boolean
+  /** True while the view is drawn over the renderer. */
+  visible: boolean
+  url: string
+  title: string
+  loading: boolean
+  canGoBack: boolean
+  canGoForward: boolean
+  /** Present when the last navigation failed. */
+  error: string | null
+}
+
+/**
+ * The in-app browser: a `WebContentsView` owned by the main process and drawn
+ * over the renderer where the panel says to.
+ *
+ * Main owns it (rather than the renderer holding a `<webview>`) for one concrete
+ * reason: the engine's `browse` tool then drives it directly, with no
+ * main → renderer → main round-trip like `preview_inspect` needs. The renderer's
+ * only job here is telling main *where* to put it and *whether* it is showing —
+ * a native view floats above the DOM, so a panel that closes must hide it too.
+ */
+export interface BrowserApi {
+  /** Current view status. Cheap — creates nothing. */
+  status: () => Promise<BrowserViewStatus>
+  /** Create the view if needed and load `url` (bare hosts are https'd, prose is searched). */
+  open: (url?: string) => Promise<BrowserViewStatus>
+  /** Position the view. The renderer reports its panel rect on every layout change. */
+  setBounds: (bounds: BrowserBounds) => Promise<void>
+  /** Show or hide the view without destroying the page. */
+  setVisible: (visible: boolean) => Promise<void>
+  /** Destroy the view and its page. */
+  close: () => Promise<BrowserViewStatus>
+  reload: (ignoreCache?: boolean) => Promise<void>
+  stop: () => Promise<void>
+  /** Step history; resolves false when there is nowhere to go. */
+  go: (delta: number) => Promise<boolean>
+  /**
+   * Choose which browser the agent's next `browse` drives. The panel's segmented
+   * control owns this, so what the user sees selected is what the engine uses.
+   */
+  setDriver: (driver: BrowserDriver) => Promise<void>
+  /** Subscribe to status pushes (url/title/loading and lifecycle). */
+  onStatus: (callback: (status: BrowserViewStatus) => void) => () => void
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled tasks (Phase 4) — a stored prompt fired into a run on a cadence
+// ---------------------------------------------------------------------------
+
+/**
+ * A saved prompt that Sylor runs automatically on a cron cadence — the
+ * automation half of Phase 4. When a task comes due the main-process scheduler
+ * asks the renderer to open a fresh chat and send `prompt`, so a scheduled run
+ * reuses the exact same engine + permission machinery as a typed message:
+ * sensitive tools still prompt for approval, and nothing runs silently.
+ */
+export interface ScheduledTask {
+  /** Stable id (`sched-<time>-<n>`, minted by the store). */
+  id: string
+  /** Human label shown in the list and used to title the fired chat. */
+  name: string
+  /** The prompt sent to the engine when the task fires. */
+  prompt: string
+  /** Standard 5-field cron expression (`min hour dom month dow`). */
+  cron: string
+  /** Whether the scheduler should fire it; paused tasks stay in the list. */
+  enabled: boolean
+  /**
+   * When true the task is persisted to the DB and survives restarts; when false
+   * it lives only for this app session (dropped on quit).
+   */
+  durable: boolean
+  /**
+   * Working mode the fired run should use — `code` to do real work, `cowork`
+   * for a chat-only answer. Defaults to `code` when omitted.
+   */
+  mode?: WorkMode
+  createdAt: number
+  updatedAt: number
+  /** Epoch ms the task last fired, or undefined if it never has. */
+  lastRunAt?: number
+  /** Epoch ms the task is next due (computed from `cron`); undefined if paused. */
+  nextRunAt?: number
+}
+
+/** Editable fields accepted when creating/updating a task (the store fills the rest). */
+export interface ScheduledTaskInput {
+  name: string
+  prompt: string
+  cron: string
+  enabled?: boolean
+  durable?: boolean
+  mode?: WorkMode
+}
+
+/**
+ * Renderer-facing API for scheduled tasks (Phase 4): CRUD over the task list
+ * plus a subscription the app uses to actually run a task when it comes due.
+ * `add`/`update` reject an invalid cron expression so the UI can show the error.
+ */
+export interface SchedulerApi {
+  /** Every task (durable + session-only), soonest-due first. */
+  list: () => Promise<ScheduledTask[]>
+  /** Add a task; resolves the stored row (with its computed nextRunAt). */
+  add: (input: ScheduledTaskInput) => Promise<ScheduledTask>
+  /** Replace a task's editable fields; resolves the updated row, or null if gone. */
+  update: (id: string, input: ScheduledTaskInput) => Promise<ScheduledTask | null>
+  /** Pause/resume a task; resolves the updated row, or null if gone. */
+  setEnabled: (id: string, enabled: boolean) => Promise<ScheduledTask | null>
+  /** Delete a task. */
+  remove: (id: string) => Promise<void>
+  /**
+   * Subscribe to "a task is due" events. The callback receives the task to run;
+   * returns a disposer. The renderer opens a fresh chat and sends the prompt.
+   */
+  onTaskFired: (callback: (task: ScheduledTask) => void) => () => void
 }
 
 /** The full `window.sylor` API surface exposed by the preload script. */
@@ -1067,6 +1876,14 @@ export interface SylorApi {
   plugins: PluginsApi
   /** Working folder (Code mode): select/get the agent's sandbox root. */
   workspace: WorkspaceApi
+  /** Long-term memory: the global cross-project user profile. */
+  memory: MemoryApi
+  /** The user's real Chrome, driven over DevTools — everything the webview can't do. */
+  chrome: ChromeApi
+  /** The in-app page view the `browse` tool drives (main owns it; see BrowserApi). */
+  browser: BrowserApi
+  /** Scheduled tasks: stored prompts the scheduler fires on a cron cadence. */
+  scheduler: SchedulerApi
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,8 +1893,13 @@ export interface SylorApi {
 /**
  * A local (stdio) MCP server: Sylor spawns `command` as a child process and
  * speaks MCP over its stdio. Reaches only the local machine.
+ *
+ * Every string field supports `${VAR}` / `${VAR:-fallback}` expansion from the
+ * process environment, so a config can be committed without its secrets.
  */
 export interface McpStdioServerConfig {
+  /** Explicit transport. Optional — a `command` already implies stdio. */
+  type?: 'stdio'
   /** Executable to spawn (e.g. 'npx', 'node', 'uvx'). */
   command: string
   /** Arguments passed to the command. */
@@ -1090,12 +1912,24 @@ export interface McpStdioServerConfig {
  * A remote (HTTP) MCP server. This is the one intentional relaxation of Sylor's
  * offline posture: it reaches out only to a URL the user explicitly configured
  * on disk. `headers` (e.g. Authorization) are stored locally and never logged.
+ *
+ * `type` pins the wire protocol when a server only speaks one of them; left out,
+ * Sylor tries modern Streamable HTTP first and falls back to legacy HTTP+SSE.
+ * Every string field supports `${VAR}` / `${VAR:-fallback}` expansion.
  */
 export interface McpHttpServerConfig {
+  /** Explicit transport: `http`/`streamable-http` or legacy `sse`. */
+  type?: 'http' | 'streamable-http' | 'sse'
   /** Remote MCP endpoint (Streamable HTTP, with SSE fallback). */
   url: string
   /** Optional headers sent with every request (e.g. auth). Stored locally. */
   headers?: Record<string, string>
+  /**
+   * Sign in with OAuth when the server demands it (401), instead of failing.
+   * Opt-in: setting it is the user's standing permission for Sylor to open their
+   * browser for the consent screen and keep the resulting token on disk.
+   */
+  oauth?: boolean
 }
 
 /** A configured MCP server: local stdio process OR remote HTTP endpoint. */
@@ -1107,7 +1941,7 @@ export interface McpConfigFile {
 }
 
 /** Transport a server uses, surfaced to the UI as a badge. */
-export type McpTransport = 'stdio' | 'http'
+export type McpTransport = 'stdio' | 'http' | 'sse'
 
 /**
  * Where a server's definition came from:

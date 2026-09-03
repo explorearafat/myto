@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseSlash, expandCommand } from './commands'
+import { parseSlash, expandCommand, buildRememberPrompt } from './commands'
 
 describe('parseSlash', () => {
   it('splits a bare `/name` into the name and an empty arg string', () => {
@@ -57,5 +57,23 @@ describe('expandCommand (shared source of truth)', () => {
 
   it('does not append args when the body already consumed them', () => {
     expect(expandCommand('Open $1.', 'a.txt')).toBe('Open a.txt.')
+  })
+})
+
+describe('buildRememberPrompt (/remember)', () => {
+  it('embeds the fact and asks for the remember_user tool when given an argument', () => {
+    const out = buildRememberPrompt('I prefer dark, minimal UIs')
+    expect(out).toContain('I prefer dark, minimal UIs')
+    expect(out).toContain('remember_user')
+  })
+
+  it('trims the argument before embedding it', () => {
+    expect(buildRememberPrompt('   name is Arafat  ')).toContain('"name is Arafat"')
+  })
+
+  it('asks what to remember (and does not invoke the tool) when given no argument', () => {
+    const out = buildRememberPrompt('   ')
+    expect(out.toLowerCase()).toContain('what')
+    expect(out).not.toContain('remember_user')
   })
 })

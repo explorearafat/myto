@@ -6,16 +6,22 @@
  * exposes a single `callTool(server, name, args)` the workflow engine invokes for
  * an approved `mcp_call`. Connection status is tracked per server for the UI.
  *
+ * All four of the CLI's connectivity modes are covered: stdio, Streamable HTTP,
+ * legacy HTTP+SSE (auto-detected, or pinned with `"type"`), and OAuth 2.1 for
+ * servers that need a real sign-in (see {@link ./oauth}).
+ *
  * Security posture: remote HTTP is the one intentional relaxation of Sylor's
  * offline stance — it reaches out only to URLs the user explicitly configured on
  * disk, with locally-stored headers that are never logged. Local stdio spawns
- * local processes only. Every tool call is permission-gated upstream in the
+ * local processes only. OAuth is opt-in per server (`"oauth": true`), so a browser
+ * window never opens unbidden. Every tool call is permission-gated upstream in the
  * engine (like `run_command`); nothing here runs without approval.
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
+import { UnauthorizedError, type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import type {
   McpCategory,
   McpConnectionState,
@@ -28,6 +34,7 @@ import type {
 } from '../../shared/types'
 import { loadMcpConfigs, transportOf } from './config'
 import { MCP_CATALOG, mcpCatalogEntry } from './catalog'
+import { startOAuthSession } from './oauth'
 import { isMcpEnabled, resetMcpOverrides, setMcpEnabled } from '../settings'
 
 /** Per-request timeouts (ms). Tool calls get a long budget; connect/list short. */
@@ -317,7 +324,7 @@ class McpManager {
         builtIn: !!cat,
         recommended: cat?.recommended ?? false,
         local: cat?.local ?? transport === 'stdio',
-        risk: cat?.risk ?? (transport === 'http' ? 'network' : 'local'),
+        risk: cat?.risk ?? (transport === 'stdio' ? 'local' : 'network'),
         homepage: cat?.homepage,
         // The disk config carries its own credentials, so it isn't key-blocked.
         requiresApiKey: undefined,
@@ -374,7 +381,7 @@ class McpManager {
     const rt = this.servers.get(name)
     if (!rt) return
     try {
-      const client = await openClient(rt.def.config)
+      const client = await openClient(rt.def.config, name)
       const listed = await client.listTools(undefined, { timeout: LIST_TIMEOUT_MS })
       rt.client = client
       rt.tools = (listed.tools ?? []).map((t) => ({
@@ -398,9 +405,53 @@ function fail(error: string): McpCallOutcome {
   return { ok: false, output: '', truncated: false, error }
 }
 
+/** Which remote transport an attempt uses. */
+type RemoteKind = 'streamable' | 'sse'
+
+/** The two remote transports share this much of an interface. */
+type RemoteTransport = StreamableHTTPClientTransport | SSEClientTransport
+
+/**
+ * What both remote transports accept. `headers` is spelled out rather than typed
+ * as a DOM `RequestInit` so this file type-checks under the main process's
+ * Node-only lib set.
+ */
+interface RemoteOptions {
+  requestInit?: { headers: Record<string, string> }
+  authProvider?: OAuthClientProvider
+}
+
+/** Opens a URL in the user's real browser (for an OAuth consent screen). */
+type BrowserOpener = (url: string) => void | Promise<void>
+
+let browserOpener: BrowserOpener | null = null
+
+/**
+ * Sets how an OAuth consent screen is opened. `index.ts` wires Electron's `shell`
+ * at startup; keeping it injected means this module (and `./oauth`) never imports
+ * Electron, so they load in a plain-Node test.
+ */
+export function setMcpBrowserOpener(opener: BrowserOpener | null): void {
+  browserOpener = opener
+}
+
+async function openConsent(url: string): Promise<void> {
+  if (!browserOpener) {
+    throw new Error('Cannot open the sign-in page: no browser opener is available.')
+  }
+  await browserOpener(url)
+}
+
+/** Builds (but does not start) a remote transport of the given kind. */
+function makeRemote(kind: RemoteKind, url: URL, options: RemoteOptions): RemoteTransport {
+  return kind === 'sse'
+    ? new SSEClientTransport(url, options)
+    : new StreamableHTTPClientTransport(url, options)
+}
+
 /** Opens + connects a client for a config, dispatching on transport. */
-async function openClient(config: McpServerConfig): Promise<Client> {
-  if ('url' in config) return openHttpClient(config)
+async function openClient(config: McpServerConfig, name: string): Promise<Client> {
+  if ('url' in config) return openHttpClient(config, name)
   const client = newClient()
   const transport = new StdioClientTransport({
     command: config.command,
@@ -413,27 +464,82 @@ async function openClient(config: McpServerConfig): Promise<Client> {
 }
 
 /**
- * Opens a remote client, preferring modern Streamable HTTP and falling back to
- * legacy HTTP+SSE for older servers. Reports the primary transport's error if
- * both fail, since that's the one users are most likely configuring for.
+ * Opens a remote client.
+ *
+ * Transport choice mirrors the CLI: an explicit `"type"` pins it (`sse` for the
+ * legacy HTTP+SSE servers, `http`/`streamable-http` for modern ones), and with no
+ * `type` we prefer Streamable HTTP and fall back to SSE — reporting the *primary*
+ * error if both fail, since that's the one users are most likely configuring for.
+ * `"oauth": true` routes through {@link connectWithOAuth} instead.
  */
-async function openHttpClient(config: McpHttpServerConfig): Promise<Client> {
+async function openHttpClient(config: McpHttpServerConfig, name: string): Promise<Client> {
   const url = new URL(config.url)
   const requestInit = config.headers ? { headers: config.headers } : undefined
+  const options: RemoteOptions = requestInit ? { requestInit } : {}
+  const pinned: RemoteKind | null =
+    config.type === 'sse' ? 'sse' : config.type ? 'streamable' : null
+
+  if (config.oauth) return connectWithOAuth(name, pinned ?? 'streamable', url, options)
+
+  if (pinned) {
+    const client = newClient()
+    await client.connect(makeRemote(pinned, url, options), { timeout: CONNECT_TIMEOUT_MS })
+    return client
+  }
   try {
     const client = newClient()
-    const transport = new StreamableHTTPClientTransport(url, requestInit ? { requestInit } : undefined)
-    await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS })
+    await client.connect(makeRemote('streamable', url, options), { timeout: CONNECT_TIMEOUT_MS })
     return client
   } catch (streamErr) {
     try {
       const client = newClient()
-      const transport = new SSEClientTransport(url, requestInit ? { requestInit } : undefined)
-      await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS })
+      await client.connect(makeRemote('sse', url, options), { timeout: CONNECT_TIMEOUT_MS })
       return client
     } catch {
       throw streamErr
     }
+  }
+}
+
+/**
+ * Connects a server that authenticates with OAuth.
+ *
+ * The happy path on later launches is invisible: the SDK finds the tokens the
+ * provider persisted and refreshes them itself, so no browser opens. Only a first
+ * connect (or a dead refresh token) throws `UnauthorizedError`, which means the
+ * consent screen is already open in the user's browser — we then wait for the
+ * loopback redirect, exchange the code, and connect again on a fresh transport
+ * (a transport that failed to start can't be restarted).
+ *
+ * There is deliberately no streamable→SSE fallback here: once a redirect has
+ * happened, silently retrying a second transport would open a second browser tab.
+ * Pin `"type": "sse"` for a legacy OAuth server instead.
+ */
+async function connectWithOAuth(
+  name: string,
+  kind: RemoteKind,
+  url: URL,
+  options: RemoteOptions
+): Promise<Client> {
+  const session = await startOAuthSession(name, { openExternal: openConsent })
+  try {
+    const authed = { ...options, authProvider: session.provider }
+    const first = makeRemote(kind, url, authed)
+    try {
+      const client = newClient()
+      await client.connect(first, { timeout: CONNECT_TIMEOUT_MS })
+      return client
+    } catch (err) {
+      if (!(err instanceof UnauthorizedError)) throw err
+      const code = await session.waitForCode()
+      await first.finishAuth(code)
+      await first.close().catch(() => {})
+      const client = newClient()
+      await client.connect(makeRemote(kind, url, authed), { timeout: CONNECT_TIMEOUT_MS })
+      return client
+    }
+  } finally {
+    session.close()
   }
 }
 

@@ -8,6 +8,7 @@ import { spawnCommandPty } from '../terminal/pty'
 import { runCommand } from '../terminal/runner'
 import { isBundlerEntryHtml } from '../../shared/preview'
 import type { PreviewEvent, PreviewStartResult } from '../../shared/types'
+import type { PreviewHealth } from '../context/projectState'
 
 /**
  * The right-side live preview back-end. Two sources feed one webview:
@@ -133,8 +134,78 @@ export function setPreviewEmitter(fn: (event: PreviewEvent) => void): void {
   emitEvent = fn
 }
 
+// ── Preview health (§21–§24) ─────────────────────────────────────────────────
+
+/**
+ * What the preview pane is actually showing, as the workflow's health signal.
+ *
+ * §23's rule is that a preview must never be reported as current when it isn't, so
+ * this is derived only from things we genuinely observe: the lifecycle events this
+ * module pushes, the dev server's own output, and what a preview inspection found on
+ * the page. It is never optimistic — a build in flight reads `STALE`, a broken
+ * compile reads `COMPILE_ERROR`, and nothing running reads `UNAVAILABLE`.
+ *
+ * Kept as a module-level mirror rather than derived on demand because the evidence
+ * is streamed (pty output arrives whenever it arrives) and the reader — the
+ * orchestrator, closing a phase — needs an answer synchronously.
+ */
+let health: PreviewHealth = 'UNAVAILABLE'
+
+/**
+ * Compile failures in a dev server's output. Deliberately narrow: these are the
+ * phrases bundlers print for a *build* failure, not any line containing "error"
+ * (a chatty log line must not flip a healthy preview to broken).
+ */
+const COMPILE_FAIL_RE =
+  /(failed to compile|compilation failed|build failed|\[vite\][^\n]*error|transform failed|pre-transform error|module (?:not found|build failed)|error: could not resolve|internal server error)/i
+
+/** The counter-signal: a bundler announcing a good build again. */
+const COMPILE_OK_RE = /(compiled successfully|compiled with no|built in \d|ready in \d|page reload|hmr update)/i
+
+/** What the preview pane is actually showing right now (§23). Never optimistic. */
+export function previewHealth(): PreviewHealth {
+  return health
+}
+
+/**
+ * Record what a preview inspection saw on the page: console errors mean it compiled
+ * and served but is throwing (`RUNTIME_ERROR`), a clean read clears that back to
+ * `RUNNING`. Only ever moves between those two — an inspection can't tell us
+ * anything about a preview that isn't up.
+ */
+export function notePreviewRuntimeError(hasErrors: boolean): void {
+  if (hasErrors) {
+    if (health === 'RUNNING') health = 'RUNTIME_ERROR'
+  } else if (health === 'RUNTIME_ERROR') health = 'RUNNING'
+}
+
+/** Folds a dev server's post-start output into the health signal. */
+function noteDevOutput(text: string): void {
+  if (COMPILE_FAIL_RE.test(text)) health = 'COMPILE_ERROR'
+  else if (COMPILE_OK_RE.test(text) && health === 'COMPILE_ERROR') health = 'RUNNING'
+}
+
+/** Folds a lifecycle event into the health signal. */
+function noteHealth(event: PreviewEvent): void {
+  switch (event.phase) {
+    case 'starting':
+      // A build is in flight: whatever is on screen is the previous one.
+      health = health === 'RUNNING' || health === 'RUNTIME_ERROR' ? 'STALE' : health
+      break
+    case 'ready':
+    case 'reload':
+      health = 'RUNNING'
+      break
+    case 'error':
+    case 'stopped':
+      health = 'UNAVAILABLE'
+      break
+  }
+}
+
 /** Push a lifecycle event to the renderer (no-op before the sink is wired). */
 function push(event: PreviewEvent): void {
+  noteHealth(event)
   emitEvent?.(event)
 }
 
@@ -458,8 +529,15 @@ function awaitDevUrl(command: string): Promise<PreviewStartResult> {
     }, 120_000)
 
     pty.onData((data) => {
-      if (settled) return
-      buffer += data.replace(ANSI_RE, '')
+      const clean = data.replace(ANSI_RE, '')
+      if (settled) {
+        // The server keeps talking after it comes up, and that is where a broken
+        // compile shows up (§22): a bundler prints the failure and goes on serving
+        // the last good build, so the pane looks fine while the code is broken.
+        noteDevOutput(clean)
+        return
+      }
+      buffer += clean
       const match = buffer.match(DEV_URL_RE)
       if (match) {
         settled = true
@@ -481,6 +559,9 @@ function awaitDevUrl(command: string): Promise<PreviewStartResult> {
         devPty = null
         devCommand = null
         devUrl = null
+        // The server that was serving the pane is gone: nothing is live any more,
+        // whatever the pane still has painted on it.
+        health = 'UNAVAILABLE'
       }
       if (settled) return
       settled = true

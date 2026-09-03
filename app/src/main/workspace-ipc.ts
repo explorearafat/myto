@@ -1,4 +1,5 @@
 import { BrowserWindow, dialog, ipcMain } from 'electron'
+import { statSync } from 'node:fs'
 import { IpcChannel } from '../shared/ipc'
 import type { WorkspaceInfo } from '../shared/types'
 import { contextManager } from './context/manager'
@@ -53,8 +54,40 @@ export function applyRoot(dir: string): WorkspaceInfo {
   return info
 }
 
+/**
+ * Re-points the active root to an already-known folder WITHOUT persisting it as
+ * the default (used when opening a past conversation, to restore its own
+ * `projectRoot`). Identical to {@link applyRoot} except it deliberately omits the
+ * `saveSettings` line — so the folder for brand-new chats and the next launch
+ * stays the user's last *explicit* pick, not whichever old chat they last opened.
+ *
+ * A missing/invalid `dir` (folder deleted or moved) is a no-op: the current root
+ * is kept and its info returned, so opening a stale conversation never crashes or
+ * silently drops the sandbox onto a bad path.
+ */
+export function setActiveRoot(dir: string): WorkspaceInfo {
+  let isDir = false
+  try {
+    isDir = statSync(dir).isDirectory()
+  } catch {
+    isDir = false
+  }
+  if (!isDir) return currentInfo()
+  contextManager.setRoot(dir)
+  mcpManager.setProjectRoot(dir)
+  skillsRegistry.reload(dir)
+  const info: WorkspaceInfo = { root: dir, chosen: true }
+  broadcastWorkspace(info)
+  return info
+}
+
 export function registerWorkspaceIpc(): void {
   ipcMain.handle(IpcChannel.WorkspaceGet, () => currentInfo())
+
+  ipcMain.handle(IpcChannel.WorkspaceSetRoot, (_event, dir: string): WorkspaceInfo => {
+    if (typeof dir !== 'string' || dir.length === 0) return currentInfo()
+    return setActiveRoot(dir)
+  })
 
   ipcMain.handle(IpcChannel.WorkspaceSelect, async (event): Promise<WorkspaceInfo | null> => {
     const win = BrowserWindow.fromWebContents(event.sender)

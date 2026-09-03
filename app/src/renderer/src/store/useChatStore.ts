@@ -8,6 +8,8 @@ import type {
   IntentAnalysis,
   PersistedSession,
   PersistedToolOp,
+  RunProgress,
+  TaskState,
   ToolDecision,
   ToolProposal,
   ToolResult,
@@ -137,6 +139,10 @@ export interface AgentCardUI {
   ok?: boolean
   /** Offset into the LEAD's content at which this card was spawned (stream order). */
   contentOffset?: number
+  /** A background (non-blocking) spawn: the lead kept working while it ran. */
+  background?: boolean
+  /** Running in a private git worktree (isolated writes/commands). */
+  isolation?: 'worktree'
 }
 
 /** Live activity line shown while a run is in progress. */
@@ -145,6 +151,22 @@ export interface ActivityStatus {
   message: string
   /** Set while the engine is between retry attempts, so the UI can dim the line. */
   retrying?: boolean
+}
+
+/**
+ * Where the whole build stands, for the live status row (§33): which phase of how
+ * many, how far through the phase's task graph, whether the project's own checks
+ * passed, and what the preview is actually showing.
+ *
+ * Deliberately its OWN store field rather than part of {@link ActivityStatus}:
+ * `status` is replaced wholesale on every status/tool-request/agent-start event,
+ * so anything living inside it is clobbered a few times a second. This is sticky
+ * instead — the engine sends `progress` only when it changes, each field is
+ * merged over the last known value, and the whole thing clears when the run ends.
+ */
+export interface RunProgressUI extends RunProgress {
+  /** Derived from the run's own `plan` + `task-update` events, not sent by the engine. */
+  tasks?: { done: number; total: number }
 }
 
 /**
@@ -179,6 +201,23 @@ function appendActivity(
   const next = last && !last.done ? [...list.slice(0, -1), { ...last, done: true }] : [...list]
   next.push({ id: nextActivityId(), stage, message, done: false })
   return next
+}
+
+/**
+ * Fold the task-graph tally into the sticky progress (§33). Derived in the
+ * renderer because it already receives every node transition — the engine
+ * doesn't need to count for us. A single-node graph reports no counter at all:
+ * "1/1 tasks" on a one-file edit is noise, not progress.
+ */
+function withTasks(
+  progress: RunProgressUI | null,
+  states: Map<string, TaskState>
+): RunProgressUI | null {
+  const total = states.size
+  if (total < 2) return progress
+  let done = 0
+  for (const state of states.values()) if (state === 'completed') done += 1
+  return { ...(progress ?? {}), tasks: { done, total } }
 }
 
 /** Last path segment of a POSIX/Windows path, for a compact status label. */
@@ -229,8 +268,57 @@ function describeProposal(
       return { stage: 'executing', message: `Calling ${proposal.name}` }
     case 'web_fetch':
       return { stage: 'executing', message: `Fetching ${clip(proposal.url, 48)}` }
+    case 'web_search':
+      return { stage: 'executing', message: `Searching ${clip(proposal.query, 48)}` }
     case 'install_plugin':
       return { stage: 'executing', message: `Installing ${clip(proposal.source, 48)}` }
+    case 'preview_inspect':
+      return { stage: 'verifying', message: `Checking the preview · ${proposal.action}` }
+    case 'browse':
+      return { stage: 'executing', message: browseStatus(proposal) }
+    case 'diagnostics':
+      return {
+        stage: 'verifying',
+        message:
+          proposal.scope === 'all'
+            ? 'Checking for problems'
+            : `Checking for problems · ${proposal.scope}`
+      }
+  }
+}
+
+/**
+ * Status line for a browse step, phrased as the page-level action the user can
+ * watch happen in the browser panel beside the chat ("Opening gmail.com",
+ * "Clicking Compose") rather than as a tool name.
+ */
+function browseStatus(proposal: Extract<ToolProposal, { kind: 'browse' }>): string {
+  const what = proposal.target ? ` ${clip(proposal.target, 32)}` : ''
+  switch (proposal.action) {
+    case 'navigate': {
+      const url = proposal.url ?? ''
+      let where = url
+      try {
+        where = new URL(url.includes('://') ? url : `https://${url}`).host
+      } catch {
+        // Not a url — the engine searches for it, so show the words as typed.
+      }
+      return `Opening ${clip(where, 40)}`
+    }
+    case 'click':
+      return `Clicking${what || ' the page'}`
+    case 'type':
+      return `Typing into${what || ' the page'}`
+    case 'scroll':
+      return `Scrolling ${proposal.direction ?? 'down'}`
+    case 'console':
+      return 'Reading the page console'
+    case 'network':
+      return 'Reading the page requests'
+    case 'inspect':
+      return `Inspecting ${clip(proposal.selector ?? 'an element', 32)}`
+    default:
+      return 'Reading the page'
   }
 }
 
@@ -268,6 +356,14 @@ interface LiveRun {
   agents: AgentCardUI[]
   /** Latest activity status, mirrored to the store while visible. */
   status: ActivityStatus | null
+  /** Sticky build progress (§33), merged from every `progress` the engine sends. */
+  progress: RunProgressUI | null
+  /**
+   * State of each planned task node, keyed by id — seeded by the `plan` event and
+   * updated by `task-update`. Only exists to derive `progress.tasks`; the engine
+   * doesn't count for us because the renderer already receives every transition.
+   */
+  taskStates: Map<string, TaskState>
   /** Ordered activity timeline (one step per distinct status), mirrored while visible. */
   activity: ActivityStep[]
   /** Intent interpretation for this run. */
@@ -309,6 +405,12 @@ export interface ChatState {
   runId: string | null
   /** Live activity status ("Reading files…"), or null. */
   status: ActivityStatus | null
+  /**
+   * Where the build stands for the active run (§33) — phase, tasks, checks,
+   * preview — or null when the turn is a one-off with no roadmap behind it.
+   * Rendered as chips on the same single status row, never as a second block.
+   */
+  progress: RunProgressUI | null
   /**
    * Ordered live activity timeline for the active run — the progressive sequence
    * of phases (Understanding → Reading → Planning → …) the UI renders in place of
@@ -506,6 +608,7 @@ function projectLiveRun(
   runId: string | null
   disposer: (() => void) | null
   status: ActivityStatus | null
+  progress: RunProgressUI | null
   activity: ActivityStep[]
   intent: IntentAnalysis | null
 } {
@@ -520,6 +623,7 @@ function projectLiveRun(
       runId: null,
       disposer: null,
       status: null,
+      progress: null,
       activity: [],
       intent: null
     }
@@ -549,6 +653,7 @@ function projectLiveRun(
     runId: run.runId,
     disposer: run.disposer,
     status: run.status,
+    progress: run.progress,
     activity: run.activity,
     intent: run.intent
   }
@@ -594,6 +699,12 @@ export const useChatStore = create<ChatState>((set, get) => {
     const planFirst = useAppStore.getState().planFirst
     const mode = useAppStore.getState().workMode
     const projectId = get().projectId
+    // Pin this run to the folder that's active right now. `loadInto` re-points the
+    // active root to the open conversation's own folder before a send is possible,
+    // so this snapshot is this chat's folder; capturing it here lets the engine
+    // wrap the run in `runWithRoot`, keeping reads/writes on this folder even if
+    // the user opens a different conversation (and root) while the run is in flight.
+    const runRoot = useAppStore.getState().workspaceRoot
 
     const run: LiveRun = {
       runId,
@@ -603,6 +714,8 @@ export const useChatStore = create<ChatState>((set, get) => {
       tools: [],
       agents: [],
       status: null,
+      progress: null,
+      taskStates: new Map(),
       activity: [],
       intent: null,
       disposer: () => {},
@@ -720,7 +833,12 @@ export const useChatStore = create<ChatState>((set, get) => {
           if (event.agentId) break
           run.status = { stage: event.stage, message: event.message, retrying: event.retrying }
           run.activity = appendActivity(run.activity, event.stage, event.message)
-          if (isVisible()) set({ status: run.status, activity: run.activity })
+          // §33 — merged, not replaced: the engine sends `progress` when something
+          // changes (phase start, then again once the checks have run), so a later
+          // event that carries only `checks` must not erase the phase.
+          if (event.progress) run.progress = { ...(run.progress ?? {}), ...event.progress }
+          if (isVisible())
+            set({ status: run.status, activity: run.activity, progress: run.progress })
           break
         case 'delta':
           // Buffer; the flush timer applies it in coalesced batches (see above).
@@ -834,17 +952,23 @@ export const useChatStore = create<ChatState>((set, get) => {
             task: event.task,
             status: 'running',
             content: '',
-            contentOffset: run.content.length
+            contentOffset: run.content.length,
+            ...(event.background ? { background: true } : {}),
+            ...(event.isolation ? { isolation: event.isolation } : {})
           }
           run.agents.push(card)
-          // Show what the subagent is about to do, not "Delegating to the
-          // frontend…". Concrete file ops (Creating/Editing/Reading/Reviewing
-          // <file>) replace this within a step or two — see the tool-request case;
-          // the reviewer gets its own verb up front so its read phase reads right.
-          const startStage: WorkflowStage = event.role === 'reviewer' ? 'verifying' : 'generating'
-          const startMsg = event.role === 'reviewer' ? 'Reviewing the changes…' : 'Working…'
-          run.status = { stage: startStage, message: startMsg }
-          run.activity = appendActivity(run.activity, startStage, startMsg)
+          // A FOREGROUND spawn owns the run's status line while it works — the lead
+          // is blocked on it, so its verb (Reviewing…/Working…) is what's happening.
+          // A BACKGROUND spawn must NOT hijack it: the lead keeps working and its own
+          // status line stays live, so we only add the nested card. Concrete file ops
+          // (Creating/Editing/Reading <file>) replace the foreground line within a
+          // step or two — see the tool-request case.
+          if (!event.background) {
+            const startStage: WorkflowStage = event.role === 'reviewer' ? 'verifying' : 'generating'
+            const startMsg = event.role === 'reviewer' ? 'Reviewing the changes…' : 'Working…'
+            run.status = { stage: startStage, message: startMsg }
+            run.activity = appendActivity(run.activity, startStage, startMsg)
+          }
           if (isVisible()) {
             // Push a copy so the store and the run's source-of-truth card never
             // share a mutable reference (flush updates each independently).
@@ -878,6 +1002,20 @@ export const useChatStore = create<ChatState>((set, get) => {
           }
           break
         }
+        case 'plan': {
+          // §33 — seed the task tally. `plan` always precedes execution, so the
+          // total is known before the first node moves.
+          run.taskStates = new Map(event.tasks.map((t) => [t.id, t.state]))
+          run.progress = withTasks(run.progress, run.taskStates)
+          if (isVisible()) set({ progress: run.progress })
+          break
+        }
+        case 'task-update': {
+          run.taskStates.set(event.task.id, event.task.state)
+          run.progress = withTasks(run.progress, run.taskStates)
+          if (isVisible()) set({ progress: run.progress })
+          break
+        }
         case 'done': {
           flush()
           run.disposer() // detach the listener (cancel is a no-op post-completion)
@@ -902,6 +1040,7 @@ export const useChatStore = create<ChatState>((set, get) => {
               ),
               running: false,
               status: null,
+              progress: null,
               activity: [],
               runId: null,
               disposer: null
@@ -941,6 +1080,7 @@ export const useChatStore = create<ChatState>((set, get) => {
               ),
               running: false,
               status: null,
+              progress: null,
               activity: [],
               runId: null,
               disposer: null
@@ -959,7 +1099,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         effort,
         planFirst,
         mode,
-        ...(projectId ? { projectId } : {})
+        ...(projectId ? { projectId } : {}),
+        ...(runRoot ? { root: runRoot } : {})
       },
       onEvent
     )
@@ -1004,6 +1145,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     running: false,
     runId: null,
     status: null,
+    progress: null,
     activity: [],
     intent: null,
     disposer: null,
@@ -1062,6 +1204,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         attachments: [...state.attachments, ...bound],
         running: true,
         status: null,
+        progress: null,
         activity: [],
         intent: null
       }))
@@ -1119,6 +1262,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         ),
         running: false,
         status: null,
+        progress: null,
         activity: [],
         runId: null,
         disposer: null
@@ -1134,6 +1278,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         attachments: [],
         running: false,
         status: null,
+        progress: null,
         activity: [],
         intent: null,
         runId: null,
@@ -1158,6 +1303,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           ),
           running: false,
           status: null,
+          progress: null,
           activity: [],
           runId: null,
           disposer: null
@@ -1224,6 +1370,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         agents: state.agents.filter((a) => a.afterMessageId !== messageId),
         running: true,
         status: null,
+        progress: null,
         activity: [],
         intent: null
       }))

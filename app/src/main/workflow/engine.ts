@@ -1,7 +1,9 @@
 import type {
   AgentRole,
+  ChatImage,
   ChatMessage,
   CompletionOptions,
+  HookEvent,
   IntentKind,
   McpCategory,
   McpToolInfo,
@@ -10,6 +12,7 @@ import type {
   SkillInfo,
   TaskNode,
   ToolDecision,
+  ToolKind,
   ToolProposal,
   ToolResult,
   WorkflowEvent,
@@ -18,14 +21,37 @@ import type {
 } from '../../shared/types'
 import { providerFromSettings, type Provider } from '../providers'
 import { toErrorMessage } from '../providers/http'
-import { getSettings, isSkillEnabled, getUserProfile, appendUserProfile } from '../settings'
+import {
+  getSettings,
+  isSkillEnabled,
+  getUserProfileForPrompt,
+  appendUserProfile
+} from '../settings'
 import { contextManager } from '../context/manager'
+import { buildInstructionsPreamble } from '../context/instructions'
+import { buildAuditInventory } from '../context/projectAudit'
+import {
+  activePlanPath,
+  buildMemoryPreamble,
+  isPlaceholder,
+  memoryDocPath,
+  readMemoryDoc,
+  scaffoldMemory
+} from '../context/projectMemory'
+import {
+  appendDecision,
+  archivePlan as archiveActivePlan,
+  readProjectState,
+  updateProjectState,
+  writeSessionCheckpoint
+} from '../context/projectState'
 import {
   applyEdit,
   findFiles,
   listDirectory,
   proposeWrite,
   readFileSlice,
+  readMediaFile,
   readProjectFile,
   searchProject,
   writeProjectFile
@@ -33,15 +59,29 @@ import {
 import { describeIssues, recheckWrittenFile, verifyWrittenFile } from '../fs/verify'
 import { appendProjectMemory, getProject, listProjectKnowledge } from '../db/projects'
 import { runCommand } from '../terminal/runner'
-import { looksLikeDevServer, startDev } from '../preview/server'
+import {
+  looksLikeDevServer,
+  notePreviewRuntimeError,
+  previewHealth,
+  startDev
+} from '../preview/server'
+import { requestPreviewInspect } from '../preview/inspect'
+import { classifyBrowse, describeBrowse, runBrowserAction } from '../browser/runner'
 import { fetchUrl } from '../web/fetch'
+import { searchWeb } from '../web/search'
+import {
+  availableCheckers,
+  realDiagnosticsDeps,
+  runDiagnostics,
+  scopeFor
+} from '../diagnostics/run'
 import { mcpManager } from '../mcp/manager'
 import { skillsRegistry } from '../skills/registry'
 import { mergeSkillCatalog } from '../skills/catalog'
 import { commandsRegistry } from '../commands/registry'
 import { installPlugin } from '../plugins/installer'
 import { classifyIntent } from './intent'
-import { decideAuto } from './permission'
+import { decideAuto, decideBrowse, type PermissionOutcome } from './permission'
 import { ToolStreamParser, parseToolBlock, type ParsedTool } from './toolStream'
 import { ReasoningStripper, stripReasoningTags } from './reasoning'
 import { isAbort, withRetry, type RetryNotice } from './resilience'
@@ -59,13 +99,121 @@ import {
   type NodeRunResult,
   type VerifyOutcome
 } from './orchestrator/orchestrator'
+import type { MemoryPort } from './orchestrator/staging'
 import { classifyComplexityHeuristic } from './orchestrator/complexity'
+import { createWorktree, finalizeWorktree, type WorktreeHandle } from './worktree'
+import { runHooks, type HookCommandRunner } from './hooks'
+import { servedFromReadCache, updateReadCache } from './readCache'
 
 /** Sink the engine emits events to (wired to IPC in workflow-ipc.ts). */
 export type EventSink = (event: WorkflowEvent) => void
 
 /** Sink for live command output (wired to the terminal pane in workflow-ipc.ts). */
 export type TerminalSink = (data: string) => void
+
+/**
+ * The shared BROWSE THE WEB teaching block.
+ *
+ * Both prompts — Code and Cowork — interpolate this exact text, so the browse
+ * protocol the model learns cannot drift between the two modes (in Cowork it is
+ * the *only* tool, in Code it sits alongside the file/command ones).
+ *
+ * The rules are carried over from the standalone browser agent loop, which is where
+ * they were proven in practice: one action per message, work from the numbered
+ * elements of the last read rather than re-reading, never type a credential, and
+ * stop once a scroll stops revealing anything new.
+ */
+const BROWSE_BLOCK = `BROWSE THE WEB — you have a real browser on screen, use it like a person would:
+- The browser sits beside the chat and the user watches every step. It drives either the
+  in-app page view or the user's own Chrome (whichever they picked), so the sites they are
+  already signed into work.
+- web_fetch only downloads a URL's text. Use browse whenever you must actually USE a site:
+  click, type, search inside it, page through it, or see what the user sees.
+
+\`\`\`sylor-tool
+{ "tool": "browse", "action": "navigate", "url": "https://news.ycombinator.com" }
+\`\`\`
+
+\`\`\`sylor-tool
+{ "tool": "browse", "action": "read" }
+\`\`\`
+
+\`\`\`sylor-tool
+{ "tool": "browse", "action": "click", "target": "#12" }
+\`\`\`
+
+\`\`\`sylor-tool
+{ "tool": "browse", "action": "type", "target": "Search", "text": "electron webcontentsview", "submit": true }
+\`\`\`
+
+\`\`\`sylor-tool
+{ "tool": "browse", "action": "scroll", "direction": "down" }
+\`\`\`
+
+\`\`\`sylor-tool
+{ "tool": "browse", "action": "console", "level": "error" }
+\`\`\`
+
+\`\`\`sylor-tool
+{ "tool": "browse", "action": "network", "filter": "failed" }
+\`\`\`
+
+\`\`\`sylor-tool
+{ "tool": "browse", "action": "inspect", "selector": ".hero h1", "styles": ["line-height"] }
+\`\`\`
+- The actions: "navigate" (open a URL — a bare word or phrase becomes a web search), "read"
+  (the page's text plus a NUMBERED list of every link, button and field on it), "click",
+  "type" ("text" into a field; add "submit": true to press Enter), and "scroll"
+  ("direction": "up"/"down"). Add "visual": true to a "read" to also SEE a picture of the
+  page — reach for that when the layout or an image matters, not by default.
+- To DEBUG a page rather than drive it: "console" (its console messages and uncaught
+  errors; "level": "error"/"warn"/"all"), "network" (the requests it made with their
+  status and timing; "filter": "failed"/"all") and "inspect" ("selector" — one element's
+  box, text and COMPUTED styles). Use them to find out why a page misbehaves instead of
+  guessing from what it renders; recording starts when Sylor first touches the page, so
+  read the console AFTER the click that misbehaved, not before.
+- "target" is how you point at something: the NUMBER from the last read ("#12" — always
+  prefer this, it is exact) or the element's visible label ("Sign in").
+- Every browse block ENDS your message, like any other action: one short line, the single
+  block, stop. The app reports what happened and only then do you continue.
+- You do NOT need a separate read after acting — a navigate/click/type/scroll already returns
+  the page it landed on. Work from that observation; re-reading an unchanged page wastes a step.
+- Keep going until the goal is actually met. If the user asked for several things, do every
+  one of them. If there is more below, scroll — but when a scroll reveals nothing new you have
+  reached the end, so stop scrolling and answer.
+- SAFETY: never type a password, card number, verification code or any other credential —
+  those fields are refused, and if a site demands a sign-in, say so and let the user do it
+  themselves. Anything that pays, orders or subscribes is refused outright; a click that
+  sends, posts, publishes or deletes needs the user's approval first, so expect to wait.
+- Finish by TELLING THE USER what you found, in your own words. The page text is context for
+  you, not the answer — never paste the raw dump back at them.`
+
+/**
+ * The project-memory + inspection-discipline block of the system prompt. Its job is
+ * to kill the `READ → SEARCH → READ → SEARCH` loop: a project's understanding is
+ * written down once (see `context/projectMemory.ts`) and re-injected every run, so
+ * rediscovering it is wasted budget. Deliberately directory-agnostic — the per-run
+ * memory preamble names the actual folder (`.claude/` or `.sylor/`) and carries the
+ * documents themselves.
+ */
+const MEMORY_BLOCK = `PROJECT MEMORY — understand once, then remember:
+- This project keeps its understanding in a small set of markdown documents — PROJECT.md
+  (what is being built), ARCHITECTURE.md (how), FILEMAP.md (what each file is responsible
+  for), CONVENTIONS.md, DECISIONS.md, STATE.md (where the work stands) and TASKS.md — inside
+  its agent-memory folder. When they exist they are handed to you below: read them, trust
+  them, and do NOT rediscover what they already tell you.
+- Before every read_file / list_files / search_files / find_files, ask: do I actually need
+  this for the task in front of me, and is it already in memory? Opening a file to learn what
+  it is for, re-listing a directory you have already seen, or re-searching a fact you were
+  already given is wasted work — and a READ → SEARCH → READ → SEARCH loop is exactly how a
+  turn ends with nothing built. Inspect what you are about to change; skip the rest.
+- When something errors, do NOT restart discovery. Name the actual error, inspect the
+  smallest scope it implicates, fix the root cause, verify it, and carry on.
+- Keep the documents true as you go: the file map when files appear, disappear or change
+  job; STATE.md and TASKS.md as work lands; ARCHITECTURE.md when the shape changes; and
+  DECISIONS.md when you make a call worth remembering, with its reason. A section that is
+  still a bare heading is one you are expected to fill in — do it as you learn the answer,
+  not at the very end. Stale or absent memory means the next session pays for this one.`
 
 /**
  * The Sylor system prompt. Phase 4 lifts the read-only boundary: the engine can
@@ -110,7 +258,11 @@ YOU CAN LOOK AT THE PROJECT — DO IT BEFORE YOU CHANGE ANYTHING:
 These four only LOOK — they change nothing, so they run immediately without asking the
 user, and (unlike an action) you may emit several in one message to gather what you need
 before deciding. read_file takes optional "offset" (1-based first line) and "limit" for a
-big file. search_files takes a regular expression; "path" and "glob" are optional filters.
+big file, and — pointed at an image ("png"/"jpg"/"gif"/"webp") — hands you the picture itself
+to SEE, not its raw bytes. search_files takes a regular expression; "path" and "glob" are
+optional filters; add "before"/"after"/"context" for N lines around each hit (like grep
+-B/-A/-C), "multiline": true for a pattern that spans lines, or "mode": "files" (just the
+matching paths) / "count" (per-file tallies) instead of the default matching lines.
 find_files lists files by a name/path glob (\`**\` across folders, \`*\` within one, \`{a,b}\`
 alternatives) — use it to locate files by name when search_files (which greps CONTENTS) is
 the wrong tool.
@@ -127,6 +279,17 @@ user's approval, ENDS your message (one per message, like any action), and retur
 page's readable text. Only http/https URLs work, and internal/loopback addresses are
 refused. Sylor works offline — reach for web_fetch only when the answer isn't already in the
 project or your own knowledge, not as a first move.
+
+When you don't already have a URL, SEARCH the web to find current, real sources:
+
+\`\`\`sylor-tool
+{ "tool": "web_search", "query": "vite configure base path for subdirectory deploy" }
+\`\`\`
+
+web_search returns a ranked list of results (title, URL, and a snippet each). Like web_fetch
+it reaches the network, so it IS an action: it needs approval and ENDS your message. The
+normal flow is search → pick the best result → web_fetch that URL to read it in full. Prefer
+primary sources (official docs, the project's own repo) over blog summaries.
 
 To change part of an existing file, replace an exact piece of it — do NOT rewrite the
 whole file:
@@ -191,10 +354,10 @@ yourself. After it lands, the new skills are available immediately and any \`/co
 can be used from the composer.
 
 Rules for tool blocks:
-- ONE ACTION PER MESSAGE. A write_file, edit_file, run_command, web_fetch, install_plugin, or
-  mcp_call block ENDS your message: say one short line, emit that single block, and stop. The app runs it
-  and reports back, and only THEN do you continue. Anything you write after an action block is
-  discarded unseen — so never stack a second file, a summary, or "next I'll…" behind it.
+- ONE ACTION PER MESSAGE. A write_file, edit_file, run_command, web_fetch, web_search, install_plugin,
+  diagnostics, or mcp_call block ENDS your message: say one short line, emit that single block, and
+  stop. The app runs it and reports back, and only THEN do you continue. Anything you write after an
+  action block is discarded unseen — so never stack a second file, a summary, or "next I'll…" behind it.
   (Read-only blocks are the sole exception: several read_file / list_files / search_files /
   find_files in one message is fine, since they only gather context before you act.)
 - To create or change several files, emit them one per message across several steps — file,
@@ -237,6 +400,59 @@ LIVE PREVIEW (how the user actually SEES what you build):
 - Do this as the final step once the files exist. One dev-server command is enough — it
   keeps running and hot-reloads on further edits; do not re-run it every change.
 
+VERIFY IN THE PREVIEW — don't just claim it works, SEE that it works:
+- Once the preview is on screen, you can inspect and drive it to confirm a UI change actually
+  landed, the same way a developer would open devtools. Use one action per message (it ENDS
+  the message like any action) and read the result back before deciding what's next:
+
+\`\`\`sylor-tool
+{ "tool": "preview_inspect", "action": "screenshot" }
+\`\`\`
+
+\`\`\`sylor-tool
+{ "tool": "preview_inspect", "action": "snapshot" }
+\`\`\`
+
+\`\`\`sylor-tool
+{ "tool": "preview_inspect", "action": "inspect", "selector": ".cta", "styles": ["color", "background-color"] }
+\`\`\`
+
+- The actions: "screenshot" (a rendered picture of the page — you SEE it), "snapshot" (the
+  page's text + structure), "inspect" (computed CSS for a "selector" — the most reliable way
+  to verify a color/font/spacing, better than eyeballing a screenshot), "console_logs"
+  (recent console output; add "level": "error" to see only errors), "network" (recent
+  requests; add "filter": "failed" for only failures), "click" (click a "selector"), "fill"
+  ("selector" + "value" to type into an input), and "resize" ("preset": "mobile"/"tablet"/
+  "desktop", or "width"/"height", to test responsive layout).
+- After a visible change, prefer "inspect" for exact style values and "console_logs"
+  ("level": "error") to catch runtime errors, then a "screenshot" to confirm the look. These
+  only observe/drive the user's OWN local preview — they change no files and reach no network,
+  so they run immediately without asking.
+- SAFETY: "fill" refuses password / token / card / secret-looking fields. Never try to type a
+  credential into the preview.
+
+CHECK YOUR WORK WITH THE PROJECT'S OWN CHECKERS (diagnostics):
+- \`diagnostics\` runs the checkers the project already has — TypeScript (\`tsc --noEmit\`) and
+  ESLint — and hands you back a sorted list of \`file:line:col  code  message\`. Use it after a
+  round of edits instead of guessing whether the code compiles:
+
+\`\`\`sylor-tool
+{ "tool": "diagnostics" }
+\`\`\`
+
+- Optional "scope": "typescript" or "eslint" narrows it to one checker (default is both);
+  optional "files": ["src/main/foo.ts"] narrows the REPORT to those paths or folders (the
+  whole project is still checked — a file's type errors depend on the rest of the program).
+- Prefer this over a run_command like \`npx tsc\`: it needs no shell, produces no ANSI noise,
+  and comes back as structured problems instead of pages of compiler output.
+- Read the reply carefully: it names which checkers RAN and which were SKIPPED. "Nothing was
+  checked" means the project has no checker installed — NOT that the code is fine. An empty
+  problem list is only meaningful for a checker that actually ran.
+- Fix what it reports, then re-run it once to confirm. Don't re-run it when it already came
+  back clean.
+
+${BROWSE_BLOCK}
+
 HOW YOU COMMUNICATE — narrate the WORK, never the THINKING:
 - Every message you send must contain at least one short line of prose. A reply that is
   nothing but tool blocks looks frozen from the outside: the user sees a spinner, has no
@@ -259,23 +475,28 @@ HOW YOU COMMUNICATE — narrate the WORK, never the THINKING:
 - Calm, terse and final, the way Claude Code does it: short lines that say what is
   happening, one per step, and no filler between them.
 
+${MEMORY_BLOCK}
+
 Be concise, correct, and grounded in the provided project context.`
 
 /**
  * The Cowork-mode system prompt. Cowork is a ChatGPT-like conversational
- * assistant: Sylor answers, explains, and writes code directly in its reply,
- * but has NO access to the user's files or terminal and proposes no tools. It is
- * deliberately silent about the `sylor-tool` protocol so the model never tries
- * to act on a folder here — that's what Code mode is for.
+ * assistant with ONE capability: the browser. Sylor answers, explains, and writes
+ * code directly in its reply, and can go use the web on the user's behalf — but it
+ * has NO access to their files or terminal, and the `browse` allowlist in
+ * `runAgentLoop` enforces that regardless of what the model tries to emit.
  */
-const COWORK_SYSTEM_PROMPT = `You are Sylor, a friendly, sharp AI assistant. Right now you are in "Cowork" mode — you work like a chat assistant (think ChatGPT), not an agent.
+const COWORK_SYSTEM_PROMPT = `You are Sylor, a friendly, sharp AI assistant. Right now you are in "Cowork" mode — you work like a chat assistant (think ChatGPT), with a real web browser you can drive.
 
 In Cowork mode you:
 - Answer questions, explain ideas, brainstorm, review snippets the user pastes, and hold a normal conversation.
 - Write any code directly in your reply inside fenced Markdown code blocks (e.g. \`\`\`ts). The user can read and copy it.
-- Do NOT have access to the user's files, folders, or terminal. You cannot edit files, run commands, or start servers here — so never say you did.
+- Go and USE the web when the answer lives out there: look something up, open a site, work through a webapp the user is signed into, and report back what you found.
+- Do NOT have access to the user's files, folders, or terminal. You cannot edit files, run commands, or start servers here — so never say you did. If they want that, they can switch to "Code" mode with the Cowork/Code toggle by the message box.
 
-If the user wants you to actually read their project, edit files, run commands, or build and preview something in a folder, tell them to switch to "Code" mode using the Cowork/Code toggle by the message box — that's where you act on a project.
+To use the browser, emit a fenced block in this exact format — one block, at the END of your message, and nothing after it:
+
+${BROWSE_BLOCK}
 
 Be warm, concise, and genuinely helpful. Use Markdown for structure and keep every code block correct and runnable.
 
@@ -499,7 +720,16 @@ function spawnDirective(): string {
     'or write the files), check it off (`- [x]`), and continue until the whole checklist is done. ' +
     'Delegate for genuine multi-step work — for a ' +
     'one-file tweak, just do it yourself. Subagents cannot spawn further subagents. As the lead, ' +
-    'narrate your decisions in prose but never paste file contents into chat — always use write_file.'
+    'narrate your decisions in prose but never paste file contents into chat — always use write_file.\n\n' +
+    'Two optional modifiers on a spawn:\n' +
+    '- `"isolation": "worktree"` runs the agent in a private git worktree (its own copy of the ' +
+    'project at the last commit). Use this ONLY for a genuinely independent slice — one that neither ' +
+    'reads your uncommitted edits nor touches the same files as another running agent — so two ' +
+    'builders can work in parallel without clobbering each other. Its changes are merged back when it ' +
+    'finishes. For work that depends on your current edits, do NOT isolate.\n' +
+    '- `"background": true` makes the spawn non-blocking: you keep working immediately and receive the ' +
+    "subagent's report in a later step, once it finishes. Use it to fan a slow, independent slice out " +
+    'while you make progress elsewhere; leave it off when you need the result before your next step.'
   )
 }
 
@@ -527,9 +757,39 @@ interface RunHandle {
   controller: AbortController
   /** Tool requests awaiting a renderer decision, keyed by toolId. */
   pending: Map<string, PendingDecision>
+  /**
+   * In-flight background subagents (spawned with `background: true`). The lead
+   * keeps working while these run; each one's report is drained into a later
+   * feedback turn, and the run is not allowed to emit `done` until all have
+   * settled ({@link joinBackgroundTasks}). Nesting is depth 1, so only a lead
+   * ever populates this — a subagent can't spawn, background or otherwise.
+   */
+  backgroundTasks: Promise<void>[]
+  /**
+   * Per-run read-dedup cache (Problem 1). Maps a `read_file` window key (root +
+   * path + line range, see `readCache.ts`) to the file's `size:mtime` stamp when
+   * it was served, so a second identical read of a file unchanged since is
+   * answered from a short note instead of a fresh disk hit AND a second full-content
+   * copy in the model's context. Evicted on a write to that path; cleared after any
+   * command (which could touch arbitrary files).
+   */
+  readCache: Map<string, string>
 }
 
 const activeRuns = new Map<string, RunHandle>()
+
+/**
+ * Awaits every in-flight background subagent and clears the list. Called before
+ * each `done` emit (and as a backstop in `runWorkflow`'s `finally`) so an
+ * `agent-end` from a background task can never arrive after the run has already
+ * reported completion. Total: individual task failures are swallowed inside the
+ * fire-and-forget wrapper, so this only ever waits, never throws.
+ */
+async function joinBackgroundTasks(handle: RunHandle): Promise<void> {
+  if (handle.backgroundTasks.length === 0) return
+  const pending = handle.backgroundTasks.splice(0)
+  await Promise.allSettled(pending)
+}
 
 /**
  * Upper bound on agent-loop iterations in a single turn. Each iteration is one
@@ -742,18 +1002,27 @@ export async function runWorkflow(
 ): Promise<void> {
   const { runId, messages, permissionMode, projectId, effort, planFirst, mode } = request
   const controller = new AbortController()
-  const handle: RunHandle = { controller, pending: new Map() }
+  const handle: RunHandle = {
+    controller,
+    pending: new Map(),
+    backgroundTasks: [],
+    readCache: new Map()
+  }
   activeRuns.set(runId, handle)
 
   const settings = getSettings()
   const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
-  // Load per-project instructions + knowledge (from the DB) and the repo's
-  // checked-in instruction files (.sylor/SYLOR.md et al.) once, up front, so they
-  // frame the whole run. Never throws — a bad/deleted project id or a missing
-  // instruction file degrades to no preamble.
-  const projectPreamble = [buildProjectPreamble(projectId ?? null), buildRepoInstructionsPreamble()]
-    .filter(Boolean)
-    .join('\n\n')
+
+  // Pin the whole run to the conversation's own folder when the client passed one
+  // (`request.root` = the chat's persisted projectRoot). Reuses the same
+  // AsyncLocalStorage override that worktree isolation uses, so every read/write/
+  // command — and every project-memory lookup below — resolves against THIS chat's
+  // folder even if the user opens a different conversation, switching the global
+  // root, mid-run. Omitted → runs against the live global root exactly as before.
+  // Generic over sync and async callbacks: the override covers the whole async
+  // subtree, so an awaited call stays pinned for its entire continuation.
+  const pinToRunRoot = <T>(fn: () => T): T =>
+    request.root ? contextManager.runWithRoot(request.root, fn) : fn()
 
   try {
     // 0. Guard: nothing works without a model. Rather than firing a malformed
@@ -771,53 +1040,62 @@ export async function runWorkflow(
       return
     }
 
-    // Cowork mode: a pure conversational assistant — no project scan, no tools,
-    // no folder access. Sylor answers and writes code directly in the reply, so
-    // a casual "how do I…" never triggers a file read or a terminal command.
-    // Runs a single completion and stops; the agent pipeline below is Code mode
-    // (the default when `mode` is unspecified, e.g. older callers / tests).
+    // UserPromptSubmit hooks (Phase 4): fire once as the turn begins, before any
+    // model call, so an automation can react to the prompt (log it, prep a file).
+    // Non-blocking; a no-op when unconfigured. Fires for both Cowork and Code.
+    await runLifecycleHooks('UserPromptSubmit', controller.signal, {
+      SYLOR_PROMPT: lastUser,
+      SYLOR_MODE: mode ?? 'code'
+    })
+    if (controller.signal.aborted) return
+
+    // Cowork mode: a conversational assistant with ONE capability — the browser.
+    // It answers and writes code directly in the reply, never touches the user's
+    // files or terminal, but can go and USE the web on their behalf. That means it
+    // needs the real gated agent loop, not a single completion: a `browse` has to
+    // be proposed, approved, executed, and fed back so the model can act on what it
+    // saw. `toolAllowlist: ['browse']` is what keeps the mode's promise — every
+    // other tool kind is refused in `executeTool`, whatever the model emits.
+    //
+    // `allowSpawn: false` both forbids subagents here and disables the
+    // continue/start-build nudges, which exist for file builds and would misfire on
+    // a turn whose only work is browsing.
     if ((mode ?? 'code') === 'cowork') {
       emit({ type: 'status', runId, stage: 'generating', message: 'Thinking…' })
       const provider = providerFromSettings(settings)
       let system = COWORK_SYSTEM_PROMPT + effortDirective(effort ?? 'medium')
-      const coworkProfile = buildUserProfilePreamble()
+      const coworkProfile = buildUserProfilePreamble(lastUser)
       if (coworkProfile) system += `\n\n${coworkProfile}`
       const outbound: ChatMessage[] = [{ role: 'system', content: system }, ...messages]
 
-      const parser = new ToolStreamParser()
-      const think = new ReasoningStripper()
-      let received = false
-      const retry = retryReporter(runId, emit)
-      await withRetry(
-        async () => {
-          await provider.streamCompletion(
-            settings.modelId,
-            outbound,
-            (chunk) => {
-              if (!chunk.delta) return
-              received = true
-              const prose = parser.push(chunk.delta)
-              if (!prose) return
-              const shown = think.push(prose)
-              if (shown) emit({ type: 'delta', runId, text: shown })
-            },
-            controller.signal,
-            completionOptions(effort ?? 'medium')
-          )
+      await runAgentLoop({
+        role: 'lead',
+        outbound,
+        maxSteps: MAX_STEPS,
+        intentKind: 'question',
+        planFirstStop: false,
+        allowSpawn: false,
+        runId,
+        permissionMode,
+        projectId: projectId ?? null,
+        handle,
+        provider,
+        modelId: settings.modelId,
+        enabledSkills: [],
+        emit,
+        onTerminal,
+        spawnContext: {
+          overview: '',
+          projectPreamble: '',
+          effort: effort ?? 'medium',
+          mcpTools: [],
+          enabledSkills: [],
+          recap: ''
         },
-        {
-          signal: controller.signal,
-          canRetry: () => !received,
-          onRetry: retry.onRetry
-        }
-      )
-      retry.clear('Thinking…')
-      if (controller.signal.aborted) return
-      const tail = think.push(parser.flush()) + think.flush()
-      if (tail) emit({ type: 'delta', runId, text: tail })
+        toolAllowlist: ['browse']
+      })
 
-      // Cowork never executes tools or records memory: the parser runs only as a
-      // safety net so a stray tool block can't leak as raw JSON or be executed.
+      if (controller.signal.aborted) return
       emit({ type: 'done', runId })
       return
     }
@@ -827,6 +1105,44 @@ export async function runWorkflow(
     const intent = await classifyIntent(lastUser, settings)
     if (controller.signal.aborted) return
     emit({ type: 'intent', runId, intent })
+
+    // 1b. Project memory. Everything the run knows about the project that ISN'T in
+    // the code: the DB-backed per-project instructions/knowledge, the hierarchical
+    // checked-in instruction files (user ~/.sylor/SYLOR.md + the project's own
+    // SYLOR.md / AGENTS.md / CLAUDE.md slots, @imports inlined), and the persisted
+    // understanding documents (PROJECT / ARCHITECTURE / FILEMAP / CONVENTIONS /
+    // DECISIONS / STATE / TASKS). Together they are what stops a run rediscovering
+    // the project from zero. Built inside the run-root pin because two of the three
+    // read files, and never throws — a bad project id or an unreadable doc degrades
+    // to a shorter preamble.
+    //
+    // On a work turn the documents are scaffolded first, so the agent has real files
+    // to maintain instead of having to remember to invent them. Scaffolding never
+    // overwrites, so an existing `.claude/` (or a doc a human wrote) is adopted, not
+    // clobbered. Read-only turns scaffold nothing.
+    const projectPreamble = pinToRunRoot(() => {
+      if (intent.kind === 'edit') {
+        const created = scaffoldMemory()
+        if (created.length > 0) {
+          // A status line, never a delta: seeding memory is infrastructure, and the
+          // assistant's own prose must stay the assistant's (§33 — no internal noise).
+          emit({
+            type: 'status',
+            runId,
+            stage: 'understanding',
+            message: `Started project memory in ${created[0].split('/')[0]}/…`
+          })
+        }
+      }
+      return [
+        buildProjectPreamble(projectId ?? null),
+        buildInstructionsPreamble(),
+        buildMemoryPreamble()
+      ]
+        .filter(Boolean)
+        .join('\n\n')
+    })
+    if (controller.signal.aborted) return
 
     // 2. Gather project context when the intent calls for it.
     let overview = ''
@@ -955,47 +1271,64 @@ export async function runWorkflow(
     // planning and review would be pure overhead) and plan-first turns (the user
     // explicitly asked for a plan and a stop, which is its own gate).
     if (intent.kind === 'edit' && !planFirstStop) {
-      await runOrchestrator({
-        runId,
-        request: lastUser,
-        overview,
-        settings,
-        emit,
-        signal: controller.signal,
-        executeNode: (node, opts) => executeNode(node, opts, leadArgs),
-        // plan.md goes through the same approval gate as any other write.
-        writePlan: async (markdown) => {
-          await executeTool(
-            { tool: 'write_file', path: 'plan.md', content: markdown },
-            { runId, permissionMode, handle, emit, onTerminal }
-          )
-        },
-        verify: () => verifyProject({ runId, permissionMode, handle, emit, onTerminal }),
-        // Non-streaming (a verdict, not prose) so it stays off the reply stream.
-        // Paced + retried like every other model call; safe to replay verbatim
-        // because nothing has been shown to the user yet.
-        judge: async (msgs) => {
-          const retry = retryReporter(runId, emit)
-          const verdict = await withRetry(
-            () => provider.getCompletion(settings.modelId, msgs, completionOptions(effort ?? 'medium')),
-            {
-              signal: controller.signal,
-              onRetry: retry.onRetry
-            }
-          )
-          retry.clear('Reviewing…')
-          return verdict
-        }
-      })
+      // One non-streaming completion, paced + retried like every other model call.
+      // Used for both the review verdict and document authoring; safe to replay
+      // verbatim because nothing it produces has been shown to the user yet.
+      const complete = async (msgs: ChatMessage[], settled: string): Promise<string> => {
+        const retry = retryReporter(runId, emit)
+        const text = await withRetry(
+          () => provider.getCompletion(settings.modelId, msgs, completionOptions(effort ?? 'medium')),
+          { signal: controller.signal, onRetry: retry.onRetry }
+        )
+        retry.clear(settled)
+        return text
+      }
+      await pinToRunRoot(() =>
+        runOrchestrator({
+          runId,
+          request: lastUser,
+          overview,
+          settings,
+          emit,
+          signal: controller.signal,
+          executeNode: (node, opts) => executeNode(node, opts, leadArgs),
+          // plan.md goes through the same approval gate as any other write.
+          writePlan: async (markdown) => {
+            await executeTool(
+              { tool: 'write_file', path: activePlanPath(), content: markdown },
+              { runId, permissionMode, handle, emit, onTerminal }
+            )
+          },
+          verify: () => verifyProject({ runId, permissionMode, handle, emit, onTerminal }),
+          judge: (msgs) => complete(msgs, 'Reviewing…'),
+          // Staged execution (§12–§27): the run becomes one phase of a roadmap that
+          // persists in the project's own agent-memory folder.
+          memory: projectMemoryPort(),
+          scribe: (msgs) => complete(msgs, 'Writing the plan…'),
+          // Named in the plan's verification checklist so the phase's definition of
+          // done is the project's real checks, not a generic wish.
+          verifyCommands: detectVerifyCommands(),
+          // What the preview pane is actually showing, so STATE.md can never claim a
+          // stale preview is current (§23).
+          previewHealth: () => previewHealth(),
+          // The one-time project audit (§3). The current file map is passed back in so
+          // re-rendering it keeps every purpose line already refined by hand.
+          auditInventory: () => buildAuditInventory(readMemoryDoc('filemap'))
+        })
+      )
       if (controller.signal.aborted) return
+      // Never let a `done` race ahead of a still-running background subagent's
+      // `agent-end` (the lead may have finished before it did).
+      await joinBackgroundTasks(handle)
       emit({ type: 'done', runId })
       return
     }
 
     emit({ type: 'status', runId, stage: 'generating', message: 'Generating…' })
-    await runAgentLoop(leadArgs)
+    await pinToRunRoot(() => runAgentLoop(leadArgs))
 
     if (controller.signal.aborted) return
+    await joinBackgroundTasks(handle)
     emit({ type: 'done', runId })
   } catch (err) {
     if (!controller.signal.aborted) {
@@ -1005,6 +1338,22 @@ export async function runWorkflow(
     // Release any resolvers still waiting so nothing leaks on completion.
     for (const p of handle.pending.values()) p.resolve('reject')
     handle.pending.clear()
+    // Backstop: on an abort/error path (or any done we didn't guard) drain
+    // background tasks so a late `agent-end` can't outlive the run's teardown.
+    await joinBackgroundTasks(handle)
+    // Stop hooks (Phase 4): fire once the turn has fully settled, but only when it
+    // ran to completion — a user cancel isn't a "stop". Non-blocking side effects
+    // (notify, commit, clean up). Best-effort; a no-op when unconfigured.
+    if (!controller.signal.aborted) {
+      await runLifecycleHooks('Stop', controller.signal, {
+        SYLOR_PROMPT: lastUser,
+        SYLOR_MODE: mode ?? 'code'
+      })
+    }
+    // Persist the project file-index (Problem 1) so the structural summaries this
+    // run gathered survive into the next run/session. No-op when nothing changed;
+    // never throws (saveIndex swallows write errors).
+    contextManager.flushIndex()
     activeRuns.delete(runId)
   }
 }
@@ -1065,6 +1414,12 @@ interface AgentLoopArgs {
    * files). Absent for the lead, which is unrestricted.
    */
   capabilities?: readonly Capability[]
+  /**
+   * A hard whitelist of tool kinds for the whole loop, orthogonal to capabilities.
+   * Cowork passes `['browse']` so the mode's "no files, no terminal" promise is
+   * enforced by code and not just by the prompt.
+   */
+  toolAllowlist?: readonly ToolKind[]
   /**
    * Collector the loop appends each successfully written project-relative path to,
    * so the orchestrator knows exactly what a task node changed.
@@ -1129,6 +1484,23 @@ function retryReporter(
 }
 
 /**
+ * Formats a finished subagent's report for feeding back to the lead — identical
+ * wording whether the subagent ran inline (awaited) or in the background, so the
+ * lead reads both the same way. `(no report returned)` guards a silent agent.
+ */
+function describeSubagentReport(
+  role: string,
+  task: string,
+  subReport: string,
+  ok: boolean
+): string {
+  return (
+    `Report from the ${role} subagent (${ok ? 'completed' : 'failed'}) ` +
+    `for task "${task}":\n\n${subReport || '(no report returned)'}`
+  )
+}
+
+/**
  * The core agent loop shared by the lead and every subagent (requirement B).
  * Each iteration streams one completion over `outbound`, demuxes prose from
  * `sylor-tool` blocks, records memory / activates skills inline, executes
@@ -1187,6 +1559,12 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
   let built = false
   // The agent's latest non-empty prose — its conclusion, returned as the report.
   let report = ''
+  // Reports from BACKGROUND subagents that have finished since the last feedback
+  // turn (lead only). A background spawn returns immediately; when it settles it
+  // pushes its report here, and the next feedback turn (or the end-of-turn join)
+  // drains this so the lead reacts to the fan-out result. Persists across steps
+  // because a task started in step 2 may not finish until step 5.
+  const backgroundReports: string[] = []
 
   // Last few characters of prose streamed so far, and whether the current step has
   // yet to stream any. Each step is a separate completion appended to the SAME
@@ -1235,8 +1613,12 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
       tool.tool === 'edit_file' ||
       tool.tool === 'run_command' ||
       tool.tool === 'web_fetch' ||
+      tool.tool === 'web_search' ||
       tool.tool === 'install_plugin' ||
       tool.tool === 'mcp_call' ||
+      tool.tool === 'preview_inspect' ||
+      tool.tool === 'browse' ||
+      tool.tool === 'diagnostics' ||
       (allowSpawn && tool.tool === 'spawn_agent')
     )
   }
@@ -1406,8 +1788,12 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
         t.tool === 'find_files' ||
         t.tool === 'run_command' ||
         t.tool === 'web_fetch' ||
+        t.tool === 'web_search' ||
         t.tool === 'install_plugin' ||
-        t.tool === 'mcp_call'
+        t.tool === 'mcp_call' ||
+        t.tool === 'preview_inspect' ||
+        t.tool === 'browse' ||
+        t.tool === 'diagnostics'
     )
     const spawnRequests = allowSpawn
       ? parser.tools.filter(
@@ -1496,6 +1882,44 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     // The turn wants to end here: nothing was proposed, delegated, or activated.
     const ending = sideEffects.length === 0 && spawnRequests.length === 0 && !skillInjection.text
 
+    // 4d‴′. Background-agent join (lead only). The turn wants to end, but a
+    // subagent the lead fired off with `background: true` may still be running —
+    // or may have just finished with a report the lead hasn't reacted to yet.
+    // Don't conclude blind: wait for every in-flight background task, then feed
+    // their reports back so the lead integrates the work (or genuinely finishes)
+    // instead of stopping with the fan-out still pending. Bounded — subagents
+    // can't spawn (depth 1) and each background task settles exactly once, so
+    // after draining, `ending` is reached again with nothing left and falls
+    // through. Plan-first never spawns, so it is naturally exempt.
+    //
+    // The `allowSpawn` guard makes this genuinely lead-only: `handle.backgroundTasks`
+    // is SHARED across the whole run, so an un-guarded subagent reaching its own
+    // ending would try to `joinBackgroundTasks` the lead's fan-out — including the
+    // very task that IS itself — and await its own completion forever. Subagents
+    // never spawn, so their own `backgroundReports` is always empty; gating on
+    // `allowSpawn` keeps them out of the shared handle entirely.
+    if (
+      ending &&
+      allowSpawn &&
+      (handle.backgroundTasks.length > 0 || backgroundReports.length > 0)
+    ) {
+      if (handle.backgroundTasks.length > 0) {
+        emit({
+          type: 'status',
+          runId,
+          stage: 'generating',
+          message: 'Waiting for background agents to finish…'
+        })
+        await joinBackgroundTasks(handle)
+      }
+      if (signal.aborted) return report
+      if (backgroundReports.length > 0) {
+        outbound.push({ role: 'assistant', content: raw })
+        outbound.push({ role: 'user', content: backgroundReports.splice(0).join('\n\n') })
+        continue
+      }
+    }
+
     // 4d⁗. Verify-fix nudge. The turn is ending but a file written earlier this turn
     // is still failing its static check — the model wrote something broken and is
     // about to tell the user it's done. Send it back to the file. Applies to every
@@ -1510,7 +1934,11 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
       for (const path of [...pendingIssues.keys()]) {
         const issues = recheckWrittenFile(path)
         if (issues.length === 0) pendingIssues.delete(path)
-        else pendingIssues.set(path, issues.map((issue) => issue.message))
+        else
+          pendingIssues.set(
+            path,
+            issues.map((issue) => issue.message)
+          )
       }
     }
     if (
@@ -1566,16 +1994,24 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
 
     // Once we're past the break, real work is about to happen this step. Remember it so a
     // later prose-only turn reads as a closing summary (a finish), not a stall to nudge.
-    // Reads (and web_fetch) are deliberately excluded: gathering information is progress,
-    // but it is not *building*, and if a read or fetch refunded the stall budgets a model
-    // could investigate in circles forever instead of being nudged into writing something.
+    // Reads (and web_fetch / web_search / browse) are deliberately excluded: gathering
+    // information is progress, but it is not *building*, and if a read, fetch, search, or
+    // page visit refunded the stall budgets a model could investigate in circles forever
+    // instead of being nudged into writing something. (Cowork, where browsing IS the whole
+    // job, runs with allowSpawn:false — which disables both of those nudges outright.)
     const mutated = sideEffects.some(
       (t) =>
         t.tool !== 'read_file' &&
         t.tool !== 'list_files' &&
         t.tool !== 'search_files' &&
         t.tool !== 'find_files' &&
-        t.tool !== 'web_fetch'
+        t.tool !== 'web_fetch' &&
+        t.tool !== 'web_search' &&
+        t.tool !== 'preview_inspect' &&
+        t.tool !== 'browse' &&
+        // A checker reads the project and changes nothing, so it must not refund
+        // the stall budgets either — otherwise a model could re-run `tsc` forever.
+        t.tool !== 'diagnostics'
     )
     if (mutated || spawnRequests.length > 0) {
       built = true
@@ -1604,6 +2040,7 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
           emit,
           onTerminal,
           capabilities: args.capabilities,
+          toolAllowlist: args.toolAllowlist,
           filesWritten: args.filesWritten
         })
 
@@ -1648,14 +2085,39 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     // 4e′. Delegated subagents (lead only — allowSpawn is false past depth 1).
     // Each runs this same gated loop in the same folder and hands back a report,
     // fed to the lead exactly like a tool result so it can decide the next step.
+    // A `background: true` spawn is fire-and-forget: the lead keeps working and
+    // the report is drained into a later feedback turn (or the end-of-turn join).
     const spawnReports: string[] = []
     for (const spawn of spawnRequests) {
       if (signal.aborted) return report
-      const { report: subReport, ok } = await runSubagent(spawn, args)
-      spawnReports.push(
-        `Report from the ${spawn.role} subagent (${ok ? 'completed' : 'failed'}) ` +
-          `for task "${spawn.task}":\n\n${subReport || '(no report returned)'}`
-      )
+      if (spawn.background) {
+        // Non-blocking. The task settles into `backgroundReports`; the handle
+        // tracks it so the run can't emit `done` while it's still in flight, and
+        // the lead is told now that it started so it moves on to other work.
+        const task = runSubagent(spawn, args)
+          .then(({ report: subReport, ok }) => {
+            backgroundReports.push(describeSubagentReport(spawn.role, spawn.task, subReport, ok))
+          })
+          .catch((err) => {
+            backgroundReports.push(
+              describeSubagentReport(
+                spawn.role,
+                spawn.task,
+                `crashed: ${toErrorMessage(err)}`,
+                false
+              )
+            )
+          })
+        handle.backgroundTasks.push(task)
+        spawnReports.push(
+          `Started the ${spawn.role} subagent in the BACKGROUND for task "${spawn.task}". ` +
+            'It runs independently and will report back when it finishes — continue with other ' +
+            'work now; do not wait for it.'
+        )
+      } else {
+        const { report: subReport, ok } = await runSubagent(spawn, args)
+        spawnReports.push(describeSubagentReport(spawn.role, spawn.task, subReport, ok))
+      }
     }
     if (signal.aborted) return report
 
@@ -1678,8 +2140,28 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     const feedback: string[] = []
     if (outcomes.length > 0) feedback.push(summarizeResults(outcomes))
     if (spawnReports.length > 0) feedback.push(spawnReports.join('\n\n'))
+    // Drain any background subagents that finished since the last step, so the
+    // lead reacts to their reports mid-build rather than only at the very end.
+    if (backgroundReports.length > 0) feedback.push(backgroundReports.splice(0).join('\n\n'))
     if (skillInjection.text) feedback.push(skillInjection.text)
-    outbound.push({ role: 'user', content: feedback.join('\n\n') })
+    // An image `read_file` attaches its bytes to this fed-back turn so a
+    // vision-capable model actually SEES the file — the text summary already
+    // named it. A `preview_inspect` "screenshot" and a visual `browse` "read" ride
+    // the SAME channel, so the model literally sees the preview it's verifying and
+    // the web page it's driving. Transient: these live only in this run's
+    // `outbound`, never in the persisted (text-only) transcript, so re-reads happen
+    // per run, not per open.
+    const images: ChatImage[] = outcomes.flatMap(({ result }) =>
+      (result.kind === 'read' || result.kind === 'preview_inspect' || result.kind === 'browse') &&
+      result.media
+        ? [{ mediaType: result.media.mediaType, dataBase64: result.media.dataBase64 }]
+        : []
+    )
+    outbound.push(
+      images.length > 0
+        ? { role: 'user', content: feedback.join('\n\n'), images }
+        : { role: 'user', content: feedback.join('\n\n') }
+    )
   }
 
   return report
@@ -1962,7 +2444,9 @@ export async function compactHistoryWithModel(
   } catch {
     summary = ''
   }
-  const content = summary ? decorateModelNote(summary, plan.folded) : summarizeFoldedSteps(plan.folded)
+  const content = summary
+    ? decorateModelNote(summary, plan.folded)
+    : summarizeFoldedSteps(plan.folded)
   return [...plan.head, { role: 'user', content }, ...plan.tail]
 }
 
@@ -2008,7 +2492,17 @@ async function runSubagent(
 ): Promise<{ report: string; ok: boolean; agentId: string }> {
   const agentId = nextAgentId()
   const { role, task } = spawn
-  parent.emit({ type: 'agent-start', runId: parent.runId, agentId, role, task })
+  parent.emit({
+    type: 'agent-start',
+    runId: parent.runId,
+    agentId,
+    role,
+    task,
+    // Surface how this agent runs so the renderer can badge it. Both optional and
+    // only present when set, so a plain spawn's event is byte-identical to before.
+    ...(spawn.background ? { background: true } : {}),
+    ...(spawn.isolation ? { isolation: spawn.isolation } : {})
+  })
 
   const system = buildSubagentSystem(role, task, parent.spawnContext, opts.context)
   const outbound: ChatMessage[] = [
@@ -2016,26 +2510,47 @@ async function runSubagent(
     { role: 'user', content: task }
   ]
 
+  let worktree: WorktreeHandle | null = null
   let report = ''
   let ok = false
   try {
-    report = await runAgentLoop({
-      ...parent,
-      role,
-      agentId,
-      outbound,
-      maxSteps: SUBAGENT_MAX_STEPS,
-      intentKind: 'edit',
-      planFirstStop: false,
-      allowSpawn: false,
-      capabilities: resolveRole(role).capabilities,
-      filesWritten: opts.filesWritten,
-      emit: stampEmit(parent.emit, agentId)
-    })
+    // Worktree isolation (requirement: sub-agent power-up). When requested, carve a
+    // private git worktree and run the WHOLE loop inside `runWithRoot(dir, …)` so
+    // every file this agent writes and every command it runs resolves against the
+    // worktree, not the shared root — letting parallel isolated agents work without
+    // colliding. `createWorktree` returns null (no git / not a repo / failure), in
+    // which case we simply run in the shared root: isolation is best-effort.
+    if (spawn.isolation === 'worktree') {
+      worktree = await createWorktree(agentId, parent.handle.controller.signal)
+    }
+    const runLoop = (): Promise<string> =>
+      runAgentLoop({
+        ...parent,
+        role,
+        agentId,
+        outbound,
+        maxSteps: SUBAGENT_MAX_STEPS,
+        intentKind: 'edit',
+        planFirstStop: false,
+        allowSpawn: false,
+        capabilities: resolveRole(role).capabilities,
+        filesWritten: opts.filesWritten,
+        emit: stampEmit(parent.emit, agentId)
+      })
+    report = worktree ? await contextManager.runWithRoot(worktree.dir, runLoop) : await runLoop()
     ok = !parent.handle.controller.signal.aborted
   } catch (err) {
     report = `Subagent error: ${toErrorMessage(err)}`
     ok = false
+  } finally {
+    // Always wind the worktree down — syncing the agent's changes back into the
+    // project and removing the temp branch — even on abort or error, so work isn't
+    // stranded and temp dirs don't accumulate. No signal: teardown must complete
+    // regardless of cancellation (each git call is still bounded by its timeout).
+    if (worktree) {
+      const note = await finalizeWorktree(worktree)
+      if (note) report = report ? `${report}\n\n${note}` : note
+    }
   }
 
   // Bound the handoff: the orchestrator (and the nested-agent UI) only ever see a
@@ -2094,6 +2609,59 @@ function nodeBrief(node: TaskNode): string {
 }
 
 /**
+ * The project's persistent memory, as the orchestrator's {@link MemoryPort}.
+ *
+ * This is the seam that makes a run one phase of a roadmap instead of a one-shot:
+ * the orchestrator reads where the work stands, plans only the current phase, and
+ * closes it by writing STATE.md / TASKS.md / the archive / the checkpoint — so the
+ * next turn resumes from what is recorded instead of re-deriving the project (§1).
+ *
+ * Two deliberate choices:
+ *
+ *  - **Bookkeeping writes are NOT gated.** STATE.md and TASKS.md go through the
+ *    plain `writeProjectFile` path (the same one `scaffoldMemory` uses), because
+ *    maintaining the agent's own memory is infrastructure — asking the user to
+ *    approve a status line every turn would be noise, not safety. The *plan* still
+ *    goes through the gate: `writePlan` is a real tool call.
+ *  - **A placeholder reads as absent.** `readDoc` returns null for a doc that is
+ *    still the untouched scaffold, so "has this project been specified yet?" is
+ *    answered by content, not by the file's existence.
+ *
+ * Every call resolves against the run's pinned root, because the orchestrator runs
+ * inside `pinToRunRoot`. Best-effort throughout: the underlying helpers swallow
+ * their own write failures, so a read-only checkout degrades to an unrecorded phase
+ * rather than a failed turn.
+ */
+function projectMemoryPort(): MemoryPort {
+  return {
+    readState: () => readProjectState(),
+    writeState: (patch) => updateProjectState(patch),
+    readDoc: (id) => {
+      const text = readMemoryDoc(id)
+      return text && !isPlaceholder(text) ? text : null
+    },
+    writeDoc: async (id, content) => {
+      try {
+        writeProjectFile(memoryDocPath(id), content)
+      } catch {
+        // A read-only project simply keeps no memory; the turn still stands.
+      }
+    },
+    readPlan: () => {
+      try {
+        return readProjectFile(activePlanPath())
+      } catch {
+        return null
+      }
+    },
+    archivePlan: (phase, name, completedIds) =>
+      archiveActivePlan(phase, name, activePlanPath(), completedIds),
+    decide: (entry) => void appendDecision(entry),
+    checkpoint: (cp) => writeSessionCheckpoint(cp)
+  }
+}
+
+/**
  * Scripts tried, in order, for the orchestrator's VERIFY stage — cheapest and
  * most deterministic first. A project with none of these simply isn't verified
  * (reported honestly) rather than having a command invented for it.
@@ -2104,44 +2672,97 @@ const VERIFY_SCRIPTS = ['typecheck', 'lint', 'build', 'test'] as const
 const WATCHER_RE = /--watch|^\s*(vitest|jest|nodemon)\s*$/
 
 /**
- * The VERIFY stage: runs the project's own check through the SAME approval gate
- * as any other command, so the user sees and authorizes it. Distinguishes three
- * outcomes honestly — no check exists / the user declined (`ran: false`, no
- * claim made), the check passed, or the check failed (which the reviewer then
- * sees and can route to rework).
+ * The VERIFY stage: runs the project's own checks through the SAME approval gate
+ * as any other command, so the user sees and authorizes each one. Distinguishes
+ * three outcomes honestly — no check exists / the user declined (`ran: false`, no
+ * claim made), the checks passed, or one failed (which the reviewer then sees and
+ * can route to rework).
+ *
+ * Runs EVERY check the project has, not just the first (§34): "it compiles" is not
+ * verification, and a phase can't be called done on a typecheck alone. Fails fast —
+ * once one check fails there is nothing to learn from the rest, and the run's job
+ * is to fix that failure.
+ *
+ * Type errors and lint problems are read through the `diagnostics` tool rather than
+ * `npm run typecheck`/`npm run lint` when the project's checkers are installed: it
+ * is the same check, but the reviewer gets sorted, deduped, capped, file-grouped
+ * entries instead of a wall of pty-wrapped terminal text. Only what diagnostics
+ * genuinely covered is dropped from the script list, and "nothing was checked" is
+ * never treated as coverage — so an unusable checker falls back to the script.
  */
 async function verifyProject(ctx: ExecContext): Promise<VerifyOutcome> {
-  const command = detectVerifyCommand()
-  if (!command) return { ran: false, ok: false }
+  const passed: string[] = []
+  let covered: 'typecheck' | 'lint' | 'both' | null = null
 
-  const result = await executeTool({ tool: 'run_command', command }, ctx)
-  if (!result || result.kind !== 'run_command') return { ran: false, ok: false }
-  // A null exit code means it never actually ran (declined or aborted) — that is
-  // "unverified", not "failed". We don't manufacture evidence in either direction.
-  if (result.exitCode === null) return { ran: false, ok: false, command }
-  return { ran: true, ok: result.exitCode === 0, command, output: result.output }
+  const scope = scopeFor(availableCheckers(realDiagnosticsDeps(contextManager.getRoot())))
+  if (scope !== null) {
+    const result = await executeTool({ tool: 'diagnostics', scope }, ctx)
+    // No result means declined or aborted: unverified, not failed. Fall through to
+    // the scripts rather than claiming anything.
+    if (result && result.kind === 'diagnostics' && result.ok) {
+      if (result.errors > 0) {
+        return { ran: true, ok: false, command: `diagnostics (${scope})`, output: result.output }
+      }
+      // Warnings are not failures — `eslint .` exits 0 on them, and so do we.
+      passed.push(`diagnostics (${scope})`)
+      covered = scope === 'all' ? 'both' : scope === 'typescript' ? 'typecheck' : 'lint'
+    }
+  }
+
+  const commands = detectVerifyCommands().filter((command) => {
+    if (covered === null) return true
+    if (covered === 'both' || covered === 'typecheck') {
+      if (command === 'npm run typecheck') return false
+    }
+    if (covered === 'both' || covered === 'lint') {
+      if (command === 'npm run lint') return false
+    }
+    return true
+  })
+  if (commands.length === 0 && passed.length === 0) return { ran: false, ok: false }
+
+  for (const command of commands) {
+    const result = await executeTool({ tool: 'run_command', command }, ctx)
+    // A null exit code (or no result) means it never actually ran — declined or
+    // aborted. That is "unverified", not "failed": stop asking, and report only
+    // what genuinely ran. We don't manufacture evidence in either direction.
+    if (!result || result.kind !== 'run_command' || result.exitCode === null) break
+    if (result.exitCode !== 0) return { ran: true, ok: false, command, output: result.output }
+    passed.push(command)
+  }
+  return passed.length > 0
+    ? { ran: true, ok: true, command: passed.join(' && ') }
+    : { ran: false, ok: false, command: commands[0] }
 }
 
 /**
- * Picks the project's verification command from its package.json scripts, or null
- * when it has none (a non-Node project, or no package.json). Best-effort and
- * never throws — an unreadable/malformed manifest simply means "no check".
+ * The project's verification commands, cheapest first, or an empty list when it has
+ * none (a non-Node project, or no package.json). Best-effort and never throws — an
+ * unreadable/malformed manifest simply means "no checks".
+ *
+ * `build` is skipped when the project also has a `typecheck` script: for a typed
+ * project the two prove the same thing and a production build is minutes of work
+ * for no extra signal.
  */
-function detectVerifyCommand(): string | null {
+function detectVerifyCommands(): string[] {
   let scripts: Record<string, unknown>
   try {
     const pkg = JSON.parse(readProjectFile('package.json')) as { scripts?: Record<string, unknown> }
     scripts = pkg.scripts ?? {}
   } catch {
-    return null
+    return []
   }
-  for (const name of VERIFY_SCRIPTS) {
+  const usable = (name: string): boolean => {
     const script = scripts[name]
-    if (typeof script !== 'string' || !script.trim()) continue
-    if (WATCHER_RE.test(script)) continue
-    return `npm run ${name}`
+    return typeof script === 'string' && !!script.trim() && !WATCHER_RE.test(script)
   }
-  return null
+  const out: string[] = []
+  for (const name of VERIFY_SCRIPTS) {
+    if (!usable(name)) continue
+    if (name === 'build' && usable('typecheck')) continue
+    out.push(`npm run ${name}`)
+  }
+  return out
 }
 
 /**
@@ -2167,13 +2788,15 @@ function stampEmit(emit: EventSink, agentId: string): EventSink {
 
 /**
  * Reads the living `plan.md` (requirement E) so a subagent's prompt is seeded
- * with the current plan the lead maintains. Best-effort: a missing file or a path
- * error yields '' (the plan may not exist yet). Truncated so a huge plan can't
- * blow the subagent's context budget.
+ * with the current plan the lead maintains. Resolved through
+ * {@link activePlanPath}, so the plan is found in the project's agent-memory folder
+ * (`.claude/plan.md` / `.sylor/plan.md`) as well as at the historical project root.
+ * Best-effort: a missing file or a path error yields '' (the plan may not exist
+ * yet). Truncated so a huge plan can't blow the subagent's context budget.
  */
 function readPlanMd(): string {
   try {
-    const content = readProjectFile('plan.md').trim()
+    const content = readProjectFile(activePlanPath()).trim()
     return content.length > 8000 ? `${content.slice(0, 8000)}\n… (truncated)` : content
   } catch {
     return ''
@@ -2207,7 +2830,7 @@ function buildSubagentSystem(
     skillsDirective(skills) +
     effortDirective(ctx.effort) +
     roleDirectiveFor(role)
-  const userProfile = buildUserProfilePreamble()
+  const userProfile = buildUserProfilePreamble(task)
   if (userProfile) system += `\n\n${userProfile}`
   if (ctx.projectPreamble) system += `\n\n${ctx.projectPreamble}`
   if (ctx.overview) system += `\n\n## Project context\n${ctx.overview}`
@@ -2254,6 +2877,13 @@ interface ExecContext {
    * (the lead).
    */
   capabilities?: readonly Capability[]
+  /**
+   * A hard whitelist of tool kinds, independent of capabilities. Cowork passes
+   * `['browse']`: it must have NO files and NO terminal, and capabilities alone
+   * can't express that because `allowsTool('read')` is unconditionally true.
+   * Absent = no allowlist (Code mode).
+   */
+  toolAllowlist?: readonly ToolKind[]
   /** Collector for successfully written project-relative paths. */
   filesWritten?: string[]
 }
@@ -2278,10 +2908,76 @@ type ExecutableTool = Extract<
       | 'find_files'
       | 'run_command'
       | 'web_fetch'
+      | 'web_search'
       | 'install_plugin'
       | 'mcp_call'
+      | 'preview_inspect'
+      | 'browse'
+      | 'diagnostics'
   }
 >
+
+/**
+ * Base environment shared by every hook fired for a run: the event name and the
+ * workspace root the command already runs in. Hooks read these `SYLOR_*` vars to
+ * know why they were invoked.
+ */
+function baseHookEnv(event: HookEvent): Record<string, string> {
+  return { SYLOR_HOOK_EVENT: event, SYLOR_PROJECT_ROOT: contextManager.getRoot() }
+}
+
+/**
+ * Per-tool hook context: the tool name (matched against a hook's `matcher`), a
+ * JSON dump of the tool's input, and a few convenience vars (file path, command,
+ * url) so a hook can act without parsing JSON. Best-effort — a value that can't
+ * serialize is simply omitted.
+ */
+function toolHookEnv(event: HookEvent, tool: ExecutableTool): Record<string, string> {
+  const env = baseHookEnv(event)
+  env.SYLOR_TOOL_NAME = tool.tool
+  try {
+    env.SYLOR_TOOL_INPUT = JSON.stringify(tool)
+  } catch {
+    // A value that won't serialize (shouldn't happen for a parsed tool) is skipped.
+  }
+  if ('path' in tool && typeof tool.path === 'string') env.SYLOR_FILE_PATH = tool.path
+  if (tool.tool === 'run_command') env.SYLOR_COMMAND = tool.command
+  if (tool.tool === 'web_fetch') env.SYLOR_URL = tool.url
+  return env
+}
+
+/**
+ * Adapter turning the pty-backed {@link runCommand} into the {@link
+ * HookCommandRunner} the pure hooks core expects: output is captured (not
+ * streamed to the integrated terminal — hooks are plumbing, not agent work), the
+ * run's abort signal cancels it, and `timeoutMs` bounds it.
+ */
+function hookRunner(signal: AbortSignal): HookCommandRunner {
+  return async (command, env, timeoutMs) => {
+    const res = await runCommand(command, () => {}, signal, { env, timeoutMs })
+    return { exitCode: res.exitCode, output: res.output }
+  }
+}
+
+/**
+ * Fire a run-lifecycle hook (`UserPromptSubmit` at the start of a run, `Stop` at
+ * the end). Neither blocks — they run for their side effects (prep context, send
+ * a notification) and their exit codes are ignored. A missing/empty config is a
+ * no-op with zero overhead. Never throws, so a bad hook can't derail a run.
+ */
+async function runLifecycleHooks(
+  event: 'UserPromptSubmit' | 'Stop',
+  signal: AbortSignal,
+  extra: Record<string, string>
+): Promise<void> {
+  const hooks = getSettings().hooks
+  if (!hooks?.[event]?.length) return
+  try {
+    await runHooks(hooks, event, { env: { ...baseHookEnv(event), ...extra } }, hookRunner(signal))
+  } catch (err) {
+    console.error(`[sylor] ${event} hook failed:`, err)
+  }
+}
 
 /**
  * Turns a parsed tool op into a proposal, requests a decision (auto-approved or
@@ -2332,7 +3028,12 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
         op: 'search_files',
         path: tool.path,
         query: tool.query,
-        glob: tool.glob
+        glob: tool.glob,
+        before: tool.before,
+        after: tool.after,
+        context: tool.context,
+        multiline: tool.multiline,
+        mode: tool.mode
       }
     } else if (tool.tool === 'find_files') {
       proposal = { id, kind: 'read', op: 'find_files', path: tool.path, glob: tool.glob }
@@ -2340,15 +3041,55 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
       proposal = { id, kind: 'run_command', command: tool.command }
     } else if (tool.tool === 'web_fetch') {
       proposal = { id, kind: 'web_fetch', url: tool.url }
+    } else if (tool.tool === 'web_search') {
+      proposal = { id, kind: 'web_search', query: tool.query }
     } else if (tool.tool === 'install_plugin') {
       proposal = { id, kind: 'install_plugin', source: tool.source, scope: tool.scope }
-    } else {
+    } else if (tool.tool === 'mcp_call') {
       proposal = {
         id,
         kind: 'mcp_call',
         server: tool.server,
         name: tool.name,
         arguments: tool.arguments
+      }
+    } else if (tool.tool === 'browse') {
+      // `risk` is decided HERE, not by the model: the permission gate keys off it
+      // (a click that pays is refused; one that sends/deletes always asks), so the
+      // classification must come from our own regexes over the target's label.
+      proposal = {
+        id,
+        kind: 'browse',
+        action: tool.action,
+        url: tool.url,
+        target: tool.target,
+        text: tool.text,
+        submit: tool.submit,
+        direction: tool.direction,
+        visual: tool.visual,
+        selector: tool.selector,
+        styles: tool.styles,
+        level: tool.level,
+        filter: tool.filter,
+        risk: classifyBrowse(tool)
+      }
+    } else if (tool.tool === 'diagnostics') {
+      // `scope` defaults HERE rather than in the parser: the proposal is the shape
+      // the user sees in the permission bar, so it must say what will really run.
+      proposal = { id, kind: 'diagnostics', scope: tool.scope ?? 'all', files: tool.files }
+    } else {
+      proposal = {
+        id,
+        kind: 'preview_inspect',
+        action: tool.action,
+        selector: tool.selector,
+        styles: tool.styles,
+        value: tool.value,
+        level: tool.level,
+        filter: tool.filter,
+        preset: tool.preset,
+        width: tool.width,
+        height: tool.height
       }
     }
   } catch (err) {
@@ -2361,7 +3102,44 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
     return failed.result
   }
 
-  const outcome = decideAuto(permissionMode, proposal.kind)
+  // The permission decision. Everything but `browse` keys off the tool kind and the
+  // run's mode. A browse keys off the RISK CLASS the step was classified as, and is
+  // the only tool that can be refused OUTRIGHT instead of merely asked about —
+  // which is exactly why it needs its own gate: `decideAuto` has no `block`.
+  let outcome: PermissionOutcome
+  if (proposal.kind === 'browse') {
+    const risk = proposal.risk ?? 'read'
+    const verdict = decideBrowse(risk, getSettings().browser, permissionMode)
+    if (verdict === 'block') {
+      emit({ type: 'tool-request', runId, proposal, auto: false })
+      const result = rejectedResult(
+        proposal,
+        risk === 'payment'
+          ? 'Refused: Sylor never pays, orders, or subscribes on the user’s behalf. ' +
+              'Tell the user what you found and let them finish this step themselves.'
+          : `Refused: the user’s browser policy blocks “${risk}” actions.`
+      )
+      emit({ type: 'tool-result', runId, result })
+      return result
+    }
+    outcome = verdict
+  } else {
+    outcome = decideAuto(permissionMode, proposal.kind)
+  }
+
+  // Mode gate (Cowork). A hard whitelist, checked before capabilities: Cowork is a
+  // chat assistant with a browser and nothing else, so a file or terminal op is
+  // refused here even though `allowsTool('read')` would wave it through.
+  if (ctx.toolAllowlist && !ctx.toolAllowlist.includes(proposal.kind)) {
+    emit({ type: 'tool-request', runId, proposal, auto: false })
+    const result = rejectedResult(
+      proposal,
+      `Not available in this mode (${proposal.kind}). You have no access to the user’s ` +
+        'files, folders, or terminal here — answer, or use the browser.'
+    )
+    emit({ type: 'tool-result', runId, result })
+    return result
+  }
 
   // Capability gate (requirement: per-agent tool scoping). A scoped specialist may
   // only use the tool kinds its role holds — a reviewer that tries to rewrite the
@@ -2390,7 +3168,36 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
     return result
   }
 
-  const result = await applyTool(proposal, onTerminal, handle.controller.signal)
+  // PreToolUse hooks (Phase 4). A non-zero exit BLOCKS the tool — the final
+  // programmatic gate, sitting after the user's own approval so an automation can
+  // veto even an auto-approved op (e.g. refuse a destructive `rm -rf` while the
+  // run is autonomous). A missing/empty config skips this with no overhead.
+  const hooks = getSettings().hooks
+  if (hooks?.PreToolUse?.length) {
+    const pre = await runHooks(
+      hooks,
+      'PreToolUse',
+      { toolName: tool.tool, env: toolHookEnv('PreToolUse', tool) },
+      hookRunner(handle.controller.signal)
+    )
+    if (handle.controller.signal.aborted) return null
+    if (pre.blocked) {
+      const result = rejectedResult(proposal, pre.reason ?? 'Blocked by a PreToolUse hook.')
+      emit({ type: 'tool-result', runId, result })
+      return result
+    }
+  }
+
+  // Read-dedup (Problem 1): a repeat `read_file` of a file unchanged since we last
+  // served it this run is answered from a short note — no second disk read, no
+  // second full-content copy in the model's context. Any other op (a first read, a
+  // changed file, a write/command) falls through to `applyTool` and then updates
+  // the per-run cache + the persistent `.sylor` index. Everything below runs on
+  // `result` either way; the write-guarded blocks are naturally skipped for a
+  // cached read, and a PostToolUse hook still fires (matching a real read).
+  const cached = servedFromReadCache(handle.readCache, proposal)
+  const result = cached ?? (await applyTool(proposal, onTerminal, handle.controller.signal))
+  if (!cached) updateReadCache(handle.readCache, proposal, result)
   // Record what actually landed on disk, so the orchestrator can attribute files
   // to the task node that changed them (and decide whether to verify at all).
   if (
@@ -2410,6 +3217,20 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
   if (proposal.kind === 'write_file' && result.kind === 'write_file' && result.ok) {
     const issues = verifyWrittenFile(proposal.path, proposal.newContent)
     if (issues.length > 0) result.issues = issues.map((issue) => issue.message)
+  }
+  // PostToolUse hooks (Phase 4): fired for side effects (a formatter, a notifier,
+  // a log) after the op ran. They CANNOT block — the tool already happened — so
+  // exit codes are ignored. Skipped on a cancelled run. Reuses the same config
+  // read above so a mid-run settings edit can't split Pre/Post.
+  if (hooks?.PostToolUse?.length && !handle.controller.signal.aborted) {
+    const env = toolHookEnv('PostToolUse', tool)
+    env.SYLOR_TOOL_OK = String('ok' in result ? result.ok !== false : true)
+    await runHooks(
+      hooks,
+      'PostToolUse',
+      { toolName: tool.tool, env },
+      hookRunner(handle.controller.signal)
+    )
   }
   emit({ type: 'tool-result', runId, result })
   return result
@@ -2453,7 +3274,15 @@ function failedPreparation(
         query: tool.tool === 'search_files' ? tool.query : undefined,
         glob: tool.tool === 'find_files' ? tool.glob : undefined
       },
-      result: { id, kind: 'read', ok: false, output: '', truncated: false, summary: 'failed', error }
+      result: {
+        id,
+        kind: 'read',
+        ok: false,
+        output: '',
+        truncated: false,
+        summary: 'failed',
+        error
+      }
     }
   }
   if (tool.tool === 'web_fetch') {
@@ -2462,10 +3291,92 @@ function failedPreparation(
       result: { id, kind: 'web_fetch', ok: false, output: '', truncated: false, error }
     }
   }
+  if (tool.tool === 'web_search') {
+    return {
+      proposal: { id, kind: 'web_search', query: tool.query },
+      result: { id, kind: 'web_search', ok: false, output: '', truncated: false, error }
+    }
+  }
   if (tool.tool === 'install_plugin') {
     return {
       proposal: { id, kind: 'install_plugin', source: tool.source, scope: tool.scope },
       result: { id, kind: 'install_plugin', ok: false, output: '', error }
+    }
+  }
+  if (tool.tool === 'preview_inspect') {
+    return {
+      proposal: {
+        id,
+        kind: 'preview_inspect',
+        action: tool.action,
+        selector: tool.selector,
+        styles: tool.styles,
+        value: tool.value,
+        level: tool.level,
+        filter: tool.filter,
+        preset: tool.preset,
+        width: tool.width,
+        height: tool.height
+      },
+      result: {
+        id,
+        kind: 'preview_inspect',
+        ok: false,
+        action: tool.action,
+        output: '',
+        truncated: false,
+        summary: 'failed',
+        error
+      }
+    }
+  }
+  if (tool.tool === 'browse') {
+    return {
+      proposal: {
+        id,
+        kind: 'browse',
+        action: tool.action,
+        url: tool.url,
+        target: tool.target,
+        text: tool.text,
+        submit: tool.submit,
+        direction: tool.direction,
+        visual: tool.visual,
+        selector: tool.selector,
+        styles: tool.styles,
+        level: tool.level,
+        filter: tool.filter,
+        risk: classifyBrowse(tool)
+      },
+      result: {
+        id,
+        kind: 'browse',
+        ok: false,
+        action: tool.action,
+        output: '',
+        truncated: false,
+        summary: 'failed',
+        error
+      }
+    }
+  }
+  if (tool.tool === 'diagnostics') {
+    return {
+      proposal: { id, kind: 'diagnostics', scope: tool.scope ?? 'all', files: tool.files },
+      result: {
+        id,
+        kind: 'diagnostics',
+        ok: false,
+        entries: [],
+        errors: 0,
+        warnings: 0,
+        truncated: false,
+        ran: [],
+        skipped: [],
+        output: '',
+        summary: 'failed',
+        error
+      }
     }
   }
   const path = tool.tool === 'write_file' || tool.tool === 'edit_file' ? tool.path : ''
@@ -2502,10 +3413,67 @@ function rejectedResult(proposal: ToolProposal, reason = 'Skipped by user'): Too
     }
   }
   if (proposal.kind === 'web_fetch') {
-    return { id: proposal.id, kind: 'web_fetch', ok: false, output: '', truncated: false, error: reason }
+    return {
+      id: proposal.id,
+      kind: 'web_fetch',
+      ok: false,
+      output: '',
+      truncated: false,
+      error: reason
+    }
+  }
+  if (proposal.kind === 'web_search') {
+    return {
+      id: proposal.id,
+      kind: 'web_search',
+      ok: false,
+      output: '',
+      truncated: false,
+      error: reason
+    }
   }
   if (proposal.kind === 'install_plugin') {
     return { id: proposal.id, kind: 'install_plugin', ok: false, output: '', error: reason }
+  }
+  if (proposal.kind === 'preview_inspect') {
+    return {
+      id: proposal.id,
+      kind: 'preview_inspect',
+      ok: false,
+      action: proposal.action,
+      output: '',
+      truncated: false,
+      summary: 'skipped',
+      error: reason
+    }
+  }
+  if (proposal.kind === 'browse') {
+    return {
+      id: proposal.id,
+      kind: 'browse',
+      ok: false,
+      action: proposal.action,
+      output: '',
+      truncated: false,
+      summary: 'skipped',
+      error: reason
+    }
+  }
+  if (proposal.kind === 'diagnostics') {
+    return {
+      id: proposal.id,
+      kind: 'diagnostics',
+      ok: false,
+      entries: [],
+      errors: 0,
+      warnings: 0,
+      truncated: false,
+      ran: [],
+      skipped: [],
+      output: '',
+      summary: 'skipped',
+      error: reason
+    }
   }
   return { id: proposal.id, kind: 'run_command', exitCode: null, output: reason, truncated: false }
 }
@@ -2530,21 +3498,35 @@ async function applyTool(
   // real content into the next turn (bounded by fs/operations' caps).
   if (proposal.kind === 'read') {
     try {
+      // read_file first checks whether the target is an image to VIEW rather than
+      // text to read; readMediaFile returns null for an ordinary file, so text
+      // reads fall straight through to the line-windowed reader. Capturing the
+      // media outcome in its own binding keeps `.media` precisely typed (a `??`
+      // union with ReadOutcome would collapse it away).
+      const media = proposal.op === 'read_file' ? readMediaFile(proposal.path) : null
       const outcome =
-        proposal.op === 'read_file'
+        media ??
+        (proposal.op === 'read_file'
           ? readFileSlice(proposal.path, proposal.offset, proposal.limit)
           : proposal.op === 'list_files'
             ? listDirectory(proposal.path)
             : proposal.op === 'find_files'
               ? findFiles(proposal.glob ?? '', proposal.path)
-              : searchProject(proposal.query ?? '', proposal.path, proposal.glob)
+              : searchProject(proposal.query ?? '', proposal.path, proposal.glob, {
+                  before: proposal.before,
+                  after: proposal.after,
+                  context: proposal.context,
+                  multiline: proposal.multiline,
+                  mode: proposal.mode
+                }))
       return {
         id: proposal.id,
         kind: 'read',
         ok: true,
         output: outcome.output,
         truncated: outcome.truncated,
-        summary: outcome.summary
+        summary: outcome.summary,
+        media: media?.media
       }
     } catch (err) {
       return {
@@ -2573,6 +3555,27 @@ async function applyTool(
     return {
       id: proposal.id,
       kind: 'web_fetch',
+      ok: outcome.ok,
+      output: outcome.output,
+      truncated: outcome.truncated,
+      error: outcome.error
+    }
+  }
+
+  // web_search — reach the network for a ranked result list. searchWeb never throws
+  // (network error, timeout, or empty result all come back as an outcome) and honours
+  // the abort signal, mirroring web_fetch, so no extra plumbing here.
+  if (proposal.kind === 'web_search') {
+    onTerminal(`\r\n\x1b[38;5;39m🔎 ${proposal.query}\x1b[0m\r\n`)
+    const outcome = await searchWeb(proposal.query, signal)
+    if (outcome.ok) {
+      onTerminal(`\x1b[32m✓ searched\x1b[0m\r\n`)
+    } else {
+      onTerminal(`\x1b[31m${outcome.error ?? 'Search failed.'}\x1b[0m\r\n`)
+    }
+    return {
+      id: proposal.id,
+      kind: 'web_search',
       ok: outcome.ok,
       output: outcome.output,
       truncated: outcome.truncated,
@@ -2624,7 +3627,11 @@ async function applyTool(
     }
     const c = outcome.plugin.contents
     const count = (n: number, one: string): string => (n ? `${n} ${one}${n > 1 ? 's' : ''}` : '')
-    const parts = [count(c.skills.length, 'skill'), count(c.commands.length, 'command'), count(c.connectors.length, 'connector')].filter(Boolean)
+    const parts = [
+      count(c.skills.length, 'skill'),
+      count(c.commands.length, 'command'),
+      count(c.connectors.length, 'connector')
+    ].filter(Boolean)
     const detail = [
       c.skills.length ? `skills: ${c.skills.join(', ')}` : '',
       c.commands.length ? `commands: ${c.commands.join(', ')}` : '',
@@ -2644,6 +3651,107 @@ async function applyTool(
       plugin: outcome.plugin.name,
       output: `Installed ${outcome.plugin.name}${parts.length ? ` — ${parts.join(', ')}` : ''}.${detail ? `\n${detail}` : ''}`
     }
+  }
+
+  // preview_inspect — verify the live preview. The preview is a RENDERER-owned
+  // <webview>, so the engine can't touch it directly: requestPreviewInspect does
+  // a main→renderer→main round-trip (or resolves an actionable failure when no
+  // preview/window is available). It never throws, so no try/catch here. A
+  // "screenshot" comes back with `media` bytes that ride the vision path (step 4h).
+  if (proposal.kind === 'preview_inspect') {
+    onTerminal(`\r\n\x1b[38;5;39m🔍 preview: ${proposal.action}\x1b[0m\r\n`)
+    const res = await requestPreviewInspect({
+      action: proposal.action,
+      selector: proposal.selector,
+      styles: proposal.styles,
+      value: proposal.value,
+      level: proposal.level,
+      filter: proposal.filter,
+      preset: proposal.preset,
+      width: proposal.width,
+      height: proposal.height
+    })
+    if (res.ok) {
+      onTerminal(`\x1b[32m✓ ${res.summary}\x1b[0m\r\n`)
+    } else {
+      onTerminal(`\x1b[31m${res.error ?? 'Preview inspection failed.'}\x1b[0m\r\n`)
+    }
+    // A console read is the one inspection that says whether the served page is
+    // actually healthy, so it feeds the preview health signal STATE.md records
+    // (§23): `[error]` lines mean it compiled and served but is throwing.
+    if (res.ok && proposal.action === 'console_logs') {
+      notePreviewRuntimeError(res.output.includes('[error]'))
+    }
+    return {
+      id: proposal.id,
+      kind: 'preview_inspect',
+      ok: res.ok,
+      action: proposal.action,
+      output: res.output,
+      truncated: res.truncated,
+      summary: res.summary,
+      media: res.media,
+      error: res.error
+    }
+  }
+
+  // browse — USE the web in a real browser. Unlike preview_inspect there is no
+  // round-trip: the page view is main-owned (or the user's own Chrome over CDP),
+  // so runBrowserAction drives it directly. It never throws — every failure is a
+  // value — and after a non-`read` action it settles and re-perceives, so one step
+  // returns both what happened and the page it landed on. A visual read comes back
+  // with `media` bytes that ride the vision path (step 4h).
+  if (proposal.kind === 'browse') {
+    onTerminal(`\r\n\x1b[38;5;39m🌐 ${describeBrowse(proposal)}\x1b[0m\r\n`)
+    const res = await runBrowserAction({
+      action: proposal.action,
+      url: proposal.url,
+      target: proposal.target,
+      text: proposal.text,
+      submit: proposal.submit,
+      direction: proposal.direction,
+      visual: proposal.visual,
+      selector: proposal.selector,
+      styles: proposal.styles,
+      level: proposal.level,
+      filter: proposal.filter
+    })
+    if (res.ok) {
+      onTerminal(`\x1b[32m✓ ${res.summary}\x1b[0m\r\n`)
+    } else {
+      onTerminal(`\x1b[31m${res.error ?? 'Browsing failed.'}\x1b[0m\r\n`)
+    }
+    return {
+      id: proposal.id,
+      kind: 'browse',
+      ok: res.ok,
+      action: proposal.action,
+      output: res.output,
+      truncated: res.truncated,
+      summary: res.summary,
+      url: res.url,
+      media: res.media,
+      error: res.error
+    }
+  }
+
+  // diagnostics — run the project's own checkers and read the problems back as
+  // structured data. runDiagnostics never throws (a missing checker, a crashed one,
+  // and a cancelled one are all values) and honours the abort signal through its
+  // injected exec, so no extra plumbing here. Note `ok` means the checkers RAN:
+  // a project where nothing could be checked comes back ok:false, never "clean".
+  if (proposal.kind === 'diagnostics') {
+    onTerminal(`\r\n\x1b[38;5;208m🩺 diagnostics (${proposal.scope})\x1b[0m\r\n`)
+    const report = await runDiagnostics(
+      { scope: proposal.scope, files: proposal.files, signal },
+      realDiagnosticsDeps(contextManager.getRoot())
+    )
+    if (report.ok) {
+      onTerminal(`\x1b[32m✓ ${report.summary}\x1b[0m\r\n`)
+    } else {
+      onTerminal(`\x1b[31m${report.error ?? 'No checker could be run.'}\x1b[0m\r\n`)
+    }
+    return { id: proposal.id, kind: 'diagnostics', ...report }
   }
 
   // run_command
@@ -2730,14 +3838,55 @@ function describeBatch(tools: ExecutableTool[]): { stage: WorkflowStage; message
   const fetches = tools.filter(
     (t): t is Extract<ExecutableTool, { tool: 'web_fetch' }> => t.tool === 'web_fetch'
   )
+  const searches = tools.filter(
+    (t): t is Extract<ExecutableTool, { tool: 'web_search' }> => t.tool === 'web_search'
+  )
   const installs = tools.filter(
     (t): t is Extract<ExecutableTool, { tool: 'install_plugin' }> => t.tool === 'install_plugin'
+  )
+  const previews = tools.filter(
+    (t): t is Extract<ExecutableTool, { tool: 'preview_inspect' }> => t.tool === 'preview_inspect'
+  )
+  const browses = tools.filter(
+    (t): t is Extract<ExecutableTool, { tool: 'browse' }> => t.tool === 'browse'
+  )
+  const checks = tools.filter(
+    (t): t is Extract<ExecutableTool, { tool: 'diagnostics' }> => t.tool === 'diagnostics'
   )
   const firstCmd = (): string => commands[0].command.trim().split(/\s+/).slice(0, 3).join(' ')
 
   // A plugin install → the executing phase, naming the source.
   if (installs.length > 0) {
     return { stage: 'executing', message: `Installing ${installs[0].source}` }
+  }
+
+  // A browse (no files, no commands) → the scanning phase, describing the step the
+  // way the user would say it ("Opening example.com", "Clicking Compose").
+  if (browses.length > 0 && commands.length === 0 && writes.length === 0 && reads.length === 0) {
+    const said = describeBrowse(browses[0])
+    return { stage: 'scanning', message: said.charAt(0).toUpperCase() + said.slice(1) }
+  }
+
+  // A preview inspection → the verifying phase, naming the action.
+  if (previews.length > 0 && commands.length === 0 && writes.length === 0 && reads.length === 0) {
+    return {
+      stage: 'verifying',
+      message:
+        previews.length === 1
+          ? `Checking the preview · ${previews[0].action}`
+          : `Checking the preview · ${previews.length} looks`
+    }
+  }
+
+  // A diagnostics read → the verifying phase. It IS a check, so it reads the same
+  // as "Verifying · npm run typecheck" would, naming the checker rather than a
+  // command line the user never typed.
+  if (checks.length > 0 && commands.length === 0 && writes.length === 0 && reads.length === 0) {
+    const scope = checks[0].scope ?? 'all'
+    return {
+      stage: 'verifying',
+      message: scope === 'all' ? 'Checking for problems' : `Checking for problems · ${scope}`
+    }
   }
 
   // A web_fetch batch (no files, no commands) → the scanning phase, naming the host.
@@ -2750,7 +3899,23 @@ function describeBatch(tools: ExecutableTool[]): { stage: WorkflowStage; message
     }
     return {
       stage: 'scanning',
-      message: fetches.length === 1 ? `Fetching ${host || 'the web'}` : `Fetching ${fetches.length} pages`
+      message:
+        fetches.length === 1 ? `Fetching ${host || 'the web'}` : `Fetching ${fetches.length} pages`
+    }
+  }
+
+  // A web_search batch (no files, no commands, no fetches) → the scanning phase.
+  if (
+    searches.length > 0 &&
+    commands.length === 0 &&
+    writes.length === 0 &&
+    reads.length === 0 &&
+    fetches.length === 0
+  ) {
+    return {
+      stage: 'scanning',
+      message:
+        searches.length === 1 ? 'Searching the web' : `Running ${searches.length} web searches`
     }
   }
 
@@ -2843,7 +4008,9 @@ function summarizeResults(outcomes: Array<{ tool: ExecutableTool; result: ToolRe
               ? `${tool.tool} ${tool.path}`
               : 'read'
       if (!result.ok) return `${label} → error: ${result.error ?? 'failed'}`
-      const truncNote = result.truncated ? ' — truncated, ask for a narrower range if you need more' : ''
+      const truncNote = result.truncated
+        ? ' — truncated, ask for a narrower range if you need more'
+        : ''
       return `${label} → ${result.summary}${truncNote}\n${result.output}`
     }
     if (result.kind === 'mcp_call') {
@@ -2858,10 +4025,44 @@ function summarizeResults(outcomes: Array<{ tool: ExecutableTool; result: ToolRe
       const truncNote = result.truncated ? ' (content truncated)' : ''
       return `web_fetch ${label} → ok${truncNote}\n${result.output.trim()}`
     }
+    if (result.kind === 'web_search') {
+      const label = tool.tool === 'web_search' ? tool.query : ''
+      if (!result.ok) return `web_search "${label}" → error: ${result.error ?? 'failed'}`
+      const truncNote = result.truncated ? ' (results truncated)' : ''
+      return `web_search "${label}" → ok${truncNote}\n${result.output.trim()}`
+    }
     if (result.kind === 'install_plugin') {
       const label = tool.tool === 'install_plugin' ? tool.source : ''
       if (!result.ok) return `install_plugin ${label} → error: ${result.error ?? 'failed'}`
       return `install_plugin ${label} → ok\n${result.output.trim()}`
+    }
+    if (result.kind === 'preview_inspect') {
+      const label = `preview_inspect ${result.action}`
+      if (!result.ok) return `${label} → error: ${result.error ?? 'failed'}`
+      const truncNote = result.truncated ? ' (output truncated)' : ''
+      // A screenshot's bytes are attached to this turn as a real image (step 4h);
+      // the text just tells the model to look at it.
+      const shot = result.media ? '\n(the screenshot is attached to this message — look at it)' : ''
+      return `${label} → ${result.summary}${truncNote}\n${result.output.trim()}${shot}`
+    }
+    if (result.kind === 'browse') {
+      const label = `browse ${result.action}`
+      if (!result.ok) return `${label} → error: ${result.error ?? 'failed'}`
+      const truncNote = result.truncated ? ' (page truncated — scroll for more)' : ''
+      const where = result.url ? `\nurl: ${result.url}` : ''
+      const shot = result.media ? '\n(the page screenshot is attached — look at it)' : ''
+      return `${label} → ${result.summary}${truncNote}${where}\n${result.output.trim()}${shot}`
+    }
+    if (result.kind === 'diagnostics') {
+      // `ok: false` here means NO checker ran — the one outcome that must never be
+      // reported as a clean project, so it is stated as an error, not as a result.
+      if (!result.ok) return `diagnostics → error: ${result.error ?? 'nothing was checked'}`
+      const truncNote = result.truncated ? ' (list truncated)' : ''
+      const clean =
+        result.errors === 0 && result.warnings === 0
+          ? '\nNothing to fix from these checkers. Do not re-run them to confirm.'
+          : ''
+      return `diagnostics → ${result.summary}${truncNote}\n${result.output.trim()}${clean}`
     }
     // run_command — a null exit code means the user skipped it (it never ran).
     const command = tool.tool === 'run_command' ? tool.command : ''
@@ -2984,7 +4185,8 @@ function buildMessages(
     effortDirective(effort) +
     intentDirective(intentKind) +
     planDirective(planFirst, intentKind)
-  const userProfile = buildUserProfilePreamble()
+  const lastUser = [...history].reverse().find((m) => m.role === 'user')?.content ?? ''
+  const userProfile = buildUserProfilePreamble(lastUser)
   if (userProfile) system += `\n\n${userProfile}`
   if (projectPreamble) system += `\n\n${projectPreamble}`
   if (overview) system += `\n\n## Project context\n${overview}`
@@ -3026,53 +4228,6 @@ function buildProjectPreamble(projectId: string | null): string {
 }
 
 /**
- * The repo-checked-in instruction files Sylor reads into every Code turn — the
- * `.sylor` analogue of Claude Code's CLAUDE.md. `.sylor/SYLOR.md` is the primary,
- * project-owned convention; root `SYLOR.md` and the cross-tool `AGENTS.md` are
- * honoured too so an existing repo works without renaming. First found wins per
- * slot; all found are included, in this order.
- */
-const REPO_INSTRUCTION_FILES = ['.sylor/SYLOR.md', 'SYLOR.md', 'AGENTS.md'] as const
-/** Total char budget for injected repo instructions (keeps the prompt lean). */
-const MAX_REPO_INSTRUCTION_CHARS = 8_000
-
-/**
- * Builds the repo-instructions preamble from the project's checked-in guidance
- * files (see {@link REPO_INSTRUCTION_FILES}). Unlike {@link buildProjectPreamble}
- * (DB-only), this reads real files — but only project-relative ones through the
- * sandbox (`readProjectFile`), so the boundary is untouched. A missing file is
- * skipped; the whole thing is best-effort and never throws. Returns '' when no
- * instruction file exists, so a repo without one adds nothing.
- */
-function buildRepoInstructionsPreamble(): string {
-  const parts: string[] = []
-  const seen = new Set<string>()
-  let total = 0
-  for (const rel of REPO_INSTRUCTION_FILES) {
-    let content: string
-    try {
-      content = readProjectFile(rel).trim()
-    } catch {
-      continue // missing / unreadable / outside sandbox — skip
-    }
-    if (!content || seen.has(content)) continue
-    seen.add(content)
-    const remaining = MAX_REPO_INSTRUCTION_CHARS - total
-    if (remaining <= 0) break
-    const clipped =
-      content.length > remaining ? `${content.slice(0, remaining)}\n… (instructions clipped)` : content
-    total += clipped.length
-    parts.push(`## Repository instructions (from ${rel})\n${clipped}`)
-  }
-  if (parts.length === 0) return ''
-  return (
-    parts.join('\n\n') +
-    '\n\nFollow these repository instructions as standing guidance for this project, ' +
-    'the same way you would the user’s direct request.'
-  )
-}
-
-/**
  * Appends Sylor's `remember` notes to the active project's long-term memory and
  * confirms each as a `delta` so the user sees what was recorded. Memory is
  * per-project, so with no active project it emits a single note explaining the
@@ -3109,11 +4264,14 @@ function recordMemory(
  * build, their look/typography taste). Returns '' when nothing's been learned,
  * so a fresh install adds no section. Injected into every run's system prompt
  * (Code and Cowork) so preferences carry over without the user repeating them.
- * Reads only the local profile file; never throws.
+ *
+ * `query` (the current turn's text) narrows a large profile to the most relevant
+ * facts via {@link getUserProfileForPrompt}; a small profile is injected whole.
+ * Reads only the local profile store; never throws.
  */
-function buildUserProfilePreamble(): string {
+function buildUserProfilePreamble(query = ''): string {
   try {
-    const profile = getUserProfile()
+    const profile = getUserProfileForPrompt(query)
     if (!profile) return ''
     return (
       '## About this user (remembered across all their projects)\n' +

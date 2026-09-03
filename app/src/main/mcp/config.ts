@@ -9,8 +9,16 @@
  * Shape:
  *   { "mcpServers": {
  *       "fs":     { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] },
- *       "remote": { "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer …" } }
+ *       "remote": { "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer ${MCP_TOKEN}" } },
+ *       "legacy": { "type": "sse", "url": "https://example.com/sse" },
+ *       "oauthed": { "url": "https://example.com/mcp", "oauth": true }
  *   } }
+ *
+ * Two CLI-parity behaviours live here:
+ *  - an explicit `"type"` pins the transport (`stdio` / `http` / `streamable-http` /
+ *    legacy `sse`) for servers that only speak one of them;
+ *  - `${VAR}` and `${VAR:-fallback}` in any string are expanded from the process
+ *    environment, so a config full of tokens can still be committed.
  *
  * {@link parseMcpConfig} is a pure validator (unit-tested); {@link loadMcpConfigs}
  * layers the two files. Both are defensive — a missing/garbage file yields no
@@ -45,7 +53,26 @@ export function projectMcpConfigPath(projectRoot: string): string {
 
 /** Which transport a config describes (for the UI badge + manager dispatch). */
 export function transportOf(config: McpServerConfig): McpTransport {
+  if (config.type === 'sse') return 'sse'
   return 'url' in config ? 'http' : 'stdio'
+}
+
+/**
+ * Expand `${VAR}` and `${VAR:-fallback}` from `env`.
+ *
+ * An unset variable with no fallback is left in place, on purpose: a config that
+ * expected a token then fails visibly ("…Bearer ${MCP_TOKEN}" in the error) instead
+ * of quietly connecting with an empty credential, which is far harder to diagnose.
+ */
+export function expandEnv(value: string, env: NodeJS.ProcessEnv = process.env): string {
+  return value.replace(
+    /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g,
+    (whole, name: string, fallback?: string) => {
+      const found = env[name]
+      if (found !== undefined && found !== '') return found
+      return fallback !== undefined ? fallback : whole
+    }
+  )
 }
 
 /** Narrows an unknown JSON value to a `Record<string,string>`, or undefined. */
@@ -53,30 +80,46 @@ function coerceStringRecord(value: unknown): Record<string, string> | undefined 
   if (typeof value !== 'object' || value === null) return undefined
   const out: Record<string, string> = {}
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof v === 'string') out[k] = v
+    if (typeof v === 'string') out[k] = expandEnv(v)
   }
   return Object.keys(out).length > 0 ? out : undefined
+}
+
+/** The transport a `"type"` field asks for, or undefined when it says nothing valid. */
+function declaredType(value: unknown): 'stdio' | 'http' | 'streamable-http' | 'sse' | undefined {
+  return value === 'stdio' || value === 'http' || value === 'streamable-http' || value === 'sse'
+    ? value
+    : undefined
 }
 
 /** Validates one server entry into a {@link McpServerConfig}, or null if invalid. */
 function coerceServer(value: unknown): McpServerConfig | null {
   if (typeof value !== 'object' || value === null) return null
   const v = value as Record<string, unknown>
+  const type = declaredType(v.type)
 
-  // Remote HTTP server: identified by a non-empty string `url`. Checked first so
-  // a config carrying both fields is treated as remote (url wins, documented).
-  if (typeof v.url === 'string' && v.url.trim()) {
+  // Remote HTTP server: identified by a non-empty string `url`, or demanded by an
+  // explicit remote `type`. Checked first so a config carrying both fields is
+  // treated as remote (url wins, documented) — unless `type` says stdio.
+  const url = typeof v.url === 'string' ? expandEnv(v.url).trim() : ''
+  if (type !== 'stdio' && url) {
     const headers = coerceStringRecord(v.headers)
-    const cfg: McpHttpServerConfig = { url: v.url }
+    const cfg: McpHttpServerConfig = { url }
+    // `type` is already narrowed to the remote variants by the guard above.
+    if (type) cfg.type = type
     if (headers) cfg.headers = headers
+    if (v.oauth === true) cfg.oauth = true
     return cfg
   }
+  // A remote type with no url is a broken entry, not a stdio one.
+  if (type === 'http' || type === 'streamable-http' || type === 'sse') return null
 
   // Local stdio server: identified by a non-empty string `command`.
-  if (typeof v.command === 'string' && v.command.trim()) {
-    const cfg: McpStdioServerConfig = { command: v.command }
+  if (typeof v.command === 'string' && expandEnv(v.command).trim()) {
+    const cfg: McpStdioServerConfig = { command: expandEnv(v.command).trim() }
+    if (type === 'stdio') cfg.type = 'stdio'
     if (Array.isArray(v.args)) {
-      const args = v.args.filter((a): a is string => typeof a === 'string')
+      const args = v.args.filter((a): a is string => typeof a === 'string').map((a) => expandEnv(a))
       if (args.length > 0) cfg.args = args
     }
     const env = coerceStringRecord(v.env)

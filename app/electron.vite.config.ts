@@ -1,14 +1,36 @@
 import { resolve } from 'node:path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
+import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
+// Prepend a `#!/usr/bin/env node` shebang to the CLI bundle so `out/main/cli.js`
+// (the `sylor` bin) is directly executable on POSIX. Scoped to the `cli` chunk so
+// the GUI entry is untouched, and done at renderChunk time because Rollup strips
+// any shebang written in the source. Same Node target + externalized deps as the
+// main build, so the CLI shares one toolchain with the app it boots.
+function cliShebangPlugin(): Plugin {
+  return {
+    name: 'sylor-cli-shebang',
+    renderChunk(code, chunk) {
+      if (chunk.name !== 'cli' || code.startsWith('#!')) return null
+      return { code: `#!/usr/bin/env node\n${code}`, map: null }
+    }
+  }
+}
+
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin(), cliShebangPlugin()],
     build: {
       rollupOptions: {
-        input: { index: resolve('src/main/index.ts') }
+        input: {
+          index: resolve('src/main/index.ts'),
+          cli: resolve('src/cli/index.ts'),
+          // The embeddable library entry (`sylor/sdk` → out/main/sdk.js). Same
+          // build as the app it exposes, so the engine is never duplicated.
+          sdk: resolve('src/sdk/index.ts')
+        }
       }
     }
   },

@@ -38,3 +38,27 @@ export function expandCommand(body: string, argString: string): string {
   if (!referencesArgs && args) out = `${out.trim()}\n\n${args}`
   return out.trim()
 }
+
+/**
+ * The prompt behind the built-in `/remember` command. It doesn't save anything
+ * itself — it instructs the model to record a durable fact via its `remember_user`
+ * tool, so the fact lands in Sylor's global cross-project memory the same way an
+ * organically-learned one would. With no argument it asks the user what to keep
+ * (rather than saving a blank). Pure/dependency-free so the renderer's `/` menu
+ * and any test can build the same string.
+ */
+export function buildRememberPrompt(argString: string): string {
+  const note = argString.trim()
+  if (!note) {
+    return (
+      'I want you to remember something about me for future sessions. Ask me what ' +
+      'you should remember — a short, durable fact about who I am, how I like to ' +
+      'work, or my taste — then save it to your long-term memory.'
+    )
+  }
+  return (
+    `Remember this about me for future sessions, across all my projects: "${note}". ` +
+    'Save it now using your remember_user tool, then confirm in one short sentence. ' +
+    'Record only this fact — do not start any other work.'
+  )
+}

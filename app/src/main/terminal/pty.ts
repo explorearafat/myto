@@ -168,8 +168,17 @@ export function killAllPtys(): void {
  * Spawns a one-shot command pty (not tracked in the interactive registry) and
  * returns the raw {@link IPty}. Used by the agent command runner. Throws if the
  * pty backend is unavailable — callers guard with {@link ptyAvailable}.
+ *
+ * `extraEnv` is merged over `process.env` (its values win), letting callers pass
+ * context to a subprocess — e.g. the `SYLOR_*` variables an automation hook
+ * reads. Omitted for ordinary commands, which inherit the plain environment.
  */
-export function spawnCommandPty(command: string, cols = 120, rows = 30): IPty {
+export function spawnCommandPty(
+  command: string,
+  cols = 120,
+  rows = 30,
+  extraEnv?: Record<string, string | undefined>
+): IPty {
   if (!ptyModule) throw new Error(loadError ?? 'Terminal backend unavailable')
   const cwd = contextManager.getRoot()
 
@@ -189,6 +198,6 @@ export function spawnCommandPty(command: string, cols = 120, rows = 30): IPty {
     cols,
     rows,
     cwd,
-    env: process.env
+    env: extraEnv ? { ...process.env, ...extraEnv } : process.env
   })
 }

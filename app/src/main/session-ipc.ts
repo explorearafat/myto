@@ -3,8 +3,17 @@ import { app } from 'electron'
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { IpcChannel } from '../shared/ipc'
-import type { PersistedMessage, PersistedSession, PersistedToolOp, SessionSummary } from '../shared/types'
+import type {
+  PersistedMessage,
+  PersistedSession,
+  PersistedToolOp,
+  SessionSummary,
+  UsageStats
+} from '../shared/types'
+import { computeUsageStats, emptyUsageStats } from '../shared/usage'
 import { contextManager } from './context/manager'
+import { getSettings } from './settings'
+import { readUsageFacts } from './db/stats'
 import {
   appendMessage,
   appendTerminalChunk,
@@ -85,11 +94,24 @@ export function registerSessionIpc(): void {
     }
   )
 
+  // Activity dashboard. Read-only and best-effort: the zero state is a welcome
+  // screen, so a DB fault degrades to an all-zero snapshot rather than rejecting
+  // the invoke and blanking the panel.
+  ipcMain.handle(IpcChannel.SessionsUsageStats, (): UsageStats => {
+    const now = Date.now()
+    try {
+      return computeUsageStats(readUsageFacts(), now)
+    } catch (err) {
+      console.error('[sylor] usage stats read failed:', err)
+      return emptyUsageStats(now)
+    }
+  })
+
   // Fire-and-forget appends. Wrapped so a DB error never propagates to the UI.
   ipcMain.on(
     IpcChannel.SessionsAppendMessage,
     (_event, sessionId: string, msg: PersistedMessage) => {
-      safe(() => appendMessage(sessionId, msg, Date.now()))
+      safe(() => appendMessage(sessionId, stampModel(msg), Date.now()))
     }
   )
 
@@ -124,6 +146,23 @@ export function registerSessionIpc(): void {
   ipcMain.on(IpcChannel.SessionsAppendTerminal, (_event, sessionId: string, data: string) => {
     safe(() => appendTerminalChunk(sessionId, data))
   })
+}
+
+/**
+ * Record which model produced an assistant turn, so the dashboard's "favourite
+ * model" is real history rather than whatever happens to be selected today.
+ *
+ * The renderer never sees the model id — it lives in main's provider settings —
+ * so main stamps it here, on the up-front (empty) assistant insert that starts
+ * every run. The DB keeps the value from that first write, so the streaming
+ * re-upserts can't overwrite it. User turns and an unconfigured model are left
+ * alone (a blank label would be worse than none).
+ */
+function stampModel(msg: PersistedMessage): PersistedMessage {
+  if (msg.role !== 'assistant' || msg.model) return msg
+  const { modelName, modelId } = getSettings()
+  const label = (modelName || modelId).trim()
+  return label ? { ...msg, model: label } : msg
 }
 
 /** Run a DB write, swallowing errors to a console line (persistence is best-effort). */

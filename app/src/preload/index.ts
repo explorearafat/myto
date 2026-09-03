@@ -1,6 +1,16 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IpcChannel } from '../shared/ipc'
-import type { CompletionChunk, PreviewEvent, SylorApi, WorkflowEvent, WorkspaceInfo } from '../shared/types'
+import type {
+  BrowserViewStatus,
+  ChromeStatus,
+  CompletionChunk,
+  PreviewEvent,
+  PreviewInspectRequest,
+  ScheduledTask,
+  SylorApi,
+  WorkflowEvent,
+  WorkspaceInfo
+} from '../shared/types'
 
 /** Monotonic counter used to correlate streaming chunks with their request. */
 let streamCounter = 0
@@ -91,7 +101,8 @@ const api: SylorApi = {
     appendToolOp: (sessionId, op) =>
       ipcRenderer.send(IpcChannel.SessionsAppendToolOp, sessionId, op),
     appendTerminal: (sessionId, data) =>
-      ipcRenderer.send(IpcChannel.SessionsAppendTerminal, sessionId, data)
+      ipcRenderer.send(IpcChannel.SessionsAppendTerminal, sessionId, data),
+    usageStats: () => ipcRenderer.invoke(IpcChannel.SessionsUsageStats)
   },
   projects: {
     list: () => ipcRenderer.invoke(IpcChannel.ProjectsList),
@@ -127,7 +138,18 @@ const api: SylorApi = {
       return () => {
         ipcRenderer.removeListener(IpcChannel.PreviewEvent, listener)
       }
-    }
+    },
+    onInspectRequest: (callback) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        payload: PreviewInspectRequest
+      ): void => callback(payload)
+      ipcRenderer.on(IpcChannel.PreviewInspectRequest, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.PreviewInspectRequest, listener)
+      }
+    },
+    respondInspect: (response) => ipcRenderer.send(IpcChannel.PreviewInspectResult, response)
   },
   mcp: {
     listServers: () => ipcRenderer.invoke(IpcChannel.McpListServers),
@@ -163,6 +185,7 @@ const api: SylorApi = {
   },
   workspace: {
     select: () => ipcRenderer.invoke(IpcChannel.WorkspaceSelect),
+    setRoot: (dir) => ipcRenderer.invoke(IpcChannel.WorkspaceSetRoot, dir),
     get: () => ipcRenderer.invoke(IpcChannel.WorkspaceGet),
     onChanged: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, info: WorkspaceInfo): void =>
@@ -170,6 +193,66 @@ const api: SylorApi = {
       ipcRenderer.on(IpcChannel.WorkspaceChanged, listener)
       return () => {
         ipcRenderer.removeListener(IpcChannel.WorkspaceChanged, listener)
+      }
+    }
+  },
+  memory: {
+    get: () => ipcRenderer.invoke(IpcChannel.MemoryGet),
+    remember: (note) => ipcRenderer.invoke(IpcChannel.MemoryRemember, note)
+  },
+  chrome: {
+    status: () => ipcRenderer.invoke(IpcChannel.ChromeGetStatus),
+    open: (url) => ipcRenderer.invoke(IpcChannel.ChromeOpen, url),
+    close: () => ipcRenderer.invoke(IpcChannel.ChromeClose),
+    navigate: (url) => ipcRenderer.invoke(IpcChannel.ChromeNavigate, url),
+    evaluate: (expression) => ipcRenderer.invoke(IpcChannel.ChromeEvaluate, expression),
+    screenshot: () => ipcRenderer.invoke(IpcChannel.ChromeScreenshot),
+    reload: (ignoreCache) => ipcRenderer.invoke(IpcChannel.ChromeReload, ignoreCache),
+    stop: () => ipcRenderer.invoke(IpcChannel.ChromeStop),
+    go: (delta) => ipcRenderer.invoke(IpcChannel.ChromeGo, delta),
+    focus: () => ipcRenderer.invoke(IpcChannel.ChromeFocus),
+    signIn: (url) => ipcRenderer.invoke(IpcChannel.ChromeSignIn, url),
+    finishSignIn: () => ipcRenderer.invoke(IpcChannel.ChromeFinishSignIn),
+    onStatus: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, status: ChromeStatus): void =>
+        callback(status)
+      ipcRenderer.on(IpcChannel.ChromeStatusChanged, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.ChromeStatusChanged, listener)
+      }
+    }
+  },
+  browser: {
+    status: () => ipcRenderer.invoke(IpcChannel.BrowserGetStatus),
+    open: (url) => ipcRenderer.invoke(IpcChannel.BrowserOpen, url),
+    setBounds: (bounds) => ipcRenderer.invoke(IpcChannel.BrowserSetBounds, bounds),
+    setVisible: (visible) => ipcRenderer.invoke(IpcChannel.BrowserSetVisible, visible),
+    close: () => ipcRenderer.invoke(IpcChannel.BrowserClose),
+    reload: (ignoreCache) => ipcRenderer.invoke(IpcChannel.BrowserReload, ignoreCache),
+    stop: () => ipcRenderer.invoke(IpcChannel.BrowserStop),
+    go: (delta) => ipcRenderer.invoke(IpcChannel.BrowserGo, delta),
+    setDriver: (driver) => ipcRenderer.invoke(IpcChannel.BrowserSetDriver, driver),
+    onStatus: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, status: BrowserViewStatus): void =>
+        callback(status)
+      ipcRenderer.on(IpcChannel.BrowserStatusChanged, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.BrowserStatusChanged, listener)
+      }
+    }
+  },
+  scheduler: {
+    list: () => ipcRenderer.invoke(IpcChannel.SchedulerList),
+    add: (input) => ipcRenderer.invoke(IpcChannel.SchedulerAdd, input),
+    update: (id, input) => ipcRenderer.invoke(IpcChannel.SchedulerUpdate, id, input),
+    setEnabled: (id, enabled) => ipcRenderer.invoke(IpcChannel.SchedulerSetEnabled, id, enabled),
+    remove: (id) => ipcRenderer.invoke(IpcChannel.SchedulerRemove, id),
+    onTaskFired: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, task: ScheduledTask): void =>
+        callback(task)
+      ipcRenderer.on(IpcChannel.SchedulerTaskFired, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.SchedulerTaskFired, listener)
       }
     }
   }

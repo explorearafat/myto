@@ -7,6 +7,7 @@ import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
 import { useAppStore } from '@renderer/store/useAppStore'
 import { useSessionStore } from '@renderer/store/useSessionStore'
 import { useProjectStore } from '@renderer/store/useProjectStore'
+import { enqueueScheduledTask } from '@renderer/lib/scheduler-runner'
 
 export default function App() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
@@ -36,7 +37,18 @@ export default function App() {
     const dispose = window.sylor?.workspace?.onChanged?.((info) => {
       setWorkspace(info)
     })
-    return () => dispose?.()
+
+    // A scheduled task came due (main-process scheduler): run it in a fresh chat.
+    // The runner idle-gates and serializes fires, and routes through the normal
+    // send path so a scheduled run still pauses at sensitive tools for approval.
+    const disposeScheduler = window.sylor?.scheduler?.onTaskFired?.((task) => {
+      enqueueScheduledTask(task)
+    })
+
+    return () => {
+      dispose?.()
+      disposeScheduler?.()
+    }
   }, [loadSettings, initWorkspace, setWorkspace, boot, refreshProjects])
 
   return (

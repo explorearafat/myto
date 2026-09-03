@@ -23,7 +23,7 @@ interface WebviewHTMLAttributes<T> extends HTMLAttributes<T> {
   useragent?: string
 }
 
-/** The subset of Electron's WebviewTag DOM API the panel/Sylorium call imperatively. */
+/** The subset of Electron's WebviewTag DOM API the preview panel calls imperatively. */
 export interface WebviewElement extends HTMLElement {
   reload(): void
   reloadIgnoringCache(): void
@@ -35,6 +35,12 @@ export interface WebviewElement extends HTMLElement {
   goForward(): void
   canGoBack(): boolean
   canGoForward(): boolean
+  /**
+   * True while the guest is still loading. Read locally by the host (no round-trip
+   * into the guest page), so the inspector polls this instead of asking the
+   * page for `document.readyState` when it waits for an action to settle.
+   */
+  isLoading(): boolean
   /** Run JS in the guest and resolve with its result — the DOM-perception path. */
   executeJavaScript(code: string, userGesture?: boolean): Promise<unknown>
   /**

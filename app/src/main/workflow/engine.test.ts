@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -8,11 +8,15 @@ import type {
   CompletionChunk,
   IntentAnalysis,
   McpToolInfo,
+  PreviewInspectResponse,
   SkillInfo,
   WorkflowEvent,
   WorkflowRunRequest
 } from '@shared/types'
 import { DEFAULT_PROVIDER_SETTINGS } from '@shared/defaults'
+import { setPreviewInspectTransport, type PreviewInspectPayload } from '@main/preview/inspect'
+import { setBrowserTargets } from '@main/browser/runner'
+import type { BrowserTarget } from '@main/browser/target'
 
 // ---- Mocks for the engine's collaborators -----------------------------------
 
@@ -43,11 +47,21 @@ vi.mock('@main/settings', () => ({
 
 const listFiles = vi.fn<() => string[]>(() => ['package.json', 'src/index.ts'])
 const buildOverview = vi.fn<() => string>(() => 'PROJECT OVERVIEW')
+// Pass-through spy for the run-root pin: records the root it was handed and still
+// runs the wrapped body, so a run given `request.root` behaves normally while the
+// test can assert the whole run was confined to that folder (Problem 2).
+const runWithRoot = vi.fn((_root: string, fn: () => unknown) => fn())
 vi.mock('@main/context/manager', () => ({
   contextManager: {
     listFiles: () => listFiles(),
     buildOverview: () => buildOverview(),
-    getRoot: () => '/test'
+    getRoot: () => '/test',
+    runWithRoot: (root: string, fn: () => unknown) => runWithRoot(root, fn),
+    fileStamp: () => null,
+    noteRead: () => {},
+    noteWrite: () => {},
+    indexSummaryFor: () => undefined,
+    flushIndex: () => {}
   }
 }))
 
@@ -73,9 +87,9 @@ const writeProjectFile = vi.fn<(path: string, content: string) => void>((path, c
   mkdirSync(dirname(abs), { recursive: true })
   writeFileSync(abs, content)
 })
-const findFiles = vi.fn<(glob: string, path: string) => { output: string; truncated: boolean; summary: string }>(
-  () => ({ output: 'src/a.ts\nsrc/b.ts', truncated: false, summary: '2 files' })
-)
+const findFiles = vi.fn<
+  (glob: string, path: string) => { output: string; truncated: boolean; summary: string }
+>(() => ({ output: 'src/a.ts\nsrc/b.ts', truncated: false, summary: '2 files' }))
 // Sandbox reader used by detectVerifyCommand (package.json), readPlanMd (plan.md),
 // and buildRepoInstructionsPreamble (.sylor/SYLOR.md et al.). Default: throw, i.e.
 // "no such file" — every engine call site catches, so the baseline behaves as if
@@ -91,25 +105,83 @@ vi.mock('@main/fs/operations', () => ({
   readProjectFile: (path: string) => readProjectFile(path)
 }))
 
+/**
+ * The paths the AGENT wrote, in order. A work turn also seeds the project-memory
+ * documents under `.sylor/` (an engine-owned infrastructure write, and here every
+ * doc reads as absent because `readProjectFile` throws by default), so those are
+ * filtered out — these tests are about what the model's actions put on disk.
+ */
+const agentWrites = (): string[] =>
+  writeProjectFile.mock.calls.map((c) => c[0]).filter((p) => !p.startsWith('.sylor/'))
+
 // Web fetch — mocked so engine tests never touch the network. `fetchUrl` is a
 // controllable spy: an approved web_fetch resolves deterministically to this
 // outcome. Reset in beforeEach.
-const fetchUrl = vi.fn<(url: string, signal?: AbortSignal) => Promise<{
-  ok: boolean
-  output: string
-  truncated: boolean
-  error?: string
-}>>(async (url) => ({ ok: true, output: `URL: ${url}\n\nfetched body`, truncated: false }))
+const fetchUrl = vi.fn<
+  (
+    url: string,
+    signal?: AbortSignal
+  ) => Promise<{
+    ok: boolean
+    output: string
+    truncated: boolean
+    error?: string
+  }>
+>(async (url) => ({ ok: true, output: `URL: ${url}\n\nfetched body`, truncated: false }))
 vi.mock('@main/web/fetch', () => ({
   fetchUrl: (url: string, signal?: AbortSignal) => fetchUrl(url, signal)
 }))
+
+// Preview inspect — the real (electron-free) `preview/inspect` seam is used; a
+// test installs this fake transport via setPreviewInspectTransport so the whole
+// `preview_inspect` path runs headlessly, with no window or `<webview>`. By
+// default it returns a screenshot whose `media` bytes must ride the vision path
+// (step 4h). Wired per preview test and torn down in afterEach (see below).
+const previewInspect = vi.fn<(payload: PreviewInspectPayload) => Promise<PreviewInspectResponse>>(
+  async (payload) => ({
+    requestId: '',
+    ok: true,
+    output: `preview ${payload.action} ok`,
+    truncated: false,
+    summary: payload.action,
+    media: { kind: 'image', mediaType: 'image/png', dataBase64: 'AAAA' }
+  })
+)
 
 afterAll(() => {
   rmSync(fsRoot, { recursive: true, force: true })
 })
 
+/**
+ * A `BrowserTarget` with no Electron behind it, installed via `setBrowserTargets`.
+ * Its `executeJavaScript` ignores the injected scan script and just answers with a
+ * ready-made snapshot — the point of these tests is the engine's gate and
+ * feed-back loop, not the in-page scan (which `browser/perception.test.ts` covers
+ * against the real expression).
+ */
+function fakeTarget(url: string, text: string): BrowserTarget {
+  return {
+    loadURL: async () => {},
+    getURL: () => url,
+    getTitle: () => 'Fake page',
+    isLoading: () => false,
+    executeJavaScript: async () => ({
+      url,
+      title: 'Fake page',
+      // Padded past perception's signal threshold so the DOM tier is accepted.
+      text: `${text}\n${'the page has readable body text here. '.repeat(2)}`,
+      elements: []
+    }),
+    capturePage: async () => ({ toDataURL: () => 'data:image/png;base64,AAAA', isEmpty: () => false })
+  }
+}
+
 const runCommand = vi.fn<
-  (command: string, onData: (d: string) => void, signal?: AbortSignal) => Promise<{
+  (
+    command: string,
+    onData: (d: string) => void,
+    signal?: AbortSignal
+  ) => Promise<{
     exitCode: number | null
     output: string
     truncated: boolean
@@ -184,8 +256,7 @@ vi.mock('@main/db/projects', () => ({
     sessionCount: 0
   }),
   listProjectKnowledge: () => [],
-  appendProjectMemory: (id: string, note: string, now: number) =>
-    appendProjectMemory(id, note, now)
+  appendProjectMemory: (id: string, note: string, now: number) => appendProjectMemory(id, note, now)
 }))
 
 const {
@@ -203,10 +274,7 @@ const {
 const userTurn: ChatMessage[] = [{ role: 'user', content: 'Explain the project structure' }]
 
 /** Build a run request with a default permission mode. */
-function req(
-  runId: string,
-  overrides: Partial<WorkflowRunRequest> = {}
-): WorkflowRunRequest {
+function req(runId: string, overrides: Partial<WorkflowRunRequest> = {}): WorkflowRunRequest {
   return { runId, messages: userTurn, permissionMode: 'ask', ...overrides }
 }
 
@@ -254,13 +322,13 @@ describe('capWords (handoff cap)', () => {
     expect(out.startsWith('w0 w1 w2 w3 w4 w5 w6 w7 w8 w9')).toBe(true)
     expect(out).toContain('truncated at 10 words')
     // The prose portion carries exactly the budgeted number of words.
-    expect(out.split(/\s+/).slice(0, 10)).toEqual(
-      Array.from({ length: 10 }, (_, i) => `w${i}`)
-    )
+    expect(out.split(/\s+/).slice(0, 10)).toEqual(Array.from({ length: 10 }, (_, i) => `w${i}`))
   })
 
   it('counts words, not characters, so a budget of 150 keeps long-but-few words', () => {
-    const fifteenLongWords = Array.from({ length: 15 }, () => 'antidisestablishmentarianism').join(' ')
+    const fifteenLongWords = Array.from({ length: 15 }, () => 'antidisestablishmentarianism').join(
+      ' '
+    )
     expect(capWords(fifteenLongWords, 150)).toBe(fifteenLongWords)
   })
 
@@ -327,10 +395,14 @@ describe('compactHistory (mid-run context compaction, §17)', () => {
   it('folds the old middle, keeping the pinned prologue and the most recent turns', () => {
     const head = [m('system', 'SYSTEM PROMPT'), m('user', 'the original request')]
     const appended = [
-      wrote('a.ts'), m('user', 'a.ts applied'),
-      wrote('b.ts'), m('user', 'b.ts applied'),
-      ran('npm test'), m('user', '1 passed'),
-      wrote('c.ts'), m('user', 'c.ts applied') // the latest step
+      wrote('a.ts'),
+      m('user', 'a.ts applied'),
+      wrote('b.ts'),
+      m('user', 'b.ts applied'),
+      ran('npm test'),
+      m('user', '1 passed'),
+      wrote('c.ts'),
+      m('user', 'c.ts applied') // the latest step
     ]
     const msgs = [...head, ...appended]
     // Tiny budgets force a fold and keep only the last pair verbatim.
@@ -352,10 +424,14 @@ describe('compactHistory (mid-run context compaction, §17)', () => {
   it('names the real files and commands from the folded turns in the note', () => {
     const head = [m('system', 'S'), m('user', 'req')]
     const appended = [
-      wrote('src/a.ts'), m('user', 'ok'),
-      ran('npm run build'), m('user', 'ok'),
-      wrote('src/b.ts'), m('user', 'ok'),
-      wrote('src/z.ts'), m('user', 'ok') // last pair kept, not summarized
+      wrote('src/a.ts'),
+      m('user', 'ok'),
+      ran('npm run build'),
+      m('user', 'ok'),
+      wrote('src/b.ts'),
+      m('user', 'ok'),
+      wrote('src/z.ts'),
+      m('user', 'ok') // last pair kept, not summarized
     ]
     const out = compactHistory([...head, ...appended], head.length, 150, 10)
     const note = out.find((x) => x.content.startsWith('[Context note'))!.content
@@ -398,9 +474,12 @@ describe('compactHistoryWithModel (model-written compaction note)', () => {
   const foldingHistory = (): ChatMessage[] => {
     const head = [m('system', 'SYSTEM'), m('user', 'the original request')]
     const appended = [
-      wrote('src/a.ts'), m('user', 'a applied'),
-      wrote('src/b.ts'), m('user', 'b applied'),
-      wrote('src/z.ts'), m('user', 'z applied') // last pair kept verbatim
+      wrote('src/a.ts'),
+      m('user', 'a applied'),
+      wrote('src/b.ts'),
+      m('user', 'b applied'),
+      wrote('src/z.ts'),
+      m('user', 'z applied') // last pair kept verbatim
     ]
     return [...head, ...appended]
   }
@@ -457,6 +536,7 @@ describe('runWorkflow', () => {
     streamCompletion.mockClear()
     listFiles.mockClear()
     buildOverview.mockClear()
+    runWithRoot.mockClear()
     classifyIntent.mockClear()
     proposeWrite.mockClear()
     writeProjectFile.mockClear()
@@ -498,6 +578,30 @@ describe('runWorkflow', () => {
       .join('')
     expect(text).toBe('Hello world')
     expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('pins the whole run to request.root when the client passes one (Problem 2)', async () => {
+    classifyIntent.mockResolvedValue({ kind: 'chat', summary: 'chat', needsContext: false })
+    streamCompletion.mockResolvedValue(undefined)
+
+    const { events, emit } = collector()
+    await runWorkflow(req('r-pin', { root: '/pinned' }), emit, noTerminal)
+
+    // The run body is wrapped in contextManager.runWithRoot(root, …) so every
+    // read/write/command resolves against THIS chat's folder even if the user opens
+    // a different conversation — switching the global root — mid-run.
+    expect(runWithRoot).toHaveBeenCalledWith('/pinned', expect.any(Function))
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('does not wrap the run when no root is provided (global root, as before)', async () => {
+    classifyIntent.mockResolvedValue({ kind: 'chat', summary: 'chat', needsContext: false })
+    streamCompletion.mockResolvedValue(undefined)
+
+    const { emit } = collector()
+    await runWorkflow(req('r-nopin'), emit, noTerminal)
+
+    expect(runWithRoot).not.toHaveBeenCalled()
   })
 
   it('skips scanning/reading when the intent needs no context', async () => {
@@ -559,9 +663,9 @@ describe('runWorkflow', () => {
     expect(outbound[0].content).toContain('conversational')
   })
 
-  it('cowork mode is a pure chat turn: no intent classify, no scan, chat-only prompt', async () => {
+  it('cowork mode is a chat turn with a browser: no intent classify, no scan, browse-only prompt', async () => {
     // Cowork bypasses the whole agent pipeline — it never classifies intent or
-    // scans the project, and its system prompt teaches no tool protocol.
+    // scans the project — and its system prompt teaches exactly one tool: browse.
     streamCompletion.mockImplementation(emitsText('Here is how you do it.'))
 
     const { events, emit } = collector()
@@ -575,14 +679,15 @@ describe('runWorkflow', () => {
     expect(s).not.toContain('scanning')
     expect(s).not.toContain('reading')
 
-    // Exactly one completion, driven by the chat-only system prompt.
+    // Exactly one completion, driven by the chat-plus-browser system prompt.
     expect(streamCompletion).toHaveBeenCalledOnce()
     const outbound = streamCompletion.mock.calls[0][1] as ChatMessage[]
     expect(outbound[0].role).toBe('system')
     expect(outbound[0].content).toContain('Cowork')
-    // The tool protocol is never taught in Cowork mode.
-    expect(outbound[0].content).not.toContain('sylor-tool')
+    // The browser is taught; nothing that touches files or the terminal is.
+    expect(outbound[0].content).toContain('"tool": "browse"')
     expect(outbound[0].content).not.toContain('write_file')
+    expect(outbound[0].content).not.toContain('run_command')
 
     // Prose streamed through and the turn ended cleanly.
     const text = events
@@ -707,6 +812,10 @@ const USE_SKILL_BLOCK = '```sylor-tool\n{ "tool": "use_skill", "name": "pdf-tool
 const FIND_BLOCK = '```sylor-tool\n{ "tool": "find_files", "glob": "**/*.ts" }\n```\n'
 const WEB_FETCH_BLOCK =
   '```sylor-tool\n{ "tool": "web_fetch", "url": "https://example.com/doc" }\n```\n'
+const PREVIEW_SCREENSHOT_BLOCK =
+  '```sylor-tool\n{ "tool": "preview_inspect", "action": "screenshot" }\n```\n'
+const PREVIEW_INSPECT_BLOCK =
+  '```sylor-tool\n{ "tool": "preview_inspect", "action": "inspect", "selector": ".cta", "styles": ["color"] }\n```\n'
 
 /** A write_file block for an arbitrary path/content (for multi-block completions). */
 function writeBlock(path: string, content: string): string {
@@ -722,6 +831,19 @@ describe('runWorkflow tool execution', () => {
     runCommand.mockClear()
     findFiles.mockClear()
     fetchUrl.mockClear()
+    // Preview transport starts unwired (as if no preview pane is open); a preview
+    // test opts in with setPreviewInspectTransport(previewInspect). Re-establish
+    // the default screenshot reply since mockReset() strips implementations.
+    previewInspect.mockReset()
+    previewInspect.mockImplementation(async (payload) => ({
+      requestId: '',
+      ok: true,
+      output: `preview ${payload.action} ok`,
+      truncated: false,
+      summary: payload.action,
+      media: { kind: 'image', mediaType: 'image/png', dataBase64: 'AAAA' }
+    }))
+    setPreviewInspectTransport(null)
     // Re-establish the "no such file" default so a test that made a repo-instruction
     // file exist doesn't leak into the next.
     readProjectFile.mockReset()
@@ -736,6 +858,15 @@ describe('runWorkflow tool execution', () => {
     projectMemory = ''
     projectInstructions = ''
     classifyIntent.mockResolvedValue({ kind: 'edit', summary: 'edit', needsContext: false })
+  })
+
+  // A preview test wires the module-level transport; clear it so it never leaks
+  // into a later test (which would then behave as if a preview pane were open).
+  // Same for the browser targets: unwired means "no browser here", which is what
+  // every non-browse test must see.
+  afterEach(() => {
+    setPreviewInspectTransport(null)
+    setBrowserTargets(null)
   })
 
   it('auto-approves a write in auto-edit mode and applies it', async () => {
@@ -770,7 +901,7 @@ describe('runWorkflow tool execution', () => {
     const { emit } = collector()
     await runWorkflow(req('tc3', { permissionMode: 'auto-edit' }), emit, noTerminal)
 
-    expect(writeProjectFile).toHaveBeenCalledOnce()
+    expect(agentWrites()).toHaveLength(1)
     expect(runCommand).not.toHaveBeenCalled()
   })
 
@@ -798,7 +929,7 @@ describe('runWorkflow tool execution', () => {
     await runWorkflow(req('one1', { permissionMode: 'auto-edit' }), emit, noTerminal)
 
     // Exactly one file was written, and it was the first block.
-    expect(writeProjectFile).toHaveBeenCalledOnce()
+    expect(agentWrites()).toEqual(['a.ts'])
     expect(writeProjectFile).toHaveBeenCalledWith('a.ts', 'a')
     // Prose after the first block never reached the user.
     const prose = events
@@ -827,7 +958,7 @@ describe('runWorkflow tool execution', () => {
     const { emit } = collector()
     await runWorkflow(req('one2', { permissionMode: 'auto-edit' }), emit, noTerminal)
 
-    expect(writeProjectFile.mock.calls.map((c) => c[0])).toEqual(['a.ts', 'b.ts', 'c.ts'])
+    expect(agentWrites()).toEqual(['a.ts', 'b.ts', 'c.ts'])
   })
 
   it('records a remember block to the active project memory (no approval card)', async () => {
@@ -929,7 +1060,7 @@ describe('runWorkflow tool execution', () => {
     resolveToolDecision('t4', request.proposal.id, 'reject')
     await p
 
-    expect(writeProjectFile).not.toHaveBeenCalled()
+    expect(agentWrites()).toEqual([])
     const result = firstToolResult(events)
     expect(result.result).toMatchObject({ kind: 'write_file', ok: false })
   })
@@ -944,7 +1075,7 @@ describe('runWorkflow tool execution', () => {
     cancelWorkflow('t5')
     // The run unwinds without hanging and without a `done` event.
     await expect(p).resolves.toBeUndefined()
-    expect(writeProjectFile).not.toHaveBeenCalled()
+    expect(agentWrites()).toEqual([])
   })
 
   it('feeds a tool result back and continues on a second completion (agent loop)', async () => {
@@ -990,29 +1121,75 @@ describe('runWorkflow tool execution', () => {
     streamCompletion.mockImplementation(emitsText('Writing the plan.\n' + WRITE_BLOCK))
 
     const { events, emit } = collector()
-    await runWorkflow(req('pf1', { permissionMode: 'auto-edit', planFirst: true }), emit, noTerminal)
+    await runWorkflow(
+      req('pf1', { permissionMode: 'auto-edit', planFirst: true }),
+      emit,
+      noTerminal
+    )
 
     expect(streamCompletion).toHaveBeenCalledTimes(1)
-    expect(writeProjectFile).toHaveBeenCalledOnce()
+    expect(agentWrites()).toHaveLength(1)
     expect(events.at(-1)?.type).toBe('done')
   })
 
-  it('cowork mode never executes a tool block the model emits', async () => {
-    // Even if the model emits a sylor-tool block in Cowork mode, the engine must
-    // not execute it — no write, no approval card. The parser strips it so it
-    // also never leaks into prose.
-    streamCompletion.mockImplementation(emitsText('Sure, here you go.\n' + WRITE_BLOCK))
+  it('cowork mode refuses a file write and tells the model why, without touching disk', async () => {
+    // Cowork's allowlist is `['browse']`. A write_file block must not reach disk —
+    // but it is NOT silently dropped either: the refusal is surfaced as a
+    // request+result pair and fed back, so the model learns the mode's limits
+    // instead of re-emitting the same block. auto-edit doesn't change that: the
+    // mode gate is checked before the permission decision is honoured.
+    streamCompletion.mockImplementationOnce(emitsText('Sure, here you go.\n' + WRITE_BLOCK))
+    streamCompletion.mockImplementation(emitsText('I cannot edit files in Cowork.'))
 
     const { events, emit } = collector()
-    await runWorkflow(req('rcw2', { mode: 'cowork', permissionMode: 'auto-edit' }), emit, noTerminal)
+    await runWorkflow(
+      req('rcw2', { mode: 'cowork', permissionMode: 'auto-edit' }),
+      emit,
+      noTerminal
+    )
 
     expect(writeProjectFile).not.toHaveBeenCalled()
-    expect(events.some((e) => e.type === 'tool-request')).toBe(false)
+    const results = events.filter((e) => e.type === 'tool-result') as {
+      result: { kind: string; ok?: boolean; error?: string }
+    }[]
+    expect(results).toHaveLength(1)
+    expect(results[0].result.kind).toBe('write_file')
+    expect(results[0].result.ok).toBe(false)
+    expect(results[0].result.error).toContain('Not available in this mode')
+    // The block itself never leaks into the prose.
     const prose = events
       .filter((e) => e.type === 'delta')
       .map((e) => (e as { text: string }).text)
       .join('')
     expect(prose).not.toContain('sylor-tool')
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('cowork mode DOES browse: the one tool the mode allows runs and feeds the page back', async () => {
+    // The point of the mode gate is that it is a whitelist, not a ban on tools:
+    // a browse step is proposed, executed against the injected target, and its
+    // page brief is fed back so the model can answer from what it saw.
+    setBrowserTargets({ app: () => fakeTarget('https://example.com', 'Example — hello') })
+    streamCompletion.mockImplementationOnce(
+      emitsText('Let me look.\n```sylor-tool\n{ "tool": "browse", "action": "read" }\n```')
+    )
+    streamCompletion.mockImplementation(emitsText('The page says hello.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('rcw3', { mode: 'cowork' }), emit, noTerminal)
+
+    const results = events.filter((e) => e.type === 'tool-result') as {
+      result: { kind: string; ok?: boolean; output?: string }
+    }[]
+    expect(results).toHaveLength(1)
+    expect(results[0].result.kind).toBe('browse')
+    expect(results[0].result.ok).toBe(true)
+    expect(results[0].result.output).toContain('hello')
+    // A read is auto-approved by the default browsing policy, so no card waited.
+    const request = events.find((e) => e.type === 'tool-request') as { auto: boolean }
+    expect(request.auto).toBe(true)
+    // The result went back to the model: a second completion answered from it.
+    expect(streamCompletion).toHaveBeenCalledTimes(2)
     expect(events.at(-1)?.type).toBe('done')
   })
 
@@ -1134,6 +1311,99 @@ describe('runWorkflow tool execution', () => {
     expect(fetchUrl).toHaveBeenCalledWith('https://example.com/doc', expect.anything())
   })
 
+  it('auto-approves a preview_inspect screenshot and attaches the render to the fed-back turn', async () => {
+    // preview_inspect verifies the live preview and is modelled like a read: it
+    // auto-approves in EVERY mode (even ask) — a verification pass never prompts.
+    // A "screenshot" comes back with `media` bytes that must ride the vision path
+    // (step 4h), so the model literally sees the render it's checking.
+    // A verification turn is investigative, not a build, so classify it as a
+    // question — that disarms the edit-only "start the build" nudge and lets the
+    // turn end naturally once the check is fed back.
+    classifyIntent.mockResolvedValue({ kind: 'question', summary: 'verify', needsContext: false })
+    setPreviewInspectTransport(previewInspect)
+    streamCompletion.mockImplementationOnce(
+      emitsText('Let me look at the page.\n' + PREVIEW_SCREENSHOT_BLOCK)
+    )
+    streamCompletion.mockImplementation(emitsText('The layout looks correct.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('prev1', { permissionMode: 'ask' }), emit, noTerminal)
+
+    const request = firstToolRequest(events)
+    expect(request.auto).toBe(true) // verification never asks
+    expect(request.proposal).toMatchObject({ kind: 'preview_inspect', action: 'screenshot' })
+    expect(previewInspect).toHaveBeenCalledWith(expect.objectContaining({ action: 'screenshot' }))
+
+    const result = firstToolResult(events)
+    expect(result.result).toMatchObject({ kind: 'preview_inspect', ok: true, action: 'screenshot' })
+
+    // The screenshot's bytes are attached to the synthesized feedback turn as a
+    // real image, so a vision model SEES the render (not just a text summary).
+    const secondOutbound = streamCompletion.mock.calls[1][1] as ChatMessage[]
+    const fedBack = secondOutbound.find((m) => m.role === 'user' && !!m.images)
+    expect(fedBack?.images).toEqual([{ mediaType: 'image/png', dataBase64: 'AAAA' }])
+    expect(feedbackText()).toContain('preview_inspect screenshot → screenshot')
+    expect(feedbackText()).toContain('the screenshot is attached')
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('passes a preview_inspect inspect selector + styles through to the transport', async () => {
+    // The refinement fields (selector, styles) must survive the parse → proposal →
+    // transport hops so the renderer inspects the right element with the right keys.
+    classifyIntent.mockResolvedValue({ kind: 'question', summary: 'verify', needsContext: false })
+    setPreviewInspectTransport(previewInspect)
+    previewInspect.mockResolvedValue({
+      requestId: '',
+      ok: true,
+      output: 'color: rgb(255, 0, 0)',
+      truncated: false,
+      summary: 'div.cta · 120×40'
+    })
+    streamCompletion.mockImplementationOnce(
+      emitsText('Checking the button.\n' + PREVIEW_INSPECT_BLOCK)
+    )
+    streamCompletion.mockImplementation(emitsText('Confirmed.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('prev2', { permissionMode: 'ask' }), emit, noTerminal)
+
+    expect(previewInspect).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'inspect', selector: '.cta', styles: ['color'] })
+    )
+    const result = firstToolResult(events)
+    expect(result.result).toMatchObject({ kind: 'preview_inspect', ok: true, action: 'inspect' })
+    // No media on an inspect, so no feedback turn ever carries an image.
+    const secondOutbound = streamCompletion.mock.calls[1][1] as ChatMessage[]
+    expect(secondOutbound.find((m) => m.role === 'user' && !!m.images)).toBeUndefined()
+    expect(feedbackText()).toContain('preview_inspect inspect → div.cta · 120×40')
+    expect(feedbackText()).toContain('color: rgb(255, 0, 0)')
+  })
+
+  it('surfaces a no-preview failure as a tool-result and keeps going (never throws)', async () => {
+    // With no transport wired (the preview pane is closed), requestPreviewInspect
+    // resolves an actionable failure instead of throwing — the agent reads a clear
+    // "start the preview first" note and can recover on the next step.
+    // (beforeEach leaves the transport null, so this test wires nothing.)
+    classifyIntent.mockResolvedValue({ kind: 'question', summary: 'verify', needsContext: false })
+    streamCompletion.mockImplementationOnce(emitsText(PREVIEW_SCREENSHOT_BLOCK))
+    streamCompletion.mockImplementation(emitsText("I'll start the preview first."))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('prev3', { permissionMode: 'autonomous' }), emit, noTerminal)
+
+    expect(previewInspect).not.toHaveBeenCalled()
+    const result = firstToolResult(events)
+    expect(result.result).toMatchObject({
+      kind: 'preview_inspect',
+      ok: false,
+      error: 'preview not running'
+    })
+    // The loop continued (a second completion ran) and the failure was fed back.
+    expect(streamCompletion.mock.calls.length).toBeGreaterThan(1)
+    expect(feedbackText()).toContain('preview_inspect screenshot → error')
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
   it('injects .sylor/SYLOR.md repository instructions into the system prompt', async () => {
     // The repo's checked-in guidance (.sylor/SYLOR.md, first slot) must frame the
     // whole run — read once up front and appended to the lead's system prompt.
@@ -1168,7 +1438,9 @@ describe('runWorkflow tool execution', () => {
     const system = (streamCompletion.mock.calls[0][1] as ChatMessage[])[0].content
     // Both distinct files are included, .sylor first.
     expect(system).toContain('## Repository instructions (from .sylor/SYLOR.md)')
-    expect(system.indexOf('Sylor rules win.')).toBeLessThan(system.indexOf('Legacy agents guidance.'))
+    expect(system.indexOf('Sylor rules win.')).toBeLessThan(
+      system.indexOf('Legacy agents guidance.')
+    )
   })
 
   it('adds no repository-instructions section when the repo has none', async () => {
@@ -1425,7 +1697,9 @@ describe('runWorkflow error handling', () => {
     // is fed back, the second completion concludes with no tools, ending the loop.
     streamCompletion.mockImplementation(() => Promise.resolve(undefined))
     streamCompletion.mockImplementationOnce(
-      emitsText('```sylor-tool\n{ "tool": "write_file", "path": "../evil.ts", "content": "x" }\n```\n')
+      emitsText(
+        '```sylor-tool\n{ "tool": "write_file", "path": "../evil.ts", "content": "x" }\n```\n'
+      )
     )
 
     const { events, emit } = collector()

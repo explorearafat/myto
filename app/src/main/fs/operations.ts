@@ -8,7 +8,7 @@ import {
   writeFileSync,
   type Dirent
 } from 'node:fs'
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { contextManager, IGNORED_DIRS } from '../context/manager'
 
 /**
@@ -211,6 +211,76 @@ export function readFileSlice(relPath: string, offset?: number, limit?: number):
   return { output: text || '(empty file)', truncated: truncated || end < lines.length, summary }
 }
 
+/** Human-readable byte size for a caption ('245 KB', '1.4 MB'). */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** Image extensions a vision model can read, mapped to their MIME type. */
+const IMAGE_MEDIA_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp'
+}
+
+/**
+ * Ceiling on an image we'll hand to the model. Anthropic rejects images past ~5 MB,
+ * and sending one would fail the whole turn — so we refuse it here with a message
+ * the model can act on, rather than letting the request blow up downstream.
+ */
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+/** A {@link ReadOutcome} that may carry an attached image for a vision model. */
+export interface MediaOutcome extends ReadOutcome {
+  media?: { kind: 'image'; mediaType: string; dataBase64: string }
+}
+
+/**
+ * If `relPath` names something a model can VIEW rather than read as text, returns
+ * a media outcome; otherwise returns null so the caller falls back to
+ * {@link readFileSlice}. Images (PNG/JPEG/GIF/WebP) come back as base64 bytes
+ * (capped at {@link MAX_IMAGE_BYTES}) plus a text caption. A PDF is recognized but
+ * not rendered — an OpenAI-compatible image channel can't carry one — so it
+ * returns a caption explaining that, with no bytes, instead of failing. Sandbox-
+ * checked; throws the underlying fs error when the file is missing/unreadable.
+ */
+export function readMediaFile(relPath: string): MediaOutcome | null {
+  const ext = extname(relPath).toLowerCase()
+  const mediaType = IMAGE_MEDIA_TYPES[ext]
+  if (mediaType) {
+    const abs = resolveSafe(relPath)
+    const bytes = readFileSync(abs)
+    const name = basename(relPath)
+    if (bytes.byteLength > MAX_IMAGE_BYTES) {
+      return {
+        output: `(${name} is a ${fmtBytes(bytes.byteLength)} image — too large to view; the limit is ${fmtBytes(MAX_IMAGE_BYTES)}. Ask for a smaller copy or a cropped region.)`,
+        truncated: false,
+        summary: 'image too large'
+      }
+    }
+    return {
+      output: `${name} — ${ext.slice(1).toUpperCase()} image, ${fmtBytes(bytes.byteLength)} (shown below).`,
+      truncated: false,
+      summary: `image · ${fmtBytes(bytes.byteLength)}`,
+      media: { kind: 'image', mediaType, dataBase64: bytes.toString('base64') }
+    }
+  }
+  if (ext === '.pdf') {
+    const abs = resolveSafe(relPath)
+    const size = statSync(abs).size
+    return {
+      output: `(${basename(relPath)} is a PDF, ${fmtBytes(size)}. Sylor can view images directly (PNG/JPEG/GIF/WebP) but does not render PDF pages yet — ask the user for the relevant text, or a screenshot/exported image of the page you need.)`,
+      truncated: false,
+      summary: 'pdf (not viewable)'
+    }
+  }
+  return null
+}
+
 /**
  * Lists one directory: subdirectories first (with a trailing `/`), then files
  * with their byte sizes. One level only — the model asks again to go deeper,
@@ -280,12 +350,69 @@ function globToRegExp(pattern: string): { re: RegExp; basenameOnly: boolean } {
 }
 
 /** Compiles `query` as a regex, falling back to a literal match if it won't parse. */
-function toSearchRegExp(query: string): RegExp {
+function toSearchRegExp(query: string, multiline: boolean): RegExp {
+  // `g` is needed to walk every multiline match; `s` lets `.` cross newlines and
+  // `m` anchors ^/$ per line, which is what "match across lines" should mean.
+  const flags = multiline ? 'gms' : ''
   try {
-    return new RegExp(query)
+    return new RegExp(query, flags)
   } catch {
-    return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags)
   }
+}
+
+/** Refinements a caller can layer onto {@link searchProject}. */
+export interface SearchOptions {
+  /** Lines of trailing context per hit (grep -A). */
+  after?: number
+  /** Lines of leading context per hit (grep -B). */
+  before?: number
+  /** Context on BOTH sides (grep -C); fills in before/after when they're unset. */
+  context?: number
+  /** Match a pattern that spans lines (the hit's START line is what's reported). */
+  multiline?: boolean
+  /** `content` (matching lines, default), `files` (paths only), `count` (tallies). */
+  mode?: 'content' | 'files' | 'count'
+}
+
+/**
+ * Finds the 0-based line indices in `lines` that `re` matches. For a per-line
+ * search that's every line the regex tests true against; for a multiline search
+ * the regex is walked over the whole text and each match maps to the line its
+ * start offset falls on (so a match spanning several lines reports one hit, at
+ * its beginning — the same line ripgrep prints for a `-U` match).
+ */
+function matchingLineIndices(text: string, lines: string[], re: RegExp, multiline: boolean): number[] {
+  if (!multiline) {
+    const idxs: number[] = []
+    for (let i = 0; i < lines.length; i++) if (re.test(lines[i])) idxs.push(i)
+    return idxs
+  }
+  // Precompute line-start offsets so a match index maps to a line in O(log n).
+  const starts: number[] = [0]
+  for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1)
+  const lineOf = (offset: number): number => {
+    let lo = 0
+    let hi = starts.length - 1
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1
+      if (starts[mid] <= offset) lo = mid
+      else hi = mid - 1
+    }
+    return lo
+  }
+  const idxs: number[] = []
+  let seen = -1
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    const line = lineOf(m.index)
+    if (line !== seen) {
+      idxs.push(line)
+      seen = line
+    }
+    // A zero-width match would loop forever — nudge lastIndex past it.
+    if (m.index === re.lastIndex) re.lastIndex++
+  }
+  return idxs
 }
 
 /**
@@ -293,14 +420,32 @@ function toSearchRegExp(query: string): RegExp {
  * returning `path:line: text` hits grouped by file. Walks from `relPath` fresh on
  * every call, skipping {@link IGNORED_DIRS} and binaries, bounded by
  * {@link MAX_SEARCH_FILES} files and {@link MAX_SEARCH_MATCHES} hits.
+ *
+ * `opts` layers on ripgrep-style refinements: `before`/`after`/`context` print
+ * surrounding lines (context lines use a `path-line-` separator, matches a
+ * `path:line:` one, and non-adjacent groups are divided by `--`); `multiline`
+ * matches patterns that span lines; and `mode` switches the whole result to a
+ * bare file list (`files`) or per-file match tallies (`count`). With no options
+ * the output is byte-identical to the plain per-line content search.
  */
-export function searchProject(query: string, relPath = '.', glob?: string): ReadOutcome {
+export function searchProject(
+  query: string,
+  relPath = '.',
+  glob?: string,
+  opts: SearchOptions = {}
+): ReadOutcome {
   const root = resolveSafe(relPath || '.')
   const projectRoot = contextManager.getRoot()
-  const re = toSearchRegExp(query)
+  const multiline = opts.multiline === true
+  const re = toSearchRegExp(query, multiline)
   const globMatch = glob ? globToRegExp(glob) : null
+  const mode = opts.mode ?? 'content'
+  const before = Math.max(0, opts.before ?? opts.context ?? 0)
+  const after = Math.max(0, opts.after ?? opts.context ?? 0)
 
   const hits: string[] = []
+  const fileList: string[] = []
+  const counts: Array<{ rel: string; n: number }> = []
   let matchCount = 0
   let fileHitCount = 0
   let scanned = 0
@@ -339,25 +484,91 @@ export function searchProject(query: string, relPath = '.', glob?: string): Read
       if (looksBinary(text)) continue
 
       const lines = toLines(text)
-      let fileMatched = false
-      for (let i = 0; i < lines.length; i++) {
-        if (!re.test(lines[i])) continue
-        fileMatched = true
+      if (multiline) re.lastIndex = 0
+      const matchIdxs = matchingLineIndices(text, lines, re, multiline)
+      if (matchIdxs.length === 0) continue
+      fileHitCount++
+
+      if (mode === 'files') {
+        if (fileList.length >= MAX_FIND_MATCHES) {
+          capped = true
+          return
+        }
+        fileList.push(rel)
+        continue
+      }
+      if (mode === 'count') {
+        matchCount += matchIdxs.length
+        counts.push({ rel, n: matchIdxs.length })
+        continue
+      }
+
+      // content mode — emit the matched lines, with optional surrounding context.
+      const matchSet = new Set(matchIdxs)
+      // Merge each match's [i-before, i+after] window into non-overlapping ranges.
+      const ranges: Array<[number, number]> = []
+      for (const i of matchIdxs) {
+        const lo = Math.max(0, i - before)
+        const hi = Math.min(lines.length - 1, i + after)
+        const last = ranges[ranges.length - 1]
+        if (last && lo <= last[1] + 1) last[1] = Math.max(last[1], hi)
+        else ranges.push([lo, hi])
+      }
+      for (let r = 0; r < ranges.length; r++) {
         if (matchCount >= MAX_SEARCH_MATCHES) {
           capped = true
           break
         }
-        matchCount++
-        const line = lines[i]
-        const shown =
-          line.length > MAX_MATCH_LINE_CHARS ? `${line.slice(0, MAX_MATCH_LINE_CHARS)}…` : line
-        hits.push(`${rel}:${i + 1}: ${shown.trim()}`)
+        if ((before > 0 || after > 0) && (hits.length > 0 || r > 0)) hits.push('--')
+        const [lo, hi] = ranges[r]
+        for (let ln = lo; ln <= hi; ln++) {
+          const isMatch = matchSet.has(ln)
+          if (isMatch) {
+            if (matchCount >= MAX_SEARCH_MATCHES) {
+              capped = true
+              break
+            }
+            matchCount++
+          }
+          const raw = lines[ln]
+          const shown = raw.length > MAX_MATCH_LINE_CHARS ? `${raw.slice(0, MAX_MATCH_LINE_CHARS)}…` : raw
+          // Match lines use `:`; context lines use `-` — grep's convention.
+          hits.push(`${rel}:${ln + 1}${isMatch ? ': ' : '- '}${shown.trim()}`)
+        }
       }
-      if (fileMatched) fileHitCount++
       if (capped) return
     }
   }
   walk(root, 0)
+
+  if (mode === 'files') {
+    fileList.sort()
+    const body =
+      fileList.length > 0
+        ? fileList.join('\n') + (capped ? `\n… (stopped at ${MAX_FIND_MATCHES} files)` : '')
+        : `No files contain ${query}`
+    const { text, truncated } = clip(body)
+    return {
+      output: text,
+      truncated: truncated || capped,
+      summary: fileList.length === 0 ? 'no files' : `${fileList.length} file${fileList.length === 1 ? '' : 's'}`
+    }
+  }
+  if (mode === 'count') {
+    const body =
+      counts.length > 0
+        ? counts.map((c) => `${c.rel}:${c.n}`).join('\n') + (capped ? '\n… (search capped)' : '')
+        : `No matches for ${query}`
+    const { text, truncated } = clip(body)
+    return {
+      output: text,
+      truncated: truncated || capped,
+      summary:
+        matchCount === 0
+          ? 'no matches'
+          : `${matchCount} match${matchCount === 1 ? '' : 'es'} in ${fileHitCount} file${fileHitCount === 1 ? '' : 's'}`
+    }
+  }
 
   const body =
     hits.length > 0

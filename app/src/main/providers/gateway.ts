@@ -31,6 +31,28 @@ function samplingBody(options?: CompletionOptions): Record<string, unknown> {
   if (typeof options.maxTokens === 'number') body.max_tokens = options.maxTokens
   return body
 }
+
+/**
+ * Expands our {@link ChatMessage}[] into the OpenAI chat wire format. A text-only
+ * message passes straight through (`{role, content: string}`); a message carrying
+ * images is rewritten into the multimodal parts array — one `text` part plus an
+ * `image_url` part per image, each a `data:<mime>;base64,<bytes>` URL the gateway
+ * forwards to the model's vision input. A gateway or model without vision ignores
+ * the parts it can't use, and the text caption in `content` still carries meaning.
+ */
+function toOpenAiMessages(messages: ChatMessage[]): unknown[] {
+  return messages.map((m) => {
+    if (!m.images || m.images.length === 0) return { role: m.role, content: m.content }
+    const parts: unknown[] = [{ type: 'text', text: m.content }]
+    for (const img of m.images) {
+      parts.push({
+        type: 'image_url',
+        image_url: { url: `data:${img.mediaType};base64,${img.dataBase64}` }
+      })
+    }
+    return { role: m.role, content: parts }
+  })
+}
 interface GatewayModelsResponse {
   data?: Array<{ id: string }>
 }
@@ -123,7 +145,7 @@ export class GatewayProvider implements Provider {
       method: 'POST',
       headers: this.authHeaders(),
       timeoutMs: 120_000,
-      body: { model: modelId, stream: false, messages, ...samplingBody(options) }
+      body: { model: modelId, stream: false, messages: toOpenAiMessages(messages), ...samplingBody(options) }
     })
     if (data.error?.message) throw new Error(data.error.message)
     return data.choices?.[0]?.message?.content ?? ''
@@ -143,7 +165,7 @@ export class GatewayProvider implements Provider {
       headers: { Accept: 'text/event-stream', ...this.authHeaders() },
       timeoutMs: 120_000,
       signal,
-      body: { model: modelId, stream: true, messages, ...samplingBody(options) }
+      body: { model: modelId, stream: true, messages: toOpenAiMessages(messages), ...samplingBody(options) }
     })
     if (!res.ok) {
       const text = await res.text().catch(() => '')

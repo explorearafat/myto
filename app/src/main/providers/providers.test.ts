@@ -131,6 +131,27 @@ describe('OllamaProvider', () => {
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
     expect(body.options).toEqual({ temperature: 0.7, num_predict: 32_000 })
   })
+
+  it('expands an image attachment into the native images array (base64, no data: prefix)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ message: { content: 'ok' } }))
+    const provider = new OllamaProvider({ baseUrl: 'http://localhost:11434' })
+    await provider.getCompletion('llava', [
+      { role: 'user', content: 'what is this?', images: [{ mediaType: 'image/png', dataBase64: 'AAAA' }] }
+    ])
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.messages[0]).toEqual({ role: 'user', content: 'what is this?', images: ['AAAA'] })
+  })
+
+  it('leaves a text-only message as a plain string with no images key', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ message: { content: 'ok' } }))
+    const provider = new OllamaProvider({ baseUrl: 'http://localhost:11434' })
+    await provider.getCompletion('llama3.1:8b', [{ role: 'user', content: 'hi' }])
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.messages[0]).toEqual({ role: 'user', content: 'hi' })
+    expect('images' in body.messages[0]).toBe(false)
+  })
 })
 
 describe('GatewayProvider', () => {
@@ -345,5 +366,31 @@ describe('GatewayProvider', () => {
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
     expect(body.temperature).toBe(0.3)
     expect(body.reasoning_effort).toBeUndefined()
+  })
+
+  it('expands an image attachment into OpenAI image_url content parts', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'ok' } }] }))
+    const provider = new GatewayProvider(baseConfig)
+    await provider.getCompletion('gpt-4o', [
+      { role: 'user', content: 'describe', images: [{ mediaType: 'image/jpeg', dataBase64: 'Zm9v' }] }
+    ])
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.messages[0]).toEqual({
+      role: 'user',
+      content: [
+        { type: 'text', text: 'describe' },
+        { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,Zm9v' } }
+      ]
+    })
+  })
+
+  it('leaves a text-only message as a plain string content', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'ok' } }] }))
+    const provider = new GatewayProvider(baseConfig)
+    await provider.getCompletion('gpt-4o', [{ role: 'user', content: 'hi' }])
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.messages[0]).toEqual({ role: 'user', content: 'hi' })
   })
 })

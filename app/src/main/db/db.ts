@@ -38,7 +38,7 @@ export function __setDbPathForTest(path: string): void {
 }
 
 /** Current schema version; bump + extend {@link migrate} for additive changes. */
-export const SCHEMA_VERSION = 6
+export const SCHEMA_VERSION = 8
 
 /**
  * Open the database once (lazily), applying pragmas and running migrations. All
@@ -224,6 +224,42 @@ function migrate(handle: DatabaseSync): void {
     // all prose then all cards. Additive + nullable: pre-existing ops default to
     // NULL and fall back to end-of-message ordering in the renderer.
     handle.exec(`ALTER TABLE tool_ops ADD COLUMN content_offset INTEGER`)
+  }
+
+  if (current < 7) {
+    // Durable scheduled tasks (Phase 4). A stored prompt the scheduler enqueues on
+    // a cron cadence. Only tasks the user marks *durable* land here; session-only
+    // tasks live in memory and vanish on quit. This is a standalone table with no
+    // foreign keys — a task isn't tied to any one session (it opens a fresh chat
+    // each time it fires). `enabled`/`durable` are 0/1 ints; `mode` and the two
+    // timestamps are nullable. Rows are keyed by the scheduler's own `sched-*` id.
+    handle.exec(`
+      CREATE TABLE IF NOT EXISTS scheduled_tasks (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        prompt      TEXT NOT NULL,
+        cron        TEXT NOT NULL,
+        enabled     INTEGER NOT NULL DEFAULT 1,
+        durable     INTEGER NOT NULL DEFAULT 1,
+        mode        TEXT,
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        last_run_at INTEGER,
+        next_run_at INTEGER
+      );
+    `)
+  }
+
+  if (current < 8) {
+    // Activity analytics (the zero-state dashboard). Two additive, nullable
+    // columns on messages: `created_at` is the wall-clock time the turn was first
+    // written (the table only had a per-session `seq`, which says nothing about
+    // *when*), and `model` is the display label of the model that produced an
+    // assistant turn. Both nullable so every pre-existing row upgrades untouched:
+    // the stats layer dates undated messages from their session's created_at and
+    // leaves model-less turns out of the favourite-model tally.
+    handle.exec(`ALTER TABLE messages ADD COLUMN created_at INTEGER`)
+    handle.exec(`ALTER TABLE messages ADD COLUMN model TEXT`)
   }
 
   handle.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)

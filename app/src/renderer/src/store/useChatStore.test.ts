@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useChatStore } from './useChatStore'
-import type { PersistedSession, WorkflowEvent } from '@shared/types'
+import { useAppStore } from './useAppStore'
+import type { PersistedSession, TaskNode, TaskState, WorkflowEvent } from '@shared/types'
 
 /** A freshly-loaded, empty session bound to `id` (sets the store's sessionId). */
 function loadedSession(id: string): PersistedSession {
@@ -101,9 +102,7 @@ describe('useChatStore assistant persistence', () => {
   it('persists the assistant row up-front, not only on done', () => {
     useChatStore.getState().applyLoaded(loadedSession('sess-persist-1'))
 
-    const appendMessage = window.sylor.sessions.appendMessage as unknown as ReturnType<
-      typeof vi.fn
-    >
+    const appendMessage = window.sylor.sessions.appendMessage as unknown as ReturnType<typeof vi.fn>
     appendMessage.mockClear()
 
     useChatStore.getState().send('hi')
@@ -140,9 +139,7 @@ describe('useChatStore assistant persistence', () => {
       capturedOnEvent!({ type: 'delta', runId: 'run-x', text: 'streamed answer' })
       vi.advanceTimersByTime(DELTA_FLUSH_INTERVAL_MS)
 
-      const call = appendMessage.mock.calls.find(
-        (c) => (c[1] as { id: string }).id === assistantId
-      )
+      const call = appendMessage.mock.calls.find((c) => (c[1] as { id: string }).id === assistantId)
       expect(call).toBeDefined()
       expect((call?.[1] as { content: string }).content).toBe('streamed answer')
     } finally {
@@ -248,3 +245,201 @@ describe('useChatStore background run visibility', () => {
 
 /** Comfortably exceeds useChatStore's DELTA_FLUSH_MS (66) so the flush timer fires. */
 const DELTA_FLUSH_INTERVAL_MS = 200
+
+/**
+ * Folder pinning (Problem 2, run side). `loadInto` re-points the active root to
+ * the open chat's folder before a send is possible; `startRun` snapshots that
+ * root into the run request so the engine can wrap the whole run in
+ * `runWithRoot(root)` — keeping reads/writes on this chat's folder even if the
+ * user opens a different conversation (and root) while the run is in flight.
+ */
+describe('useChatStore run payload — folder pinning (Problem 2)', () => {
+  /** Capture the WorkflowRunRequest the store hands the main process on the next run. */
+  function captureRunInput(): () => Record<string, unknown> | null {
+    let input: Record<string, unknown> | null = null
+    const runMock = window.sylor.workflow.run as unknown as ReturnType<typeof vi.fn>
+    runMock.mockImplementationOnce((i: unknown) => {
+      input = i as Record<string, unknown>
+      return () => {}
+    })
+    return () => input
+  }
+
+  afterEach(() => {
+    // Don't leak the active folder into unrelated tests in this file.
+    useAppStore.setState({ workspaceRoot: null })
+  })
+
+  it('pins the run to the active folder (root travels in the payload)', () => {
+    useAppStore.setState({ workspaceRoot: '/training' })
+    const input = captureRunInput()
+
+    useChatStore.getState().applyLoaded(loadedSession('sess-root-1'))
+    useChatStore.getState().send('build a sign up page')
+
+    expect(input()?.root).toBe('/training')
+  })
+
+  it('omits root when no folder is active (Cowork / unset)', () => {
+    useAppStore.setState({ workspaceRoot: null })
+    const input = captureRunInput()
+
+    useChatStore.getState().applyLoaded(loadedSession('sess-root-2'))
+    useChatStore.getState().send('just chatting')
+
+    const payload = input()
+    expect(payload && 'root' in payload).toBe(false)
+  })
+})
+
+/**
+ * §33 — the status row has to be able to say where the WHOLE build stands: which
+ * phase of how many, how far through that phase's tasks, whether the project's
+ * checks passed, and what the preview is really showing.
+ *
+ * The engine sends `progress` only when it changes, so the store keeps it sticky
+ * in a field of its own. That placement is the point of these tests: `status` is
+ * replaced wholesale several times a second (every status, tool-request and
+ * agent-start), so anything living inside it would be wiped within a step or two.
+ */
+describe('useChatStore build progress (§33)', () => {
+  /** Start a run in `sessionId` and hand back its event sink. */
+  function startRunIn(sessionId: string): (e: WorkflowEvent) => void {
+    let captured: ((e: WorkflowEvent) => void) | null = null
+    const runMock = window.sylor.workflow.run as unknown as ReturnType<typeof vi.fn>
+    runMock.mockImplementationOnce((_input: unknown, cb: unknown) => {
+      captured = cb as (e: WorkflowEvent) => void
+      return () => {}
+    })
+    useChatStore.getState().applyLoaded(loadedSession(sessionId))
+    useChatStore.getState().send('build the dashboard')
+    return captured!
+  }
+
+  const node = (id: string, state: TaskState): TaskNode => ({
+    id,
+    role: 'builder',
+    description: `task ${id}`,
+    dependsOn: [],
+    state,
+    attempts: 0
+  })
+
+  it('merges each progress over the last, so the checks never erase the phase', () => {
+    const emit = startRunIn('sess-prog-1')
+    const runId = useChatStore.getState().runId!
+
+    emit({
+      type: 'status',
+      runId,
+      stage: 'planning',
+      message: 'Phase 3 of 9 — Core flow.',
+      progress: { phase: { n: 3, total: 9, name: 'Core flow' }, preview: 'RUNNING' }
+    })
+    expect(useChatStore.getState().progress).toEqual({
+      phase: { n: 3, total: 9, name: 'Core flow' },
+      preview: 'RUNNING'
+    })
+
+    // The verify emit reports the checks. It must not blank the phase.
+    emit({
+      type: 'status',
+      runId,
+      stage: 'verifying',
+      message: 'Recording progress…',
+      progress: { checks: 'FAILING', preview: 'COMPILE_ERROR' }
+    })
+    expect(useChatStore.getState().progress).toEqual({
+      phase: { n: 3, total: 9, name: 'Core flow' },
+      checks: 'FAILING',
+      preview: 'COMPILE_ERROR'
+    })
+  })
+
+  it('holds the progress through the events that carry none', () => {
+    const emit = startRunIn('sess-prog-2')
+    const runId = useChatStore.getState().runId!
+    emit({
+      type: 'status',
+      runId,
+      stage: 'planning',
+      message: 'Phase 1 of 3 — Foundation.',
+      progress: { phase: { n: 1, total: 3, name: 'Foundation' }, checks: 'PASSING' }
+    })
+
+    // Exactly the events that overwrite `status`: a plain status line, a file op,
+    // and a subagent starting. Each used to be the end of the progress chips.
+    emit({ type: 'status', runId, stage: 'generating', message: 'Writing the layout…' })
+    emit({
+      type: 'tool-request',
+      runId,
+      proposal: { id: 'tool-prog-1', kind: 'run_command', command: 'ls' },
+      auto: true
+    })
+    emit({ type: 'agent-start', runId, agentId: 'a1', role: 'builder', task: 'the layout' })
+
+    expect(useChatStore.getState().status?.message).toBe('Working…')
+    expect(useChatStore.getState().progress).toEqual({
+      phase: { n: 1, total: 3, name: 'Foundation' },
+      checks: 'PASSING'
+    })
+  })
+
+  it('counts the phase’s tasks from the plan and its updates', () => {
+    const emit = startRunIn('sess-prog-3')
+    const runId = useChatStore.getState().runId!
+    emit({
+      type: 'status',
+      runId,
+      stage: 'planning',
+      message: 'Phase 2 of 5 — Core.',
+      progress: { phase: { n: 2, total: 5, name: 'Core' } }
+    })
+    emit({
+      type: 'plan',
+      runId,
+      complexity: 'medium',
+      tasks: [node('t1', 'ready'), node('t2', 'pending'), node('t3', 'pending')]
+    })
+    expect(useChatStore.getState().progress?.tasks).toEqual({ done: 0, total: 3 })
+
+    emit({ type: 'task-update', runId, task: node('t1', 'completed') })
+    emit({ type: 'task-update', runId, task: node('t2', 'running') })
+    expect(useChatStore.getState().progress?.tasks).toEqual({ done: 1, total: 3 })
+
+    // A node that failed is not a node that's done — the counter stays short, so
+    // the row can't read as finished when it isn't (§34).
+    emit({ type: 'task-update', runId, task: node('t2', 'failed') })
+    expect(useChatStore.getState().progress).toMatchObject({
+      phase: { n: 2, total: 5, name: 'Core' },
+      tasks: { done: 1, total: 3 }
+    })
+  })
+
+  it('reports no counter for a one-node turn, and nothing at all for a one-off', () => {
+    const emit = startRunIn('sess-prog-4')
+    const runId = useChatStore.getState().runId!
+    // A SIMPLE turn: one synthesized node, no roadmap behind it. "1/1 tasks" is
+    // noise on a one-file edit, and a plain edit must keep the plain status row.
+    emit({ type: 'plan', runId, complexity: 'simple', tasks: [node('t1', 'ready')] })
+    emit({ type: 'status', runId, stage: 'generating', message: 'Editing App.tsx…' })
+    expect(useChatStore.getState().progress).toBeNull()
+  })
+
+  it('clears the progress when the run ends', () => {
+    const emit = startRunIn('sess-prog-5')
+    const runId = useChatStore.getState().runId!
+    emit({
+      type: 'status',
+      runId,
+      stage: 'verifying',
+      message: 'Final phase complete.',
+      progress: { phase: { n: 3, total: 3, name: 'Verification' }, checks: 'PASSING' }
+    })
+    expect(useChatStore.getState().progress).not.toBeNull()
+
+    emit({ type: 'done', runId })
+    expect(useChatStore.getState().progress).toBeNull()
+  })
+})
+

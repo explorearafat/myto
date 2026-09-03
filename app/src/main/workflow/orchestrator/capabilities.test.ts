@@ -105,6 +105,14 @@ describe('allowsTool', () => {
   it('forbids mcp_call for a role with no MCP grant', () => {
     expect(allowsTool(['terminal'], 'mcp_call')).toBe(false)
   })
+
+  it('gates both network tools behind the web capability', () => {
+    // web_fetch and web_search are the two network-egress tools; both need `web`.
+    expect(allowsTool(['web'], 'web_fetch')).toBe(true)
+    expect(allowsTool(['web'], 'web_search')).toBe(true)
+    expect(allowsTool(['filesystem', 'terminal'], 'web_fetch')).toBe(false)
+    expect(allowsTool(['filesystem', 'terminal'], 'web_search')).toBe(false)
+  })
 })
 
 describe('scopeSkills', () => {
