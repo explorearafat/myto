@@ -7,3 +7,7 @@ coverage/
 .env*
 !.env.example
 .claude/
+
+# Sylor app runtime state & generated plan artifacts (machine-local, never committed)
+.sylor/
+/plan.md
