@@ -146,9 +146,10 @@ export interface UiSettings {
   /** Reasoning effort applied to workflow runs (composer control). */
   effort: ReasoningEffort
   /**
-   * When true, a substantial edit turn first writes a `plan.md` capturing the
-   * full plan and pauses before making other changes (composer "Plan first"
-   * toggle). Off by default so ordinary chats aren't slowed.
+   * When true, an edit turn plans as usual and then HALTS for the user's approval
+   * before anything is built (composer "Plan first" toggle): the plan is shown,
+   * approving it builds it in the same turn, rejecting it costs only the planning.
+   * Off by default so ordinary work isn't gated behind a click.
    */
   planFirst: boolean
   /**
@@ -164,6 +165,54 @@ export interface UiSettings {
    * gated (the composer is blocked) until then.
    */
   workspaceRoot?: string
+  /**
+   * Whether the always-on-top mini status widget is showing (Phase 8). Off by
+   * default: the tray already carries the same state without taking a corner of
+   * the screen, so the floating window is for people who want it there.
+   *
+   * This preference IS the control — main applies it on every settings save — so
+   * there is one writer and the window can never disagree with the stored value.
+   */
+  statusWidget: boolean
+  /**
+   * FULL-PC ACCESS (opt-in, off by default). When true, the three enforcement
+   * seams that normally confine Sylor to the chosen project and gate every side
+   * effect are relaxed at once:
+   *
+   *  1. File paths are no longer confined to the project root — `resolveSafe`
+   *     lets any absolute path on the machine through (read, write, delete).
+   *  2. Every tool op (write, command, mcp, web) is auto-approved, in every
+   *     permission mode — no prompts.
+   *  3. Commands run without a per-command decision.
+   *
+   * Two browser gates deliberately survive even here, because they are
+   * irreversible and reach outside the machine: `payment` stays blocked outright
+   * and `send`/`delete` still ask once. Everything ON the user's own PC is
+   * unrestricted.
+   *
+   * This is a large, deliberate reduction of the app's safety boundary. It is a
+   * single explicit switch (not something that can be reached by accident), the
+   * Settings toggle carries a red warning, and a run acting under it records a
+   * one-line note in its transcript so it is never invisible.
+   */
+  fullAccess: boolean
+  /**
+   * AUTO-SEND (opt-in, off by default, meaningful only while {@link fullAccess}
+   * is on). Full access relaxes everything ON the machine, but two browser gates
+   * deliberately survive it — `send` (post/message/mail AS the user) and `delete`
+   * — because they reach outside the machine and can't be taken back. This switch
+   * waives the ONE of those the user asked to automate: with it on, Sylor may send
+   * a message, post, or mail on its own without asking first.
+   *
+   * It is deliberately narrow. `delete` still asks (destroying the user's data is
+   * a different act from sending on their behalf), and `payment` stays blocked
+   * outright — auto-send never authorises spending money. It also does nothing
+   * unless full access is on, so it can't quietly widen the normal, sandboxed
+   * posture; it is a sub-permission of an already-warned switch. The Settings
+   * toggle only appears (enabled) once full access is turned on, and carries its
+   * own warning.
+   */
+  autoSend: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +447,12 @@ export interface WriteFileProposal {
   newContent: string
   /** Whether the target file already exists (edit vs create). */
   exists: boolean
+  /**
+   * One short phrase saying what this file is for, as the model described it
+   * ("the login endpoint the dashboard calls"). Optional — a block that omits it
+   * still writes; the row simply carries no subtitle.
+   */
+  purpose?: string
 }
 
 /** A proposed shell command to run in the integrated terminal. */
@@ -481,8 +536,11 @@ export type ReadOp = 'read_file' | 'list_files' | 'search_files' | 'find_files'
  * string. Unlike the three above, this changes nothing, so it is auto-approved in
  * every permission mode (see `decideAuto`) and every role may issue it (see
  * `allowsTool`). It is still a real proposal rather than an inline side channel,
- * so the UI, the transcript, and the session DB all record what Sylor looked at
- * — the user can always see what it based a decision on.
+ * so the Run Log and the session DB both record what Sylor looked at — the user
+ * can always go and see what it based a decision on. What they do NOT get is a
+ * row per read in the chat itself: a dozen "Read tailwind.config.js" lines bury
+ * the answer they were taken for, so the thread shows only the reads that FAILED
+ * (see `renderer/src/lib/threadCards.ts`).
  *
  * This is the tool that makes Sylor able to work on an EXISTING file: before it
  * had one, the model could only rewrite files whole, from guesswork.
@@ -541,6 +599,16 @@ export interface ReadProposal {
  *  - `fill`          — type a value into an input by CSS selector.
  *  - `resize`        — emulate a viewport (mobile/tablet/desktop or W×H) to test
  *                       responsive layout; reflows the real preview element.
+ *  - `eval`          — run an expression IN the guest page and return its value.
+ *                       The general-purpose escape hatch: hover, key presses,
+ *                       scrolling, reading app state, calling a function the page
+ *                       exposes — anything the eight fixed actions don't cover.
+ *  - `navigate`      — load another page of the preview (or reload the current
+ *                       one when no `url` is given), so a multi-page app can be
+ *                       walked route by route.
+ *  - `server_logs`   — the DEV SERVER's own output (main-side, not the guest):
+ *                       the compile errors and stack traces that explain a blank
+ *                       or stale page the guest console cannot see.
  */
 export type PreviewInspectAction =
   | 'snapshot'
@@ -551,14 +619,21 @@ export type PreviewInspectAction =
   | 'click'
   | 'fill'
   | 'resize'
+  | 'eval'
+  | 'navigate'
+  | 'server_logs'
 
 /**
  * A request to LOOK AT or DRIVE the live browser preview — the verification
  * affordance behind "check that the button is actually blue now". Like
  * {@link ReadProposal} it is auto-approved in every mode and allowed for every
  * role: it only observes/interacts with the user's own running preview, touches
- * no filesystem and makes no outbound network egress. The one hard safety rule
- * lives in the executor: `fill` refuses credential-looking fields.
+ * no filesystem and makes no outbound network egress. Two hard safety rules live
+ * in the executor: `fill` refuses credential-looking fields, and `navigate` is
+ * confined to loopback — the preview pane stays pointed at the user's own app,
+ * and reaching the real web remains the separately gated `browse` tool's job
+ * (which keeps `eval`'s reach local too, since it can only script whatever page
+ * the preview is allowed to hold).
  */
 export interface PreviewInspectProposal {
   id: string
@@ -580,6 +655,10 @@ export interface PreviewInspectProposal {
   width?: number
   /** Explicit emulated height in px — `resize`. */
   height?: number
+  /** JavaScript to run in the guest page — `eval` only (required there). */
+  expression?: string
+  /** Where to send the preview — `navigate`; omitted means reload in place. */
+  url?: string
 }
 
 /**
@@ -694,8 +773,33 @@ export type ToolProposal =
   | BrowseProposal
   | DiagnosticsProposal
 
-/** The user's (or permission-mode's) verdict on a proposal. */
-export type ToolDecision = 'approve' | 'reject'
+/**
+ * The user's (or permission-mode's) verdict on a proposal. `approve-always` is an
+ * approval that also grants a run-scoped standing approval for that class of op —
+ * see `standingApprovalKey` in `shared/approvals.ts` for how narrow that class is.
+ * Only the live IPC decision ever carries it; a persisted op records the plain
+ * `approve`, since the standing part belongs to the run, not to the op.
+ */
+export type ToolDecision = 'approve' | 'reject' | 'approve-always'
+
+/**
+ * What the user attached to their verdict, beyond the verb itself. Both fields are
+ * optional and independent of the decision's meaning — the engine applies the
+ * decision identically whether or not they are present:
+ *
+ *  - `editedContent` is edit-then-approve: the user fixed the model's proposed file
+ *    in the diff before letting it reach disk, so THIS is what gets written (only
+ *    honored for a `write_file` proposal, and the result comes back marked `edited`
+ *    so the model is told its bytes were changed rather than silently diverging).
+ *  - `reason` is why they said no. A bare "Skipped by user" tells the model nothing
+ *    it can act on; "wrong file, put it in src/lib" turns a refusal into direction.
+ */
+export interface ToolDecisionDetail {
+  /** Replacement file body for a `write_file` proposal the user edited first. */
+  editedContent?: string
+  /** The user's own words for a rejection, fed back to the model. */
+  reason?: string
+}
 
 /** Outcome of an applied `write_file` proposal. */
 export interface WriteFileResult {
@@ -704,6 +808,12 @@ export interface WriteFileResult {
   ok: boolean
   /** Present when `ok` is false (e.g. sandbox violation, write error). */
   error?: string
+  /**
+   * True when the bytes written were the USER's edit of the proposal, not the
+   * model's own text (edit-then-approve). Told to the model so it works from what
+   * is actually on disk; absent means what it proposed is what landed.
+   */
+  edited?: boolean
   /**
    * Problems found by statically checking the bytes just written — malformed
    * JSON, an unbalanced/truncated source file, a missing asset or import target.
@@ -999,10 +1109,97 @@ export interface TaskNode {
 }
 
 /**
- * A fact discovered, decision made, or artifact produced by an agent, recorded
- * on the shared-context blackboard. Downstream nodes receive a *scoped* digest
- * (their task + upstream dependency findings only) so agents don't rediscover
- * the same facts or drown in unrelated output.
+ * One line in the model's live task checklist — the flat, model-maintained TODO
+ * list surfaced by the `update_todos` tool (Claude-Code's TodoWrite equivalent).
+ *
+ * This is deliberately NOT a {@link TaskNode}: a TaskNode is the orchestrator's
+ * phase-DAG unit (role, dependsOn, attempts, executed by a scoped specialist),
+ * whereas a TodoItem is a plain step the lead writes for itself to stay honest
+ * about what's left. Keeping them separate is why a simple, unorchestrated turn
+ * can still show a checklist, and why the model's list never pollutes the §33
+ * phase-progress counter.
+ */
+export interface TodoItem {
+  /** Short imperative description of the step ("Add the /logout route"). */
+  text: string
+  /** Where the step stands. Convention: at most one item is `in_progress`. */
+  status: 'pending' | 'in_progress' | 'completed'
+}
+
+/**
+ * An out-of-scope issue the model noticed while doing something else and flagged
+ * instead of fixing (the `flag_followup` tool — Claude-Desktop's `spawn_task`).
+ *
+ * The failure this exists to kill is scope creep: an agent that fixes every dead
+ * import and stale doc it walks past turns a one-file change into an unreviewable
+ * diff, while an agent that says nothing lets the user lose the finding entirely.
+ * So the finding is recorded — in the project's `FOLLOWUPS.md` — and surfaced as a
+ * chip the user can start as its OWN turn, leaving the current change alone.
+ *
+ * Live-only in the UI (the file is the durable record), so `id` only has to be
+ * unique within the session that raised it.
+ */
+export interface Followup {
+  /** Correlates the chip with a dismissal (engine-minted). */
+  id: string
+  /** One-line imperative the user can act on ("Fix the stale README badge"). */
+  title: string
+  /** Why it matters / what to do, when the title alone doesn't carry it. */
+  note?: string
+  /** Files the follow-up concerns, so a new turn starts in the right place. */
+  files?: string[]
+  /**
+   * Project-relative path the entry was written to, or absent when it could not be
+   * recorded (read-only checkout, no folder). The UI must not claim a file exists
+   * that doesn't, so this is what the chip's footnote is derived from.
+   */
+  recordedIn?: string
+}
+
+/**
+ * A clarifying question the model asked the user mid-run (the `ask_user` tool —
+ * Claude-Code's AskUserQuestion). The engine BLOCKS the run on it: nothing else
+ * happens until {@link WorkflowApi.answerQuestion} delivers a reply, which is then
+ * fed back so the model continues with a real answer instead of a guess. Transient
+ * (never persisted); the id correlates the answer back to the awaiting promise.
+ */
+export interface PendingQuestion {
+  /** Correlates the answer to the run's awaiting promise (engine-minted). */
+  id: string
+  /** The question itself, in the model's words. */
+  question: string
+  /** Optional short chip label for the choice (e.g. "Auth method"). */
+  header?: string
+  /** Suggested answers rendered as one-click options; free text is always allowed. */
+  options?: string[]
+}
+
+/**
+ * A plan waiting for the user's go-ahead — the "Plan first" checkpoint. Emitted
+ * once the plan exists and BEFORE any specialist runs, so approving it builds the
+ * plan in the same turn and rejecting it costs nothing but the planning. Answered
+ * over the ordinary tool-decision channel ({@link WorkflowApi.toolDecision}): a
+ * plan is a proposed action like any other, so `id` is a decision id, not a tool id.
+ * Transient — never persisted; a reopened finished run is never waiting.
+ */
+export interface PendingPlan {
+  /** Correlates the decision to the run's awaiting promise (engine-minted). */
+  id: string
+  /** How the turn was sized, so the bar can say what kind of build this is. */
+  complexity: Complexity
+  /** One readable line per task, in the order the plan runs them. */
+  steps: string[]
+  /** Project-relative path of the written plan document, when one was written. */
+  planPath?: string
+  /** Which phase of the roadmap this plan covers, when the project runs one. */
+  phase?: { n: number; total: number; name: string }
+}
+
+/**
+ * A structured result a subagent hands back to the orchestrator — one fact,
+ * decision, or artifact tied to the task node that produced it. Findings are how
+ * the orchestrator accumulates what the fan-out learned without re-reading each
+ * agent's full transcript.
  */
 export interface Finding {
   /** The agent that produced it (correlates with agent-start/agent-end). */
@@ -1089,8 +1286,236 @@ export interface RunProgress {
   preview?: 'RUNNING' | 'STALE' | 'COMPILE_ERROR' | 'RUNTIME_ERROR' | 'UNAVAILABLE' | 'UNKNOWN'
 }
 
+/**
+ * One restorable point in time, taken by Sylor just before it changed anything.
+ *
+ * A checkpoint is a *snapshot*, not a note: `git` mode records the whole working
+ * tree (tracked edits AND the untracked files Sylor just created) as a dangling
+ * commit kept alive by a ref under `refs/sylor/checkpoints/`, so it costs nothing
+ * once the objects are deduplicated and never touches the user's branch, HEAD,
+ * index, or stash list. `files` mode is the no-git fallback: byte copies of the
+ * files this run wrote, under `.sylor/checkpoints/<id>/`.
+ *
+ * Not to be confused with `SessionCheckpoint` in the project-state module, which
+ * is a hand-off note written for the *next* session and restores nothing.
+ */
+export interface CheckpointInfo {
+  /** Stable id, also the ref/directory name. */
+  id: string
+  /** Wall-clock ms the snapshot was taken. */
+  at: number
+  /** What was about to happen ("Before writing src/app.ts"). */
+  label: string
+  /** How the bytes are held — which decides what a restore can bring back. */
+  kind: 'git' | 'files'
+  /** The commit object holding the tree, for `git` checkpoints. */
+  sha?: string
+  /** Project-relative paths captured, for `files` checkpoints. */
+  files?: string[]
+  /** The run that took it, when it was taken during a turn. */
+  runId?: string
+  /** True when this one was taken automatically to make a restore reversible. */
+  auto?: boolean
+}
+
+/** Outcome of a restore: what came back, and the escape hatch that was left first. */
+export interface RestoreResult {
+  ok: boolean
+  /** A short, user-facing reason when `ok` is false. */
+  error?: string
+  /** Project-relative paths actually rewritten (empty = the tree already matched). */
+  restored?: string[]
+  /** The auto-checkpoint taken *before* restoring, so the restore itself can be undone. */
+  safety?: CheckpointInfo
+}
+
+// ---------------------------------------------------------------------------
+// Dependency graph — the canvas's map of what imports what
+// ---------------------------------------------------------------------------
+
+/**
+ * How much of the project the graph should cover. `run` is the default because
+ * the useful question during a turn is "what does this change reach", not "draw me
+ * the whole repository".
+ */
+export type DepGraphScope = 'run' | 'project'
+
+/** One file in the graph. Paths are POSIX and project-relative, as index keys are. */
+export interface DepGraphNode {
+  path: string
+  /** The index's cached structural one-liner, when it has one. */
+  summary?: string
+  /** True when this run read or wrote it. */
+  touched: boolean
+  /** True when this run wrote it — the nodes a reviewer cares about most. */
+  written: boolean
+  /**
+   * How many of its imports left the project (packages, node builtins, aliases
+   * that matched nothing). Shown as a count rather than as edges to invented
+   * nodes: the graph only draws files it can actually name.
+   */
+  external: number
+}
+
+/** A resolved import: `from` imports `to`. Both ends are always drawn nodes. */
+export interface DepGraphEdge {
+  from: string
+  to: string
+}
+
+/** What the renderer asks for: a scope plus what this run has touched so far. */
+export interface DepGraphRequest {
+  scope: DepGraphScope
+  /** Project-relative paths the run read or wrote (seeds for `run` scope). */
+  touched: string[]
+  /** The subset it wrote. */
+  written: string[]
+}
+
+/** A graph ready to draw, capped so a big repository cannot lock up the canvas. */
+export interface DepGraph {
+  scope: DepGraphScope
+  nodes: DepGraphNode[]
+  edges: DepGraphEdge[]
+  /** Nodes the cap left out, so the UI can say so instead of quietly hiding them. */
+  omitted: number
+  /** How many files the index knows at all — the honest ceiling for `project` scope. */
+  indexed: number
+}
+
+/**
+ * The renderer's door onto the graph. It is built in main, from the live project
+ * index, because only main has it — the renderer contributes the one thing main
+ * doesn't track per-turn: which files the visible run touched.
+ */
+export interface GraphApi {
+  build: (req: DepGraphRequest) => Promise<DepGraph>
+}
+
+// ---------------------------------------------------------------------------
+// Ambient status — Sylor outside its own window (tray + optional mini widget)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the ambient surfaces show at a glance.
+ *
+ * `waiting` is the one that earns its own value: a run blocked on the user looks
+ * identical to a working one from the taskbar, and that is exactly the state
+ * somebody needs to be told about. `done` persists after a run ends rather than
+ * decaying to `idle`, because "the last run finished" is a true and useful thing
+ * to read hours later; `idle` means nothing has run at all.
+ */
+export type AmbientState = 'idle' | 'running' | 'waiting' | 'done' | 'failed'
+
+/**
+ * One glanceable line about the run, for surfaces that are not the chat window.
+ *
+ * Every field is folded from the same {@link WorkflowEvent} stream the chat reads
+ * (see `main/ambient.ts`), so the tray tooltip and the mini widget can never
+ * describe a different turn than the one on screen. `message` is the engine's own
+ * status line — never a phrase invented here — except for the three blocked
+ * states, which say plainly that they are waiting on a person.
+ */
+export interface AmbientStatus {
+  state: AmbientState
+  /** One short line: what is happening, in the engine's own words. */
+  message: string
+  /** The lane the message came from: a subagent's `agentId`, or null for the lead. */
+  lane: string | null
+  /** That lane's role, when the message came from a subagent. */
+  role?: string
+  /** How many subagents are still open — 0 when the lead is working alone. */
+  agents: number
+  /** Wall-clock ms the run began; 0 when nothing is running (so: no clock). */
+  startedAt: number
+  /** The run this describes, so a stop request from out here names it. */
+  runId: string | null
+}
+
+/**
+ * The ambient surfaces' two-way door.
+ *
+ * Two renderers use it for opposite halves: the mini widget reads (`get` /
+ * `onStatus`) and asks (`focus` / `stop`), while the MAIN window only listens
+ * (`onFocusLane` / `onStopRequest`) — because the main window is the one that
+ * knows the live run's id and owns the canvas, so main forwards the intent rather
+ * than acting on the run itself.
+ */
+export interface AmbientApi {
+  /** The status as it stands — the mini widget's first paint. */
+  get: () => Promise<AmbientStatus>
+  /** Subscribe to status changes. Returns a disposer. */
+  onStatus: (callback: (status: AmbientStatus) => void) => () => void
+  /**
+   * Bring the main window forward, and point its run log at `lane` when one is
+   * given (null = show every lane). Fire-and-forget.
+   */
+  focus: (lane?: string | null) => void
+  /** Main → the main window: open the run log on this lane. Returns a disposer. */
+  onFocusLane: (callback: (lane: string | null) => void) => () => void
+  /** Ask the live run to stop from outside the window (tray menu, widget button). */
+  stop: () => void
+  /** Main → the main window: an ambient surface asked to stop the run. */
+  onStopRequest: (callback: () => void) => () => void
+}
+
+/**
+ * What the model is currently carrying, measured — the honest input for the
+ * context meter.
+ *
+ * Every number here is a character count of the array actually being sent, taken
+ * in the engine at the top of a step, because the renderer cannot see the system
+ * prompt or the tool output fed back between turns. `budget` is Sylor's own fold
+ * threshold (`MAX_CONTEXT_CHARS`), which is the only limit that genuinely applies:
+ * it is where the engine condenses. `windowTokens` is the model's real context
+ * window and is present ONLY when Sylor actually knows it for that model id —
+ * absent means unknown, and the UI says "unknown" rather than inventing a
+ * denominator to draw a percentage against.
+ */
+export interface ContextUsage {
+  /** Total characters assembled for the next completion. */
+  chars: number
+  /** The fold threshold: past this, the engine condenses the old middle. */
+  budget: number
+  /** The system prompt (instructions, project context, skills). */
+  systemChars: number
+  /** Prior conversation + this request — the pinned prologue, never folded. */
+  historyChars: number
+  /** What the model has written this turn (prose + tool blocks). */
+  assistantChars: number
+  /** Tool output fed back this turn (file reads, command output, reports). */
+  toolChars: number
+  /** How many earlier steps the NEXT fold would condense; 0 = nothing pending. */
+  foldSteps: number
+  /** The model's real context window in tokens, when it is known. */
+  windowTokens?: number
+}
+
+/**
+ * Fields every {@link WorkflowEvent} carries, whatever its kind.
+ *
+ * `at` is the wall-clock ms the event crossed to the renderer. It is stamped in
+ * exactly ONE place — the IPC sink in `main/workflow-ipc.ts` — so no emit site has
+ * to remember it and no two events can disagree about the clock. Optional because
+ * the headless CLI and the embeddable SDK build their own sinks and don't need it;
+ * a consumer that wants a time falls back to "now" rather than inventing one.
+ */
+export interface WorkflowEventMeta {
+  at?: number
+}
+
+/**
+ * Adds {@link WorkflowEventMeta} to every variant of a union *distributively*, so
+ * the result is still a real discriminated union — narrowing on `type` and
+ * `Extract<WorkflowEvent, { type: 'agent-start' }>` keep working.
+ */
+type Stamped<T> = T extends unknown ? T & WorkflowEventMeta : never
+
 /** Discriminated union of events streamed from the engine to the renderer. */
-export type WorkflowEvent =
+export type WorkflowEvent = Stamped<WorkflowEventBody>
+
+/** The per-kind payloads; {@link WorkflowEvent} is this plus the shared metadata. */
+type WorkflowEventBody =
   | { type: 'intent'; runId: string; intent: IntentAnalysis }
   /**
    * `retrying` marks a transient-failure notice (rate limit / 5xx / timeout) that
@@ -1143,7 +1568,43 @@ export type WorkflowEvent =
    */
   | { type: 'plan'; runId: string; complexity: Complexity; tasks: TaskNode[] }
   | { type: 'task-update'; runId: string; task: TaskNode }
+  /**
+   * `todos` replaces the run's live task checklist wholesale — the lead's own
+   * flat plan for the turn (see {@link TodoItem}), rendered as a small evolving
+   * panel while the turn runs. Distinct from `plan`/`task-update`, which drive
+   * the orchestrator's phase-DAG progress; this is the model's self-maintained
+   * list. Additive, so an older renderer simply ignores it.
+   */
+  | { type: 'todos'; runId: string; todos: TodoItem[] }
+  | { type: 'question'; runId: string; question: PendingQuestion }
+  /**
+   * `plan-approval` halts the run on the user: the plan is written, nothing has
+   * been built, and the turn resumes only once they approve or reject it through
+   * {@link WorkflowApi.toolDecision}. Only emitted when "Plan first" is on.
+   */
+  | { type: 'plan-approval'; runId: string; approval: PendingPlan }
+  /**
+   * `followup` reports one out-of-scope issue the run flagged instead of fixing
+   * (see {@link Followup}) — additive, one event per flag, never replacing the
+   * list. Unlike `todos` these OUTLIVE the turn in the UI: the user acts on them
+   * after the answer lands, so the chips stay until the conversation moves on.
+   */
+  | { type: 'followup'; runId: string; followup: Followup }
   | { type: 'agent-message'; runId: string; message: AgentMessage }
+  /**
+   * Sylor took a restorable snapshot before changing something (see
+   * {@link CheckpointInfo}). Emitted only when a *new* point was actually
+   * recorded: taking one when the tree is byte-identical to the last would put a
+   * row in the timeline for a state that already had one.
+   */
+  | { type: 'checkpoint'; runId: string; checkpoint: CheckpointInfo }
+  /**
+   * Measured context load at the top of a step (see {@link ContextUsage}). Sent
+   * from the engine because only the engine can see the assembled array — the
+   * renderer would otherwise be guessing at the system prompt and the tool output
+   * fed back between turns.
+   */
+  | { type: 'context'; runId: string; usage: ContextUsage }
   | { type: 'done'; runId: string }
   | { type: 'error'; runId: string; message: string }
 
@@ -1167,8 +1628,9 @@ export interface WorkflowRunRequest {
    */
   effort?: ReasoningEffort
   /**
-   * When true, a substantial edit turn is instructed to write `plan.md` first
-   * and stop before other edits ("Plan first" toggle). Defaults to false.
+   * When true, an edit turn plans and then blocks for the user's approval before
+   * any specialist runs ("Plan first" toggle) — a `plan-approval` event, answered
+   * over the tool-decision channel. Defaults to false.
    */
   planFirst?: boolean
   /**
@@ -1197,9 +1659,33 @@ export interface WorkflowApi {
   run: (request: WorkflowRunRequest, onEvent: (event: WorkflowEvent) => void) => () => void
   /**
    * Resolve a pending `tool-request` for a run. The engine is blocked awaiting
-   * this decision; `approve` executes the proposal, `reject` skips it.
+   * this decision; `approve` executes the proposal, `reject` skips it. `detail`
+   * carries edit-then-approve content and/or the user's reason for refusing —
+   * see {@link ToolDecisionDetail}.
    */
-  toolDecision: (runId: string, toolId: string, decision: ToolDecision) => void
+  toolDecision: (
+    runId: string,
+    toolId: string,
+    decision: ToolDecision,
+    detail?: ToolDecisionDetail
+  ) => void
+  /**
+   * Stop ONE subagent without ending the run. The agent's own work unwinds, an
+   * `agent-end` with `ok: false` closes its lane, and the lead keeps going with
+   * that report — so a lane that has gone wrong costs one click, not the turn.
+   */
+  cancelAgent: (runId: string, agentId: string) => void
+  /**
+   * Give back a run-scoped standing approval granted with "Always" (the key from
+   * `standingApprovalKey`). The next op of that class asks again — a grant the
+   * user can see but not withdraw would be a one-way door.
+   */
+  revokeApproval: (runId: string, key: string) => void
+  /**
+   * Answer a pending `question` for a run (the `ask_user` tool). The engine is
+   * blocked awaiting this; the text is fed back to the model as the user's reply.
+   */
+  answerQuestion: (runId: string, questionId: string, answer: string) => void
 }
 
 /** Renderer-facing API for model providers. */
@@ -1302,6 +1788,14 @@ export interface PersistedToolOp {
    */
   agentId?: string
   agentRole?: AgentRole
+  /**
+   * Wall-clock ms the op was proposed and the ms its result landed, so a reopened
+   * conversation can still show when each step happened and how long it took.
+   * Both absent on ops persisted before the columns existed — the UI then shows no
+   * time rather than guessing one.
+   */
+  startedAt?: number
+  endedAt?: number
 }
 
 /**
@@ -1512,6 +2006,8 @@ export interface PreviewInspectRequest {
   preset?: 'mobile' | 'tablet' | 'desktop'
   width?: number
   height?: number
+  expression?: string
+  url?: string
 }
 
 /**
@@ -1617,6 +2113,26 @@ export interface MemoryApi {
    * false rather than throwing, so it can never abort the caller's task.
    */
   remember: (note: string) => Promise<boolean>
+}
+
+/**
+ * Checkpoints: the undo the agent's own writes never had.
+ *
+ * The engine takes one automatically before each change (see
+ * {@link CheckpointInfo}); this is the renderer's door onto that list and onto
+ * putting the files back. There is deliberately no `delete`: a timeline whose
+ * entries can vanish is not a safety net, and the store prunes only its own
+ * oldest entries.
+ */
+export interface CheckpointsApi {
+  /** Every checkpoint for the active project, newest first. */
+  list: () => Promise<CheckpointInfo[]>
+  /**
+   * Put the files back as they were at `id`. Takes an auto-checkpoint FIRST, so
+   * the restore is itself reversible, and never deletes: a file created after the
+   * checkpoint is left alone rather than removed behind the user's back.
+   */
+  restore: (id: string) => Promise<RestoreResult>
 }
 
 // ---------------------------------------------------------------------------
@@ -1878,12 +2394,18 @@ export interface SylorApi {
   workspace: WorkspaceApi
   /** Long-term memory: the global cross-project user profile. */
   memory: MemoryApi
+  /** Restorable snapshots taken before the agent changes anything. */
+  checkpoints: CheckpointsApi
+  /** What imports what, for the canvas graph (built in main from the project index). */
+  graph: GraphApi
   /** The user's real Chrome, driven over DevTools — everything the webview can't do. */
   chrome: ChromeApi
   /** The in-app page view the `browse` tool drives (main owns it; see BrowserApi). */
   browser: BrowserApi
   /** Scheduled tasks: stored prompts the scheduler fires on a cron cadence. */
   scheduler: SchedulerApi
+  /** Ambient status: the tray + the opt-in mini widget (see AmbientApi). */
+  ambient: AmbientApi
 }
 
 // ---------------------------------------------------------------------------

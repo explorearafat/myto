@@ -41,6 +41,66 @@ describe('parseToolBlock', () => {
     expect(parseToolBlock('{ "tool": "write_file", "path": "a.ts" }')).toBeNull()
   })
 
+  it('carries the optional purpose on a write, so the card can say what a file is for', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "write_file", "path": "a.ts", "content": "x", "purpose": "the login endpoint" }'
+      )
+    ).toEqual({ tool: 'write_file', path: 'a.ts', content: 'x', purpose: 'the login endpoint' })
+  })
+
+  it('carries a purpose on an edit too', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "edit_file", "path": "a.ts", "old_string": "a", "new_string": "b", "purpose": "fixes the off-by-one" }'
+      )
+    ).toMatchObject({ tool: 'edit_file', purpose: 'fixes the off-by-one' })
+  })
+
+  it('carries a purpose on each read-only block as an internal note', () => {
+    // purpose is still parsed on a look block — it is context for the model. The user's
+    // reading status shows only "Reading <filename>", so it is never surfaced from here.
+    expect(
+      parseToolBlock('{ "tool": "read_file", "path": "a.ts", "purpose": "to see the header" }')
+    ).toMatchObject({ tool: 'read_file', path: 'a.ts', purpose: 'to see the header' })
+    expect(
+      parseToolBlock('{ "tool": "list_files", "path": "src", "purpose": "to map the folder" }')
+    ).toMatchObject({ tool: 'list_files', purpose: 'to map the folder' })
+    expect(
+      parseToolBlock('{ "tool": "search_files", "query": "pt-", "purpose": "to find the padding" }')
+    ).toMatchObject({ tool: 'search_files', purpose: 'to find the padding' })
+    expect(
+      parseToolBlock('{ "tool": "find_files", "glob": "**/*.tsx", "purpose": "to locate the page" }')
+    ).toMatchObject({ tool: 'find_files', purpose: 'to locate the page' })
+  })
+
+  it('tidies a purpose into one line and caps its length', () => {
+    const messy = parseToolBlock(
+      '{ "tool": "write_file", "path": "a.ts", "content": "x", "purpose": "  the shared\\n  button  " }'
+    )
+    expect(messy).toMatchObject({ purpose: 'the shared button' })
+
+    const long = parseToolBlock(
+      `{ "tool": "write_file", "path": "a.ts", "content": "x", "purpose": "${'why '.repeat(80)}" }`
+    )
+    expect((long as { purpose: string }).purpose.length).toBe(120)
+  })
+
+  it('never lets a bad purpose stop the write — it is simply absent', () => {
+    // What a file is FOR must not be able to prevent the file from existing.
+    for (const bad of ['""', '"   "', '42', 'null', '{ "a": 1 }']) {
+      const out = parseToolBlock(
+        `{ "tool": "write_file", "path": "a.ts", "content": "x", "purpose": ${bad} }`
+      )
+      expect(out, `purpose ${bad} should be dropped, not fatal`).toEqual({
+        tool: 'write_file',
+        path: 'a.ts',
+        content: 'x'
+      })
+      expect(out).not.toHaveProperty('purpose')
+    }
+  })
+
   it('rejects a write_file with an empty path', () => {
     expect(parseToolBlock('{ "tool": "write_file", "path": "  ", "content": "x" }')).toBeNull()
   })
@@ -134,9 +194,7 @@ describe('parseToolBlock', () => {
     ).toEqual({
       tool: 'edit_file',
       path: 'a.ts',
-      oldString: 'let x',
-      newString: 'const x',
-      replaceAll: false
+      edits: [{ oldString: 'let x', newString: 'const x', replaceAll: false }]
     })
   })
 
@@ -148,10 +206,49 @@ describe('parseToolBlock', () => {
     ).toEqual({
       tool: 'edit_file',
       path: 'a.ts',
-      oldString: 'debug\n',
-      newString: '',
-      replaceAll: true
+      edits: [{ oldString: 'debug\n', newString: '', replaceAll: true }]
     })
+  })
+
+  it('parses an edits list, keeping order and per-edit replace_all', () => {
+    // Several changes to ONE file in a single block: applied in order, each with its
+    // own replace_all, so the engine can land them all as one consolidated write.
+    expect(
+      parseToolBlock(
+        '{ "tool": "edit_file", "path": "a.ts", "edits": [' +
+          '{ "old_string": "a", "new_string": "b" },' +
+          '{ "old_string": "c", "new_string": "d", "replace_all": true } ] }'
+      )
+    ).toEqual({
+      tool: 'edit_file',
+      path: 'a.ts',
+      edits: [
+        { oldString: 'a', newString: 'b', replaceAll: false },
+        { oldString: 'c', newString: 'd', replaceAll: true }
+      ]
+    })
+  })
+
+  it('drops no-op entries in an edits list, and rejects a list left empty', () => {
+    // A no-op entry (old === new) is dropped like the single form; a list that ends up
+    // with nothing valid is malformed, not a write of unchanged content.
+    expect(
+      parseToolBlock(
+        '{ "tool": "edit_file", "path": "a.ts", "edits": [' +
+          '{ "old_string": "x", "new_string": "x" },' +
+          '{ "old_string": "keep", "new_string": "kept" } ] }'
+      )
+    ).toEqual({
+      tool: 'edit_file',
+      path: 'a.ts',
+      edits: [{ oldString: 'keep', newString: 'kept', replaceAll: false }]
+    })
+    expect(parseToolBlock('{ "tool": "edit_file", "path": "a.ts", "edits": [] }')).toBeNull()
+    expect(
+      parseToolBlock(
+        '{ "tool": "edit_file", "path": "a.ts", "edits": [{ "old_string": "x", "new_string": "x" }] }'
+      )
+    ).toBeNull()
   })
 
   it('rejects an edit_file that could not change anything', () => {
@@ -407,6 +504,52 @@ describe('parseToolBlock', () => {
     })
   })
 
+  it('parses a preview_inspect eval, keeping the expression verbatim', () => {
+    // Only the outer whitespace is trimmed: the code's own indentation and
+    // newlines are load-bearing, so the expression crosses the parse untouched.
+    expect(
+      parseToolBlock(
+        '{ "tool": "preview_inspect", "action": "eval", "expression": "  document.querySelectorAll(\'li\').length  " }'
+      )
+    ).toMatchObject({
+      tool: 'preview_inspect',
+      action: 'eval',
+      expression: "  document.querySelectorAll('li').length  "
+    })
+  })
+
+  it('rejects a preview_inspect eval with no code to run', () => {
+    // A blank expression would evaluate to `undefined` and read as a mysteriously
+    // empty result, so it is not a request worth sending to the page.
+    expect(parseToolBlock('{ "tool": "preview_inspect", "action": "eval" }')).toBeNull()
+    expect(
+      parseToolBlock('{ "tool": "preview_inspect", "action": "eval", "expression": "   " }')
+    ).toBeNull()
+  })
+
+  it('parses a preview_inspect navigate, with or without a url', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "preview_inspect", "action": "navigate", "url": " http://localhost:5173/about " }'
+      )
+    ).toMatchObject({ action: 'navigate', url: 'http://localhost:5173/about' })
+    // No url means "reload where we are" — a real request, so it parses.
+    expect(parseToolBlock('{ "tool": "preview_inspect", "action": "navigate" }')).toMatchObject({
+      action: 'navigate',
+      url: undefined
+    })
+  })
+
+  it('parses a preview_inspect server_logs, honouring the level filter', () => {
+    expect(parseToolBlock('{ "tool": "preview_inspect", "action": "server_logs" }')).toMatchObject({
+      action: 'server_logs',
+      level: undefined
+    })
+    expect(
+      parseToolBlock('{ "tool": "preview_inspect", "action": "server_logs", "level": "error" }')
+    ).toMatchObject({ action: 'server_logs', level: 'error' })
+  })
+
   // ── browse ──
   // The parse is the first gate a browse step passes: a block missing the one field
   // its action cannot work without is rejected here, before it reaches a browser.
@@ -588,6 +731,188 @@ describe('parseToolBlock', () => {
     expect(parseToolBlock('{ "tool": "diagnostics", "files": "src/a.ts" }')).toMatchObject({
       files: undefined
     })
+  })
+
+  // ── update_todos (the lead's live checklist) ──
+
+  it('parses a valid update_todos block, keeping order and status', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "update_todos", "todos": [' +
+          '{ "text": "Add the route", "status": "in_progress" },' +
+          '{ "text": "Wire the button", "status": "pending" },' +
+          '{ "text": "Write a test", "status": "completed" }] }'
+      )
+    ).toEqual({
+      tool: 'update_todos',
+      todos: [
+        { text: 'Add the route', status: 'in_progress' },
+        { text: 'Wire the button', status: 'pending' },
+        { text: 'Write a test', status: 'completed' }
+      ]
+    })
+  })
+
+  it('defaults an unknown or missing status to pending', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "update_todos", "todos": [{ "text": "a", "status": "wat" }, { "text": "b" }] }'
+      )
+    ).toEqual({
+      tool: 'update_todos',
+      todos: [
+        { text: 'a', status: 'pending' },
+        { text: 'b', status: 'pending' }
+      ]
+    })
+  })
+
+  it('drops malformed items but keeps the usable ones', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "update_todos", "todos": [{ "text": "keep" }, 7, null, { "text": "  " }, "x"] }'
+      )
+    ).toEqual({ tool: 'update_todos', todos: [{ text: 'keep', status: 'pending' }] })
+  })
+
+  it('treats an empty array as a deliberate clear', () => {
+    expect(parseToolBlock('{ "tool": "update_todos", "todos": [] }')).toEqual({
+      tool: 'update_todos',
+      todos: []
+    })
+  })
+
+  it('rejects a non-array todos, and a non-empty list that yields nothing usable', () => {
+    expect(parseToolBlock('{ "tool": "update_todos", "todos": "nope" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "update_todos" }')).toBeNull()
+    // A non-empty input that survives to nothing must not silently clear the list.
+    expect(parseToolBlock('{ "tool": "update_todos", "todos": [7, null, { "text": "" }] }')).toBeNull()
+  })
+
+  it('trims, collapses whitespace, and caps the item text', () => {
+    const long = 'x'.repeat(500)
+    const parsed = parseToolBlock(
+      `{ "tool": "update_todos", "todos": [{ "text": "  hi\\n  there  " }, { "text": "${long}" }] }`
+    )
+    expect(parsed).toMatchObject({
+      tool: 'update_todos',
+      todos: [{ text: 'hi there', status: 'pending' }, { text: long.slice(0, 200), status: 'pending' }]
+    })
+  })
+
+  // ── ask_user (the blocking clarifying question) ──
+
+  it('parses a valid ask_user block with header and options', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "ask_user", "question": "Which auth?", "header": "Auth method", ' +
+          '"options": ["Email", "Google", "Both"] }'
+      )
+    ).toEqual({
+      tool: 'ask_user',
+      question: 'Which auth?',
+      header: 'Auth method',
+      options: ['Email', 'Google', 'Both']
+    })
+  })
+
+  it('parses a bare ask_user with just a question (options and header are optional)', () => {
+    expect(parseToolBlock('{ "tool": "ask_user", "question": "Ship it?" }')).toEqual({
+      tool: 'ask_user',
+      question: 'Ship it?'
+    })
+  })
+
+  it('rejects an ask_user with a blank or missing question', () => {
+    expect(parseToolBlock('{ "tool": "ask_user" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "ask_user", "question": "   " }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "ask_user", "question": 7 }')).toBeNull()
+  })
+
+  it('filters options to non-empty strings and drops the field when none survive', () => {
+    // Bad options degrade to "no chips" (free text is always allowed) — never a rejected block.
+    expect(
+      parseToolBlock(
+        '{ "tool": "ask_user", "question": "Pick one", "options": ["keep", "", 7, null, "  "] }'
+      )
+    ).toEqual({ tool: 'ask_user', question: 'Pick one', options: ['keep'] })
+    expect(
+      parseToolBlock('{ "tool": "ask_user", "question": "Pick one", "options": [7, "", null] }')
+    ).toEqual({ tool: 'ask_user', question: 'Pick one' })
+  })
+
+  it('trims/caps the question and header and limits the number of options', () => {
+    const long = 'y'.repeat(700)
+    const many = Array.from({ length: 12 }, (_, i) => `opt ${i}`)
+    const parsed = parseToolBlock(
+      `{ "tool": "ask_user", "question": "  a\\n  b  ", "header": "${'h'.repeat(80)}", ` +
+        `"question2": "${long}", "options": ${JSON.stringify(many)} }`
+    )
+    expect(parsed).toMatchObject({ tool: 'ask_user', question: 'a b' })
+    const ask = parsed as Extract<ParsedTool, { tool: 'ask_user' }>
+    expect(ask.header?.length).toBe(40)
+    expect(ask.options?.length).toBe(6)
+  })
+
+  // ── flag_followup (out-of-scope work spotted and deliberately deferred) ──
+
+  it('parses a full flag_followup block', () => {
+    expect(
+      parseToolBlock(
+        '{ "tool": "flag_followup", "title": "Fix the stale README badge", ' +
+          '"note": "It points at the old workflow name.", "files": ["README.md", "ci.yml"] }'
+      )
+    ).toEqual({
+      tool: 'flag_followup',
+      title: 'Fix the stale README badge',
+      note: 'It points at the old workflow name.',
+      files: ['README.md', 'ci.yml']
+    })
+  })
+
+  it('parses a bare flag_followup with just a title', () => {
+    expect(parseToolBlock('{ "tool": "flag_followup", "title": "Drop the dead flag" }')).toEqual({
+      tool: 'flag_followup',
+      title: 'Drop the dead flag'
+    })
+  })
+
+  it('rejects a flag_followup with a blank or missing title', () => {
+    // The title IS the follow-up — there is nothing to act on without one.
+    expect(parseToolBlock('{ "tool": "flag_followup" }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "flag_followup", "title": "  " }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "flag_followup", "title": 7 }')).toBeNull()
+    expect(parseToolBlock('{ "tool": "flag_followup", "note": "no title here" }')).toBeNull()
+  })
+
+  it('accepts `paths` as an alias for `files` and drops non-string entries', () => {
+    expect(
+      parseToolBlock('{ "tool": "flag_followup", "title": "Tidy up", "paths": ["a.ts", 7, "", null] }')
+    ).toEqual({ tool: 'flag_followup', title: 'Tidy up', files: ['a.ts'] })
+    // Nothing survivable degrades to "no files" — never a rejected block, because what
+    // a follow-up *explains* must not stop it from being recorded.
+    expect(
+      parseToolBlock('{ "tool": "flag_followup", "title": "Tidy up", "files": [7, null] }')
+    ).toEqual({ tool: 'flag_followup', title: 'Tidy up' })
+    expect(
+      parseToolBlock('{ "tool": "flag_followup", "title": "Tidy up", "note": "   " }')
+    ).toEqual({ tool: 'flag_followup', title: 'Tidy up' })
+  })
+
+  it('trims/collapses/caps the title and note and limits the files', () => {
+    const many = Array.from({ length: 10 }, (_, i) => `f${i}.ts`)
+    const parsed = parseToolBlock(
+      `{ "tool": "flag_followup", "title": "  a\\n  b  ", "note": "${'n'.repeat(600)}", ` +
+        `"files": ${JSON.stringify(many)} }`
+    )
+    expect(parsed).toMatchObject({ tool: 'flag_followup', title: 'a b' })
+    const flag = parsed as Extract<ParsedTool, { tool: 'flag_followup' }>
+    expect(flag.note?.length).toBe(400)
+    expect(flag.files?.length).toBe(6)
+    const long = parseToolBlock(
+      `{ "tool": "flag_followup", "title": "${'t'.repeat(200)}" }`
+    ) as Extract<ParsedTool, { tool: 'flag_followup' }>
+    expect(long.title.length).toBe(90)
   })
 })
 

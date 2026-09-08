@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IpcChannel } from '../shared/ipc'
 import type {
+  AmbientStatus,
   BrowserViewStatus,
   ChromeStatus,
   CompletionChunk,
@@ -77,8 +78,17 @@ const api: SylorApi = {
         ipcRenderer.removeListener(IpcChannel.WorkflowEvent, listener)
       }
     },
-    toolDecision: (runId, toolId, decision) => {
-      ipcRenderer.send(IpcChannel.WorkflowToolDecision, runId, toolId, decision)
+    toolDecision: (runId, toolId, decision, detail) => {
+      ipcRenderer.send(IpcChannel.WorkflowToolDecision, runId, toolId, decision, detail)
+    },
+    cancelAgent: (runId, agentId) => {
+      ipcRenderer.send(IpcChannel.WorkflowCancelAgent, runId, agentId)
+    },
+    revokeApproval: (runId, key) => {
+      ipcRenderer.send(IpcChannel.WorkflowRevokeApproval, runId, key)
+    },
+    answerQuestion: (runId, questionId, answer) => {
+      ipcRenderer.send(IpcChannel.WorkflowAnswer, runId, questionId, answer)
     }
   },
   sessions: {
@@ -200,6 +210,13 @@ const api: SylorApi = {
     get: () => ipcRenderer.invoke(IpcChannel.MemoryGet),
     remember: (note) => ipcRenderer.invoke(IpcChannel.MemoryRemember, note)
   },
+  checkpoints: {
+    list: () => ipcRenderer.invoke(IpcChannel.CheckpointsList),
+    restore: (id) => ipcRenderer.invoke(IpcChannel.CheckpointsRestore, id)
+  },
+  graph: {
+    build: (req) => ipcRenderer.invoke(IpcChannel.GraphBuild, req)
+  },
   chrome: {
     status: () => ipcRenderer.invoke(IpcChannel.ChromeGetStatus),
     open: (url) => ipcRenderer.invoke(IpcChannel.ChromeOpen, url),
@@ -253,6 +270,38 @@ const api: SylorApi = {
       ipcRenderer.on(IpcChannel.SchedulerTaskFired, listener)
       return () => {
         ipcRenderer.removeListener(IpcChannel.SchedulerTaskFired, listener)
+      }
+    }
+  },
+  // Two audiences, deliberately split (see `main/ambient-ipc.ts`): the mini widget
+  // reads `get`/`onStatus` and asks `focus`/`stop`; the main window only listens on
+  // `onFocusLane`/`onStopRequest`. Nothing out at the edges cancels a run itself —
+  // the chat window owns the live runId, so a stop arrives here as an intent.
+  ambient: {
+    get: () => ipcRenderer.invoke(IpcChannel.AmbientGet),
+    onStatus: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, status: AmbientStatus): void =>
+        callback(status)
+      ipcRenderer.on(IpcChannel.AmbientStatusChanged, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.AmbientStatusChanged, listener)
+      }
+    },
+    focus: (lane) => ipcRenderer.send(IpcChannel.AmbientFocus, lane ?? null),
+    onFocusLane: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, lane: string | null): void =>
+        callback(lane)
+      ipcRenderer.on(IpcChannel.AmbientFocusLane, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.AmbientFocusLane, listener)
+      }
+    },
+    stop: () => ipcRenderer.send(IpcChannel.AmbientStop),
+    onStopRequest: (callback) => {
+      const listener = (): void => callback()
+      ipcRenderer.on(IpcChannel.AmbientStopRun, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.AmbientStopRun, listener)
       }
     }
   }

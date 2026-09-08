@@ -68,6 +68,19 @@ describe('formatEventForStderr — tool-request', () => {
     ).toBe('⏳ run_command npm test')
   })
 
+  it('says what a file is for when the block carried a purpose', () => {
+    // Headless output is a log someone reads later; "src/a.ts" alone doesn't say
+    // why the file exists.
+    expect(
+      formatEventForStderr({
+        type: 'tool-request',
+        runId: RUN,
+        proposal: { ...write, purpose: 'the login endpoint' },
+        auto: true
+      })
+    ).toBe('⚙ write_file src/a.ts — the login endpoint')
+  })
+
   it('prefixes a subagent proposal with its agentId', () => {
     expect(
       formatEventForStderr({

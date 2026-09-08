@@ -8,6 +8,8 @@
  * SPEC      → a short request becomes PROJECT.md, once per project
  * PLAN      → complexity router + planner (≤1 LLM call; SIMPLE spends none)
  * ASSIGN    → build the TaskGraph, announce it, record it on the blackboard
+ * APPROVE   → only with "Plan first" on: halt for the user's go-ahead, before a
+ *             single file is touched (a reject stops the run, having built nothing)
  * EXECUTE   → the scheduler runs the ready set IN PARALLEL, each node a scoped
  *             specialist agent; every report lands on the blackboard as a Finding
  * INTEGRATE → deterministic gather (no LLM): reports, files, failures
@@ -64,6 +66,10 @@ import {
   phaseBrief,
   phaseLabel,
   resolvePhase,
+  openingNote,
+  planningBrief,
+  roadmapSummary,
+  scanNote,
   type AuditInventory,
   type MemoryPort,
   type PhaseCloseOutcome,
@@ -133,6 +139,25 @@ export interface VerifyOutcome {
   output?: string
 }
 
+/**
+ * The plan put to the user for a go-ahead (#2 — the "Plan first" checkpoint). Built
+ * from the real task graph, so the bar can never describe a plan other than the one
+ * about to run.
+ */
+export interface PlanProposal {
+  /** How the turn was sized. */
+  complexity: Complexity
+  /** One readable line per task, in the order the plan runs them. */
+  steps: string[]
+  /** True when a plan document was written this turn (the user can go and read it). */
+  wrotePlan: boolean
+  /** The phase this plan covers, when the project is running a roadmap. */
+  phase?: { n: number; total: number; name: string }
+}
+
+/** The user's verdict on a {@link PlanProposal}. */
+export type PlanDecision = 'approve' | 'reject'
+
 /** How the checks stood, in the shape the live status row reports (§33). */
 const checksOf = (v: VerifyOutcome): RunProgress['checks'] =>
   v.ran ? (v.ok ? 'PASSING' : 'FAILING') : 'UNKNOWN'
@@ -145,6 +170,13 @@ export interface OrchestratorDeps {
   /** Project overview, or '' when the turn gathered no context. */
   overview: string
   settings: ProviderSettings
+  /**
+   * How big the model already sized this turn. The engine decides it once (it
+   * needs the size to pick the reasoning tier before the first call), so supplying
+   * it here keeps a turn to ONE sizing decision. Omitted — in tests, and in any
+   * caller that has not sized the request — the orchestrator asks for itself.
+   */
+  complexity?: Complexity
   emit: (event: WorkflowEvent) => void
   signal: AbortSignal
   /** Runs one task node as a real, scoped agent. Never throws. */
@@ -157,6 +189,13 @@ export interface OrchestratorDeps {
   writePlan: (markdown: string) => Promise<void>
   /** Runs the project's own checks through the gated pipeline, if it has any. */
   verify: (filesChanged: string[]) => Promise<VerifyOutcome>
+  /**
+   * Puts the plan to the user and BLOCKS until they decide (#2). Supplied only when
+   * "Plan first" is on; omitted, the run builds straight through as it always has.
+   * The caller owns showing it and awaiting the click — this module only decides
+   * where in the machine the halt belongs (after the plan, before any specialist).
+   */
+  approvePlan?: (proposal: PlanProposal) => Promise<PlanDecision>
   /** One non-streaming completion, used for the review verdict. */
   judge: (messages: ChatMessage[]) => Promise<string>
   /**
@@ -205,6 +244,12 @@ export interface OrchestratorResult {
   usedPlannerLlm: boolean
   /** Every file the team wrote this turn. */
   filesChanged: string[]
+  /**
+   * True when the run stopped at the "Plan first" checkpoint because the user did
+   * not approve the plan (#2). A decision, not a failure — nothing was built and
+   * nothing needs retrying.
+   */
+  planRejected?: boolean
   /** The phase this run worked on, when the project is running a roadmap (§33). */
   phase?: { n: number; total: number; name: string }
   /** True when that phase closed this turn and the next one was planned (§25). */
@@ -222,10 +267,13 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
   const { runId, request, overview, settings, emit, signal } = deps
 
   // ── PLAN ────────────────────────────────────────────────────────────────
-  // Route first (cheap, usually heuristic-only), then plan. SIMPLE never asks
-  // the model for a plan — it collapses to one node and goes straight to work.
+  // Size the turn first, then plan. The size is the MODEL's verdict — normally
+  // decided once by the engine and handed in; asked for here when it wasn't.
+  // SIMPLE never asks the model for a plan — it collapses to one node and goes
+  // straight to work.
   emit({ type: 'status', runId, stage: 'planning', message: 'Sizing the work…' })
-  const complexity = await classifyComplexity(request, settings)
+  const complexity =
+    deps.complexity ?? (await classifyComplexity(request, settings, signal, { overview }))
   if (signal.aborted) return aborted(complexity)
 
   // ── PHASE ───────────────────────────────────────────────────────────────
@@ -237,6 +285,12 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
   // no audit, no spec, no plan document. Everything else is a phase of a build.
   const stageable = !!memory && !!phase && (phase.complexity !== 'simple' || !phase.fresh)
 
+  // The turn's first readable line, before anything slow. Everything between here
+  // and the plan is an internal document call — nothing streamed, minutes at high
+  // reasoning effort — so without this the reply sits empty while the status row
+  // repeats a phase label, which reads as a hung app rather than a working one.
+  if (stageable && phase) emit({ type: 'delta', runId, text: `${openingNote(phase)}\n` })
+
   // ── AUDIT (§3) ──────────────────────────────────────────────────────────
   // The one inspection an unfamiliar project is allowed, persisted so it is never
   // repeated: the file map (free — the files describe themselves) plus, once ever,
@@ -247,8 +301,9 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
     // reads — so a project it cannot walk, or a document it cannot write, must never
     // be able to fail the work this turn was actually asked to do.
     try {
+      const inventory = deps.auditInventory?.()
       const audit = await auditProject({
-        inventory: deps.auditInventory?.(),
+        inventory,
         memory,
         scribe: deps.scribe,
         signal
@@ -256,6 +311,11 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
       if (audit.wrote.includes('architecture') || audit.wrote.includes('conventions')) {
         emit({ type: 'status', runId, stage: 'planning', message: 'Recorded the project’s architecture.' })
       }
+      // Said out loud, not just flashed in the status row: the user asked to be told
+      // the repo was read before any code was written. Only ever describes a scan
+      // that actually happened — see scanNote.
+      const note = scanNote(audit, inventory?.files ?? 0)
+      if (note) emit({ type: 'delta', runId, text: `${note}\n` })
     } catch {
       // Nothing recorded: the later stages read the placeholders, exactly as before.
     }
@@ -284,7 +344,10 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
     type: 'status',
     runId,
     stage: 'planning',
-    message: complexity === 'simple' ? 'Planning the change…' : `Planning a ${complexity} build…`
+    // Not "Planning a medium build…": the size is a routing decision, and labelling
+    // the user's request with it says more about Sylor's process than about their
+    // work. What the row is for is what is happening now.
+    message: complexity === 'simple' ? 'Planning the change…' : 'Planning the work…'
   })
   // plan.md is written only for a real multi-task plan: a one-node plan carries
   // no information the user doesn't already see, and writing it would add a
@@ -292,11 +355,27 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
   let planMarkdown = ''
   const plan = await buildPlan(request, complexity, settings, {
     // The phase brief scopes the planner to THIS phase; project memory tells it
-    // what already exists so it doesn't plan work that is already done.
-    overview: phase ? [phaseBrief(phase), overview].filter(Boolean).join('\n\n') : overview,
+    // what already exists so it doesn't plan work that is already done — and the
+    // planning brief hands it the specification written moments ago, so the split
+    // follows the pages, data and API boundary the spec just decided instead of
+    // being inferred a second time from the raw request.
+    overview: phase
+      ? [phaseBrief(phase), memory ? planningBrief(memory) : '', overview].filter(Boolean).join('\n\n')
+      : overview,
     writePlan: (markdown) => {
       planMarkdown = markdown
-    }
+    },
+    signal,
+    // Falling back to one generalist node is a real loss of fidelity, so it is
+    // reported rather than hidden — otherwise a failed planner call looks
+    // identical to a request that genuinely needed only one task.
+    onDegraded: (reason) =>
+      emit({
+        type: 'status',
+        runId,
+        stage: 'planning',
+        message: `Planning fell back to a single task — ${reason}`
+      })
   })
   if (signal.aborted) return aborted(complexity)
 
@@ -333,6 +412,17 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
       progress: progressOf()
     })
 
+    // The plan said out loud (§33) — BEFORE the phase-plan document is authored,
+    // not after. plan.md is a file the user has to go and open, and the status row
+    // can only carry `Phase 1 of 9`; meanwhile authoring that document is the
+    // longest single call of the turn (minutes, at high reasoning effort). Emitting
+    // here means the shape of the build — how many phases, what each is for, what
+    // this one breaks down into — is readable within seconds of the planner
+    // returning, and the wait that follows happens under text the user can read.
+    // Derived from the roadmap and the real task graph, so it costs no call and
+    // cannot describe a plan other than the one being written.
+    emit({ type: 'delta', runId, text: `${roadmapSummary(phase, plan.tasks)}\n` })
+
     const markdown = await authorPhasePlan({
       phase,
       request,
@@ -340,7 +430,17 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
       memoryDigest: memoryDigest(memory),
       verifyCommands: deps.verifyCommands,
       scribe: deps.scribe,
-      signal
+      signal,
+      // A skeleton plan.md still gets written (the task list and checklist in it
+      // are real), but the user is told the judgement sections are placeholders
+      // instead of discovering it by opening the file.
+      onDegraded: (reason) =>
+        emit({
+          type: 'status',
+          runId,
+          stage: 'planning',
+          message: `Phase plan written without its detail — ${reason}`
+        })
     })
     if (signal.aborted) return aborted(complexity)
     await deps.writePlan(markdown)
@@ -380,6 +480,51 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
   }
 
   // ── EXECUTE ─────────────────────────────────────────────────────────────
+  // The "Plan first" checkpoint (#2). The halt belongs exactly here: the plan is
+  // written and announced, and not one file has been touched — so approving costs
+  // the user nothing they haven't already seen, and rejecting costs only the
+  // planning. A reject is a DECISION, not a failure: nothing is retried, no rework
+  // is routed, and the run says plainly that it stopped on purpose.
+  if (deps.approvePlan) {
+    emit({
+      type: 'status',
+      runId,
+      stage: 'planning',
+      message: 'Waiting for your go-ahead on the plan…',
+      progress: progressOf()
+    })
+    const decision = await deps.approvePlan({
+      complexity,
+      steps: graph.all.map((n) => `${resolveRole(n.role).title}: ${n.description}`),
+      wrotePlan: staged || (plan.tasks.length > 1 && !!planMarkdown),
+      ...(staged && phase ? { phase: { n: phase.spec.n, total: phase.total, name: phase.spec.name } } : {})
+    })
+    if (signal.aborted) return aborted(complexity, graph.all)
+    if (decision === 'reject') {
+      emit({ type: 'status', runId, stage: 'planning', message: 'Plan not approved — nothing was built.' })
+      emit({
+        type: 'delta',
+        runId,
+        text:
+          '\nI stopped before building anything — you didn’t approve this plan. ' +
+          'Tell me what to change about it and I’ll re-plan.\n'
+      })
+      return {
+        complexity,
+        tasks: graph.all,
+        passed: false,
+        reworks: 0,
+        reviewNotes: '',
+        usedPlannerLlm: plan.usedLlm,
+        filesChanged: [],
+        planRejected: true,
+        ...(staged && phase
+          ? { phase: { n: phase.spec.n, total: phase.total, name: phase.spec.name } }
+          : {})
+      }
+    }
+  }
+
   const filesChanged: string[] = []
   await execute(graph, shared, deps, filesChanged)
   if (signal.aborted) return aborted(complexity, graph.all)
@@ -760,10 +905,15 @@ function respond(
   const lines: string[] = ['']
   if (phaseLine) lines.push(phaseLine, '')
   if (multi) {
-    lines.push(`**Team result** (${result.complexity}, ${graph.size} tasks)`)
+    // No header, and no task ids. "**Team result** (complex, 3 tasks)" led with two
+    // things that were about Sylor rather than about the user's project: the header
+    // named its own internal machinery, and `complex` is a routing decision the user
+    // never asked to see. The count it carried is already sitting in the list below.
+    // `t1`/`rework-1` go for the same reason — they appear nowhere else in the app,
+    // so what identifies a line to a reader is who did the work and what it was.
     for (const node of graph.all) {
       const mark = node.state === 'completed' ? '✓' : node.state === 'running' ? '·' : '✗'
-      lines.push(`- ${mark} **${node.id}** (${resolveRole(node.role).title}) — ${node.description}`)
+      lines.push(`- ${mark} **${resolveRole(node.role).title}** — ${node.description}`)
     }
   }
   if (result.filesChanged.length) {
@@ -778,7 +928,13 @@ function respond(
     )
   }
   for (const node of problems) {
-    lines.push('', `⚠ **${node.id}** (${node.role}) ${node.state}: ${node.error ?? 'no detail reported.'}`)
+    // Same role naming as the bullets, so the two line up by eye — and no repeat of
+    // the description, because the bullet above already said what this piece was. The
+    // only thing left to add here is why it stopped.
+    lines.push(
+      '',
+      `⚠ **${resolveRole(node.role).title}** — ${node.state}: ${node.error ?? 'no detail reported.'}`
+    )
   }
   if (!result.passed) {
     lines.push(

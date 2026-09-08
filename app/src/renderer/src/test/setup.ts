@@ -1,7 +1,7 @@
 import '@testing-library/jest-dom/vitest'
 import { vi } from 'vitest'
 import { DEFAULT_PROVIDER_SETTINGS } from '@shared/defaults'
-import type { BrowserViewStatus, ChromeStatus, SylorApi } from '@shared/types'
+import type { AmbientStatus, BrowserViewStatus, ChromeStatus, SylorApi } from '@shared/types'
 import { emptyUsageStats } from '@shared/usage'
 
 /** A located-but-not-running real browser: what tests see unless they override it. */
@@ -14,6 +14,16 @@ const CHROME_IDLE: ChromeStatus = {
   loading: false,
   signingIn: false,
   error: null
+}
+
+/** Nothing is running under vitest, so the ambient surfaces report exactly that. */
+const AMBIENT_IDLE: AmbientStatus = {
+  state: 'idle',
+  message: 'Nothing running',
+  lane: null,
+  agents: 0,
+  startedAt: 0,
+  runId: null
 }
 
 /** No in-app page view exists under vitest (it is a main-process native view). */
@@ -60,7 +70,10 @@ const sylorMock: SylorApi = {
   workflow: {
     // No-op run that immediately hands back a disposer.
     run: vi.fn().mockReturnValue(() => {}),
-    toolDecision: vi.fn()
+    toolDecision: vi.fn(),
+    cancelAgent: vi.fn(),
+    revokeApproval: vi.fn(),
+    answerQuestion: vi.fn()
   },
   sessions: {
     // Query ops resolve sane empty defaults so boot() has no session and falls
@@ -197,6 +210,19 @@ const sylorMock: SylorApi = {
     get: vi.fn().mockResolvedValue(''),
     remember: vi.fn().mockResolvedValue(true)
   },
+  checkpoints: {
+    // No project on disk under vitest: an empty timeline, and a restore that
+    // truthfully reports it found nothing rather than claiming success.
+    list: vi.fn().mockResolvedValue([]),
+    restore: vi.fn().mockResolvedValue({ ok: false, error: 'That checkpoint is no longer on record.' })
+  },
+  graph: {
+    // Nothing indexed under vitest, so the graph is honestly empty rather than a
+    // fixture the tests could accidentally assert against as if it were real.
+    build: vi
+      .fn()
+      .mockResolvedValue({ scope: 'run', nodes: [], edges: [], omitted: 0, indexed: 0 })
+  },
   chrome: {
     // No real browser under vitest: available, never running, every call a no-op.
     status: vi.fn().mockResolvedValue(CHROME_IDLE),
@@ -234,6 +260,16 @@ const sylorMock: SylorApi = {
     setEnabled: vi.fn().mockResolvedValue(null),
     remove: vi.fn().mockResolvedValue(undefined),
     onTaskFired: vi.fn().mockReturnValue(() => {})
+  },
+  ambient: {
+    // The tray and the floating card live in main; here they are an idle status and
+    // subscriptions that hand back a disposer so effects can clean up.
+    get: vi.fn().mockResolvedValue(AMBIENT_IDLE),
+    onStatus: vi.fn().mockReturnValue(() => {}),
+    focus: vi.fn(),
+    onFocusLane: vi.fn().mockReturnValue(() => {}),
+    stop: vi.fn(),
+    onStopRequest: vi.fn().mockReturnValue(() => {})
   }
 }
 

@@ -1,5 +1,6 @@
 import type { ChatMessage, IntentAnalysis, ProviderSettings } from '../../shared/types'
 import { createProvider } from '../providers'
+import { leadsWith, matchesAnyWord } from './markers'
 
 /** Keywords suggesting an edit/change request vs. a question. */
 const EDIT_MARKERS = [
@@ -25,16 +26,61 @@ const EDIT_MARKERS = [
   'optimize'
 ]
 
+/** English phrases that ask for an explanation rather than a change. */
 const EXPLAIN_MARKERS = [
   'explain',
   'what is',
+  'what are',
+  'what does',
   'why',
   'how does',
   'how do',
   'difference',
   'meaning',
   'describe',
-  'summarize'
+  'summarize',
+  'tell me about',
+  'walk me through'
+]
+
+/**
+ * Interrogative openers that lead a genuine question. Deliberately excludes
+ * "can/could/would you", which in practice lead a polite imperative ("can you
+ * add a logout button?") — a request, not a question.
+ */
+const QUESTION_LEADS = ['what', 'why', 'how', 'when', 'where', 'who', 'which', 'whose']
+
+/**
+ * Banglish (romanised Bengali) question markers, matched anywhere in the prompt.
+ * The router is English-first, so a Banglish question looked like an edit request
+ * the moment it mentioned "build" — which is exactly how "hii tomake kono boro
+ * project build korte dile tumi ki korbe?" ("if you were given a big project to
+ * build, what would you do?") was answered with a nine-phase production build
+ * instead of a sentence.
+ *
+ * Omits "tumi ki" / "apni ki" for the same reason English omits "can you": in
+ * practice they lead a polite request ("tumi ki ei file ta fix korte parbe?").
+ */
+const BANGLISH_QUESTION_MARKERS = [
+  'ki korbe',
+  'ki korba',
+  'ki korbo',
+  'ki kore',
+  'ki hobe',
+  'ki hoy',
+  'kivabe',
+  'kibhabe',
+  'ki vabe',
+  'ki bhabe',
+  'kemon',
+  'keno',
+  'kano',
+  'kothay',
+  'kokhon',
+  'ki mane',
+  'mane ki',
+  'bujhao',
+  'bujhiye'
 ]
 
 /**
@@ -79,18 +125,26 @@ const CHAT_MARKERS = [
 
 /**
  * True when the prompt is a greeting / social message: it leads with a chat
- * marker (as a whole word, optionally followed by punctuation or more words)
- * and carries no edit keyword. Kept deliberately conservative — anything that
- * smells like real work falls through to question/edit.
+ * marker (as a whole word, stretched letters allowed, optionally followed by
+ * punctuation or more words) and carries no edit keyword. Kept deliberately
+ * conservative — anything that smells like real work falls through to
+ * question/edit.
  */
 function isChitChat(lower: string): boolean {
   if (!lower) return false
-  if (EDIT_MARKERS.some((marker) => lower.includes(marker))) return false
-  return CHAT_MARKERS.some((m) => {
-    if (lower === m) return true
-    // A leading marker followed by a word boundary (space or punctuation).
-    return lower.startsWith(m) && /[\s,.!?]/.test(lower.charAt(m.length))
-  })
+  if (matchesAnyWord(lower, EDIT_MARKERS)) return false
+  return CHAT_MARKERS.some((m) => leadsWith(lower, m))
+}
+
+/**
+ * True when the prompt is shaped like a question: an explain phrase, an
+ * interrogative opener, or a Banglish question marker. A trailing `?` alone does
+ * NOT count — "can you add a logout button?" is a request, not a question.
+ */
+function looksInterrogative(lower: string): boolean {
+  if (matchesAnyWord(lower, EXPLAIN_MARKERS)) return true
+  if (matchesAnyWord(lower, BANGLISH_QUESTION_MARKERS)) return true
+  return QUESTION_LEADS.some((lead) => leadsWith(lower, lead))
 }
 
 /**
@@ -105,9 +159,9 @@ export function classifyIntentHeuristic(prompt: string): IntentAnalysis {
     return { kind: 'chat', summary: 'You want to chat with Sylor.', needsContext: false }
   }
 
-  const isEdit =
-    EDIT_MARKERS.some((marker) => lower.includes(marker)) &&
-    !EXPLAIN_MARKERS.some((marker) => lower.includes(marker))
+  // A question shape beats an edit keyword: someone asking *about* building is
+  // not asking us to build. (This is the tie-break the LLM path also makes.)
+  const isEdit = matchesAnyWord(lower, EDIT_MARKERS) && !looksInterrogative(lower)
 
   const needsContext = isEdit
 
@@ -123,17 +177,16 @@ export function classifyIntentHeuristic(prompt: string): IntentAnalysis {
 /**
  * Whether the cheap heuristic is confident enough to skip the LLM round-trip: a
  * clear greeting, or a prompt carrying exactly one of the two signals — an edit
- * marker XOR an explain marker. A prompt with no markers, or with both, is
- * genuinely ambiguous and still earns the smarter LLM classification. This keeps
- * the common case ("build/add/fix X", "explain/why X", "hi") instant instead of
- * blocking generation on a separate classification call.
+ * marker XOR a question shape. A prompt with neither, or with both (an edit verb
+ * inside a question — "kono project build korte dile ki korbe?"), is genuinely
+ * ambiguous and still earns the smarter LLM classification. This keeps the common
+ * case ("build/add/fix X", "explain/why X", "hi") instant instead of blocking
+ * generation on a separate classification call.
  */
 function heuristicIsConfident(prompt: string): boolean {
   const lower = prompt.toLowerCase().trim()
   if (isChitChat(lower)) return true
-  const hasEdit = EDIT_MARKERS.some((m) => lower.includes(m))
-  const hasExplain = EXPLAIN_MARKERS.some((m) => lower.includes(m))
-  return hasEdit !== hasExplain
+  return matchesAnyWord(lower, EDIT_MARKERS) !== looksInterrogative(lower)
 }
 
 /**
@@ -143,7 +196,8 @@ function heuristicIsConfident(prompt: string): boolean {
  */
 export async function classifyIntent(
   prompt: string,
-  settings: ProviderSettings
+  settings: ProviderSettings,
+  signal?: AbortSignal
 ): Promise<IntentAnalysis> {
   // Fast path: a very short prompt, or one the heuristic already reads
   // confidently, is classified inline — no LLM latency before the model starts
@@ -162,6 +216,11 @@ export async function classifyIntent(
     '"chat" (a greeting, small talk, or social message needing no project work), ' +
     '"question" (they want an explanation or answer about the code/project), or ' +
     '"edit" (they want you to change, build, run, or fix something). ' +
+    'The message may be in any language, or in a romanised mix (e.g. Banglish) — ' +
+    'judge the intent, not the vocabulary. A hypothetical about work ' +
+    '("if you were given a big project to build, what would you do?") is a QUESTION: ' +
+    'it asks how you would work, and answering it means writing a sentence, not code. ' +
+    'Only choose "edit" when the user is asking for the change itself, now. ' +
     'Respond with ONLY valid JSON: ' +
     '{"kind":"chat"|"question"|"edit","summary":"<short one-sentence restatement of what the user wants>","needsContext":true|false}. ' +
     'Set needsContext true only when answering requires reading the project files.'
@@ -171,7 +230,7 @@ export async function classifyIntent(
   ]
 
   try {
-    const raw = await provider.getCompletion(settings.modelId, messages)
+    const raw = await provider.getCompletion(settings.modelId, messages, undefined, signal)
     const parsed = parseIntentJson(raw)
     if (parsed) return parsed
   } catch {

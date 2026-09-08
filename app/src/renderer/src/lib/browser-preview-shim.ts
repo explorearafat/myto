@@ -15,6 +15,7 @@
  */
 import { DEFAULT_PROVIDER_SETTINGS } from '@shared/defaults'
 import type {
+  AmbientStatus,
   Attachment,
   BrowserViewStatus,
   ChromeStatus,
@@ -53,6 +54,16 @@ const PREVIEW_VIEW: BrowserViewStatus = {
   canGoBack: false,
   canGoForward: false,
   error: 'The in-app browser needs the Sylor desktop app.'
+}
+
+/** No run is possible out here, so the ambient surfaces are permanently idle. */
+const PREVIEW_AMBIENT: AmbientStatus = {
+  state: 'idle',
+  message: 'Nothing running',
+  lane: null,
+  agents: 0,
+  startedAt: 0,
+  runId: null
 }
 
 function installShim(): void {
@@ -108,7 +119,10 @@ function installShim(): void {
     },
     workflow: {
       run: () => () => {},
-      toolDecision: () => {}
+      toolDecision: () => {},
+      cancelAgent: () => {},
+      revokeApproval: () => {},
+      answerQuestion: () => {}
     },
     sessions: {
       list: (projectId) =>
@@ -296,6 +310,17 @@ function installShim(): void {
       get: () => Promise.resolve(''),
       remember: () => Promise.resolve(false)
     },
+    // Nothing has been built in a browser tab, so there is nothing to go back to.
+    checkpoints: {
+      list: () => Promise.resolve([]),
+      restore: () => Promise.resolve({ ok: false, error: 'The browser preview has no project.' })
+    },
+    graph: {
+      // No project index in a browser tab, so there is nothing to draw — the canvas
+      // says as much rather than showing a graph of nothing.
+      build: (req) =>
+        Promise.resolve({ scope: req.scope, nodes: [], edges: [], omitted: 0, indexed: 0 })
+    },
     // No real browser to drive from a browser tab: report "nothing installed" so the
     // browser panel shows its explain-and-offer card instead of pretending to launch.
     chrome: {
@@ -347,6 +372,16 @@ function installShim(): void {
       setEnabled: () => Promise.resolve(null),
       remove: () => Promise.resolve(),
       onTaskFired: () => () => {}
+    },
+    // The tray and the floating card are native windows, so out here there is
+    // nothing to report and nothing to focus: an honest idle status, no-op asks.
+    ambient: {
+      get: () => Promise.resolve(PREVIEW_AMBIENT),
+      onStatus: () => () => {},
+      focus: () => {},
+      onFocusLane: () => () => {},
+      stop: () => {},
+      onStopRequest: () => () => {}
     }
   }
 

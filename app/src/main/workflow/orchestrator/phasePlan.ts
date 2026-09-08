@@ -315,7 +315,8 @@ const PLAN_SECTIONS: readonly SectionSpec[] = [
   }
 ] as const
 
-const RANK: Record<Complexity, number> = { simple: 0, medium: 1, complex: 2 }
+/** Complexity as an ordered scale, so sizes can be compared, not just matched. */
+export const RANK: Record<Complexity, number> = { simple: 0, medium: 1, complex: 2 }
 
 /** The sections a plan at this complexity carries, in render order. */
 function sectionsFor(complexity: Complexity): readonly SectionSpec[] {

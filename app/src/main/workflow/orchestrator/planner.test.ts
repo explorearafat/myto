@@ -133,6 +133,43 @@ describe('buildPlan — robustness fallbacks', () => {
   })
 })
 
+describe('buildPlan — degradation is reported, not hidden', () => {
+  // A fallback turns a multi-domain request into one generalist node. That is a
+  // real loss of fidelity, so it has to reach the user rather than look like the
+  // plan they asked for.
+  it('reports the provider error behind a fallback', async () => {
+    getCompletion.mockRejectedValue(new Error('Request timed out after 600000ms'))
+    const onDegraded = vi.fn()
+    await buildPlan('build stuff', 'complex', settings, { onDegraded })
+    expect(onDegraded).toHaveBeenCalledTimes(1)
+    expect(onDegraded.mock.calls[0][0]).toMatch(/timed out/i)
+  })
+
+  it('reports an answer that parsed to nothing usable', async () => {
+    getCompletion.mockResolvedValue('here is my plan: do everything, trust me')
+    const onDegraded = vi.fn()
+    await buildPlan('build stuff', 'medium', settings, { onDegraded })
+    expect(onDegraded).toHaveBeenCalledTimes(1)
+    expect(onDegraded.mock.calls[0][0]).toMatch(/task graph/i)
+  })
+
+  it('stays quiet when a user Stop cancelled the planner', async () => {
+    // A cancellation is not a degradation — the user already knows.
+    getCompletion.mockRejectedValue(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+    const onDegraded = vi.fn()
+    await buildPlan('build stuff', 'complex', settings, { onDegraded })
+    expect(onDegraded).not.toHaveBeenCalled()
+  })
+
+  it('stays quiet on a plan that parsed fine', async () => {
+    getCompletion.mockResolvedValue(plan([{ id: 't1', role: 'backend', description: 'do it' }]))
+    const onDegraded = vi.fn()
+    const res = await buildPlan('do it', 'medium', settings, { onDegraded })
+    expect(res.tasks).toHaveLength(1)
+    expect(onDegraded).not.toHaveBeenCalled()
+  })
+})
+
 describe('plan persistence + rendering', () => {
   it('hands the rendered markdown to the writePlan callback', async () => {
     const writePlan = vi.fn()

@@ -27,10 +27,16 @@ export const IpcChannel = {
   WorkflowStart: 'workflow:start',
   /** Renderer → main: cancel an in-flight run by runId. */
   WorkflowCancel: 'workflow:cancel',
+  /** Renderer → main: stop ONE subagent of a run without ending the run. */
+  WorkflowCancelAgent: 'workflow:cancel-agent',
   /** Main → renderer: a workflow event (intent/status/delta/tool/done/error). */
   WorkflowEvent: 'workflow:event',
   /** Renderer → main: resolve a pending tool-request (approve/reject). */
   WorkflowToolDecision: 'workflow:tool-decision',
+  /** Renderer → main: withdraw a run-scoped standing approval by key. */
+  WorkflowRevokeApproval: 'workflow:revoke-approval',
+  /** Renderer → main: answer a pending clarifying question (the `ask_user` tool). */
+  WorkflowAnswer: 'workflow:answer',
 
   // Session persistence (Phase 5)
   /** Renderer → main (invoke): list sessions for the active project root. */
@@ -186,6 +192,18 @@ export const IpcChannel = {
   /** Renderer → main (invoke): append one durable fact; resolves true when newly saved. */
   MemoryRemember: 'memory:remember',
 
+  // Checkpoints (the undo the agent's writes never had): snapshots the engine takes
+  // before it changes anything, restorable from the canvas timeline.
+  /** Renderer → main (invoke): every checkpoint for the active project, newest first. */
+  CheckpointsList: 'checkpoints:list',
+  /** Renderer → main (invoke): put the files back as they were at one checkpoint. */
+  CheckpointsRestore: 'checkpoints:restore',
+
+  // Dependency graph (the canvas's map of the codebase): built in main from the
+  // project index, since that is where the per-file import lists live.
+  /** Renderer → main (invoke): nodes + edges for a scope, capped for drawing. */
+  GraphBuild: 'graph:build',
+
   // Real browser (the "use everything that works in Chrome" path): the
   // user's own Chrome/Edge, launched with a Sylor-only profile and driven over
   // the DevTools protocol. It is a genuine browser, so Google sign-in and every
@@ -255,7 +273,24 @@ export const IpcChannel = {
   /** Renderer → main (invoke): delete a task. */
   SchedulerRemove: 'scheduler:remove',
   /** Main → renderer (send): a task came due — the renderer opens a chat and sends it. */
-  SchedulerTaskFired: 'scheduler:task-fired'
+  SchedulerTaskFired: 'scheduler:task-fired',
+
+  // Ambient status (Phase 8): what Sylor is doing, for the surfaces that are not
+  // the chat window — the tray tooltip/icon and the opt-in floating mini widget.
+  // Folded in main from the same workflow event stream the chat reads, so the two
+  // can never describe different turns.
+  /** Renderer → main (invoke): the current ambient status (the widget's first paint). */
+  AmbientGet: 'ambient:get',
+  /** Main → renderer (send): the ambient status changed. */
+  AmbientStatusChanged: 'ambient:status-changed',
+  /** Renderer → main (send): surface the main window, optionally at a lane. */
+  AmbientFocus: 'ambient:focus',
+  /** Main → the MAIN window (send): open the run log on this lane. */
+  AmbientFocusLane: 'ambient:focus-lane',
+  /** Renderer → main (send): stop the live run from outside the window. */
+  AmbientStop: 'ambient:stop',
+  /** Main → the MAIN window (send): an ambient surface asked to stop the run. */
+  AmbientStopRun: 'ambient:stop-run'
 } as const
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel]

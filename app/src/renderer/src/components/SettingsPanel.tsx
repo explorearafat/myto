@@ -27,6 +27,15 @@ import type {
 } from '@shared/types'
 import { useAppStore } from '@renderer/store/useAppStore'
 import { BrowserPermissionsSection } from '@renderer/components/browser/BrowserPermissions'
+import {
+  emptyBoardMessage,
+  filterCounts,
+  FILTER_LABEL,
+  FILTER_ORDER,
+  matchesFilter,
+  matchesQuery,
+  type CatalogFilter
+} from '@renderer/lib/catalogFilter'
 
 const AUTH_SCHEMA_LABELS: Record<AuthSchema, string> = {
   none: 'None',
@@ -381,6 +390,10 @@ function GeneralPane() {
   const setPermissionMode = useAppStore((s) => s.setPermissionMode)
   const planFirst = useAppStore((s) => s.planFirst)
   const setPlanFirst = useAppStore((s) => s.setPlanFirst)
+  const fullAccess = useAppStore((s) => s.fullAccess)
+  const setFullAccess = useAppStore((s) => s.setFullAccess)
+  const autoSend = useAppStore((s) => s.autoSend)
+  const setAutoSend = useAppStore((s) => s.setAutoSend)
 
   return (
     <div className="divide-y divide-border">
@@ -419,18 +432,73 @@ function GeneralPane() {
       </SettingRow>
       <SettingRow
         title="Plan first"
-        description="For substantial edit turns, write a plan.md capturing the full plan and pause before making other changes."
+        description="For substantial edit turns, show the plan and wait for your go-ahead before touching a single file."
       >
         <Switch checked={planFirst} onChange={(v) => void setPlanFirst(v)} label="Plan first" />
       </SettingRow>
+      <div className="py-3.5">
+        <div className="flex items-center justify-between gap-6">
+          <div className="min-w-0">
+            <div className="text-[13px] font-medium text-red-600">Full-PC access</div>
+            <p className="mt-0.5 text-[12px] leading-relaxed text-muted">
+              Lets Sylor read, write, and delete <span className="font-medium text-red-600">any file
+              anywhere on this computer</span> — not just the project folder — and run any command
+              without asking. The project sandbox and every approval prompt are turned off.
+            </p>
+          </div>
+          <div className="shrink-0">
+            <Switch
+              checked={fullAccess}
+              onChange={(v) => void setFullAccess(v)}
+              label="Full-PC access"
+            />
+          </div>
+        </div>
+        {fullAccess && (
+          <p className="mt-2 rounded-md bg-red-500/14 px-3 py-2 text-[12px] leading-relaxed text-red-600">
+            Full-PC access is ON. Sylor no longer asks before editing files outside your project or
+            running commands. Buying things is still blocked, and {autoSend ? 'deleting' : 'posting or deleting'} in
+            the browser still asks once. Turn this off when you don’t need it.
+          </p>
+        )}
+        {fullAccess && (
+          <div className="mt-3 border-t border-border pt-3">
+            <div className="flex items-center justify-between gap-6">
+              <div className="min-w-0">
+                <div className="text-[13px] font-medium text-red-600">Auto-send messages</div>
+                <p className="mt-0.5 text-[12px] leading-relaxed text-muted">
+                  Lets Sylor <span className="font-medium text-red-600">send messages, posts, and
+                  emails on its own</span> — replying to a mail, posting for you, messaging someone —
+                  without asking first. Deleting data still asks, and buying things stays blocked.
+                </p>
+              </div>
+              <div className="shrink-0">
+                <Switch
+                  checked={autoSend}
+                  onChange={(v) => void setAutoSend(v)}
+                  label="Auto-send messages"
+                />
+              </div>
+            </div>
+            {autoSend && (
+              <p className="mt-2 rounded-md bg-red-500/14 px-3 py-2 text-[12px] leading-relaxed text-red-600">
+                Auto-send is ON. Sylor can post and send messages or email as you without a prompt.
+                Make sure you trust the task before leaving it running.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
 
-/** Appearance pane: color theme. */
+/** Appearance pane: color theme, and the floating status card. */
 function AppearancePane() {
   const theme = useAppStore((s) => s.theme)
   const setTheme = useAppStore((s) => s.setTheme)
+  const statusWidget = useAppStore((s) => s.statusWidget)
+  const setStatusWidget = useAppStore((s) => s.setStatusWidget)
   return (
     <div className="divide-y divide-border">
       <SettingRow
@@ -444,6 +512,20 @@ function AppearancePane() {
           onChange={(v) => void setTheme(v)}
         />
       </SettingRow>
+      {/* This switch IS the window: main opens and destroys the card on the save, so
+          the toggle can never claim something the desktop disagrees with. It is also
+          the only way to dismiss it — the card is deliberately not closable, since a
+          window that could close itself would leave this row lying until next launch. */}
+      <SettingRow
+        title="Floating status card"
+        description="A small always-on-top card showing what Sylor is doing, with a clock and a stop button. The tray icon reports the same thing without taking a corner of the screen."
+      >
+        <Switch
+          checked={statusWidget}
+          onChange={(v) => void setStatusWidget(v)}
+          label="Floating status card"
+        />
+      </SettingRow>
     </div>
   )
 }
@@ -452,15 +534,23 @@ function AppearancePane() {
 // Connectors (MCP) & Skills panes (disk-authored; status + per-item toggle)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Small pill used for the badges on connector/skill cards. */
+/**
+ * Small pill used for the badges on connector/skill cards.
+ *
+ * The text sits at the 600 step rather than 300: the app's default theme is warm
+ * paper, and amber-300 on #faf9f5 is a badge you cannot read. 600 clears legible
+ * contrast on the paper ground and is still bright enough on the dark charcoal one,
+ * so a single value serves both themes — the `dark:` variant is not available here
+ * (it keys off the OS scheme, while the app's theme is a `data-theme` attribute).
+ */
 type ChipTone = 'muted' | 'ok' | 'warn' | 'danger' | 'info' | 'accent'
 const CHIP_TONE: Record<ChipTone, string> = {
   muted: 'bg-surface-2 text-muted',
-  ok: 'bg-emerald-500/15 text-emerald-300',
-  warn: 'bg-amber-500/15 text-amber-300',
-  danger: 'bg-red-500/15 text-red-300',
-  info: 'bg-sky-500/15 text-sky-300',
-  accent: 'bg-primary/15 text-primary'
+  ok: 'bg-emerald-500/14 text-emerald-600',
+  warn: 'bg-amber-500/16 text-amber-600',
+  danger: 'bg-red-500/14 text-red-600',
+  info: 'bg-sky-500/14 text-sky-600',
+  accent: 'bg-primary/14 text-primary'
 }
 function Chip({
   children,
@@ -472,9 +562,106 @@ function Chip({
   title?: string
 }) {
   return (
-    <span title={title} className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${CHIP_TONE[tone]}`}>
+    <span title={title} className={`rounded-md px-1.5 py-0.5 text-[10px] font-medium ${CHIP_TONE[tone]}`}>
       {children}
     </span>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The board: the shared vocabulary the Connectors and Skills panes are built from
+//
+// Both panes are the same thing — two dozen items of which a handful are live —
+// and both used to render as an undifferentiated column of bordered boxes, every
+// row the same weight whether it was running or switched off, its state carried
+// only by a 20px switch at the far right edge. The board gives that column a
+// spine: a state-tinted monogram tile per row so on/off is readable straight down
+// the left edge, one dotted trait line in place of five identical chips, and a
+// sticky header that counts, filters, searches and adds without scrolling.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** What a card's tile and status dot say about it at a glance. */
+type BoardTone = 'on' | 'off' | 'warn' | 'error'
+const BOARD_TONE: Record<BoardTone, { tile: string; dot: string; text: string }> = {
+  on: { tile: 'bg-primary/14 text-primary', dot: 'bg-primary', text: 'text-primary' },
+  off: { tile: 'bg-surface-2 text-muted', dot: 'bg-muted/50', text: 'text-muted' },
+  warn: { tile: 'bg-amber-500/16 text-amber-600', dot: 'bg-amber-500', text: 'text-amber-600' },
+  error: { tile: 'bg-red-500/14 text-red-600', dot: 'bg-red-500', text: 'text-red-600' }
+}
+
+/**
+ * A card's identity tile: the item's initial in a rounded square, tinted by state.
+ * This is what makes a long board scannable — terracotta tiles are live, grey ones
+ * are off — and it is tinted by the brand accent rather than a per-category rainbow
+ * so the pane still reads as Sylor rather than as a plugin bazaar.
+ */
+function Monogram({ label, tone }: { label: string; tone: BoardTone }) {
+  const initial = (label.match(/[a-z0-9]/i)?.[0] ?? '·').toUpperCase()
+  return (
+    <span
+      aria-hidden="true"
+      className={
+        'grid h-9 w-9 shrink-0 place-items-center rounded-[10px] text-[13px] font-semibold ' +
+        BOARD_TONE[tone].tile
+      }
+    >
+      {initial}
+    </span>
+  )
+}
+
+/** The state dot beside a card's status line; `pulse` only while a connect is in flight. */
+function StateDot({ tone, pulse = false }: { tone: BoardTone; pulse?: boolean }) {
+  return (
+    <span className="flex h-4 shrink-0 items-center">
+      <span
+        aria-hidden="true"
+        className={'h-1.5 w-1.5 rounded-full ' + BOARD_TONE[tone].dot + (pulse ? ' animate-pulse' : '')}
+      />
+    </span>
+  )
+}
+
+/** One fact on a card's trait line; a tone lifts the two that are worth noticing. */
+type Trait = { text: string; tone?: 'warn' | 'danger' }
+
+/**
+ * A card's facts as one dotted line. It replaces a row of five same-shaped chips —
+ * transport, local/external, risk, free, built-in — which competed with each other
+ * and with the badges that actually mattered. Only the two that are worth a second
+ * look (a network/system reach, a high-risk scope) keep any colour.
+ */
+function TraitLine({ traits }: { traits: readonly Trait[] }) {
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-muted">
+      {traits.map((trait, i) => (
+        <span key={trait.text} className="flex items-center gap-1.5">
+          {i > 0 && (
+            <span aria-hidden="true" className="text-border">
+              ·
+            </span>
+          )}
+          <span
+            className={
+              trait.tone === 'danger' ? 'text-red-600' : trait.tone === 'warn' ? 'text-amber-600' : ''
+            }
+          >
+            {trait.text}
+          </span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/** A category heading that reads as a ruled legend rather than a floating caption. */
+function GroupLegend({ label, count }: { label: string; count: number }) {
+  return (
+    <div className="flex items-center gap-2">
+      <h4 className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted">{label}</h4>
+      <span className="text-[10px] tabular-nums text-muted/70">{count}</span>
+      <span aria-hidden="true" className="h-px flex-1 bg-border" />
+    </div>
   )
 }
 
@@ -500,7 +687,10 @@ function Toggle({
       onClick={onClick}
       className={
         'relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-50 ' +
-        (on ? 'bg-primary' : 'bg-surface-2')
+        // The off state needs the inset ring: surface-2 (#efeee6) on bg (#faf9f5) is
+        // barely a shade apart on the paper theme, so without it an off switch reads
+        // as an empty gap rather than as a control.
+        (on ? 'bg-primary' : 'bg-surface-2 ring-1 ring-inset ring-border')
       }
     >
       <span
@@ -535,6 +725,166 @@ function SearchInput({
   )
 }
 
+/**
+ * The four state pills, each carrying its count.
+ *
+ * `Needs setup` disappears when its count is zero rather than sitting there as a
+ * dead `0` — on the Skills board it is always zero (a skill has no connection to
+ * fail), so the strip is a three-pill strip there and nobody is invited to click
+ * into an empty result.
+ */
+function FilterStrip({
+  value,
+  onChange,
+  counts
+}: {
+  value: CatalogFilter
+  onChange: (f: CatalogFilter) => void
+  counts: Record<CatalogFilter, number>
+}) {
+  return (
+    <div role="tablist" aria-label="Filter by state" className="flex items-center gap-1">
+      {FILTER_ORDER.filter((f) => f !== 'attention' || counts.attention > 0).map((f) => {
+        const active = value === f
+        return (
+          <button
+            key={f}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => onChange(f)}
+            className={
+              'sylor-press flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ' +
+              (active
+                ? 'bg-primary text-bg'
+                : 'text-muted hover:bg-surface-2 hover:text-text') +
+              (f === 'attention' && !active ? ' text-amber-600' : '')
+            }
+          >
+            {FILTER_LABEL[f]}
+            <span className={'tabular-nums ' + (active ? 'text-bg/70' : 'text-muted/70')}>
+              {counts[f]}
+            </span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+/** A quiet text action for the header's right side (Reconnect, Reload, Reset…). */
+function GhostAction({
+  children,
+  onClick,
+  disabled,
+  title
+}: {
+  children: ReactNode
+  onClick: () => void
+  disabled?: boolean
+  title?: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className="sylor-press rounded-md px-2 py-1 text-[11px] text-muted transition-colors hover:bg-surface-2 hover:text-text disabled:opacity-50"
+    >
+      {children}
+    </button>
+  )
+}
+
+/**
+ * The board's control deck: how many are live, a hairline capacity bar, the add
+ * action, then filter + search.
+ *
+ * It is sticky because both boards are long enough to scroll past their own
+ * controls — the old panes put `+ Add a connector` at the very bottom, under two
+ * dozen rows, which is the one place a user looking to add something will not
+ * look. The `-mt-6 pt-6` pair swallows the scroll pane's own top padding so the
+ * pinned band stays opaque as rows slide under it.
+ */
+function BoardHeader({
+  noun,
+  on,
+  total,
+  filter,
+  onFilter,
+  counts,
+  query,
+  onQuery,
+  searchPlaceholder,
+  addLabel,
+  onAdd,
+  children
+}: {
+  noun: string
+  on: number
+  total: number
+  filter: CatalogFilter
+  onFilter: (f: CatalogFilter) => void
+  counts: Record<CatalogFilter, number>
+  query: string
+  onQuery: (v: string) => void
+  searchPlaceholder: string
+  addLabel: string
+  onAdd: () => void
+  children?: ReactNode
+}) {
+  const pct = total === 0 ? 0 : Math.round((on / total) * 100)
+  return (
+    <div className="sticky top-0 z-10 -mt-6 bg-surface pb-3 pt-6">
+      <div className="overflow-hidden rounded-xl border border-border bg-bg">
+        <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+          <div className="min-w-0">
+            <p className="text-[13px] font-medium text-text">
+              <span className="tabular-nums">{on}</span>
+              <span className="text-muted"> of </span>
+              <span className="tabular-nums">{total}</span>
+              <span className="text-muted"> {noun} on</span>
+            </p>
+            <div
+              aria-hidden="true"
+              className="mt-1.5 h-px w-32 overflow-hidden rounded-full bg-border"
+            >
+              <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            {children}
+            <button
+              type="button"
+              onClick={onAdd}
+              className="sylor-press rounded-md bg-primary/12 px-2.5 py-1 text-[11px] font-medium text-primary transition-colors hover:bg-primary/20"
+            >
+              {addLabel}
+            </button>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 border-t border-border px-3 py-2">
+          <FilterStrip value={filter} onChange={onFilter} counts={counts} />
+          <div className="ml-auto w-44 shrink-0">
+            <SearchInput value={query} onChange={onQuery} placeholder={searchPlaceholder} />
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** The dashed card a board shows in place of its list when it has nothing to list. */
+function BoardEmpty({ message, action }: { message: string; action?: ReactNode }) {
+  return (
+    <div className="rounded-xl border border-dashed border-border px-4 py-8 text-center">
+      <p className="text-[12px] text-muted">{message}</p>
+      {action ? <div className="mt-2 flex justify-center">{action}</div> : null}
+    </div>
+  )
+}
+
 /** Groups items by a category key, preserving a fixed display order. */
 function groupByCategory<T, C extends string>(
   items: T[],
@@ -560,13 +910,17 @@ function groupByCategory<T, C extends string>(
   return ordered
 }
 
-/** Human labels + badge tone for a server's connection state. */
-const MCP_STATE_STYLE: Record<McpConnectionState, { label: string; tone: ChipTone }> = {
-  connecting: { label: 'Connecting…', tone: 'warn' },
-  connected: { label: 'Connected', tone: 'ok' },
-  error: { label: 'Error', tone: 'danger' },
-  disabled: { label: 'Off', tone: 'muted' },
-  unconfigured: { label: 'Setup needed', tone: 'warn' }
+/**
+ * The word a server's status line leads with. The colour no longer comes from
+ * here: the card's tile, dot and state word all read their tone from
+ * `serverTone`, so a state has exactly one place that decides how it looks.
+ */
+const MCP_STATE_LABEL: Record<McpConnectionState, string> = {
+  connecting: 'Connecting…',
+  connected: 'Connected',
+  error: 'Error',
+  disabled: 'Off',
+  unconfigured: 'Setup needed'
 }
 
 /** Display labels for connector categories, in the order the pane lists them. */
@@ -634,22 +988,36 @@ const SKILL_CATEGORY_LABEL: Record<SkillCategory, string> = {
   performance: 'Performance'
 }
 
-/** The one-line status shown under a server's title (honest about each state). */
-function mcpStatusLine(s: McpServerStatus): string {
+/**
+ * The detail that follows the state word on a server's status line.
+ *
+ * It deliberately does not repeat the state itself: the line renders as
+ * `● Connected — 12 tools available`, so a detail of `'Connecting…'` after the
+ * word `Connecting…` would just stutter. An empty string means the state word
+ * already said everything there is to say.
+ */
+function mcpStateDetail(s: McpServerStatus): string {
   switch (s.state) {
     case 'connected':
       return `${s.toolCount} tool${s.toolCount === 1 ? '' : 's'} available`
     case 'connecting':
-      return 'Connecting…'
+      return ''
     case 'disabled':
-      return 'Turned off — its tools are hidden from the assistant'
+      return 'its tools are hidden from the assistant'
     case 'unconfigured':
       return s.requiresApiKey
-        ? `Needs ${s.requiresApiKey} — add it to mcp.json, then Reconnect`
-        : 'Needs a workspace folder — open one to use this server'
+        ? `needs ${s.requiresApiKey} — add it to mcp.json, then Reconnect`
+        : 'needs a workspace folder — open one to use this server'
     case 'error':
-      return s.error ?? 'Failed to connect'
+      return s.error ?? 'failed to connect'
   }
+}
+
+/** Which tile/dot tone a server wears: a broken one outranks the switch. */
+function serverTone(s: McpServerStatus): BoardTone {
+  if (s.state === 'error') return 'error'
+  if (s.state === 'unconfigured') return 'warn'
+  return s.enabled ? 'on' : 'off'
 }
 
 /** A centered modal over a dimmed backdrop; Esc, the backdrop, or ✕ closes it. */
@@ -991,6 +1359,12 @@ function AddButton({ label, onClick }: { label: string; onClick: () => void }) {
  * The on/off state is persisted separately (`sylor-mcp.json`) so a model-Save
  * can't clobber it. Self-contained: owns its fetch state, never touches provider
  * settings.
+ *
+ * It renders as a board (`BoardHeader` + monogram cards): two dozen rows of which
+ * three or four are live is a list you scan for state, not for names, and a switch
+ * at the far right edge is the one place state was legible from. The header's
+ * `Needs setup` filter is the pane's real job — a connector the user turned on that
+ * has no key on disk is invisible in a plain list and looks like a Sylor bug.
  */
 function McpSection() {
   const [servers, setServers] = useState<McpServerStatus[]>([])
@@ -1000,6 +1374,7 @@ function McpSection() {
   const [removing, setRemoving] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState<CatalogFilter>('all')
 
   useEffect(() => {
     let cancelled = false
@@ -1061,109 +1436,150 @@ function McpSection() {
 
   const hasProject = !!paths?.project
 
-  const q = query.trim().toLowerCase()
-  const filtered = q
-    ? servers.filter((s) =>
-        [s.name, s.title, s.description, MCP_CATEGORY_LABEL[s.category]].some((f) =>
-          f.toLowerCase().includes(q)
-        )
-      )
-    : servers
-  const groups = groupByCategory(filtered, MCP_CATEGORY_ORDER, (s) => s.category)
-  const enabledCount = servers.filter((s) => s.enabled).length
+  const visible = servers.filter(
+    (s) =>
+      matchesFilter(s, filter) &&
+      matchesQuery([s.name, s.title, s.description, MCP_CATEGORY_LABEL[s.category]], query)
+  )
+  const groups = groupByCategory(visible, MCP_CATEGORY_ORDER, (s) => s.category)
+  const counts = filterCounts(servers)
 
   return (
     <section className="space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-[12px] text-muted">
-          {enabledCount} of {servers.length} enabled
-        </span>
-        <div className="flex items-center gap-4">
-          <button
-            type="button"
-            onClick={handleRestore}
-            disabled={busy !== null}
-            className="text-[12px] font-medium text-muted transition-colors hover:text-text disabled:opacity-50"
-          >
-            {busy === 'restore' ? 'Restoring…' : 'Restore defaults'}
-          </button>
-          <button
-            type="button"
-            onClick={handleReconnect}
-            disabled={busy !== null}
-            className="text-[12px] font-medium text-primary transition-colors hover:text-primary/80 disabled:opacity-50"
-          >
-            {busy === 'reconnect' ? 'Reconnecting…' : 'Reconnect'}
-          </button>
-        </div>
-      </div>
-
-      <SearchInput value={query} onChange={setQuery} placeholder="Search connectors…" />
+      <BoardHeader
+        noun="connectors"
+        on={counts.on}
+        total={counts.all}
+        filter={filter}
+        onFilter={setFilter}
+        counts={counts}
+        query={query}
+        onQuery={setQuery}
+        searchPlaceholder="Search connectors…"
+        addLabel="+ Add"
+        onAdd={() => setShowAdd(true)}
+      >
+        <GhostAction
+          onClick={handleRestore}
+          disabled={busy !== null}
+          title="Revert every switch to its catalog default (your mcp.json entries stay)"
+        >
+          {busy === 'restore' ? 'Restoring…' : 'Reset'}
+        </GhostAction>
+        <GhostAction onClick={handleReconnect} disabled={busy !== null} title="Reconnect every enabled server">
+          {busy === 'reconnect' ? 'Reconnecting…' : 'Reconnect'}
+        </GhostAction>
+      </BoardHeader>
 
       {servers.length === 0 ? (
-        <p className="text-[12px] text-muted">
-          No connectors yet. Use “Add / Import connector” below to add one.
-        </p>
-      ) : filtered.length === 0 ? (
-        <p className="text-[12px] text-muted">No connectors match “{query}”.</p>
+        <BoardEmpty
+          message="No connectors yet."
+          action={
+            <button
+              type="button"
+              onClick={() => setShowAdd(true)}
+              className="sylor-press rounded-md bg-primary/12 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/20"
+            >
+              + Add / Import a connector
+            </button>
+          }
+        />
+      ) : visible.length === 0 ? (
+        <BoardEmpty
+          message={emptyBoardMessage(filter, query, 'connectors')}
+          action={
+            filter === 'all' ? undefined : (
+              <GhostAction onClick={() => setFilter('all')}>Show all connectors</GhostAction>
+            )
+          }
+        />
       ) : (
-        <div className="space-y-4">
+        <div className="space-y-5">
           {groups.map(([cat, list]) => (
             <div key={cat} className="space-y-2">
-              <h4 className="text-[11px] font-semibold uppercase tracking-wider text-muted">
-                {MCP_CATEGORY_LABEL[cat]}
-              </h4>
+              <GroupLegend label={MCP_CATEGORY_LABEL[cat]} count={list.length} />
               <ul className="space-y-2">
                 {list.map((s) => {
-                  const style = MCP_STATE_STYLE[s.state]
+                  const tone = serverTone(s)
                   const risk = MCP_RISK[s.risk]
+                  const detail = mcpStateDetail(s)
+                  // The old card carried five to six chips of equal weight —
+                  // transport, local/external, risk, free, built-in — so the two
+                  // that matter got lost among the three that never change. They
+                  // collapse into one dotted line, in the order a reader asks:
+                  // whose is it, how does it talk, where does it run, what can it
+                  // reach, does it cost.
+                  const traits: Trait[] = [
+                    { text: s.builtIn ? 'Built-in' : 'Custom' },
+                    { text: s.transport.toUpperCase() },
+                    { text: s.local ? 'Local' : 'External' },
+                    {
+                      text: risk.label,
+                      tone: risk.tone === 'danger' ? 'danger' : risk.tone === 'warn' ? 'warn' : undefined
+                    }
+                  ]
+                  if (s.free) traits.push({ text: 'Free' })
                   return (
-                    <li key={s.name} className="rounded-md border border-border bg-bg px-3 py-2.5">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className={'min-w-0 flex-1 ' + (s.enabled ? '' : 'opacity-60')}>
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="truncate text-[13px] font-medium text-text">{s.title}</span>
-                            {s.recommended && <Chip tone="accent">Recommended</Chip>}
-                            <Chip tone={s.builtIn ? 'muted' : 'info'}>
-                              {s.builtIn ? 'Built-in' : 'Custom'}
-                            </Chip>
+                    <li
+                      key={s.name}
+                      className="rounded-xl border border-border bg-bg px-3 py-3 transition-colors hover:border-primary/40"
+                    >
+                      <div className="flex items-start gap-3">
+                        <Monogram label={s.title} tone={tone} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-start gap-3">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span
+                                  className={
+                                    'truncate text-[13px] font-medium ' +
+                                    (s.enabled ? 'text-text' : 'text-muted')
+                                  }
+                                >
+                                  {s.title}
+                                </span>
+                                {s.recommended && <Chip tone="accent">Recommended</Chip>}
+                                {s.requiresApiKey && (
+                                  <Chip tone="warn" title={s.requiresApiKey}>
+                                    Needs a key
+                                  </Chip>
+                                )}
+                              </div>
+                              {s.description && (
+                                <p className="mt-1 text-[11px] leading-relaxed text-muted">
+                                  {s.description}
+                                </p>
+                              )}
+                              <TraitLine traits={traits} />
+                            </div>
+                            <Toggle
+                              on={s.enabled}
+                              disabled={pending === s.name}
+                              onClick={() => handleToggle(s)}
+                              label={`${s.enabled ? 'Disable' : 'Enable'} ${s.title}`}
+                            />
                           </div>
-                          {s.description && (
-                            <p className="mt-1 text-[11px] leading-relaxed text-muted">{s.description}</p>
-                          )}
-                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                            <Chip tone="muted">{s.transport.toUpperCase()}</Chip>
-                            <Chip tone={s.local ? 'ok' : 'warn'}>{s.local ? 'Local' : 'External'}</Chip>
-                            <Chip tone={risk.tone} title="What enabling this exposes">
-                              {risk.label}
-                            </Chip>
-                            {s.free && <Chip tone="ok">Free</Chip>}
-                            {s.requiresApiKey && (
-                              <Chip tone="warn" title={s.requiresApiKey}>
-                                Requires API key
-                              </Chip>
+                          <div className="mt-2 flex items-center gap-1.5 border-t border-border pt-2 text-[11px]">
+                            <StateDot tone={tone} pulse={s.state === 'connecting'} />
+                            <span className={'shrink-0 font-medium ' + BOARD_TONE[tone].text}>
+                              {MCP_STATE_LABEL[s.state]}
+                            </span>
+                            {detail && (
+                              <span className="truncate text-muted" title={detail}>
+                                — {detail}
+                              </span>
+                            )}
+                            {s.source !== 'catalog' && (
+                              <button
+                                type="button"
+                                onClick={() => void handleRemove(s)}
+                                disabled={removing === s.name}
+                                className="ml-auto shrink-0 font-medium text-muted transition-colors hover:text-red-600 disabled:opacity-50"
+                              >
+                                {removing === s.name ? 'Removing…' : 'Remove'}
+                              </button>
                             )}
                           </div>
-                          <div className="mt-1 text-[11px] text-muted">{mcpStatusLine(s)}</div>
-                        </div>
-                        <div className="flex shrink-0 flex-col items-end gap-1.5">
-                          <Chip tone={style.tone}>{style.label}</Chip>
-                          <Toggle
-                            on={s.enabled}
-                            disabled={pending === s.name}
-                            onClick={() => handleToggle(s)}
-                            label={`${s.enabled ? 'Disable' : 'Enable'} ${s.title}`}
-                          />
-                          {s.source !== 'catalog' && (
-                            <button
-                              type="button"
-                              onClick={() => void handleRemove(s)}
-                              disabled={removing === s.name}
-                              className="text-[10px] font-medium text-muted transition-colors hover:text-red-300 disabled:opacity-50"
-                            >
-                              {removing === s.name ? 'Removing…' : 'Remove'}
-                            </button>
-                          )}
                         </div>
                       </div>
                     </li>
@@ -1174,8 +1590,6 @@ function McpSection() {
           ))}
         </div>
       )}
-
-      <AddButton label="+ Add / Import connector" onClick={() => setShowAdd(true)} />
 
       <p className="text-[11px] text-muted">
         Only enabled servers connect and expose tools to the assistant. Remote (HTTP) servers reach
@@ -1204,6 +1618,12 @@ function McpSection() {
  * for one toggle per skill — enable/disable, persisted separately from provider
  * settings so a model-Save can't clobber it. Reload re-scans disk after the user
  * edits a SKILL.md. Self-contained; owns its own fetch state.
+ *
+ * Same board as Connectors, minus a connection: a skill is on or off, so its
+ * `Needs setup` bucket is always empty and the filter strip drops that pill. What a
+ * skill *can* be missing is a connector it depends on, and that is the one thing its
+ * status row acts on — `Turn on GitHub` right there, rather than sending the user to
+ * the other pane to work out which server the chip was naming.
  */
 function SkillsSection() {
   const [skills, setSkills] = useState<SkillStatus[]>([])
@@ -1215,6 +1635,7 @@ function SkillsSection() {
   const [showAdd, setShowAdd] = useState(false)
   const [enablingMcp, setEnablingMcp] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState<CatalogFilter>('all')
 
   useEffect(() => {
     let cancelled = false
@@ -1290,133 +1711,173 @@ function SkillsSection() {
 
   const mcpByName = useMemo(() => new Map(mcpServers.map((s) => [s.name, s])), [mcpServers])
 
-  const q = query.trim().toLowerCase()
-  const filtered = q
-    ? skills.filter((s) =>
-        [s.name, s.title, s.description, SKILL_CATEGORY_LABEL[s.category]].some((f) =>
-          f.toLowerCase().includes(q)
-        )
-      )
-    : skills
-  const groups = groupByCategory(filtered, SKILL_CATEGORY_ORDER, (s) => s.category)
-  const enabledCount = skills.filter((s) => s.enabled).length
+  const visible = skills.filter(
+    (s) =>
+      matchesFilter(s, filter) &&
+      matchesQuery([s.name, s.title, s.description, SKILL_CATEGORY_LABEL[s.category]], query)
+  )
+  const groups = groupByCategory(visible, SKILL_CATEGORY_ORDER, (s) => s.category)
+  const counts = filterCounts(skills)
 
   return (
     <section className="space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-[12px] text-muted">
-          {enabledCount} of {skills.length} enabled
-        </span>
-        <div className="flex items-center gap-4">
-          <button
-            type="button"
-            onClick={handleRestore}
-            disabled={busy !== null}
-            className="text-[12px] font-medium text-muted transition-colors hover:text-text disabled:opacity-50"
-          >
-            {busy === 'restore' ? 'Restoring…' : 'Restore defaults'}
-          </button>
-          <button
-            type="button"
-            onClick={handleReload}
-            disabled={busy !== null}
-            className="text-[12px] font-medium text-primary transition-colors hover:text-primary/80 disabled:opacity-50"
-          >
-            {busy === 'reload' ? 'Reloading…' : 'Reload'}
-          </button>
-        </div>
-      </div>
-
-      <SearchInput value={query} onChange={setQuery} placeholder="Search skills…" />
+      <BoardHeader
+        noun="skills"
+        on={counts.on}
+        total={counts.all}
+        filter={filter}
+        onFilter={setFilter}
+        counts={counts}
+        query={query}
+        onQuery={setQuery}
+        searchPlaceholder="Search skills…"
+        addLabel="+ Add"
+        onAdd={() => setShowAdd(true)}
+      >
+        <GhostAction
+          onClick={handleRestore}
+          disabled={busy !== null}
+          title="Revert every switch to its default (the safe essentials on)"
+        >
+          {busy === 'restore' ? 'Restoring…' : 'Reset'}
+        </GhostAction>
+        <GhostAction onClick={handleReload} disabled={busy !== null} title="Re-scan the skills folders on disk">
+          {busy === 'reload' ? 'Reloading…' : 'Reload'}
+        </GhostAction>
+      </BoardHeader>
 
       {skills.length === 0 ? (
-        <p className="text-[12px] text-muted">No skills yet. Use “Add a skill” below to create one.</p>
-      ) : filtered.length === 0 ? (
-        <p className="text-[12px] text-muted">No skills match “{query}”.</p>
+        <BoardEmpty
+          message="No skills yet."
+          action={
+            <button
+              type="button"
+              onClick={() => setShowAdd(true)}
+              className="sylor-press rounded-md bg-primary/12 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/20"
+            >
+              + Write a skill
+            </button>
+          }
+        />
+      ) : visible.length === 0 ? (
+        <BoardEmpty
+          message={emptyBoardMessage(filter, query, 'skills')}
+          action={
+            filter === 'all' ? undefined : (
+              <GhostAction onClick={() => setFilter('all')}>Show all skills</GhostAction>
+            )
+          }
+        />
       ) : (
-        <div className="space-y-4">
+        <div className="space-y-5">
           {groups.map(([cat, list]) => (
             <div key={cat} className="space-y-2">
-              <h4 className="text-[11px] font-semibold uppercase tracking-wider text-muted">
-                {SKILL_CATEGORY_LABEL[cat]}
-              </h4>
+              <GroupLegend label={SKILL_CATEGORY_LABEL[cat]} count={list.length} />
               <ul className="space-y-2">
-                {list.map((s) => (
-                  <li key={s.name} className="rounded-md border border-border bg-bg px-3 py-2.5">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className={'min-w-0 flex-1 ' + (s.enabled ? '' : 'opacity-60')}>
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="truncate text-[13px] font-medium text-text">{s.title}</span>
-                          {s.recommended && <Chip tone="accent">Recommended</Chip>}
-                          <Chip tone={s.builtIn ? 'muted' : 'info'}>
-                            {s.builtIn ? 'Built-in' : 'Custom'}
-                          </Chip>
-                        </div>
-                        {s.description && (
-                          <p className="mt-1 text-[11px] leading-relaxed text-muted">{s.description}</p>
-                        )}
-                        {s.whenToUse && (
-                          <p className="mt-0.5 text-[11px] text-muted/80">Use when: {s.whenToUse}</p>
-                        )}
-                        {s.requiresMcp.length > 0 && (
-                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                            {s.requiresMcp.map((dep) => {
-                              const server = mcpByName.get(dep)
-                              const label = server?.title ?? dep
-                              return server?.enabled ? (
-                                <Chip key={dep} tone="ok" title={`The ${label} MCP server is enabled`}>
-                                  ✓ Needs {label}
-                                </Chip>
+                {list.map((s) => {
+                  // A skill has no connection to fail, so its tone is the switch and
+                  // nothing else — the board's `attention` bucket is always empty
+                  // here and the filter strip drops that pill.
+                  const tone: BoardTone = s.enabled ? 'on' : 'off'
+                  const missing = s.requiresMcp.filter((dep) => !mcpByName.get(dep)?.enabled)
+                  return (
+                    <li
+                      key={s.name}
+                      className="rounded-xl border border-border bg-bg px-3 py-3 transition-colors hover:border-primary/40"
+                    >
+                      <div className="flex items-start gap-3">
+                        <Monogram label={s.title} tone={tone} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-start gap-3">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span
+                                  className={
+                                    'truncate text-[13px] font-medium ' +
+                                    (s.enabled ? 'text-text' : 'text-muted')
+                                  }
+                                >
+                                  {s.title}
+                                </span>
+                                {s.recommended && <Chip tone="accent">Recommended</Chip>}
+                              </div>
+                              {s.description && (
+                                <p className="mt-1 text-[11px] leading-relaxed text-muted">
+                                  {s.description}
+                                </p>
+                              )}
+                              <TraitLine
+                                traits={[
+                                  { text: s.builtIn ? 'Built-in' : 'Custom' },
+                                  ...(s.requiresMcp.length === 0
+                                    ? []
+                                    : missing.length === 0
+                                      ? [{ text: 'Connectors ready' }]
+                                      : [
+                                          {
+                                            text: `Needs ${missing
+                                              .map((dep) => mcpByName.get(dep)?.title ?? dep)
+                                              .join(', ')}`,
+                                            tone: 'warn' as const
+                                          }
+                                        ])
+                                ]}
+                              />
+                            </div>
+                            <Toggle
+                              on={s.enabled}
+                              disabled={pending === s.name}
+                              onClick={() => handleToggle(s)}
+                              label={`${s.enabled ? 'Disable' : 'Enable'} ${s.title}`}
+                            />
+                          </div>
+                          {(s.whenToUse || missing.length > 0 || s.source !== 'builtin') && (
+                            <div className="mt-2 flex items-center gap-2 border-t border-border pt-2 text-[11px]">
+                              {s.whenToUse ? (
+                                <span className="truncate text-muted" title={s.whenToUse}>
+                                  <span className="text-muted/70">Use when</span> {s.whenToUse}
+                                </span>
                               ) : (
-                                <span key={dep} className="inline-flex items-center gap-1">
-                                  <Chip
-                                    tone="warn"
-                                    title={`This skill works best with the ${label} MCP server`}
-                                  >
-                                    Needs {label} MCP
-                                  </Chip>
+                                <span className="text-muted/70">Invoked on request</span>
+                              )}
+                              <span className="ml-auto flex shrink-0 items-center gap-2">
+                                {missing.map((dep) => (
                                   <button
+                                    key={dep}
                                     type="button"
                                     onClick={() => handleEnableMcp(dep)}
                                     disabled={enablingMcp === dep}
-                                    className="text-[10px] font-medium text-primary hover:text-primary/80 disabled:opacity-50"
+                                    title={`Turn on the ${mcpByName.get(dep)?.title ?? dep} connector`}
+                                    className="font-medium text-primary transition-colors hover:text-primary/80 disabled:opacity-50"
                                   >
-                                    {enablingMcp === dep ? 'Enabling…' : 'Enable'}
+                                    {enablingMcp === dep
+                                      ? 'Turning on…'
+                                      : `Turn on ${mcpByName.get(dep)?.title ?? dep}`}
                                   </button>
-                                </span>
-                              )
-                            })}
-                          </div>
-                        )}
+                                ))}
+                                {s.source !== 'builtin' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleRemove(s)}
+                                    disabled={removing === s.name}
+                                    className="font-medium text-muted transition-colors hover:text-red-600 disabled:opacity-50"
+                                  >
+                                    {removing === s.name ? 'Removing…' : 'Remove'}
+                                  </button>
+                                )}
+                              </span>
+                            </div>
+                          )}
+                        </div>
                       </div>
-                      <div className="flex shrink-0 flex-col items-end gap-1.5">
-                        <Toggle
-                          on={s.enabled}
-                          disabled={pending === s.name}
-                          onClick={() => handleToggle(s)}
-                          label={`${s.enabled ? 'Disable' : 'Enable'} ${s.title}`}
-                        />
-                        {s.source !== 'builtin' && (
-                          <button
-                            type="button"
-                            onClick={() => void handleRemove(s)}
-                            disabled={removing === s.name}
-                            className="text-[10px] font-medium text-muted transition-colors hover:text-red-300 disabled:opacity-50"
-                          >
-                            {removing === s.name ? 'Removing…' : 'Remove'}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </li>
-                ))}
+                    </li>
+                  )
+                })}
               </ul>
             </div>
           ))}
         </div>
       )}
-
-      <AddButton label="+ Add a skill" onClick={() => setShowAdd(true)} />
 
       <p className="text-[11px] text-muted">
         Enabled skills appear to the assistant as a short listing; a skill&apos;s full instructions

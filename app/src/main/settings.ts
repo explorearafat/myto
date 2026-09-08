@@ -182,6 +182,10 @@ export function normalise(raw: unknown): ProviderSettings {
   const effort = ui.effort && VALID_EFFORTS.includes(ui.effort) ? ui.effort : d.ui.effort
   const planFirst = typeof ui.planFirst === 'boolean' ? ui.planFirst : d.ui.planFirst
   const mode = ui.mode && VALID_WORK_MODES.includes(ui.mode) ? ui.mode : d.ui.mode
+  const statusWidget =
+    typeof ui.statusWidget === 'boolean' ? ui.statusWidget : d.ui.statusWidget
+  const fullAccess = typeof ui.fullAccess === 'boolean' ? ui.fullAccess : d.ui.fullAccess
+  const autoSend = typeof ui.autoSend === 'boolean' ? ui.autoSend : d.ui.autoSend
   // The chosen working folder (requirement A). Kept only when it's a non-empty
   // string; a blank/absent value means "no folder chosen yet" and Code mode
   // stays gated. `undefined` is dropped from the JSON entirely (not persisted).
@@ -204,7 +208,16 @@ export function normalise(raw: unknown): ProviderSettings {
     },
     modelName: typeof o.modelName === 'string' ? o.modelName : d.modelName,
     modelId: typeof o.modelId === 'string' ? o.modelId : d.modelId,
-    ui: { theme, effort, planFirst, mode, ...(workspaceRoot ? { workspaceRoot } : {}) },
+    ui: {
+      theme,
+      effort,
+      planFirst,
+      mode,
+      statusWidget,
+      fullAccess,
+      autoSend,
+      ...(workspaceRoot ? { workspaceRoot } : {})
+    },
     hooks: normaliseHooks(o.hooks)
   }
 }
@@ -217,11 +230,66 @@ export function getSettings(): ProviderSettings {
   return cache
 }
 
+/**
+ * Whether the user has opted into full-PC access. The single authority every
+ * main-process enforcement seam reads — the fs sandbox (`resolveSafe`) and the
+ * permission matrix (`decideAuto`/`decideBrowse`) — so the switch is honoured in
+ * exactly one place and can't drift between them. Defensive: any read failure
+ * falls back to the safe posture (confined + gated), never to open.
+ */
+export function fullAccessEnabled(): boolean {
+  try {
+    return getSettings().ui.fullAccess === true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether the user opted into hands-free sending — posting/messaging/mailing AS
+ * themselves without a prompt. This is a SUB-permission of full access: it means
+ * nothing on its own, so it returns true only when BOTH switches are on. That
+ * coupling lives here, in the one authority `decideBrowse` reads, so the narrow
+ * "send only while full access is on" rule can't drift. Defensive: any read
+ * failure falls back to the gated posture (send keeps asking).
+ */
+export function autoSendEnabled(): boolean {
+  try {
+    const { ui } = getSettings()
+    return ui.fullAccess === true && ui.autoSend === true
+  } catch {
+    return false
+  }
+}
+
 export function saveSettings(settings: ProviderSettings): ProviderSettings {
   const normalised = normalise(settings)
   writeJsonAtomic(settingsPath(), normalised)
   cache = normalised
+  try {
+    savedListener?.(normalised)
+  } catch (error) {
+    // A surface that reacts badly to a preference must never lose the save that
+    // has already been written to disk.
+    console.error('[sylor] settings-saved listener failed:', error)
+  }
   return normalised
+}
+
+/**
+ * Notified after every successful save, with the normalised settings.
+ *
+ * The seam exists so a main-process surface can react to a *preference* (the
+ * floating status widget) without the renderer opening a second channel for it.
+ * One writer — the save — means the window and the stored value cannot drift, and
+ * `settings.ts` itself stays Electron-free and unit-testable (the same reason
+ * `setUserDataDir` is injected rather than imported).
+ */
+let savedListener: ((settings: ProviderSettings) => void) | null = null
+export function setSettingsSavedListener(
+  listener: ((settings: ProviderSettings) => void) | null
+): void {
+  savedListener = listener
 }
 
 /**

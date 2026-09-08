@@ -53,3 +53,47 @@ describe('useAppStore', () => {
     expect(state.model).toBe('GPT-4o mini')
   })
 })
+
+/**
+ * The right slot holds one of three surfaces — the live preview, the browser, the
+ * canvas — because all three draw over the same rectangle. The browser is the one
+ * that matters most here: its page is a NATIVE view the main process floats above
+ * the DOM, so merely clearing `browserOpen` would leave the page hovering over the
+ * canvas. Taking the slot from it has to hide the view too.
+ */
+describe('useAppStore right-slot exclusivity', () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      previewOpen: false,
+      browserOpen: false,
+      canvasOpen: false,
+      canvasMode: 'log'
+    })
+  })
+
+  it('opening the canvas closes whichever surface held the slot', () => {
+    useAppStore.setState({ previewOpen: true })
+    useAppStore.getState().openCanvas()
+    expect(useAppStore.getState()).toMatchObject({ canvasOpen: true, previewOpen: false })
+
+    useAppStore.getState().openBrowser()
+    expect(useAppStore.getState()).toMatchObject({ browserOpen: true, canvasOpen: false })
+
+    useAppStore.getState().openPreview()
+    expect(useAppStore.getState()).toMatchObject({ previewOpen: true, canvasOpen: false })
+  })
+
+  it('switching surface while open does not close the canvas', () => {
+    useAppStore.getState().toggleCanvas('log')
+    expect(useAppStore.getState().canvasOpen).toBe(true)
+
+    // Same surface again means "hide this"; the mode is remembered for next time.
+    useAppStore.getState().toggleCanvas('log')
+    expect(useAppStore.getState()).toMatchObject({ canvasOpen: false, canvasMode: 'log' })
+  })
+
+  it('selecting a mode on a closed canvas opens it there', () => {
+    useAppStore.getState().setCanvasMode('diff')
+    expect(useAppStore.getState()).toMatchObject({ canvasOpen: true, canvasMode: 'diff' })
+  })
+})

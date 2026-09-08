@@ -258,4 +258,15 @@ describe('buildMemoryPreamble', () => {
     expect(out).not.toContain('### DECISIONS.md')
     expect(out.length).toBeLessThan(13_000)
   })
+
+  it('never injects the follow-up log, nor lists it as unwritten', () => {
+    // A list of unrelated open issues in every prompt would invite exactly the scope
+    // creep the flag exists to prevent, and it is the USER's list to pick from.
+    expect(memoryDocPath('followups')).toBe('.sylor/FOLLOWUPS.md')
+    scaffoldMemory()
+    write('.sylor/FOLLOWUPS.md', '# Follow-ups\n\n## 2026-09-05 — fix-the-badge')
+    const out = buildMemoryPreamble()
+    expect(out).not.toContain('FOLLOWUPS.md')
+    expect(out).not.toContain('fix-the-badge')
+  })
 })

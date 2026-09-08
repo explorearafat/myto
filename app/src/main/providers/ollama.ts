@@ -6,7 +6,17 @@ import type {
   OllamaConfig,
   TestConnectionResult
 } from '../../shared/types'
-import { httpFetch, httpJson, normaliseBaseUrl, toErrorMessage } from './http'
+import { collectCompletion } from './collect'
+import {
+  COMPLETION_TIMEOUT_MS,
+  httpFetch,
+  httpJson,
+  normaliseBaseUrl,
+  stallGuard,
+  StallError,
+  STREAM_STALL_MS,
+  toErrorMessage
+} from './http'
 import { modelInfo, type Provider } from './provider'
 
 /**
@@ -109,18 +119,19 @@ export class OllamaProvider implements Provider {
     }
   }
 
+  /**
+   * Collected over the streaming endpoint rather than sent as `stream: false` —
+   * see {@link collectCompletion}. Matters even more for a local model, where a
+   * cold load plus a long generation easily outruns any fixed total deadline.
+   */
   async getCompletion(
     modelId: string,
     messages: ChatMessage[],
-    options?: CompletionOptions
+    options?: CompletionOptions,
+    signal?: AbortSignal,
+    onProgress?: (text: string) => void
   ): Promise<string> {
-    const data = await httpJson<OllamaChatChunk>(`${this.baseUrl}/api/chat`, {
-      method: 'POST',
-      timeoutMs: 120_000,
-      body: { model: modelId, stream: false, messages: toOllamaMessages(messages), ...ollamaOptions(options) }
-    })
-    if (data.error) throw new Error(data.error)
-    return data.message?.content ?? ''
+    return collectCompletion(this, modelId, messages, options, signal, onProgress)
   }
 
   async streamCompletion(
@@ -130,33 +141,51 @@ export class OllamaProvider implements Provider {
     signal?: AbortSignal,
     options?: CompletionOptions
   ): Promise<void> {
-    const res = await httpFetch(`${this.baseUrl}/api/chat`, {
-      method: 'POST',
-      timeoutMs: 120_000,
-      signal,
-      body: { model: modelId, stream: true, messages: toOllamaMessages(messages), ...ollamaOptions(options) }
-    })
-    if (!res.ok || !res.body) {
-      const text = await res.text().catch(() => '')
-      throw new Error(`HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 160)}` : ''}`)
-    }
-    await readNdjson(res.body, (line) => {
-      let parsed: OllamaChatChunk
-      try {
-        parsed = JSON.parse(line) as OllamaChatChunk
-      } catch {
-        return
+    // See the gateway provider: the guard is the body's deadline, reset by every
+    // chunk, so a local model that thinks for ten minutes is never cut off but a
+    // silent stream still fails instead of hanging.
+    const guard = stallGuard(STREAM_STALL_MS, signal)
+    try {
+      const res = await httpFetch(`${this.baseUrl}/api/chat`, {
+        method: 'POST',
+        timeoutMs: COMPLETION_TIMEOUT_MS,
+        signal: guard.signal,
+        body: { model: modelId, stream: true, messages: toOllamaMessages(messages), ...ollamaOptions(options) }
+      })
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => '')
+        throw new Error(`HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 160)}` : ''}`)
       }
-      if (parsed.error) throw new Error(parsed.error)
-      const delta = parsed.message?.content ?? ''
-      if (delta) onChunk({ delta, done: false })
-      if (parsed.done) onChunk({ delta: '', done: true })
-    })
+      guard.touch()
+      await readNdjson(
+        res.body,
+        (line) => {
+          let parsed: OllamaChatChunk
+          try {
+            parsed = JSON.parse(line) as OllamaChatChunk
+          } catch {
+            return
+          }
+          if (parsed.error) throw new Error(parsed.error)
+          const delta = parsed.message?.content ?? ''
+          if (delta) onChunk({ delta, done: false })
+          if (parsed.done) onChunk({ delta: '', done: true })
+        },
+        guard.touch
+      )
+    } catch (err) {
+      // A stall aborts the read, which surfaces as a bare cancellation; name it.
+      if (guard.expired && !(err instanceof StallError)) throw new StallError(STREAM_STALL_MS)
+      throw err
+    } finally {
+      guard.stop()
+    }
   }
 }
 async function readNdjson(
   body: ReadableStream<Uint8Array>,
-  onLine: (line: string) => void
+  onLine: (line: string) => void,
+  onProgress?: () => void
 ): Promise<void> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
@@ -165,6 +194,7 @@ async function readNdjson(
     for (;;) {
       const { value, done } = await reader.read()
       if (done) break
+      onProgress?.()
       buffer += decoder.decode(value, { stream: true })
       let newline: number
       while ((newline = buffer.indexOf('\n')) !== -1) {

@@ -28,11 +28,22 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
     theme: 'light',
     // Balanced reasoning by default; the composer effort selector overrides it.
     effort: 'medium',
-    // Plan-first is opt-in so ordinary chats aren't slowed by a plan.md step.
+    // Plan-first is opt-in: left off, a turn builds without stopping to be approved.
     planFirst: false,
     // Cowork (chat-only) is the default so casual questions never jump to the
     // terminal; the user switches to Code to work on a folder.
-    mode: 'cowork'
+    mode: 'cowork',
+    // The floating status widget is opt-in: the tray already reports the same
+    // state, and an always-on-top window nobody asked for is an imposition.
+    statusWidget: false,
+    // Full-PC access is OFF by default: out of the box Sylor stays confined to
+    // the chosen project and gates every side effect. Flipping this on is a
+    // deliberate, warned choice made in Settings.
+    fullAccess: false,
+    // Auto-send is OFF by default and does nothing unless full access is on. It
+    // waives only the browser `send` gate (posting/messaging/mailing as the user);
+    // `delete` still asks and `payment` stays blocked.
+    autoSend: false
   },
   // No automation hooks until the user adds some (Phase 4).
   hooks: {}

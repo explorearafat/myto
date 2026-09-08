@@ -21,6 +21,9 @@ export function deltaForStdout(event: WorkflowEvent): string | null {
 function describeProposalTarget(p: ToolProposal): string {
   switch (p.kind) {
     case 'write_file':
+      // The purpose, when the model attached one — a headless log that says what
+      // each file is for reads as a build, not a list of paths.
+      return ` ${p.path}${p.purpose ? ` — ${p.purpose}` : ''}`
     case 'read':
       return ` ${p.path}`
     case 'run_command':
@@ -35,6 +38,8 @@ function describeProposalTarget(p: ToolProposal): string {
       return ` ${p.source}`
     case 'diagnostics':
       return ` ${p.scope}`
+    case 'preview_inspect':
+      return ` ${p.action}`
     default:
       return ''
   }

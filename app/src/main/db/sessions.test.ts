@@ -178,6 +178,92 @@ describe('migration', () => {
     expect(plain?.contentOffset).toBeUndefined()
   })
 
+  it('round-trips subagent attribution and op timing (v9), leaving old rows blank', () => {
+    // The run log is only honest across a reload if the durable op log carries WHO
+    // did each op and WHEN. `agent_id`/`agent_role` were declared on the type (and
+    // documented as surviving a reload) long before the INSERT actually wrote them,
+    // so reopening a conversation silently lost every subagent's attribution.
+    // `started_at`/`ended_at` are what a restored duration is computed from.
+    const s = createSession(ROOT, 'Attribution', tick())
+    appendMessage(s.id, { id: 'm-1', role: 'assistant', content: 'Delegating.' }, tick())
+    appendToolOp(
+      s.id,
+      {
+        id: 'op-agent',
+        afterMessageId: 'm-1',
+        runId: 'run-9',
+        auto: true,
+        proposal: { kind: 'run_command', id: 'op-agent', command: 'npm test' },
+        agentId: 'ag-7',
+        agentRole: 'reviewer',
+        startedAt: 1_700_000_000_000,
+        endedAt: 1_700_000_004_200
+      } as PersistedToolOp,
+      tick()
+    )
+    // An op with no attribution and no clock — every row written before v9 looks
+    // like this, and it must come back blank rather than defaulted to zero/lead.
+    appendToolOp(
+      s.id,
+      {
+        id: 'op-lead',
+        afterMessageId: 'm-1',
+        runId: 'run-9',
+        auto: true,
+        proposal: { kind: 'run_command', id: 'op-lead', command: 'ls' }
+      } as PersistedToolOp,
+      tick()
+    )
+
+    // Reopen from scratch (close + reopen the file) — the point is durability, not
+    // that the in-process handle remembers.
+    closeDb()
+    const loaded = loadSession(s.id)
+    const byAgent = loaded?.tools.find((t) => t.id === 'op-agent')
+    const byLead = loaded?.tools.find((t) => t.id === 'op-lead')
+    expect(byAgent).toMatchObject({
+      agentId: 'ag-7',
+      agentRole: 'reviewer',
+      startedAt: 1_700_000_000_000,
+      endedAt: 1_700_000_004_200
+    })
+    expect(byLead?.agentId).toBeUndefined()
+    expect(byLead?.agentRole).toBeUndefined()
+    expect(byLead?.startedAt).toBeUndefined()
+    expect(byLead?.endedAt).toBeUndefined()
+  })
+
+  it('lets a later result stamp ended_at on an op already saved without one', () => {
+    // Ops are written twice: once when proposed (no result, no end) and again when
+    // the result lands. The second write is an ON CONFLICT update, so `ended_at`
+    // has to be in that update list — otherwise every restored op is missing its
+    // end and shows no duration despite having been timed.
+    const s = createSession(ROOT, 'Late end', tick())
+    appendMessage(s.id, { id: 'm-1', role: 'assistant', content: 'Running.' }, tick())
+    const proposed = {
+      id: 'op-late',
+      afterMessageId: 'm-1',
+      runId: 'run-9',
+      auto: true,
+      proposal: { kind: 'run_command', id: 'op-late', command: 'npm run build' },
+      startedAt: 500
+    } as PersistedToolOp
+    appendToolOp(s.id, proposed, tick())
+    appendToolOp(
+      s.id,
+      {
+        ...proposed,
+        result: { kind: 'run_command', id: 'op-late', exitCode: 0, output: 'ok', truncated: false },
+        endedAt: 2_500
+      } as PersistedToolOp,
+      tick()
+    )
+
+    const ops = loadSession(s.id)?.tools.filter((t) => t.id === 'op-late') ?? []
+    expect(ops).toHaveLength(1) // replaced, not duplicated
+    expect(ops[0]).toMatchObject({ startedAt: 500, endedAt: 2_500 })
+  })
+
   it('persists, clears, and round-trips feedback + flagged; reset blanks a message', () => {
     const s = createSession(ROOT, 'Feedback', tick())
     appendMessage(s.id, { id: 'm-a', role: 'user', content: 'q' }, tick())

@@ -6,15 +6,18 @@ import type {
   ProjectStatePatch,
   SessionCheckpoint
 } from '../../context/projectState'
+import { isAbort } from '../resilience'
 import {
   authoredSectionIds,
   phaseFor,
   phaseRoadmap,
   planSectionBrief,
+  RANK,
   renderPhasePlan,
   type PhaseSpec,
   type PlanSectionId
 } from './phasePlan'
+import { resolveRole } from './roles'
 
 /**
  * The staged half of the orchestrator (§2, §3, §14, §25–§27, §35) — the stages that
@@ -36,11 +39,20 @@ import {
  *
  * The rule these functions share: **a stage that cannot do its job does nothing.**
  * No port, no scribe, an unparseable answer, an aborted run — each degrades to a
- * skipped stage, never to a half-written document or a thrown error.
+ * skipped stage, never to a half-written document or a thrown error. Degrading is
+ * not the same as hiding, though: where the fallback still produces a document
+ * that *looks* finished (a phase plan whose every judgement section reads "to be
+ * determined"), the caller is told through an `onDegraded` callback so the run can
+ * say so out loud.
  */
 
-/** Reads and writes the project's memory documents. Implemented by the engine. */
-export interface MemoryPort {
+/** The reason to report for a thrown scribe failure, without importing a provider. */
+function reasonFor(err: unknown): string {
+  const text = err instanceof Error ? err.message : String(err)
+  return text.trim().slice(0, 160) || 'the call failed'
+}
+
+/** Reads and writes the project's memory documents. Implemented by the engine. */export interface MemoryPort {
   /** The parsed STATE.md header. */
   readState: () => ProjectState
   /** Patches the STATE.md header, preserving the agent's prose. */
@@ -59,14 +71,21 @@ export interface MemoryPort {
   checkpoint: (cp: SessionCheckpoint) => string | null
 }
 
-/** One non-streaming completion used to author a document. */
-export type ScribeFn = (messages: ChatMessage[]) => Promise<string>
+/**
+ * One completion used to author a document.
+ *
+ * `label` names the work for the live status row. These calls are the longest
+ * silent stretches of a staged turn — a 26-section phase plan at high reasoning
+ * effort runs for minutes with nothing streamed — so a row that still reads
+ * `Phase 1 of 9` throughout one of them is indistinguishable from a hang.
+ */
+export type ScribeFn = (messages: ChatMessage[], label?: string) => Promise<string>
 
 /** Where the roadmap stands for this run. */
 export interface PhaseContext {
   spec: PhaseSpec
   total: number
-  /** The complexity the roadmap is sized to (persisted, so it can't resize). */
+  /** The complexity the roadmap is sized to (persisted, so it can't grow mid-run). */
   complexity: Complexity
   /** True when this project had no recorded state before this turn. */
   fresh: boolean
@@ -74,11 +93,25 @@ export interface PhaseContext {
 
 /**
  * Resolves the phase to work on. The roadmap is sized by the complexity recorded in
- * STATE.md when there is one — a project that was sized as a nine-phase build stays
- * a nine-phase build even on a turn whose request would route as simple on its own.
+ * STATE.md when there is one — a project halfway through a nine-phase build stays a
+ * nine-phase build even on a turn whose request would route as simple on its own,
+ * because renumbering the phases underneath a plan the user is following is worse
+ * than carrying one that's too big.
+ *
+ * **Once, though, is not forever.** The recorded size used to win unconditionally,
+ * so a single bad route (see {@link import('./complexity')}: "a login page" counted
+ * as two domains and therefore a nine-phase product) was written to STATE.md and
+ * preferred for the life of the project. Every later turn inherited it, which is why
+ * the symptom was that Sylor got *worse* over a session rather than settling. So a
+ * roadmap that hasn't got past its first phase can still shrink to what this turn
+ * actually asked for: nothing has been delivered against it, so there is no
+ * numbering for the user to lose. It can only shrink — a bigger route mid-phase is
+ * this turn being ambitious, not the project having grown.
  */
 export function resolvePhase(state: ProjectState, routed: Complexity): PhaseContext {
-  const complexity = state.complexity ?? routed
+  const recorded = state.complexity
+  const resizable = recorded !== undefined && state.phase <= 1 && RANK[routed] < RANK[recorded]
+  const complexity = resizable ? routed : (recorded ?? routed)
   const road = phaseRoadmap(complexity)
   // `state.phase` is the phase in progress; 0 means none has started yet.
   const spec = state.phase > 0 ? (road[state.phase - 1] ?? road[road.length - 1]) : phaseFor(complexity, 0)
@@ -102,6 +135,77 @@ export function phaseBrief(phase: PhaseContext): string {
     `Objective: ${phase.spec.objective}`,
     'Plan ONLY the work that belongs to this phase. Later phases have their own plans.'
   ].join('\n')
+}
+
+/**
+ * The first thing the user can read, emitted before any model call that takes time.
+ *
+ * A staged turn's opening minutes are all internal documents — the audit, the
+ * specification, the phase plan — none of which are streamed. Until this existed
+ * the reply stayed empty through all of them, so a real build looked like a frozen
+ * window with a climbing timer. One line, rendered from the roadmap alone (no call,
+ * no latency), saying what is happening.
+ *
+ * **It used to announce instead of answer** — `On it — a decent-sized build, 5
+ * phases. Planning phase 1 (Foundation) now…` — and the user's verdict on that was
+ * plain: it reads as ceremony, a system declaring the size of its own process
+ * before a single useful thing has been said. So the scale label, the phase count
+ * and the bold banner are gone. Nothing is lost by dropping them: the phase list
+ * arrives moments later in {@link roadmapSummary}, with each phase's objective and
+ * a marker on the one being started — the same facts, where they mean something.
+ *
+ * What is left is one plain sentence about the work in progress, which is how a
+ * person answers before they have the answer.
+ *
+ * Deliberately promises only what the pipeline guarantees: the plan is read back
+ * before any code is written. It does NOT claim the project is being read — on a
+ * resumed project the audit is skipped, and a line about work that didn't happen is
+ * exactly what {@link scanNote} exists to avoid.
+ */
+export function openingNote(phase: PhaseContext): string {
+  return phase.spec.n === 1
+    ? 'Planning this before I write anything — the plan lands here first.\n'
+    : `Picking up ${phase.spec.name.toLowerCase()} — planning it before I write anything.\n`
+}
+
+/**
+ * The plan read back to the user, in the reply itself.
+ *
+ * The status line can only ever say `Phase 1 of 9`, which tells someone how long the
+ * work is without telling them what it is — and plan.md is a file they have to go and
+ * open. This is the shape of the build in the conversation: how many phases, what each
+ * one is for, and what this phase's plan actually breaks down into.
+ *
+ * Rendered from the roadmap and the real task graph, so it costs no call and cannot
+ * describe a plan other than the one that was written. The full phase list appears on
+ * phase 1 (and on the first turn a project gains state, whatever phase that lands on);
+ * later phases lead with their own line instead, because by phase 4 the user has seen
+ * the list three times and TASKS.md carries it anyway.
+ */
+export function roadmapSummary(phase: PhaseContext, tasks: readonly TaskNode[]): string {
+  const road = phaseRoadmap(phase.complexity)
+  const out: string[] = []
+
+  if (phase.spec.n === 1 || phase.fresh) {
+    out.push(`**Plan ready — ${road.length} phase${road.length === 1 ? '' : 's'}.**`, '')
+    const here = phase.spec.n === 1 ? '← starting here' : '← we are here'
+    for (const p of road) {
+      out.push(`${p.n}. **${p.name}** — ${p.objective}${p.n === phase.spec.n ? ` ${here}` : ''}`)
+    }
+  } else {
+    out.push(`**Plan ready — ${phaseLabel(phase)}.** ${phase.spec.objective}`)
+  }
+
+  if (tasks.length > 0) {
+    out.push('', `This phase breaks down into ${tasks.length} task${tasks.length === 1 ? '' : 's'}:`)
+    // The role's title, not its id: `backend` is a routing key, "Backend Engineer" is
+    // the name the same task carries in its card, its lane and the closing roll-up. It
+    // is also the truer label — an unrecognised id is dispatched to the fallback role,
+    // so printing the resolved title says who will really do the work.
+    for (const t of tasks) out.push(`- **${resolveRole(t.role).title}** — ${t.description}`)
+  }
+
+  return `${out.join('\n').trimEnd()}\n`
 }
 
 // ── AUDIT (§3) ───────────────────────────────────────────────────────────────
@@ -183,10 +287,13 @@ export async function auditProject(args: {
 
   let parsed: { architecture?: unknown; conventions?: unknown }
   try {
-    const raw = await scribe([
-      { role: 'system', content: system },
-      { role: 'user', content: user }
-    ])
+    const raw = await scribe(
+      [
+        { role: 'system', content: system },
+        { role: 'user', content: user }
+      ],
+      'Reading the project — its architecture and conventions…'
+    )
     const start = raw.indexOf('{')
     const end = raw.lastIndexOf('}')
     if (start === -1 || end <= start) return { wrote, skipped: 'unusable' }
@@ -210,6 +317,30 @@ export async function auditProject(args: {
     wrote.push(id)
   }
   return { wrote }
+}
+
+/**
+ * The scan, said out loud — the two lines a careful engineer opens with: I looked at
+ * the repo before touching it, and here is what that told me.
+ *
+ * Derived entirely from what the audit actually did, which is the point: it can only
+ * claim a scan that happened. No inventory (nothing walked), nothing to audit, or a
+ * run cancelled mid-scan all return null rather than a reassuring line about work
+ * that never took place.
+ */
+export function scanNote(outcome: AuditOutcome, files: number): string | null {
+  if (files <= 0 || outcome.skipped === 'nothing-to-audit' || outcome.skipped === 'aborted') {
+    return null
+  }
+  const learned = outcome.wrote.includes('architecture') || outcome.wrote.includes('conventions')
+  return (
+    `**Scanned the project before writing anything** — ${files} file${files === 1 ? '' : 's'} mapped` +
+    (learned
+      ? ', and its architecture and conventions are now on record'
+      : ', on top of the architecture and conventions already on record') +
+    '.\n' +
+    'All set — what follows is written from what is actually in the repo, not from a guess.\n'
+  )
 }
 
 // ── SPEC (§2) ────────────────────────────────────────────────────────────────
@@ -265,8 +396,14 @@ export interface SpecOutcome {
  * §2 — turns a short request into a production specification in PROJECT.md.
  *
  * Runs at most **once per project**: the moment PROJECT.md holds real content this
- * returns immediately, so continuing work never re-derives the spec. Skipped for a
- * simple change, which is a request to edit something, not to design a product.
+ * returns immediately, so continuing work never re-derives the spec.
+ *
+ * Reserved for `complex` work, because that is what it costs. The 20 sections below
+ * are one long serial call — "Target users", "Information architecture", "Security,
+ * performance and SEO" — that has to finish before the first line of code, and only
+ * a genuine multi-domain product build gets that back. It used to skip only
+ * `simple`, so an ordinary two-part feature paid for a product spec it would never
+ * read again.
  *
  * The assumptions the spec had to make are recorded in the decision log, because
  * they are the professional judgements the user did not get asked about (§2/§11).
@@ -280,7 +417,7 @@ export async function expandSpec(args: {
   signal: AbortSignal
 }): Promise<SpecOutcome> {
   const { request, overview, complexity, memory, scribe, signal } = args
-  if (complexity === 'simple') return { wrote: false, skipped: 'too-small' }
+  if (complexity !== 'complex') return { wrote: false, skipped: 'too-small' }
   if (memory.readDoc('project')) return { wrote: false, skipped: 'already-written' }
   if (!scribe) return { wrote: false, skipped: 'no-scribe' }
 
@@ -299,10 +436,15 @@ export async function expandSpec(args: {
 
   let doc = ''
   try {
-    doc = (await scribe([
-      { role: 'system', content: system },
-      { role: 'user', content: user }
-    ])).trim()
+    doc = (
+      await scribe(
+        [
+          { role: 'system', content: system },
+          { role: 'user', content: user }
+        ],
+        'Writing the project specification…'
+      )
+    ).trim()
   } catch {
     return { wrote: false, skipped: 'unusable' }
   }
@@ -329,6 +471,48 @@ export async function expandSpec(args: {
 }
 
 // ── PLAN (§13–§15) ───────────────────────────────────────────────────────────
+
+/**
+ * The specification sections a task graph is actually split along.
+ *
+ * PROJECT.md is written immediately before the planner runs and was then never read
+ * on the turn that wrote it: the planner saw the raw request plus the file tree, so
+ * the product decisions the spec had just made — which pages exist, what data they
+ * need, where the API boundary is — did not reach the split. These are the sections
+ * that change how the work divides. The rest of the spec (visual direction, SEO,
+ * edge cases) belongs to the phase plan and the specialists, not to the split.
+ */
+const PLANNING_SECTIONS: readonly string[] = [
+  'Objective',
+  'Major features',
+  'Pages and screens',
+  'Component architecture',
+  'Data requirements',
+  'Backend, API and authentication',
+  'Completion criteria'
+]
+
+/** Longest slice of any one section handed to the planner. */
+const PLANNING_SECTION_CHARS = 500
+
+/**
+ * The recorded specification, reduced to what the planner needs, or '' when nothing
+ * is recorded yet.
+ *
+ * Section-selected rather than clipped from the top: a blind prefix of a 20-section
+ * spec is Objective and Target users, which is the part the planner could already
+ * infer from the request anyway. Deterministic — no model call.
+ */
+export function planningBrief(memory: MemoryPort): string {
+  const spec = memory.readDoc('project')
+  if (!spec) return ''
+  const parts: string[] = []
+  for (const heading of PLANNING_SECTIONS) {
+    const body = sectionBody(spec, heading)
+    if (body) parts.push(`#### ${heading}\n${clip(body, PLANNING_SECTION_CHARS)}`)
+  }
+  return parts.length ? `### From the recorded specification\n${parts.join('\n\n')}` : ''
+}
 
 /** Coerces one JSON value into a markdown section body, or '' when unusable. */
 function asBody(value: unknown): string {
@@ -373,8 +557,14 @@ export async function authorPhasePlan(args: {
   verifyCommands?: readonly string[]
   scribe?: ScribeFn
   signal: AbortSignal
+  /**
+   * Reports that the plan came out as the bare skeleton — every judgement section
+   * an explicit "to be determined" — and why. A hollow plan reads like a finished
+   * document, so the one thing it must not be is silent.
+   */
+  onDegraded?: (reason: string) => void
 }): Promise<string> {
-  const { phase, request, tasks, memoryDigest, verifyCommands, scribe, signal } = args
+  const { phase, request, tasks, memoryDigest, verifyCommands, scribe, signal, onDegraded } = args
   const render = (sections?: Partial<Record<PlanSectionId, string>>): string =>
     renderPhasePlan({
       phase: phase.spec,
@@ -409,13 +599,23 @@ export async function authorPhasePlan(args: {
     (memoryDigest.trim() ? `## What the project already knows\n${memoryDigest.trim()}\n` : '')
 
   try {
-    const raw = await scribe([
-      { role: 'system', content: system },
-      { role: 'user', content: user }
-    ])
+    const raw = await scribe(
+      [
+        { role: 'system', content: system },
+        { role: 'user', content: user }
+      ],
+      `Writing the plan for phase ${phase.spec.n} — ${phase.spec.name}…`
+    )
     if (signal.aborted) return render()
-    return render(parseSections(raw, ids))
-  } catch {
+    const sections = parseSections(raw, ids)
+    // The model replied but nothing usable came back — the plan would render as
+    // 20-odd "to be determined" lines, which looks like a plan and isn't one.
+    if (Object.keys(sections).length === 0) {
+      onDegraded?.('the architect’s reply carried no usable sections')
+    }
+    return render(sections)
+  } catch (err) {
+    if (!isAbort(err)) onDegraded?.(reasonFor(err))
     return render()
   }
 }
@@ -685,10 +885,18 @@ async function finalAudit(args: {
       'What was built, Against the completion criteria, Verification status, Known gaps, ' +
       'Recommended next steps. Be specific and short — this is a record, not a pitch.'
     try {
-      const raw = (await scribe([
-        { role: 'system', content: system },
-        { role: 'user', content: `## Original request\n${args.request.trim()}\n\n## The record\n${facts}\n` }
-      ])).trim()
+      const raw = (
+        await scribe(
+          [
+            { role: 'system', content: system },
+            {
+              role: 'user',
+              content: `## Original request\n${args.request.trim()}\n\n## The record\n${facts}\n`
+            }
+          ],
+          'Writing the final project audit…'
+        )
+      ).trim()
       const cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/, '').trim()
       if (cleaned.length >= 200) doc = cleaned.endsWith('\n') ? cleaned : `${cleaned}\n`
     } catch {

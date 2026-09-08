@@ -18,6 +18,8 @@
  */
 import type { ChatMessage, Complexity, ProviderSettings, TaskNode } from '../../../shared/types'
 import { providerFromSettings } from '../../providers'
+import { toErrorMessage } from '../../providers/http'
+import { isAbort } from '../resilience'
 import { hasRole, roleIds } from './roles'
 import { TaskGraph, linkOverlappingWriters } from './taskGraph'
 
@@ -44,6 +46,14 @@ export interface PlanOptions {
   overview?: string
   /** Persists the rendered plan markdown (orchestrator → `plan.md`). */
   writePlan?: (markdown: string) => void
+  /** Cancels the planner completion when the run is stopped. */
+  signal?: AbortSignal
+  /**
+   * Reports that planning fell back to the one-node plan, and why. The fallback
+   * is a real loss of fidelity — a multi-domain request becomes a single
+   * generalist node — so it must not happen invisibly.
+   */
+  onDegraded?: (reason: string) => void
 }
 
 /** The loose shape a planner-model task may take before validation. */
@@ -71,7 +81,14 @@ export async function buildPlan(
     return finish(complexity, [singleNode(request)], false, opts)
   }
 
-  const raw = await requestPlan(request, complexity, settings, opts.overview)
+  const raw = await requestPlan(
+    request,
+    complexity,
+    settings,
+    opts.overview,
+    opts.signal,
+    opts.onDegraded
+  )
   // A provider/parse failure yields no tasks → single-node fallback.
   const tasks = raw ? normalizeTasks(raw) : []
   if (tasks.length === 0) {
@@ -112,7 +129,9 @@ async function requestPlan(
   request: string,
   complexity: Complexity,
   settings: ProviderSettings,
-  overview?: string
+  overview?: string,
+  signal?: AbortSignal,
+  onDegraded?: (reason: string) => void
 ): Promise<RawTask[] | null> {
   const provider = providerFromSettings(settings)
 
@@ -145,9 +164,15 @@ async function requestPlan(
   ]
 
   try {
-    const rawText = await provider.getCompletion(settings.modelId, messages)
-    return parsePlanJson(rawText)
-  } catch {
+    const rawText = await provider.getCompletion(settings.modelId, messages, undefined, signal)
+    const parsed = parsePlanJson(rawText)
+    // Parsed-to-nothing is a real degradation too, not just a thrown error: the
+    // model answered, we just couldn't use it. Say so rather than quietly
+    // collapsing a multi-domain request into one generalist node.
+    if (!parsed) onDegraded?.('the planner’s reply was not a usable task graph')
+    return parsed
+  } catch (err) {
+    if (!isAbort(err)) onDegraded?.(toErrorMessage(err))
     return null
   }
 }

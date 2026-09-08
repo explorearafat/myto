@@ -3,7 +3,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { contextManager } from '@main/context/manager'
-import { readCacheKey, servedFromReadCache, updateReadCache } from '@main/workflow/readCache'
+import {
+  hasCompleteRead,
+  readCacheKey,
+  servedFromReadCache,
+  updateReadCache
+} from '@main/workflow/readCache'
+import type { ReadCacheEntry } from '@main/workflow/readCache'
 import type {
   ReadProposal,
   ReadResult,
@@ -34,7 +40,7 @@ afterAll(() => {
 })
 
 // Each test gets a clean map; the singleton root is shared but files are per-test.
-let cache: Map<string, string>
+let cache: Map<string, ReadCacheEntry>
 afterEach(() => {
   cache = new Map()
 })
@@ -50,14 +56,15 @@ function readProp(path: string, offset?: number, limit?: number): ReadProposal {
     limit
   }
 }
-function readOk(path: string): ReadResult {
+/** A successful read. `truncated` is what decides the entry's `complete` flag. */
+function readOk(path: string, truncated = false): ReadResult {
   return {
     id: `r-${path}`,
     kind: 'read',
     ok: true,
     output: 'file body',
-    truncated: false,
-    summary: '1 line'
+    truncated,
+    summary: truncated ? 'lines 1–10 of 999' : '1 line'
   }
 }
 function writeProp(path: string, newContent: string): WriteFileProposal {
@@ -81,19 +88,32 @@ describe('servedFromReadCache / updateReadCache', () => {
     expect(served?.ok).toBe(true)
     expect(served?.id).toBe(p.id)
     expect(served?.summary).toBe('already read (unchanged)')
-    expect(served?.output).toContain('Already read')
+    expect(served?.output).toContain('already read')
     expect(served?.output).toContain('a.ts')
   })
 
-  it('keys by line window — a different offset/limit is a distinct read', () => {
+  it('lets a COMPLETE whole-file read answer for a later window of the same file', () => {
+    // The third read in the user's 13-step report was `Navbar.tsx · lines 1–70 of
+    // 172`, after Navbar.tsx had already been read in full. Those 70 lines are
+    // verbatim above in the conversation, so the window must be served, not re-read.
     writeFileSync(join(root, 'b.ts'), 'x\n'.repeat(50))
     const whole = readProp('b.ts')
     updateReadCache(cache, whole, readOk('b.ts'))
 
-    // Same file, different window → not served from the whole-file entry.
-    expect(servedFromReadCache(cache, readProp('b.ts', 10, 5))).toBeNull()
-    // The original window is still served.
+    expect(servedFromReadCache(cache, readProp('b.ts', 10, 5))).not.toBeNull()
+    expect(servedFromReadCache(cache, readProp('b.ts', 1, 70))).not.toBeNull()
     expect(servedFromReadCache(cache, whole)).not.toBeNull()
+  })
+
+  it('lets a CLIPPED read serve its own window but never a continuation past it', () => {
+    // A clipped read genuinely never showed the lines past its cut, so an offset
+    // into them is a real continuation — the one honest reason to read a path twice.
+    writeFileSync(join(root, 'big.ts'), 'x\n'.repeat(200))
+    const first = readProp('big.ts')
+    updateReadCache(cache, first, readOk('big.ts', true))
+
+    expect(servedFromReadCache(cache, first)).not.toBeNull()
+    expect(servedFromReadCache(cache, readProp('big.ts', 120))).toBeNull()
   })
 
   it('forces a fresh read when the file size changes (stale eviction)', () => {
@@ -178,5 +198,37 @@ describe('servedFromReadCache / updateReadCache', () => {
     const listing = readProp('.')
     listing.op = 'list_files'
     expect(servedFromReadCache(cache, listing)).toBeNull()
+  })
+})
+
+describe('hasCompleteRead', () => {
+  it('is false before any read, true after a whole one, false after a clipped one', () => {
+    writeFileSync(join(root, 'k.ts'), 'x\n'.repeat(20))
+    expect(hasCompleteRead(cache, 'k.ts')).toBe(false)
+
+    updateReadCache(cache, readProp('k.ts'), readOk('k.ts'))
+    expect(hasCompleteRead(cache, 'k.ts')).toBe(true)
+
+    const clipped = new Map<string, ReadCacheEntry>()
+    updateReadCache(clipped, readProp('k.ts'), readOk('k.ts', true))
+    // Clipped → the next `offset` is a continuation, so `planReadWindow` must honour
+    // it rather than forcing another whole-file read that would clip identically.
+    expect(hasCompleteRead(clipped, 'k.ts')).toBe(false)
+  })
+
+  it('is false again once the file changes on disk', () => {
+    const abs = join(root, 'l.ts')
+    writeFileSync(abs, 'one')
+    updateReadCache(cache, readProp('l.ts'), readOk('l.ts'))
+    expect(hasCompleteRead(cache, 'l.ts')).toBe(true)
+
+    writeFileSync(abs, 'one two three')
+    expect(hasCompleteRead(cache, 'l.ts')).toBe(false)
+  })
+
+  it('does not count a WINDOWED read as having read the whole file', () => {
+    writeFileSync(join(root, 'm.ts'), 'x\n'.repeat(20))
+    updateReadCache(cache, readProp('m.ts', 5, 5), readOk('m.ts'))
+    expect(hasCompleteRead(cache, 'm.ts')).toBe(false)
   })
 })

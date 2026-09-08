@@ -23,18 +23,35 @@ import { useAppStore } from '../store/useAppStore'
 import { Markdown } from './Markdown'
 import { ZeroStateDashboard } from './ZeroState'
 import { ModelSelector, EffortSelector, ModeSelector, PlanFirstToggle } from './ModelSelector'
-import { monacoThemeFor } from '../lib/monaco-theme'
+import { monacoThemeFor, languageForPath } from '../lib/monaco-theme'
 import { lineDiffStats, estimateTokens, formatCount } from '../lib/diff-stats'
+import { formatDuration } from '../lib/duration'
+import { threadCards } from '../lib/threadCards'
 import type {
   AgentRole,
   Attachment,
-  CommandInfo,
-  SkillStatus,
+  ContextUsage,
+  Followup,
+  PendingPlan,
+  PendingQuestion,
+  TodoItem,
   ToolDecision,
+  ToolDecisionDetail,
   ToolProposal,
   WorkflowStage
 } from '@shared/types'
-import { parseSlash, expandCommand, buildRememberPrompt } from '@shared/commands'
+import { CHARS_PER_TOKEN } from '@shared/context-window'
+import { parseSlash } from '@shared/commands'
+import {
+  buildSlashItems,
+  loadSlashSources,
+  NO_SLASH_SOURCES,
+  type SlashItem as SlashItemShape,
+  type SlashSources
+} from '../lib/slashSources'
+import { startRun } from '../lib/startRun'
+import { buildFollowupPrompt } from '@shared/followups'
+import { describeStandingKey, standingApprovalLabel } from '@shared/approvals'
 
 /** Human-readable byte size for an attachment chip (e.g. "12.4 KB"). */
 function formatBytes(bytes: number): string {
@@ -370,6 +387,85 @@ function ProgressChips({ progress }: { progress: RunProgressUI }): ReactNode {
 }
 
 /**
+ * The live task checklist for the active turn (#4). The model owns it through the
+ * `update_todos` tool and re-sends the whole list each time, so this is a pure
+ * projection — no local state, no ✓ we invented. It sits just above the status
+ * line: the plan on top, the "what I'm doing right now" row beneath it. Shown only
+ * while the turn is streaming and the list is non-empty (see the render gate), so a
+ * finished or checklist-less turn shows nothing.
+ *
+ * Exported for its own test: the "pure projection, no ✓ we invented" shape is a
+ * requirement worth pinning independently of the panel it renders in.
+ */
+export function TodoPanel({ todos }: { todos: TodoItem[] }): ReactNode {
+  const done = todos.filter((t) => t.status === 'completed').length
+  return (
+    <div className="mt-2 rounded-md border border-border/60 bg-surface-2/40 px-2.5 py-2">
+      <div className="mb-1 flex items-center justify-between text-[10px] font-medium uppercase tracking-wide text-muted">
+        <span>Tasks</span>
+        <span className="tabular-nums">
+          {done}/{todos.length}
+        </span>
+      </div>
+      <ul className="space-y-0.5">
+        {todos.map((todo, i) => (
+          <li key={i} className="flex items-start gap-2 text-[12px]">
+            <span className="mt-0.5 shrink-0">
+              <TodoGlyph status={todo.status} />
+            </span>
+            <span
+              className={
+                todo.status === 'completed'
+                  ? 'text-muted line-through'
+                  : todo.status === 'in_progress'
+                    ? 'font-medium text-foreground'
+                    : 'text-muted'
+              }
+            >
+              {todo.text}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+/** The leading status glyph for a single checklist row. */
+function TodoGlyph({ status }: { status: TodoItem['status'] }): ReactNode {
+  if (status === 'completed') {
+    return (
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-label="done">
+        <path
+          d="M3.5 8.5l3 3 6-6.5"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="text-emerald-500"
+        />
+      </svg>
+    )
+  }
+  if (status === 'in_progress') {
+    return (
+      <span
+        className="grid h-3 w-3 place-items-center"
+        aria-label="in progress"
+        title="In progress"
+      >
+        <span className="h-2 w-2 rounded-full bg-primary sylor-blink" />
+      </span>
+    )
+  }
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-label="to do">
+      <circle cx="8" cy="8" r="5.5" stroke="currentColor" strokeWidth="1.4" className="text-muted" />
+    </svg>
+  )
+}
+
+/**
  * The live status line shown at the BOTTOM of the active turn (Claude-Code style):
  * a SINGLE evolving row — pulsing phase icon, the current phase message, elapsed
  * time, and a rough token estimate — that re-labels itself as the engine advances
@@ -456,43 +552,6 @@ export function StatusLine({
   )
 }
 
-/** Maps a file extension to a Monaco language id for diff syntax highlighting. */
-function languageForPath(path: string): string {
-  const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
-  switch (ext) {
-    case 'ts':
-    case 'mts':
-    case 'cts':
-      return 'typescript'
-    case 'tsx':
-      return 'typescript'
-    case 'js':
-    case 'mjs':
-    case 'cjs':
-    case 'jsx':
-      return 'javascript'
-    case 'json':
-      return 'json'
-    case 'css':
-      return 'css'
-    case 'html':
-      return 'html'
-    case 'md':
-    case 'markdown':
-      return 'markdown'
-    case 'py':
-      return 'python'
-    case 'sh':
-    case 'bash':
-      return 'shell'
-    case 'yml':
-    case 'yaml':
-      return 'yaml'
-    default:
-      return 'plaintext'
-  }
-}
-
 /** Strips a run's leading `sylor-tool` fenced blocks that leaked into prose. */
 const TOOL_FENCE_RE = /```sylor-tool[\s\S]*?```/g
 
@@ -546,7 +605,7 @@ function toolLabel(card: ToolCardUI): string {
     return `${tense('Install', 'Installing', 'Installed')} ${proposal.source}`
   }
   if (proposal.kind === 'preview_inspect') {
-    return `${tense('Check', 'Checking', 'Checked')} preview · ${proposal.action}`
+    return previewLabel(proposal, tense)
   }
   if (proposal.kind === 'browse') {
     return browseLabel(proposal, tense)
@@ -557,6 +616,52 @@ function toolLabel(card: ToolCardUI): string {
   }
   const head = proposal.command.trim().split(/\s+/).slice(0, 3).join(' ')
   return `${tense('Run', 'Running', 'Ran')} ${head}`
+}
+
+/**
+ * Row label for a preview step, phrased as what the user can watch happen in the
+ * preview pane ("Looking at the preview", "Opening /about") rather than as an
+ * action name — the sibling of {@link browseLabel} for the pane beside it.
+ */
+function previewLabel(
+  proposal: Extract<ToolProposal, { kind: 'preview_inspect' }>,
+  tense: (verb: string, gerund: string, past: string) => string
+): string {
+  const target = proposal.selector ?? 'an element'
+  switch (proposal.action) {
+    case 'screenshot':
+      return `${tense('Look at', 'Looking at', 'Looked at')} the preview`
+    case 'snapshot':
+      return `${tense('Read', 'Reading', 'Read')} the preview`
+    case 'inspect':
+      return `${tense('Inspect', 'Inspecting', 'Inspected')} ${target}`
+    case 'console_logs':
+      return `${tense('Check', 'Checking', 'Checked')} the preview console`
+    case 'network':
+      return `${tense('Check', 'Checking', 'Checked')} the preview requests`
+    case 'click':
+      return `${tense('Click', 'Clicking', 'Clicked')} ${target}`
+    case 'fill':
+      return `${tense('Type', 'Typing', 'Typed')} into ${target}`
+    case 'resize':
+      return `${tense('Resize', 'Resizing', 'Resized')} the preview${
+        proposal.preset
+          ? ` to ${proposal.preset}`
+          : proposal.width && proposal.height
+            ? ` to ${proposal.width}×${proposal.height}`
+            : ''
+      }`
+    case 'eval':
+      return `${tense('Run', 'Running', 'Ran')} JS in the preview`
+    case 'navigate':
+      return proposal.url
+        ? `${tense('Open', 'Opening', 'Opened')} ${proposal.url}`
+        : `${tense('Reload', 'Reloading', 'Reloaded')} the preview`
+    case 'server_logs':
+      return `${tense('Check', 'Checking', 'Checked')} the dev server log`
+    default:
+      return `${tense('Check', 'Checking', 'Checked')} the preview`
+  }
 }
 
 /**
@@ -600,7 +705,9 @@ function hostOf(url: string): string {
 
 /** Full, untruncated description of a proposal (used as a hover title). */
 function proposalFullTitle(proposal: ToolProposal): string {
-  if (proposal.kind === 'write_file') return proposal.path
+  if (proposal.kind === 'write_file') {
+    return proposal.purpose ? `${proposal.path} — ${proposal.purpose}` : proposal.path
+  }
   if (proposal.kind === 'mcp_call') return `${proposal.server}/${proposal.name}`
   if (proposal.kind === 'read') {
     return proposal.op === 'search_files'
@@ -613,7 +720,9 @@ function proposalFullTitle(proposal: ToolProposal): string {
   if (proposal.kind === 'web_search') return `search "${proposal.query}"`
   if (proposal.kind === 'install_plugin') return `install ${proposal.source} (${proposal.scope})`
   if (proposal.kind === 'preview_inspect') {
-    return `preview ${proposal.action}${proposal.selector ? ` ${proposal.selector}` : ''}`
+    // The raw detail, so hovering an `eval` row shows the exact code that ran.
+    const detail = [proposal.selector, proposal.url, proposal.expression].filter(Boolean).join(' ')
+    return `preview ${proposal.action}${detail ? ` ${detail}` : ''}`
   }
   if (proposal.kind === 'browse') {
     const bits = [
@@ -870,11 +979,14 @@ function ToolResultFooter({ card }: { card: ToolCardUI }) {
 
 /**
  * A read op rendered as a single quiet line — "⌕ Read useChatStore.ts · 1158
- * lines". Deliberately lighter than {@link ToolCard}: understanding a change can
- * take a dozen reads, and a dozen bordered cards would bury the actual work in
- * the transcript. Nothing was changed here, so there is no diff and no status
- * badge — just what was looked at and what came back, expandable if the user
- * wants to see exactly what Sylor saw.
+ * lines". Deliberately lighter than {@link ToolCard}: nothing was changed here, so
+ * there is no diff and no status badge — just what was looked at and what came
+ * back, expandable if the user wants to see exactly what Sylor saw.
+ *
+ * In the chat thread only FAILED reads reach this component ({@link threadCards}
+ * drops the rest — a dozen bordered "Read x" rows would bury the actual answer).
+ * The Run Log shows every one of them and routes here through
+ * {@link ToolCardDetail}, so this row is still the one place a read is drawn.
  */
 function ReadCard({ card }: { card: ToolCardUI }) {
   const [expanded, setExpanded] = useState(false)
@@ -1032,9 +1144,93 @@ function BrowseCard({ card }: { card: ToolCardUI }) {
  * op errored, a soft one-line reason shows beneath the row — calm, never a red
  * "Failed" — because the agent loop retries it (the fix lands as the next tick).
  */
-function ToolCard({ card }: { card: ToolCardUI }) {
+/**
+ * A tool op's payload — the diff, the command, the arguments — with its result
+ * footer beneath. Split out of {@link ToolCard} so the Run Log can show the SAME
+ * detail without nesting a second disclosure toggle inside its own expanded row
+ * (and without a copy of this markup drifting from the card's).
+ *
+ * The three quiet kinds (read, preview check, browse) own their whole
+ * presentation — row and payload together — so for them the detail *is* the card.
+ * `ToolCard` short-circuits those before it ever reaches this component, so that
+ * delegation terminates.
+ */
+export function ToolCardDetail({ card }: { card: ToolCardUI }) {
   const { proposal } = card
   const theme = useAppStore((s) => s.theme)
+  if (proposal.kind === 'read' || proposal.kind === 'preview_inspect' || proposal.kind === 'browse')
+    return <ToolCard card={card} />
+  const language = proposal.kind === 'write_file' ? languageForPath(proposal.path) : 'plaintext'
+  return (
+    <div className="mt-1 overflow-hidden rounded-md border border-border">
+      {proposal.kind === 'write_file' ? (
+        <div className="h-56">
+          <DiffEditor
+            theme={monacoThemeFor(theme)}
+            language={language}
+            original={proposal.oldContent}
+            modified={proposal.newContent}
+            options={{
+              readOnly: true,
+              renderSideBySide: false,
+              fontFamily: 'JetBrains Mono Variable, monospace',
+              fontSize: 12,
+              lineHeight: 18,
+              minimap: { enabled: false },
+              automaticLayout: true,
+              scrollBeyondLastLine: false,
+              renderOverviewRuler: false,
+              scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 }
+            }}
+            loading={<div className="p-3 text-[11px] text-muted">Loading diff…</div>}
+          />
+        </div>
+      ) : proposal.kind === 'mcp_call' ? (
+        <div className="bg-bg px-3 py-2">
+          <div className="mb-1 font-mono text-[11px] text-muted">
+            {proposal.server}/{proposal.name}
+          </div>
+          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] text-text/90">
+            {JSON.stringify(proposal.arguments, null, 2)}
+          </pre>
+        </div>
+      ) : proposal.kind === 'web_fetch' ? (
+        <div className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
+          <span className="text-muted">🌐 </span>
+          {proposal.url}
+        </div>
+      ) : proposal.kind === 'web_search' ? (
+        <div className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
+          <span className="text-muted">🔎 </span>
+          {proposal.query}
+        </div>
+      ) : proposal.kind === 'install_plugin' ? (
+        <div className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
+          <span className="text-muted">📦 </span>
+          {proposal.source}
+          <span className="text-muted"> · {proposal.scope}</span>
+        </div>
+      ) : proposal.kind === 'diagnostics' ? (
+        <div className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
+          <span className="text-muted">🩺 </span>
+          {proposal.scope === 'all' ? 'typescript + eslint' : proposal.scope}
+          {proposal.files?.length ? (
+            <span className="text-muted"> · {proposal.files.join(', ')}</span>
+          ) : null}
+        </div>
+      ) : (
+        <pre className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
+          <span className="text-muted">$ </span>
+          {proposal.command}
+        </pre>
+      )}
+      <ToolResultFooter card={card} />
+    </div>
+  )
+}
+
+function ToolCard({ card }: { card: ToolCardUI }) {
+  const { proposal } = card
   const [expanded, setExpanded] = useState(false)
   // Reads get their own much quieter row — they carry no diff and no approval.
   if (proposal.kind === 'read') return <ReadCard card={card} />
@@ -1044,7 +1240,6 @@ function ToolCard({ card }: { card: ToolCardUI }) {
   // Browsing is a look/act on a page the user can already see in the BROWSER panel
   // — also a quiet row, with the perceived page (and screenshot) behind a tap.
   if (proposal.kind === 'browse') return <BrowseCard card={card} />
-  const language = proposal.kind === 'write_file' ? languageForPath(proposal.path) : 'plaintext'
   const icon =
     proposal.kind === 'write_file'
       ? '✎'
@@ -1062,6 +1257,7 @@ function ToolCard({ card }: { card: ToolCardUI }) {
   const stats =
     proposal.kind === 'write_file' ? lineDiffStats(proposal.oldContent, proposal.newContent) : null
   const error = cardError(card)
+  const took = formatDuration(card)
 
   return (
     <div className="my-0.5">
@@ -1095,7 +1291,21 @@ function ToolCard({ card }: { card: ToolCardUI }) {
             <span className="text-red-400">−{stats.removed}</span>
           </span>
         )}
+        {/* The user rewrote the body at the permission bar, so the diff below is
+            theirs, not the model's proposal. Worth saying: it explains why the file
+            does not match what the reply claims it wrote. */}
+        {card.edited && (
+          <span
+            className="shrink-0 rounded bg-primary/10 px-1 py-px text-[9px] text-primary"
+            title="You edited this before approving it — the diff shown is what was written"
+          >
+            your edit
+          </span>
+        )}
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
+          {/* How long it actually took — measured from the op's own start/end stamps,
+              so it is absent (not zero) for anything that was never timed. */}
+          {took && <span className="font-mono text-[10px] text-muted">{took}</span>}
           <StatusBadge card={card} />
         </span>
       </button>
@@ -1106,72 +1316,15 @@ function ToolCard({ card }: { card: ToolCardUI }) {
         </div>
       )}
 
-      {expanded && (
-        <div className="mt-1 overflow-hidden rounded-md border border-border">
-          {proposal.kind === 'write_file' ? (
-            <div className="h-56">
-              <DiffEditor
-                theme={monacoThemeFor(theme)}
-                language={language}
-                original={proposal.oldContent}
-                modified={proposal.newContent}
-                options={{
-                  readOnly: true,
-                  renderSideBySide: false,
-                  fontFamily: 'JetBrains Mono Variable, monospace',
-                  fontSize: 12,
-                  lineHeight: 18,
-                  minimap: { enabled: false },
-                  automaticLayout: true,
-                  scrollBeyondLastLine: false,
-                  renderOverviewRuler: false,
-                  scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 }
-                }}
-                loading={<div className="p-3 text-[11px] text-muted">Loading diff…</div>}
-              />
-            </div>
-          ) : proposal.kind === 'mcp_call' ? (
-            <div className="bg-bg px-3 py-2">
-              <div className="mb-1 font-mono text-[11px] text-muted">
-                {proposal.server}/{proposal.name}
-              </div>
-              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] text-text/90">
-                {JSON.stringify(proposal.arguments, null, 2)}
-              </pre>
-            </div>
-          ) : proposal.kind === 'web_fetch' ? (
-            <div className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
-              <span className="text-muted">🌐 </span>
-              {proposal.url}
-            </div>
-          ) : proposal.kind === 'web_search' ? (
-            <div className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
-              <span className="text-muted">🔎 </span>
-              {proposal.query}
-            </div>
-          ) : proposal.kind === 'install_plugin' ? (
-            <div className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
-              <span className="text-muted">📦 </span>
-              {proposal.source}
-              <span className="text-muted"> · {proposal.scope}</span>
-            </div>
-          ) : proposal.kind === 'diagnostics' ? (
-            <div className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
-              <span className="text-muted">🩺 </span>
-              {proposal.scope === 'all' ? 'typescript + eslint' : proposal.scope}
-              {proposal.files?.length ? (
-                <span className="text-muted"> · {proposal.files.join(', ')}</span>
-              ) : null}
-            </div>
-          ) : (
-            <pre className="bg-bg px-3 py-2 font-mono text-[12px] text-text/90">
-              <span className="text-muted">$ </span>
-              {proposal.command}
-            </pre>
-          )}
-          <ToolResultFooter card={card} />
+      {/* What the file is FOR, as the model described it. A transcript scrolled past
+          its prose still explains itself; an error outranks it for the same slot. */}
+      {!error && proposal.kind === 'write_file' && proposal.purpose && (
+        <div className="ml-[26px] truncate text-[10.5px] text-muted" title={proposal.purpose}>
+          {proposal.purpose}
         </div>
       )}
+
+      {expanded && <ToolCardDetail card={card} />}
     </div>
   )
 }
@@ -1259,15 +1412,23 @@ function roleMeta(role: AgentRole): { label: string; icon: string } {
  * the flat assistant turn. This is the visible "agents communicating": lead →
  * task in, subagent → work + report out. A problem reads as a calm amber dot
  * (the loop retries), never a red "Failed".
+ *
+ * A running lane also carries its own Stop, because "one of the four is off down a
+ * wrong path" should not cost the whole turn: it aborts that subagent only, and the
+ * lead is told it was cancelled so it can carry on without that report.
  */
 function AgentCard({ agent, tools }: { agent: AgentCardUI; tools: ToolCardUI[] }) {
   const meta = roleMeta(agent.role)
   const running = agent.status === 'running'
+  const cancelAgent = useChatStore((s) => s.cancelAgent)
   const blocks = useMemo(
     () =>
       interleave(
         agent.content,
-        tools.map((c) => ({ offset: c.contentOffset, block: { kind: 'card' as const, card: c } }))
+        threadCards(tools).map((c) => ({
+          offset: c.contentOffset,
+          block: { kind: 'card' as const, card: c }
+        }))
       ),
     [agent.content, tools]
   )
@@ -1297,10 +1458,30 @@ function AgentCard({ agent, tools }: { agent: AgentCardUI; tools: ToolCardUI[] }
           </span>
         )}
         {running ? (
-          <span className="inline-flex shrink-0 items-center gap-1 text-[10px] text-primary">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
-            working
-          </span>
+          agent.cancelling ? (
+            <span
+              className="inline-flex shrink-0 items-center gap-1 text-[10px] text-amber-300"
+              title="You asked this one to stop; it is unwinding whatever it was mid-way through"
+            >
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+              stopping…
+            </span>
+          ) : (
+            <>
+              <span className="inline-flex shrink-0 items-center gap-1 text-[10px] text-primary">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
+                working
+              </span>
+              <button
+                type="button"
+                onClick={() => cancelAgent(agent.agentId)}
+                title="Stop this subagent — the rest of the run keeps going"
+                className="sylor-press shrink-0 rounded px-1 py-px text-[10px] font-medium text-muted transition-colors hover:bg-amber-500/10 hover:text-amber-300"
+              >
+                stop
+              </button>
+            </>
+          )
         ) : agent.ok ? (
           <span className="shrink-0 text-[10px] font-medium text-muted" title="Done">
             done
@@ -1338,6 +1519,8 @@ interface MessageProps {
   status: ActivityStatus | null
   /** Sticky where-are-we chips for the active run (§33), or null for a one-off turn. */
   progress: RunProgressUI | null
+  /** The live task checklist for the active run (#4), replaced wholesale by the model. */
+  todos: TodoItem[]
   /** Lead (top-level) tool cards anchored beneath this message, in stream order. */
   cards: ToolCardUI[]
   /** Subagent cards anchored beneath this message (requirement B), in stream order. */
@@ -1608,6 +1791,7 @@ function AssistantMessage({
   isActive,
   status,
   progress,
+  todos,
   cards,
   agents,
   agentTools
@@ -1621,10 +1805,12 @@ function AssistantMessage({
   // Interleave prose with the lead's tool cards AND the subagent cards anchored
   // beneath this turn, in stream order (think → act → delegate → think). Cards
   // without an offset fall to the end. Subagent tool cards live inside their
-  // agent card, not here.
+  // agent card, not here. Reads are filtered by {@link threadCards} — they still
+  // count toward `tokenEstimate` below, because a hidden read costs context all
+  // the same and the meter must not flatter itself.
   const blocks = useMemo(() => {
     const anchors = [
-      ...cards.map((c) => ({
+      ...threadCards(cards).map((c) => ({
         offset: c.contentOffset,
         block: { kind: 'card' as const, card: c }
       })),
@@ -1687,6 +1873,8 @@ function AssistantMessage({
         </div>
       )}
 
+      {isActive && message.pending && todos.length > 0 && <TodoPanel todos={todos} />}
+
       {isActive && message.pending && (
         <StatusLine status={status} progress={progress} tokens={tokenEstimate} />
       )}
@@ -1739,19 +1927,216 @@ function FolderGate({ onChoose }: { onChoose: () => void }) {
 }
 
 /**
+ * One row of the permission bar: the op, its verdict buttons, and — for a
+ * `write_file` — the diff itself, collapsed behind a `+n/−m` header.
+ *
+ * The diff is here rather than only in the card because the card is the record of
+ * what happened; this is the moment BEFORE it happens, and "no silent writes"
+ * means the bytes are reviewable while refusing them still costs nothing. The
+ * modified side is editable, so a nearly-right file does not need a whole
+ * reject → re-ask round trip: fix the two lines, approve, and the engine writes
+ * exactly what is on screen (and tells the model the file holds the user's
+ * version). Rejecting takes an optional reason for the same reason — "no" without
+ * "because" makes the model guess at the correction.
+ */
+function PermissionRow({
+  card,
+  onDecide
+}: {
+  card: ToolCardUI
+  onDecide: (toolId: string, decision: ToolDecision, detail?: ToolDecisionDetail) => void
+}) {
+  const theme = useAppStore((s) => s.theme)
+  const [open, setOpen] = useState(false)
+  const [why, setWhy] = useState('')
+  const [asking, setAsking] = useState(false)
+  // The user's in-progress edit of the proposed body. `null` = untouched, so an
+  // approval without an edit sends no `editedContent` at all.
+  const [edited, setEdited] = useState<string | null>(null)
+  const proposal = card.proposal
+  const write = proposal.kind === 'write_file' ? proposal : null
+  const body = edited ?? write?.newContent ?? ''
+  const stat = write ? lineDiffStats(write.oldContent, body) : null
+  const role = card.agentRole ? roleMeta(card.agentRole) : null
+  const icon =
+    proposal.kind === 'write_file'
+      ? '✎'
+      : proposal.kind === 'mcp_call'
+        ? '⚙'
+        : proposal.kind === 'web_fetch'
+          ? '🌐'
+          : proposal.kind === 'web_search'
+            ? '🔎'
+            : proposal.kind === 'read'
+              ? '⌕'
+              : proposal.kind === 'diagnostics'
+                ? '🩺'
+                : '❯'
+  const approve = (decision: ToolDecision): void =>
+    onDecide(
+      card.id,
+      decision,
+      edited != null && edited !== write?.newContent ? { editedContent: edited } : undefined
+    )
+
+  return (
+    <div className="[&:not(:last-child)]:border-b [&:not(:last-child)]:border-amber-500/10">
+      <div className="flex items-center gap-2 px-3 py-1.5 text-[12px]">
+        <span className="shrink-0 text-[11px] text-muted">{icon}</span>
+        {write ? (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+            title={open ? 'Hide the diff' : 'Review the diff before it is written'}
+          >
+            <span className={'shrink-0 text-[9px] text-muted ' + (open ? 'rotate-90' : '')}>▶</span>
+            <span className="min-w-0 flex-1 truncate font-medium text-text">{toolLabel(card)}</span>
+            {stat && (
+              <span className="shrink-0 font-mono text-[10px]">
+                <span className="text-emerald-400">+{stat.added}</span>{' '}
+                <span className="text-red-400">−{stat.removed}</span>
+              </span>
+            )}
+          </button>
+        ) : (
+          <span
+            className="min-w-0 flex-1 truncate font-medium text-text"
+            title={proposalFullTitle(proposal)}
+          >
+            {toolLabel(card)}
+          </span>
+        )}
+        {edited != null && edited !== write?.newContent && (
+          <span
+            className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary"
+            title="Approving writes YOUR version of this file, not the proposed one"
+          >
+            your edit
+          </span>
+        )}
+        {role && (
+          <span
+            className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary"
+            title={`Requested by the ${role.label.toLowerCase()}`}
+          >
+            {role.icon} {role.label}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={() => (asking ? onDecide(card.id, 'reject', { reason: why }) : setAsking(true))}
+          className="shrink-0 rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-muted transition-colors hover:border-red-500/50 hover:text-red-300"
+        >
+          Reject
+        </button>
+        {standingApprovalLabel(proposal) && (
+          <button
+            type="button"
+            onClick={() => approve('approve-always')}
+            title={standingApprovalLabel(proposal) ?? undefined}
+            className="shrink-0 rounded-md border border-primary/40 px-2 py-0.5 text-[11px] font-medium text-primary transition-colors hover:bg-primary/10"
+          >
+            Always
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => approve('approve')}
+          className="shrink-0 rounded-md bg-primary px-2 py-0.5 text-[11px] font-medium text-bg transition-opacity hover:opacity-90"
+        >
+          Approve
+        </button>
+      </div>
+      {asking && (
+        <div className="flex items-center gap-2 px-3 pb-2">
+          <input
+            autoFocus
+            value={why}
+            onChange={(e) => setWhy(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') onDecide(card.id, 'reject', { reason: why })
+              if (e.key === 'Escape') setAsking(false)
+            }}
+            placeholder="Why not? (optional — it goes to the model)"
+            className="min-w-0 flex-1 rounded-md border border-border bg-bg px-2 py-1 text-[11px] text-text outline-none placeholder:text-muted focus:border-primary/50"
+          />
+          <button
+            type="button"
+            onClick={() => onDecide(card.id, 'reject', { reason: why })}
+            className="shrink-0 rounded-md border border-red-500/40 px-2 py-0.5 text-[11px] font-medium text-red-300 transition-colors hover:bg-red-500/10"
+          >
+            Send
+          </button>
+        </div>
+      )}
+      {write && open && (
+        <div className="px-3 pb-2">
+          <div className="h-56 overflow-hidden rounded-md border border-border">
+            <DiffEditor
+              theme={monacoThemeFor(theme)}
+              language={languageForPath(write.path)}
+              original={write.oldContent}
+              modified={body}
+              onMount={(editor) => {
+                // Edit-then-approve: the modified pane is a real editor, and every
+                // keystroke lands in `edited`, which is what Approve then sends.
+                const mod = editor.getModifiedEditor()
+                mod.updateOptions({ readOnly: false })
+                mod.onDidChangeModelContent(() => setEdited(mod.getValue()))
+              }}
+              options={{
+                originalEditable: false,
+                renderSideBySide: false,
+                fontFamily: 'JetBrains Mono Variable, monospace',
+                fontSize: 12,
+                lineHeight: 18,
+                minimap: { enabled: false },
+                automaticLayout: true,
+                scrollBeyondLastLine: false,
+                renderOverviewRuler: false,
+                scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 }
+              }}
+              loading={<div className="p-3 text-[11px] text-muted">Loading diff…</div>}
+            />
+          </div>
+          <div className="mt-1 flex items-center justify-between text-[10px] text-muted">
+            <span>Nothing is on disk yet — edit here and Approve writes your version.</span>
+            {edited != null && edited !== write.newContent && (
+              <button
+                type="button"
+                onClick={() => setEdited(null)}
+                className="rounded px-1.5 py-0.5 transition-colors hover:bg-surface-2 hover:text-text"
+              >
+                Revert my edits
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
  * Pending-approval bar shown directly ABOVE the composer (requirement D): every
  * tool op still awaiting a decision — the lead's or a subagent's — is listed
  * here with Reject / Approve, so approvals live at the input rather than being
  * hunted down in the thread. With more than one waiting, Approve all / Reject
  * all act on the batch. Routes through the same gate as the engine — nothing is
  * auto-applied here; autonomous mode simply never leaves ops in this state.
+ *
+ * Ops that can carry a run-scoped standing grant also offer "Always", so a long
+ * build stops asking about every file it writes. The button appears only where
+ * {@link standingApprovalLabel} can say plainly what the grant covers, and the
+ * engine re-derives that scope itself — this UI cannot widen it.
  */
-function PermissionBar({
+export function PermissionBar({
   awaiting,
   onDecide
 }: {
   awaiting: ToolCardUI[]
-  onDecide: (toolId: string, decision: ToolDecision) => void
+  onDecide: (toolId: string, decision: ToolDecision, detail?: ToolDecisionDetail) => void
 }) {
   if (awaiting.length === 0) return null
   return (
@@ -1780,67 +2165,388 @@ function PermissionBar({
           </div>
         )}
       </div>
-      <div className="max-h-40 overflow-y-auto">
-        {awaiting.map((card) => {
-          const role = card.agentRole ? roleMeta(card.agentRole) : null
-          const icon =
-            card.proposal.kind === 'write_file'
-              ? '✎'
-              : card.proposal.kind === 'mcp_call'
-                ? '⚙'
-                : card.proposal.kind === 'web_fetch'
-                  ? '🌐'
-                  : card.proposal.kind === 'web_search'
-                    ? '🔎'
-                    : card.proposal.kind === 'read'
-                      ? '⌕'
-                      : card.proposal.kind === 'diagnostics'
-                        ? '🩺'
-                        : '❯'
-          return (
-            <div
-              key={card.id}
-              className="flex items-center gap-2 px-3 py-1.5 text-[12px] [&:not(:last-child)]:border-b [&:not(:last-child)]:border-amber-500/10"
-            >
-              <span className="shrink-0 text-[11px] text-muted">{icon}</span>
-              <span
-                className="min-w-0 flex-1 truncate font-medium text-text"
-                title={proposalFullTitle(card.proposal)}
-              >
-                {toolLabel(card)}
-              </span>
-              {role && (
-                <span
-                  className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary"
-                  title={`Requested by the ${role.label.toLowerCase()}`}
-                >
-                  {role.icon} {role.label}
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={() => onDecide(card.id, 'reject')}
-                className="shrink-0 rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-muted transition-colors hover:border-red-500/50 hover:text-red-300"
-              >
-                Reject
-              </button>
-              <button
-                type="button"
-                onClick={() => onDecide(card.id, 'approve')}
-                className="shrink-0 rounded-md bg-primary px-2 py-0.5 text-[11px] font-medium text-bg transition-opacity hover:opacity-90"
-              >
-                Approve
-              </button>
-            </div>
-          )
-        })}
+      {/* Taller than the old 40 (`max-h-40`): a row can now unfold a diff, and a
+          review surface you have to scroll a 10rem window to read is not one. */}
+      <div className="max-h-[26rem] overflow-y-auto">
+        {awaiting.map((card) => (
+          <PermissionRow key={card.id} card={card} onDecide={onDecide} />
+        ))}
       </div>
+    </div>
+  )
+}
+
+/**
+ * The standing grants in force, as chips above the composer with an × on each.
+ *
+ * A grant's whole effect is that the permission bar stops appearing, so without
+ * this the UI would go quiet in exactly the way it goes quiet when nothing is
+ * happening. The chips make "I'm not being asked because I said so" legible, and
+ * withdrawable in one click — a one-way door for the rest of a long run is not a
+ * reasonable price for skipping a few clicks.
+ */
+export function StandingBar({
+  keys,
+  onRevoke
+}: {
+  keys: string[]
+  onRevoke: (key: string) => void
+}) {
+  if (keys.length === 0) return null
+  return (
+    <div className="mb-2 flex flex-wrap items-center gap-1.5">
+      <span className="text-[10px] text-muted">Not asking about:</span>
+      {keys.map((key) => (
+        <span
+          key={key}
+          className="flex max-w-[16rem] items-center gap-1 rounded-full border border-primary/30 bg-primary/5 px-2 py-0.5 text-[10px] text-primary"
+          title={`You approved this for the rest of the run — click × to start being asked again`}
+        >
+          <span className="truncate font-mono">{describeStandingKey(key)}</span>
+          <button
+            type="button"
+            onClick={() => onRevoke(key)}
+            aria-label={`Ask me again about ${describeStandingKey(key)}`}
+            className="shrink-0 text-muted transition-colors hover:text-text"
+          >
+            ×
+          </button>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * The footer context meter — how much of the run's context is in use, and by what.
+ *
+ * The denominator is deliberately Sylor's OWN fold threshold, not the model's
+ * context window: Sylor talks to whatever a gateway or a local Ollama exposes, so
+ * for most model ids the real window is genuinely unknowable here, and the limit
+ * that actually applies to a run is where the engine condenses. The window appears
+ * only as a secondary line, and only when it is known — otherwise it says
+ * "unknown" rather than becoming a percentage of a guess.
+ *
+ * Measured, not estimated: `usage` is taken in the engine at the top of a step,
+ * the one place that can see the assembled system prompt and the tool output fed
+ * back between turns. With no run live there is nothing measured to show, so the
+ * chip falls back to the renderer's own conversation estimate and says which of
+ * the two it is showing.
+ */
+export function ContextMeter({ estimate }: { estimate: number }) {
+  const usage = useChatStore((s) => s.usage)
+  const [open, setOpen] = useState(false)
+
+  if (!usage) {
+    return (
+      <span
+        className="text-[11px] text-muted"
+        title={
+          'Approximate token count for this conversation (estimate).\n' +
+          'A measured breakdown appears here while a run is going.'
+        }
+      >
+        ~{formatCount(estimate)} tokens
+      </span>
+    )
+  }
+
+  const pct = Math.min(100, Math.round((usage.chars / usage.budget) * 100))
+  const text = pct >= 90 ? 'text-red-400' : pct >= 70 ? 'text-amber-300' : 'text-muted'
+  const fill = pct >= 90 ? 'bg-red-400' : pct >= 70 ? 'bg-amber-300' : 'bg-primary/70'
+  const tokens = Math.round(usage.chars / CHARS_PER_TOKEN)
+
+  return (
+    <span className="relative flex items-center gap-1.5">
+      {open && <ContextBreakdown usage={usage} pct={pct} />}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        title={`${pct}% of the fold budget in use · click for the breakdown`}
+        className="sylor-press flex items-center gap-1.5 rounded text-[11px] transition-colors hover:bg-surface-2"
+      >
+        <span className="h-1 w-10 overflow-hidden rounded-full bg-surface-2">
+          <span className={'block h-full ' + fill} style={{ width: `${Math.max(pct, 2)}%` }} />
+        </span>
+        <span className={'tabular-nums ' + text}>~{formatCount(tokens)} tokens</span>
+      </button>
+    </span>
+  )
+}
+
+/**
+ * The meter's popover: where the context actually went, plus what the next fold
+ * will do about it. Every row is a measured character count turned into tokens at
+ * the same 4-chars heuristic used everywhere else — never a provider-reported
+ * figure, so it stays marked with a `~`.
+ */
+function ContextBreakdown({ usage, pct }: { usage: ContextUsage; pct: number }) {
+  const rows: Array<[string, number, string]> = [
+    ['System prompt', usage.systemChars, 'Instructions, project context, skills'],
+    ['Conversation', usage.historyChars, 'Earlier turns and this request'],
+    ['Sylor this turn', usage.assistantChars, 'Prose and tool calls written this run'],
+    ['Tool output', usage.toolChars, 'File reads, command output, subagent reports']
+  ]
+
+  return (
+    <div className="absolute bottom-full right-0 mb-1.5 w-60 rounded-lg border border-border bg-surface p-2 text-[11px] shadow-lg">
+      <div className="mb-1.5 flex items-baseline justify-between gap-2">
+        <span className="font-medium text-text">Context in use</span>
+        <span className="tabular-nums text-muted">
+          {pct}% of ~{formatCount(Math.round(usage.budget / CHARS_PER_TOKEN))}
+        </span>
+      </div>
+      {rows.map(([label, chars, why]) => (
+        <div key={label} className="flex items-baseline justify-between gap-2 py-[1px]" title={why}>
+          <span className="min-w-0 truncate text-muted">{label}</span>
+          <span className="shrink-0 tabular-nums text-text/80">
+            ~{formatCount(Math.round(chars / CHARS_PER_TOKEN))}
+          </span>
+        </div>
+      ))}
+      <p className="mt-1.5 border-t border-border pt-1.5 leading-snug text-muted">
+        {usage.foldSteps > 0
+          ? `Next fold condenses ${usage.foldSteps} earlier step${usage.foldSteps === 1 ? '' : 's'}.`
+          : 'Nothing is queued to be condensed yet.'}
+      </p>
+      <p className="mt-1 leading-snug text-muted/70">
+        {usage.windowTokens != null
+          ? `This model's window is ~${formatCount(usage.windowTokens)} tokens; Sylor folds well before it.`
+          : "This model's real window is unknown to Sylor, so the bar measures its own fold budget."}
+      </p>
     </div>
   )
 }
 
 function EmptyState() {
   return <ZeroStateDashboard />
+}
+
+/**
+ * The plan-approval bar (the "Plan first" checkpoint). Shown when the run has
+ * finished planning and is parked before it touches a single file: the steps it is
+ * about to run, and Approve / Reject. Approving builds the plan in the SAME turn —
+ * no re-sending — and rejecting stops the run having changed nothing, which is a
+ * decision rather than a failure, so nothing is retried.
+ */
+export function PlanApprovalBar({
+  approval,
+  onDecide
+}: {
+  approval: PendingPlan
+  onDecide: (decision: 'approve' | 'reject') => void
+}): ReactNode {
+  return (
+    <div className="mb-2 overflow-hidden rounded-lg border border-primary/40 bg-primary/5">
+      <div className="flex items-center justify-between gap-2 border-b border-primary/20 px-3 py-1.5">
+        <span className="flex items-center gap-1.5 text-[11px] font-semibold text-primary">
+          <span className="h-1.5 w-1.5 rounded-full bg-primary sylor-blink" />
+          {approval.phase
+            ? `Plan — phase ${approval.phase.n} of ${approval.phase.total}: ${approval.phase.name}`
+            : 'Plan ready for your go-ahead'}
+        </span>
+        <span className="shrink-0 text-[10px] text-muted">
+          {approval.steps.length === 1 ? '1 step' : `${approval.steps.length} steps`}
+          {` · ${approval.complexity}`}
+        </span>
+      </div>
+      <ol className="max-h-40 list-none overflow-y-auto">
+        {approval.steps.map((step, i) => (
+          <li
+            key={`${i}-${step}`}
+            className="flex gap-2 px-3 py-1.5 text-[12px] [&:not(:last-child)]:border-b [&:not(:last-child)]:border-primary/10"
+          >
+            <span className="shrink-0 text-[11px] text-muted">{i + 1}.</span>
+            <span className="min-w-0 flex-1 text-text" title={step}>
+              {step}
+            </span>
+          </li>
+        ))}
+      </ol>
+      <div className="flex items-center justify-between gap-2 border-t border-primary/20 px-3 py-1.5">
+        <span className="min-w-0 truncate text-[10px] text-muted">
+          {approval.planPath
+            ? `Full plan written to ${approval.planPath} — nothing else has been touched yet.`
+            : 'Nothing has been written yet.'}
+        </span>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            onClick={() => onDecide('reject')}
+            className="rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-muted transition-colors hover:border-red-500/50 hover:text-red-300"
+          >
+            Reject
+          </button>
+          <button
+            type="button"
+            onClick={() => onDecide('approve')}
+            className="rounded-md bg-primary px-2.5 py-0.5 text-[11px] font-medium text-bg transition-opacity hover:opacity-90"
+          >
+            Build it
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The clarifying-question bar (the `ask_user` tool). When the run blocks on a
+ * question, this sits above the composer: it shows the question, any suggested
+ * answer chips, and a free-text field so the user is never boxed into the offered
+ * choices. Answering (a chip click or a typed reply) resumes the paused run. The
+ * accent is the primary colour, distinct from the amber approval bar — this is a
+ * question, not a permission gate.
+ */
+export function QuestionBar({
+  question,
+  onAnswer
+}: {
+  question: PendingQuestion
+  onAnswer: (answer: string) => void
+}): ReactNode {
+  const [text, setText] = useState('')
+  const trimmed = text.trim()
+  const submit = (): void => {
+    if (!trimmed) return
+    onAnswer(trimmed)
+    setText('')
+  }
+  return (
+    <div className="mb-2 overflow-hidden rounded-lg border border-primary/40 bg-primary/5">
+      <div className="flex items-center gap-1.5 border-b border-primary/20 px-3 py-1.5">
+        <span className="h-1.5 w-1.5 rounded-full bg-primary sylor-blink" />
+        <span className="text-[11px] font-semibold text-primary">
+          {question.header?.trim() || 'A quick question'}
+        </span>
+      </div>
+      <div className="px-3 py-2">
+        <p className="mb-2 text-[13px] font-medium text-text">{question.question}</p>
+        {question.options && question.options.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {question.options.map((option, i) => (
+              <button
+                key={`${i}-${option}`}
+                type="button"
+                onClick={() => onAnswer(option)}
+                className="rounded-md border border-primary/40 px-2 py-1 text-[12px] font-medium text-primary transition-colors hover:bg-primary/10"
+              >
+                {option}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="flex items-center gap-1.5">
+          <input
+            type="text"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                submit()
+              }
+            }}
+            placeholder={
+              question.options && question.options.length > 0
+                ? 'Or type your own answer…'
+                : 'Type your answer…'
+            }
+            className="min-w-0 flex-1 rounded-md border border-border bg-surface-2/60 px-2 py-1 text-[12px] text-text placeholder:text-muted focus:border-primary/50 focus:outline-none"
+          />
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!trimmed}
+            className="shrink-0 rounded-md bg-primary px-2.5 py-1 text-[12px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-40"
+          >
+            Send
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Flagged follow-ups (the `flag_followup` tool): out-of-scope work the agent noticed
+ * while doing something else and deliberately left undone.
+ *
+ * Unlike the approval and question bars this blocks nothing — the turn is over and the
+ * work is recorded — so it is styled quietly (the neutral border, no primary accent, no
+ * blinking dot) and offers only the two things a deferred issue can need: start it as
+ * its own turn, or hide the chip. Dismissing never touches the written entry, and the
+ * footnote names a file ONLY when one was actually written: an unwritable checkout still
+ * flags the finding, and the UI must not claim a record that doesn't exist.
+ */
+export function FollowupBar({
+  followups,
+  disabled,
+  onStart,
+  onDismiss
+}: {
+  followups: Followup[]
+  disabled: boolean
+  onStart: (followup: Followup) => void
+  onDismiss: (id: string) => void
+}): ReactNode {
+  if (followups.length === 0) return null
+  return (
+    <div className="mb-2 overflow-hidden rounded-lg border border-border bg-surface-2/40">
+      <div className="flex items-center justify-between gap-2 border-b border-border/70 px-3 py-1.5">
+        <span className="text-[11px] font-semibold text-muted">
+          Noticed along the way — not done
+        </span>
+        <span className="shrink-0 text-[10px] text-muted">
+          {followups.length === 1 ? '1 follow-up' : `${followups.length} follow-ups`}
+        </span>
+      </div>
+      <ul className="max-h-40 list-none overflow-y-auto">
+        {followups.map((followup) => (
+          <li
+            key={followup.id}
+            className="flex items-start justify-between gap-2 px-3 py-1.5 [&:not(:last-child)]:border-b [&:not(:last-child)]:border-border/50"
+          >
+            <div className="min-w-0 flex-1">
+              <p className="text-[12px] font-medium text-text">{followup.title}</p>
+              {followup.note && <p className="mt-0.5 text-[11px] text-muted">{followup.note}</p>}
+              <p className="mt-0.5 truncate text-[10px] text-muted">
+                {followup.files?.length ? `${followup.files.join(', ')} · ` : ''}
+                {followup.recordedIn
+                  ? `noted in ${followup.recordedIn}`
+                  : 'this session only — nothing could be written'}
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <button
+                type="button"
+                onClick={() => onStart(followup)}
+                disabled={disabled}
+                title={
+                  disabled
+                    ? 'Finish the current turn first'
+                    : 'Start this as its own turn, right now'
+                }
+                className="rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-muted transition-colors hover:border-primary/50 hover:text-primary disabled:opacity-40"
+              >
+                Do it now
+              </button>
+              <button
+                type="button"
+                onClick={() => onDismiss(followup.id)}
+                aria-label={`Dismiss follow-up: ${followup.title}`}
+                title="Hide this — the written entry is kept"
+                className="grid h-5 w-5 place-items-center rounded-md text-[11px] text-muted transition-colors hover:bg-surface hover:text-text"
+              >
+                ✕
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
 }
 
 /** Theme toggle: sun in light, moon in dark. */
@@ -1879,12 +2585,17 @@ function ThemeToggle() {
   )
 }
 
-/** Slim chat header: rail toggle, model selector, theme + preview controls. */
+/** Slim chat header: rail toggle, model selector, theme + log/preview controls. */
 function ChatHeader({ onNewChat }: { onNewChat: () => void }) {
   const toggleRail = useAppStore((s) => s.toggleRail)
   const previewOpen = useAppStore((s) => s.previewOpen)
   const openPreview = useAppStore((s) => s.openPreview)
   const closePreview = useAppStore((s) => s.closePreview)
+  const canvasOpen = useAppStore((s) => s.canvasOpen)
+  const canvasMode = useAppStore((s) => s.canvasMode)
+  const toggleCanvas = useAppStore((s) => s.toggleCanvas)
+  const openPalette = useAppStore((s) => s.openPalette)
+  const logOpen = canvasOpen && canvasMode === 'log'
 
   return (
     <div className="flex items-center justify-between border-b border-border px-3 py-2">
@@ -1920,6 +2631,50 @@ function ChatHeader({ onNewChat }: { onNewChat: () => void }) {
           New chat
         </button>
         <ThemeToggle />
+        {/* The palette's only visible entry point. Without it, Ctrl+K is a shortcut
+            nobody discovers — and the shortcut is the whole feature. */}
+        <button
+          type="button"
+          aria-label="Open the command palette"
+          title="Search everything — Ctrl+K"
+          onClick={openPalette}
+          className="grid h-7 w-7 place-items-center rounded-md text-muted transition-colors hover:bg-surface hover:text-text"
+        >
+          <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <circle cx="9" cy="9" r="5" stroke="currentColor" strokeWidth="1.4" />
+            <path d="M12.8 12.8L16.5 16.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+          </svg>
+        </button>
+        {/* The run log lives in the right slot, beside the preview and the browser —
+            opening it never changes the conversation, it only shows the receipts. */}
+        <button
+          type="button"
+          aria-label="Toggle run log"
+          title="Run log — every step, with times"
+          onClick={() => toggleCanvas('log')}
+          className={
+            'grid h-7 w-7 place-items-center rounded-md transition-colors hover:bg-surface hover:text-text ' +
+            (logOpen ? 'text-primary' : 'text-muted')
+          }
+        >
+          <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <rect
+              x="2.5"
+              y="3.5"
+              width="15"
+              height="13"
+              rx="2"
+              stroke="currentColor"
+              strokeWidth="1.4"
+            />
+            <path
+              d="M5.5 7.5h4M5.5 10h9M5.5 12.5h6"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinecap="round"
+            />
+          </svg>
+        </button>
         <button
           type="button"
           aria-label="Toggle preview"
@@ -1949,51 +2704,10 @@ function ChatHeader({ onNewChat }: { onNewChat: () => void }) {
 }
 
 /**
- * One entry in the composer's `/` menu. `command` is a disk-authored template,
- * `skill` an enabled skill surfaced as a quick "use this skill" shortcut, and
- * `builtin` a hard-wired action (`/install`, `/remember`). All three carry a
- * `name` (typed after the slash), a one-line `description`, and an optional
- * `hint` shown after the name to preview expected arguments.
+ * One entry in the composer's `/` menu — see `lib/slashSources.ts`, which the
+ * Ctrl+K palette reads from too so both surfaces list the same commands.
  */
-type SlashItem =
-  | { kind: 'command'; name: string; description: string; hint: string; body: string }
-  | { kind: 'skill'; name: string; description: string; hint: string; title: string }
-  | { kind: 'builtin'; name: string; description: string; hint: string }
-
-/**
- * Turns a `/install <source> [scope]` line into a natural-language instruction
- * the engine reliably answers with an `install_plugin` tool block. The scope
- * word (project|global) is optional and stripped from the source; a bare
- * `/install` (no source) yields a prompt asking the user for the repo, so the
- * shortcut is still useful when typed on its own. Fulfils the user's ask:
- * "Sylor install this skill" → clone the repo and add all its skills.
- */
-function buildInstallPrompt(args: string): string {
-  const words = args.trim().split(/\s+/).filter(Boolean)
-  let scope: 'global' | 'project' | null = null
-  if (words.length > 0) {
-    const last = words[words.length - 1].toLowerCase()
-    if (last === 'project' || last === 'global') {
-      scope = last
-      words.pop()
-    }
-  }
-  const source = words.join(' ').trim()
-  if (!source) {
-    return (
-      'I want to install a Sylor plugin — a bundle of skills, commands, and ' +
-      'connectors from a Git repository or a local folder. Ask me for the ' +
-      'GitHub repository (a URL or `owner/repo`) or the folder path, then use ' +
-      'the install_plugin tool to install it.'
-    )
-  }
-  const scopeClause = scope ? ` Install it at ${scope} scope.` : ''
-  return (
-    `Install the Sylor plugin from "${source}" using the install_plugin tool.` +
-    `${scopeClause} After it installs, briefly list the skills, commands, and ` +
-    'connectors it added so I know what became available.'
-  )
-}
+type SlashItem = SlashItemShape
 
 /** Small leading glyph for each slash-menu row, keyed by item kind. */
 function SlashItemIcon({ kind }: { kind: SlashItem['kind'] }): ReactNode {
@@ -2119,9 +2833,18 @@ export function ChatPanel() {
   const running = useChatStore((s) => s.running)
   const status = useChatStore((s) => s.status)
   const progress = useChatStore((s) => s.progress)
+  const todos = useChatStore((s) => s.todos)
+  const question = useChatStore((s) => s.question)
+  const planApproval = useChatStore((s) => s.planApproval)
+  const followups = useChatStore((s) => s.followups)
+  const standing = useChatStore((s) => s.standing)
   const send = useChatStore((s) => s.send)
   const sessionId = useChatStore((s) => s.sessionId)
   const decideTool = useChatStore((s) => s.decideTool)
+  const revokeStanding = useChatStore((s) => s.revokeStanding)
+  const answerQuestion = useChatStore((s) => s.answerQuestion)
+  const decidePlan = useChatStore((s) => s.decidePlan)
+  const dismissFollowup = useChatStore((s) => s.dismissFollowup)
   const cancel = useChatStore((s) => s.cancel)
   // "New chat" opens a fresh landing page (an unsaved draft) — the row is created
   // lazily on the first send, so the rail never fills with empty 'New session'
@@ -2137,9 +2860,9 @@ export function ChatPanel() {
   const [pending, setPending] = useState<PendingAttachment[]>([])
   const [dragging, setDragging] = useState(false)
   // Slash-menu sources: disk commands + enabled skills, loaded lazily when the
-  // user starts a `/` line (so freshly-added ones show without a restart).
-  const [commands, setCommands] = useState<CommandInfo[]>([])
-  const [skills, setSkills] = useState<SkillStatus[]>([])
+  // user starts a `/` line (so freshly-added ones show without a restart). The
+  // Ctrl+K palette loads the same shape from the same module.
+  const [sources, setSources] = useState<SlashSources>(NO_SLASH_SOURCES)
   const [menuIndex, setMenuIndex] = useState(0)
   // Escape closes the menu without clearing the text; reset when the line stops
   // being a slash query so the next `/` reopens it.
@@ -2251,17 +2974,8 @@ export function ChatPanel() {
     if (!slashActive) return
     let alive = true
     void (async () => {
-      try {
-        const [cmds, sks] = await Promise.all([
-          window.sylor.commands.list(),
-          window.sylor.skills.list()
-        ])
-        if (!alive) return
-        setCommands(cmds)
-        setSkills(sks.filter((s) => s.enabled))
-      } catch (err) {
-        console.error('[sylor] failed to load slash sources:', err)
-      }
+      const next = await loadSlashSources()
+      if (alive) setSources(next)
     })()
     return () => {
       alive = false
@@ -2269,49 +2983,11 @@ export function ChatPanel() {
   }, [slashActive])
 
   // The full, unfiltered palette: the built-in /install and /remember, then user
-  // commands, then enabled skills. Filtering by the typed name happens below.
-  const slashItems = useMemo<SlashItem[]>(() => {
-    const all: SlashItem[] = [
-      {
-        kind: 'builtin',
-        name: 'install',
-        description: 'Install a plugin (skills, commands, connectors) from a repo',
-        hint: '<owner/repo> [project]'
-      },
-      {
-        kind: 'builtin',
-        name: 'remember',
-        description: 'Save a durable fact about you to Sylor’s long-term memory',
-        hint: '<fact to remember>'
-      }
-    ]
-    for (const c of commands) {
-      all.push({
-        kind: 'command',
-        name: c.name,
-        description: c.description,
-        hint: c.argumentHint,
-        body: c.body
-      })
-    }
-    for (const s of skills) {
-      all.push({
-        kind: 'skill',
-        name: s.name,
-        title: s.title || s.name,
-        description: s.description,
-        hint: ''
-      })
-    }
-    const q = slashQuery
-    const matched = q
-      ? all.filter(
-          (it) =>
-            it.name.toLowerCase().includes(q) || it.description.toLowerCase().includes(q)
-        )
-      : all
-    return matched.slice(0, 8)
-  }, [commands, skills, slashQuery])
+  // commands, then enabled skills. Filtering by the typed name happens in the lib.
+  const slashItems = useMemo<SlashItem[]>(
+    () => buildSlashItems(sources, slashQuery),
+    [sources, slashQuery]
+  )
 
   const menuOpen = slashActive && !menuDismissed && slashItems.length > 0
 
@@ -2331,26 +3007,6 @@ export function ChatPanel() {
     setMenuDismissed(false)
     setMenuIndex(0)
     requestAnimationFrame(() => textareaRef.current?.focus())
-  }
-
-  // Expand a slash line into what actually gets sent. A user command expands its
-  // template (`$ARGUMENTS`/`$1`…); `/install` becomes an install instruction;
-  // `/remember` becomes a save-to-memory instruction; a skill becomes a "use this
-  // skill" instruction; anything else is sent as-is.
-  const resolveSlash = (text: string): string => {
-    const parsed = parseSlash(text)
-    if (!parsed) return text
-    const lc = parsed.name.toLowerCase()
-    const cmd = commands.find((c) => c.name.toLowerCase() === lc)
-    if (cmd) return expandCommand(cmd.body, parsed.args)
-    if (lc === 'install') return buildInstallPrompt(parsed.args)
-    if (lc === 'remember') return buildRememberPrompt(parsed.args)
-    const skill = skills.find((s) => s.name.toLowerCase() === lc)
-    if (skill) {
-      const base = `Use the ${skill.title || skill.name} skill.`
-      return parsed.args ? `${base}\n\n${parsed.args}` : base
-    }
-    return text
   }
 
   // Auto-scroll to the newest content as it streams in (messages or tool cards).
@@ -2421,31 +3077,19 @@ export function ChatPanel() {
   }
 
   const submit = async (): Promise<void> => {
-    const raw = input.trim()
-    if ((!raw && pending.length === 0) || running || needsFolder) return
-    // Expand a leading `/command` into its prompt before sending (Claude-CLI
-    // style). Non-slash text and unknown slashes pass through unchanged.
-    const text = resolveSlash(raw)
     const outgoing: OutgoingAttachment[] = pending.map((p) => ({
       attachment: p.attachment,
       ...(p.textContent != null ? { textContent: p.textContent } : {})
     }))
-    // A turn needs a persisted session to save into. On a fresh landing page the
-    // chat is an unsaved draft (sessionId == null, showing the EmptyState); create
-    // the row now — lazily, on this first send — so the user turn and its run have
-    // somewhere durable to persist. This also covers the first-launch race (a send
-    // before boot() resolves). create() files the new chat under the rail's active
-    // project and stamps the current working folder.
-    if (useChatStore.getState().sessionId == null) {
-      await useSessionStore.getState().create()
-    }
-    // Show the raw `/command …` in the bubble (rendered as a mention chip) but
-    // send its expansion to the engine. A non-slash message expands to itself, so
-    // no engine override is passed then.
-    send(raw, outgoing, text !== raw ? text : undefined)
-    // Title a still-unnamed session from its first prompt (fire-and-forget;
-    // no-ops once the session already has a real title). See useSessionStore.
-    void useSessionStore.getState().autoName(text)
+    // `startRun` owns the whole sequence — slash expansion, creating the session row
+    // a draft chat doesn't have yet, sending, and titling the chat — so the palette
+    // starts a turn exactly the way this composer does. It also re-checks the three
+    // blocked states against live store state, which is why there is no guard here.
+    const result = await startRun(input, { attachments: outgoing, sources })
+    if (!result.sent) return
+    // It may have fetched the catalogs to expand a `/command`; keep that copy so the
+    // next line doesn't pay for the read again.
+    if (result.sources !== sources) setSources(result.sources)
     setInput('')
     setPending([])
   }
@@ -2514,6 +3158,7 @@ export function ChatPanel() {
                 isActive={message.id === lastId && message.role === 'assistant'}
                 status={status}
                 progress={progress}
+                todos={todos}
                 cards={leadCardsByMessage.get(message.id) ?? []}
                 agents={agentsByMessage.get(message.id) ?? []}
                 agentTools={toolsByAgent}
@@ -2536,6 +3181,23 @@ export function ChatPanel() {
       >
         {/* Pending approvals sit directly above the composer (requirement D). */}
         <PermissionBar awaiting={awaiting} onDecide={decideTool} />
+        {/* …and the grants that are keeping that bar from appearing, so "it stopped
+            asking" is always visible and always one click from being undone. */}
+        <StandingBar keys={standing} onRevoke={revokeStanding} />
+        {/* A blocking clarifying question sits in the same spot; the run is paused
+            until it's answered. */}
+        {question && <QuestionBar question={question} onAnswer={answerQuestion} />}
+        {/* And the plan-first checkpoint: the plan is written, nothing is built, and
+            the turn waits here for a go-ahead. */}
+        {planApproval && <PlanApprovalBar approval={planApproval} onDecide={decidePlan} />}
+        {/* Follow-ups flagged during the turn, last because they block nothing: the
+            work is already recorded and these are just the "do it now" affordance. */}
+        <FollowupBar
+          followups={followups}
+          disabled={running}
+          onStart={(followup) => send(buildFollowupPrompt(followup))}
+          onDismiss={dismissFollowup}
+        />
         {pending.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {pending.map((p) => (
@@ -2681,13 +3343,9 @@ export function ChatPanel() {
                 <span className="text-red-400">-{formatCount(removed)}</span>
               </span>
             )}
-            {/* Rough token estimate for the conversation + draft. */}
-            <span
-              className="text-[11px] text-muted"
-              title="Approximate token count for this conversation (estimate)"
-            >
-              ~{formatCount(tokenEstimate)} tokens
-            </span>
+            {/* Measured context load while a run is live; the conversation
+                estimate otherwise (see ContextMeter). */}
+            <ContextMeter estimate={tokenEstimate} />
             {/* Commit the session's edits via the permission-gated workflow. */}
             <button
               type="button"

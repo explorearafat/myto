@@ -9,10 +9,28 @@
  *    orchestrator's parallel specialists (up to MAX_PARALLEL at once) can't all
  *    fire simultaneously and trip a per-minute quota; they queue and trickle.
  *
- *  - **Retry** ({@link withRetry}) — a *retryable* failure (429 / 408 / 5xx /
- *    timeout / connection reset) is retried up to {@link MAX_RETRY_ATTEMPTS}
- *    times, waiting {@link RETRY_DELAY_MS} between attempts. Auth errors, bad
- *    requests, and user aborts are NOT retried — they can't succeed by waiting.
+ *  - **Retry** ({@link withRetry}) — a *retryable* failure is re-attempted, with
+ *    the budget chosen by WHY it failed (see {@link classifyFailure}). Auth
+ *    errors, bad requests, and user aborts are NOT retried — they can't succeed
+ *    by waiting.
+ *
+ *    The two retryable kinds are deliberately treated differently, because only
+ *    one of them is fixed by waiting:
+ *
+ *      * `transient` (429 / 5xx / connection reset) — the request was *rejected*.
+ *        An identical replay a minute later is exactly the right move: a
+ *        per-minute quota rolls over, an overloaded upstream recovers. Budget:
+ *        {@link MAX_RETRY_ATTEMPTS} attempts, {@link RETRY_DELAY_MS} apart.
+ *
+ *      * `timeout` (client-side deadline, 408 / 504 / 524) — the request was
+ *        *accepted* and simply took longer than the deadline. Nothing about the
+ *        request changed, so replaying it identically will overwhelmingly hit the
+ *        same wall; ten attempts a minute apart burn half an hour to arrive at
+ *        the same error. There is no quota to roll over either, so the long wait
+ *        buys nothing. Budget: {@link MAX_TIMEOUT_RETRY_ATTEMPTS} attempts,
+ *        {@link TIMEOUT_RETRY_DELAY_MS} apart — one quick second chance for a
+ *        genuinely unlucky first attempt (a cold start, a queued request), then
+ *        an honest failure the caller can report.
  *
  * Streaming safety: a stream that already emitted content is never retried,
  * because replaying it would duplicate text the user has read. `canRetry` lets
@@ -46,7 +64,7 @@ export function __setRequestGap(ms: number): void {
   requestGapMs = ms
 }
 
-/** How many times a retryable model request is re-attempted before giving up. */
+/** How many times a *transient* (rejected) model request is re-attempted. */
 export const MAX_RETRY_ATTEMPTS = 10
 
 /**
@@ -54,6 +72,20 @@ export const MAX_RETRY_ATTEMPTS = 10
  * or request quota to roll over, which is the failure this exists for.
  */
 export const RETRY_DELAY_MS = 60_000
+
+/**
+ * How many times a *timed-out* request is attempted in total. Two, not ten: the
+ * request was accepted and ran out of clock, so an identical replay fails the
+ * same way. The second attempt only covers a genuinely unlucky first one.
+ */
+export const MAX_TIMEOUT_RETRY_ATTEMPTS = 2
+
+/**
+ * Wait before re-attempting a timed-out request. Short, because there is no
+ * quota to roll over — the only thing the pause buys is not hammering an
+ * endpoint that is already struggling.
+ */
+export const TIMEOUT_RETRY_DELAY_MS = 2_000
 
 /** Timestamp (ms) the last outbound request was released by {@link pace}. */
 let lastRequestAt = 0
@@ -119,32 +151,67 @@ export function isAbort(err: unknown): boolean {
 }
 
 /**
- * Errors that another attempt could plausibly fix: rate limits (429), request
- * timeouts (408), transient upstream faults (5xx), and socket-level failures.
- * A 401/403 (bad key), 400 (bad request), or 404 (bad model) is permanent —
- * retrying it just burns ten minutes for the same error.
+ * Why a request failed, which decides how (and whether) it is worth repeating.
+ *
+ *  - `permanent` — a user abort, or an error another attempt cannot fix (a bad
+ *    key, a malformed request, an unknown model).
+ *  - `timeout` — the request was accepted but exceeded a deadline. Retryable,
+ *    but only briefly: replaying it unchanged will hit the same deadline.
+ *  - `transient` — the request was rejected by a rate limit or a struggling
+ *    upstream. Worth replaying identically after a real wait.
  */
-export function isRetryable(err: unknown): boolean {
-  if (isAbort(err)) return false
+export type FailureKind = 'permanent' | 'timeout' | 'transient'
+
+/**
+ * Classifies a provider failure. Checked in order of certainty: aborts and
+ * permanent HTTP statuses win outright (even when the message *also* contains
+ * timeout wording), then deadline failures, then everything transient.
+ *
+ * `408` (Request Timeout), `504` (Gateway Timeout) and `524` (Cloudflare: origin
+ * took too long) are deadline failures, not rejections — something upstream gave
+ * up waiting on a generation that was still running, so a replay faces the same
+ * clock. `429`/`500`/`502`/`503`/`522` and socket-level faults are rejections.
+ */
+export function classifyFailure(err: unknown): FailureKind {
+  if (isAbort(err)) return 'permanent'
   const text = (err instanceof Error ? err.message : String(err)).toLowerCase()
   // Permanent, even if the wording also matches a pattern below.
-  if (/\b(401|403|404|400)\b/.test(text)) return false
-  if (/\b(429|408|500|502|503|504|522|524)\b/.test(text)) return true
-  return /rate.?limit|too many requests|overloaded|capacity|quota|timed out|timeout|econnreset|etimedout|econnrefused|enotfound|socket hang up|fetch failed|network|temporarily unavailable/.test(
-    text
-  )
+  if (/\b(401|403|404|400)\b/.test(text)) return 'permanent'
+  if (/\b(408|504|524)\b/.test(text)) return 'timeout'
+  if (/\b(429|500|502|503|522)\b/.test(text)) return 'transient'
+  if (/timed out|timeout|etimedout|deadline/.test(text)) return 'timeout'
+  if (
+    /rate.?limit|too many requests|overloaded|capacity|quota|econnreset|econnrefused|enotfound|socket hang up|fetch failed|network|temporarily unavailable/.test(
+      text
+    )
+  ) {
+    return 'transient'
+  }
+  return 'permanent'
 }
+
+/**
+ * Errors that another attempt could plausibly fix — anything not `permanent`.
+ * Kept as the coarse yes/no predicate; {@link classifyFailure} is what decides
+ * how many attempts and how long a wait that failure actually earns.
+ */
+export function isRetryable(err: unknown): boolean {
+  return classifyFailure(err) !== 'permanent'
+}
+
 
 /** What {@link withRetry} reports before each wait, for surfacing in the UI. */
 export interface RetryNotice {
   /** 1-based attempt number that just failed. */
   attempt: number
-  /** Total attempts allowed ({@link MAX_RETRY_ATTEMPTS}). */
+  /** Total attempts allowed for THIS failure kind (see {@link classifyFailure}). */
   max: number
   /** How long we're about to wait before the next attempt. */
   delayMs: number
   /** Why it failed (the provider's message, trimmed for display). */
   reason: string
+  /** Which budget applied — lets the UI word a deadline failure honestly. */
+  kind: FailureKind
 }
 
 export interface RetryOptions {
@@ -158,16 +225,21 @@ export interface RetryOptions {
    * "always safe".
    */
   canRetry?: () => boolean
-  /** Override the attempt budget (tests). */
+  /** Override the transient attempt budget (tests). */
   attempts?: number
-  /** Override the inter-attempt wait (tests). */
+  /** Override the transient inter-attempt wait (tests). */
   delayMs?: number
+  /** Override the timeout attempt budget (tests). */
+  timeoutAttempts?: number
+  /** Override the timeout inter-attempt wait (tests). */
+  timeoutDelayMs?: number
 }
 
 /**
  * Runs `fn`, paced and retried. Returns its value, or throws the LAST error once
- * the budget is exhausted / the failure is permanent / a retry was vetoed — so
- * the caller's existing error handling still reports something accurate.
+ * the budget for that failure kind is exhausted / the failure is permanent / a
+ * retry was vetoed — so the caller's existing error handling still reports
+ * something accurate.
  */
 export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions = {}): Promise<T> {
   const {
@@ -175,7 +247,9 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
     onRetry,
     canRetry,
     attempts = MAX_RETRY_ATTEMPTS,
-    delayMs = RETRY_DELAY_MS
+    delayMs = RETRY_DELAY_MS,
+    timeoutAttempts = MAX_TIMEOUT_RETRY_ATTEMPTS,
+    timeoutDelayMs = TIMEOUT_RETRY_DELAY_MS
   } = options
 
   let lastError: unknown
@@ -186,15 +260,22 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
       return await fn()
     } catch (err) {
       lastError = err
-      const isLast = attempt >= attempts
-      if (isAbort(err) || !isRetryable(err) || isLast || canRetry?.() === false) throw err
+      const kind = classifyFailure(err)
+      if (kind === 'permanent' || canRetry?.() === false) throw err
+      // A deadline failure earns its own (much shorter) budget: replaying an
+      // unchanged request against the same clock is not a strategy.
+      const isTimeout = kind === 'timeout'
+      const max = isTimeout ? Math.min(attempts, Math.max(1, timeoutAttempts)) : attempts
+      const wait = isTimeout ? timeoutDelayMs : delayMs
+      if (attempt >= max) throw err
       onRetry?.({
         attempt,
-        max: attempts,
-        delayMs,
-        reason: (err instanceof Error ? err.message : String(err)).slice(0, 160)
+        max,
+        delayMs: wait,
+        reason: (err instanceof Error ? err.message : String(err)).slice(0, 160),
+        kind
       })
-      await sleep(delayMs, signal)
+      await sleep(wait, signal)
     }
   }
   // Unreachable (the loop either returns or throws), but keeps the type honest.

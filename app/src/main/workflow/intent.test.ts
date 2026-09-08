@@ -56,6 +56,41 @@ describe('classifyIntentHeuristic', () => {
     // "hey, add a button" is real work despite the greeting.
     expect(classifyIntentHeuristic('hey, add a logout button').kind).toBe('edit')
   })
+
+  it('reads a Banglish question about how you would work as a question', () => {
+    // The regression: this was routed as an edit and answered with a nine-phase
+    // production build of a project nobody asked for. "build" is real, but it
+    // sits inside "if you were given … what would you do?", and "tomake" is not
+    // the verb "make".
+    const prompt = 'hii tomake kono boro project build korte dile tumi ki korbe?'
+    expect(classifyIntentHeuristic(prompt).kind).toBe('question')
+    expect(classifyIntentHeuristic(prompt).needsContext).toBe(false)
+  })
+
+  it('still reads a Banglish request to change something as an edit', () => {
+    // The other half of the same coin: a real Banglish work request must not be
+    // talked out of being one.
+    expect(classifyIntentHeuristic('ei file er login bug ta fix koro').kind).toBe('edit')
+    expect(classifyIntentHeuristic('sidebar e ekta dark mode toggle add koro').kind).toBe('edit')
+  })
+
+  it('keeps a polite English request an edit, not a question', () => {
+    // A trailing "?" alone must not flip a request into a question.
+    expect(classifyIntentHeuristic('Can you add a logout button?').kind).toBe('edit')
+    expect(classifyIntentHeuristic('could you fix the header spacing?').kind).toBe('edit')
+  })
+
+  it('does not fire an edit marker buried inside another word', () => {
+    // "address" contains "add"; "latest" contains "test".
+    expect(classifyIntentHeuristic('the address parser is confusing').kind).toBe('question')
+    expect(classifyIntentHeuristic('the latest release notes').kind).toBe('question')
+  })
+
+  it('reads a stretched greeting as chat', () => {
+    for (const greeting of ['hii', 'heyyy', 'helloo!', 'hii there']) {
+      expect(classifyIntentHeuristic(greeting).kind, `"${greeting}" should be chat`).toBe('chat')
+    }
+  })
 })
 
 describe('classifyIntent', () => {
@@ -127,7 +162,21 @@ describe('classifyIntent', () => {
     getCompletion.mockImplementationOnce(() => {
       throw new Error('network down')
     })
-    const result = await classifyIntent('What does the workflow engine do?', settings)
+    // No edit marker and no question shape → ambiguous → the LLM path runs (and
+    // throws), so the heuristic decides: question.
+    const result = await classifyIntent('the workflow engine feels sluggish lately', settings)
+    expect(result.kind).toBe('question')
+  })
+
+  it('asks the model about a Banglish prompt that mixes both signals', async () => {
+    // "build" (edit) inside "…korte dile tumi ki korbe?" (question) is a genuine
+    // tie, so this is the one prompt shape that earns the round-trip — and when
+    // the model is unreachable, the heuristic must still not start building.
+    const prompt = 'hii tomake kono boro project build korte dile tumi ki korbe?'
+    getCompletion.mockRejectedValueOnce(new Error('offline'))
+    const before = getCompletion.mock.calls.length
+    const result = await classifyIntent(prompt, settings)
+    expect(getCompletion.mock.calls.length).toBe(before + 1)
     expect(result.kind).toBe('question')
   })
 })

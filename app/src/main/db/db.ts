@@ -38,7 +38,7 @@ export function __setDbPathForTest(path: string): void {
 }
 
 /** Current schema version; bump + extend {@link migrate} for additive changes. */
-export const SCHEMA_VERSION = 8
+export const SCHEMA_VERSION = 9
 
 /**
  * Open the database once (lazily), applying pragmas and running migrations. All
@@ -260,6 +260,20 @@ function migrate(handle: DatabaseSync): void {
     // leaves model-less turns out of the favourite-model tally.
     handle.exec(`ALTER TABLE messages ADD COLUMN created_at INTEGER`)
     handle.exec(`ALTER TABLE messages ADD COLUMN model TEXT`)
+  }
+
+  if (current < 9) {
+    // Run-log columns on tool_ops (harness overhaul, Pass A). `agent_id`/`agent_role`
+    // were already declared on PersistedToolOp — and documented as the header label
+    // "on reload" — but the INSERT dropped them, so reopening a conversation lost
+    // which subagent did what. `started_at`/`ended_at` are the wall clock the op was
+    // proposed and the ms its result landed, which is what lets a restored log show
+    // real times and durations. All four nullable: pre-existing rows upgrade
+    // untouched and the UI shows no attribution/time rather than inventing one.
+    handle.exec(`ALTER TABLE tool_ops ADD COLUMN agent_id TEXT`)
+    handle.exec(`ALTER TABLE tool_ops ADD COLUMN agent_role TEXT`)
+    handle.exec(`ALTER TABLE tool_ops ADD COLUMN started_at INTEGER`)
+    handle.exec(`ALTER TABLE tool_ops ADD COLUMN ended_at INTEGER`)
   }
 
   handle.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)

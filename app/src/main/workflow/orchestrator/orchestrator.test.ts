@@ -40,17 +40,25 @@ type ExecuteNode = OrchestratorDeps['executeNode']
 type WritePlan = OrchestratorDeps['writePlan']
 type Verify = OrchestratorDeps['verify']
 type Judge = OrchestratorDeps['judge']
+type ApprovePlan = NonNullable<OrchestratorDeps['approvePlan']>
 
 // ---- Requests that pin each routing decision --------------------------------
-// The heuristic is confident at both extremes, so these two spend NO router call;
-// the ambiguous middle one does (and is scripted per test).
+// Sizing is the model's job now, and the engine does it once and hands the verdict
+// in (deps.complexity), so these two requests come pre-sized exactly as production
+// would size them — no router call, and no dependence on the reply queue below.
 
-/** Short, one deliverable, no domain → heuristically SIMPLE, no LLM. */
+/** Short, one deliverable, no domain → SIMPLE, pinned by the harness. */
 const SIMPLE_REQUEST = 'fix the typo'
-/** Four domains → heuristically COMPLEX, no LLM. */
+/** Four domains → COMPLEX, pinned by the harness. */
 const COMPLEX_REQUEST = 'add a login API endpoint and a React component and a database migration'
-/** A substantial verb but no domain/breadth signal → the router has to ask. */
+/** Deliberately NOT pinned, so the orchestrator has to size it for itself. */
 const MEDIUM_REQUEST = 'refactor the helper that formats dates'
+
+/** What the engine would have handed in for each pinned request. */
+const PINNED: Record<string, Complexity> = {
+  [SIMPLE_REQUEST]: 'simple',
+  [COMPLEX_REQUEST]: 'complex'
+}
 
 // ---- Fixtures ---------------------------------------------------------------
 
@@ -97,6 +105,9 @@ const threw = (node: TaskNode, report = `${node.id} exploded`): NodeRunResult =>
  * Builds the injected deps as spies (defaulting to "everything succeeds, nothing
  * to verify, review passes") and returns a `run` that feeds a request through the
  * real state machine.
+ *
+ * `approvePlan` is deliberately absent unless a test passes one: that omission is
+ * production's "Plan first is off", and supplying it is production's toggle being on.
  */
 function harness(
   over: {
@@ -104,6 +115,7 @@ function harness(
     writePlan?: WritePlan
     verify?: Verify
     judge?: Judge
+    approvePlan?: ApprovePlan
   } = {}
 ) {
   const events: WorkflowEvent[] = []
@@ -113,6 +125,7 @@ function harness(
   const writePlan = vi.fn<WritePlan>(over.writePlan ?? (async () => {}))
   const verify = vi.fn<Verify>(over.verify ?? (async () => ({ ran: false, ok: false })))
   const judge = vi.fn<Judge>(over.judge ?? (async () => verdictJson('pass')))
+  const approvePlan = over.approvePlan ? vi.fn<ApprovePlan>(over.approvePlan) : undefined
 
   const deps: Omit<OrchestratorDeps, 'request'> = {
     runId: 'run-1',
@@ -123,7 +136,8 @@ function harness(
     executeNode,
     writePlan,
     verify,
-    judge
+    judge,
+    ...(approvePlan ? { approvePlan } : {})
   }
 
   return {
@@ -133,7 +147,9 @@ function harness(
     writePlan,
     verify,
     judge,
-    run: (request: string) => runOrchestrator({ ...deps, request })
+    approvePlan,
+    run: (request: string, complexity: Complexity | undefined = PINNED[request]) =>
+      runOrchestrator({ ...deps, request, complexity })
   }
 }
 
@@ -222,7 +238,7 @@ describe('routing — the complexity router only sizes the team', () => {
 
   it('MEDIUM asks the router first, then the planner (exactly two completions)', async () => {
     getCompletion
-      .mockResolvedValueOnce('{"complexity":"medium"}')
+      .mockResolvedValueOnce('{"reason":"a couple of related pieces","complexity":"medium"}')
       .mockResolvedValueOnce(planJson([task('t1', 'builder'), task('t2', 'testing', ['t1'])]))
     const h = harness()
     const result = await h.run(MEDIUM_REQUEST)
@@ -265,6 +281,100 @@ describe('assignment', () => {
     expect(assigned[0].recipient).toBe('backend')
     expect(assigned[1].dependencies).toEqual(['t1'])
     expect(assigned[1].summary).toContain('Frontend Engineer')
+  })
+})
+
+// ---- The "Plan first" approval checkpoint (#2) ------------------------------
+
+describe('plan approval — the "Plan first" checkpoint', () => {
+  it('runs straight through when no approver is injected (the toggle is off)', async () => {
+    const h = harness()
+    await h.run(SIMPLE_REQUEST)
+
+    expect(h.executeNode).toHaveBeenCalledTimes(1)
+    expect(h.events.some((e) => e.type === 'plan-approval')).toBe(false)
+  })
+
+  it('offers the plan for a go-ahead BEFORE any node runs, then builds it on approve', async () => {
+    getCompletion.mockResolvedValueOnce(
+      planJson([task('t1', 'backend'), task('t2', 'frontend', ['t1'])])
+    )
+    // Proves the ordering rather than asserting it after the fact: at the moment the
+    // approver is consulted, nothing has been dispatched and nothing written.
+    let dispatchedAtApproval = -1
+    let writesAtApproval = -1
+    const h = harness({
+      approvePlan: async () => {
+        dispatchedAtApproval = h.executeNode.mock.calls.length
+        writesAtApproval = h.writePlan.mock.calls.length
+        return 'approve'
+      }
+    })
+    const result = await h.run(COMPLEX_REQUEST)
+
+    expect(h.approvePlan).toHaveBeenCalledTimes(1)
+    expect(dispatchedAtApproval).toBe(0)
+    // The plan file itself is written first — it is what the user is approving.
+    expect(writesAtApproval).toBe(1)
+    // Approving builds in the SAME run: both nodes ran, and the gate still closed.
+    expect(dispatched(h.executeNode)).toEqual(['t1', 't2'])
+    expect(result.planRejected).toBeUndefined()
+    expect(result.passed).toBe(true)
+  })
+
+  it('describes the plan it is asking about — one step per node, with the sized team', async () => {
+    getCompletion.mockResolvedValueOnce(
+      planJson([task('t1', 'backend'), task('t2', 'frontend', ['t1'])])
+    )
+    const h = harness({ approvePlan: async () => 'approve' })
+    await h.run(COMPLEX_REQUEST)
+
+    const proposal = h.approvePlan!.mock.calls[0][0]
+    expect(proposal.complexity).toBe('complex')
+    expect(proposal.steps).toHaveLength(2)
+    // Each step names the specialist and what it will do, so the bar is readable
+    // without opening the plan file.
+    expect(proposal.steps[0]).toContain('Backend Engineer')
+    expect(proposal.steps[0]).toContain('do t1')
+    expect(proposal.steps[1]).toContain('Frontend Engineer')
+    expect(proposal.wrotePlan).toBe(true)
+  })
+
+  it('a reject builds nothing, verifies nothing, and is reported as a decision', async () => {
+    getCompletion.mockResolvedValueOnce(
+      planJson([task('t1', 'backend'), task('t2', 'frontend', ['t1'])])
+    )
+    const h = harness({ approvePlan: async () => 'reject' })
+    const result = await h.run(COMPLEX_REQUEST)
+
+    expect(h.executeNode).not.toHaveBeenCalled()
+    expect(h.verify).not.toHaveBeenCalled()
+    expect(h.judge).not.toHaveBeenCalled()
+    // Not a failure to retry: no rework, no review notes, nothing changed.
+    expect(result.planRejected).toBe(true)
+    expect(result.passed).toBe(false)
+    expect(result.reworks).toBe(0)
+    expect(result.reviewNotes).toBe('')
+    expect(result.filesChanged).toEqual([])
+    // And it says so in plain words instead of ending silently.
+    expect(textOf(h.events)).toMatch(/stopped before building/i)
+    expect(stagesOf(h.events).at(-1)).toBe('planning')
+  })
+
+  it('a cancel while the plan is waiting ends the run without building', async () => {
+    getCompletion.mockResolvedValueOnce(planJson([task('t1', 'backend')]))
+    const h = harness({
+      // What a Stop looks like from here: the engine resolves the pending decision
+      // with a reject and the signal is already aborted.
+      approvePlan: async () => {
+        h.controller.abort()
+        return 'reject'
+      }
+    })
+    const result = await h.run(COMPLEX_REQUEST)
+
+    expect(h.executeNode).not.toHaveBeenCalled()
+    expect(result.passed).toBe(false)
   })
 })
 
@@ -470,8 +580,10 @@ describe('failure handling', () => {
     expect(result.passed).toBe(false)
     expect(result.reworks).toBe(2)
     const text = textOf(h.events)
-    expect(text).toContain('⚠ **t1** (backend) failed: t1 exploded')
-    expect(text).toContain('⚠ **t2** (frontend) blocked')
+    // Named by role, not by node id, and the reason is all the line adds — the bullet
+    // list above already said which piece each of these was.
+    expect(text).toContain('⚠ **Backend Engineer** — failed: t1 exploded')
+    expect(text).toContain('⚠ **Frontend Engineer** — blocked')
     expect(text).toContain('Review still failing after 2 rework attempts')
     expect(text).toContain('this needs your input')
   })
@@ -751,10 +863,15 @@ describe('response', () => {
     const h = harness()
     await h.run(COMPLEX_REQUEST)
 
+    // Each line leads with who did the work and what it was. The old
+    // "**Team result** (complex, 2 tasks)" header and the `t1`/`t2` prefixes were
+    // Sylor describing its own routing: the ids surface nowhere else in the app, and
+    // the count is right there in the list.
     const text = textOf(h.events)
-    expect(text).toContain('**Team result** (complex, 2 tasks)')
-    expect(text).toContain('✓ **t1** (Database Engineer) — do t1')
-    expect(text).toContain('✓ **t2** (Backend Engineer) — do t2')
+    expect(text).toContain('- ✓ **Database Engineer** — do t1')
+    expect(text).toContain('- ✓ **Backend Engineer** — do t2')
+    expect(text).not.toContain('Team result')
+    expect(text).not.toContain('**t1**')
   })
 })
 

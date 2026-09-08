@@ -20,6 +20,15 @@ import { DEFAULT_BROWSER_PERMISSIONS, DEFAULT_PROVIDER_SETTINGS } from '@shared/
 /** Lifecycle phase of the live preview, mirrored from main-process events. */
 export type PreviewPhase = PreviewEvent['phase'] | 'idle'
 
+/**
+ * Which surface the right-side canvas shows: `log` is the timestamped run trace,
+ * `diff` the current write full-height, `tree` the files this run touched, `graph`
+ * what imports what, and `timeline` the restore points. Every mode listed here has
+ * a surface behind it — `CanvasPanel` renders only built ones, so a tab can never
+ * open a blank pane.
+ */
+export type CanvasMode = 'log' | 'timeline' | 'diff' | 'tree' | 'graph'
+
 /** Derives the top-nav environment badge from the active provider. */
 function envForProvider(kind: ProviderKind): EnvStatus {
   return kind === 'ollama' ? 'local' : 'remote'
@@ -74,8 +83,26 @@ export interface AppState {
   theme: Theme
   /** Reasoning effort applied to workflow runs (composer selector). */
   effort: ReasoningEffort
-  /** When on, edit turns write a `plan.md` first and pause (composer toggle). */
+  /** When on, edit turns halt for a go-ahead once the plan is ready (composer toggle). */
   planFirst: boolean
+  /**
+   * FULL-PC ACCESS (opt-in). Mirrors `settings.ui.fullAccess`. When on, Sylor can
+   * read/write/delete any file on the machine and run any command without asking.
+   * Off by default; the Settings toggle carries a warning.
+   */
+  fullAccess: boolean
+  /**
+   * AUTO-SEND (opt-in). Mirrors `settings.ui.autoSend`. A sub-permission of
+   * full access: when both are on, Sylor may post/message/mail as the user
+   * without asking. `delete` still asks and `payment` stays blocked. Off by
+   * default; the Settings toggle only shows once full access is on.
+   */
+  autoSend: boolean
+  /**
+   * Whether the always-on-top mini status card is showing. Mirrors
+   * `settings.ui.statusWidget`; main opens/destroys the window on the save.
+   */
+  statusWidget: boolean
   /** Top-level working mode: `cowork` (chat only) vs `code` (folder agent). */
   workMode: WorkMode
 
@@ -105,6 +132,42 @@ export interface AppState {
   previewReloadNonce: number
   /** Whether the left conversation rail is expanded. */
   railOpen: boolean
+
+  // ── Right-side canvas panel (harness overhaul) ──
+  /**
+   * Whether the right-side CANVAS panel is open. Third member of the same
+   * mutually-exclusive slot as the preview and the browser: all three draw over
+   * the same region, so opening one closes the others.
+   */
+  canvasOpen: boolean
+  /** Which canvas surface is showing (tab state, kept while the panel is closed). */
+  canvasMode: CanvasMode
+  /**
+   * Which lane the run log is filtered to — a subagent's `agentId`, the literal
+   * `'__lead__'` for Sylor itself, or null for all of them.
+   *
+   * It lives here rather than inside `RunLog` because the log is not the only thing
+   * that picks a lane: the command palette jumps straight to one, and (with the
+   * ambient widget) so does a click on a status popup. A filter two surfaces can set
+   * has to be shared state, or they would disagree about what is showing.
+   */
+  logLane: string | null
+  /**
+   * A restore point the user has asked for from outside the Timeline, which the
+   * Timeline should open already armed (showing its confirm).
+   *
+   * Restoring rewrites files, so a fuzzy-matched Enter in the palette must never be
+   * the click that does it. The palette arms; the Timeline still asks.
+   */
+  armedCheckpoint: string | null
+
+  // ── Command palette (Ctrl/Cmd+K) ──
+  /**
+   * Whether the global command palette is showing. It overlays everything and owns
+   * the keyboard while open, so it is app state rather than a component's — the
+   * shortcut is registered once at the root and any surface can open it.
+   */
+  paletteOpen: boolean
 
   setProjectName: (name: string) => void
   setPermissionMode: (mode: PermissionMode) => void
@@ -142,12 +205,42 @@ export interface AppState {
   showLocalPreviewUrl: (url: string) => void
   setRailOpen: (open: boolean) => void
   toggleRail: () => void
+  /**
+   * Open the canvas panel on a specific surface (or the last one used), taking the
+   * shared right slot from the preview/browser. The browser is a native view, so
+   * it must be hidden rather than merely flagged closed.
+   */
+  openCanvas: (mode?: CanvasMode) => void
+  /** Close the canvas panel, freeing the right slot. Keeps the selected mode. */
+  closeCanvas: () => void
+  /** Switch canvas surface; opens the panel if it was closed. */
+  setCanvasMode: (mode: CanvasMode) => void
+  /** Open the canvas if closed, close it if open (the composer's Log toggle). */
+  toggleCanvas: (mode?: CanvasMode) => void
+  /** Filter the run log to one lane, or pass null to show every lane. */
+  setLogLane: (lane: string | null) => void
+  /** Show the canvas log filtered to `lane` — the palette's "jump to lane". */
+  showLane: (lane: string | null) => void
+  /** Open the Timeline with `id` armed, or pass null to clear the arming. */
+  armCheckpoint: (id: string | null) => void
+  /** Show the command palette. */
+  openPalette: () => void
+  /** Hide the command palette (Escape, or after an action runs). */
+  closePalette: () => void
+  /** What Ctrl/Cmd+K does: show it, or hide it if it is already up. */
+  togglePalette: () => void
   /** Switch theme, apply it to the DOM, and persist it in settings. */
   setTheme: (theme: Theme) => Promise<void>
   /** Set the reasoning effort and persist it in settings. */
   setEffort: (effort: ReasoningEffort) => Promise<void>
   /** Toggle plan-first mode and persist it in settings. */
   setPlanFirst: (planFirst: boolean) => Promise<void>
+  /** Toggle full-PC access and persist it in settings. */
+  setFullAccess: (fullAccess: boolean) => Promise<void>
+  /** Toggle hands-free sending (sub-permission of full access) and persist it. */
+  setAutoSend: (autoSend: boolean) => Promise<void>
+  /** Show or hide the floating status card, and persist the choice. */
+  setStatusWidget: (statusWidget: boolean) => Promise<void>
   /** Set the working mode (Cowork/Code) and persist it in settings. */
   setWorkMode: (mode: WorkMode) => Promise<void>
 
@@ -206,6 +299,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   theme: DEFAULT_PROVIDER_SETTINGS.ui.theme,
   effort: DEFAULT_PROVIDER_SETTINGS.ui.effort,
   planFirst: DEFAULT_PROVIDER_SETTINGS.ui.planFirst,
+  statusWidget: DEFAULT_PROVIDER_SETTINGS.ui.statusWidget,
+  fullAccess: DEFAULT_PROVIDER_SETTINGS.ui.fullAccess,
+  autoSend: DEFAULT_PROVIDER_SETTINGS.ui.autoSend,
   workMode: DEFAULT_PROVIDER_SETTINGS.ui.mode,
   workspaceRoot: null,
   workspaceChosen: false,
@@ -215,6 +311,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   previewError: null,
   previewReloadNonce: 0,
   railOpen: true,
+  canvasOpen: false,
+  canvasMode: 'log',
+  logLane: null,
+  armedCheckpoint: null,
+  paletteOpen: false,
 
   setProjectName: (projectName) => set({ projectName }),
   setPermissionMode: (permissionMode) => set({ permissionMode }),
@@ -239,10 +340,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   openBrowser: () => {
-    // The preview and the browser share one panel slot: whichever opens last owns
-    // it. Stopping the preview server here would be too aggressive (the user may
-    // still be building), so we only take the slot back.
-    set({ browserOpen: true, previewOpen: false })
+    // The preview, the browser and the canvas share one panel slot: whichever opens
+    // last owns it. Stopping the preview server here would be too aggressive (the
+    // user may still be building), so we only take the slot back.
+    set({ browserOpen: true, previewOpen: false, canvasOpen: false })
     void window.sylor?.browser?.open()
   },
 
@@ -253,7 +354,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ browserOpen: false })
   },
   setPreviewOpen: (previewOpen) => set({ previewOpen }),
-  openPreview: () => set({ previewOpen: true, browserOpen: false }),
+  openPreview: () => set({ previewOpen: true, browserOpen: false, canvasOpen: false }),
   closePreview: () => {
     // Tearing down the server stops the file watcher and frees the port; the
     // panel returns to its idle empty state until the next auto-open.
@@ -269,10 +370,58 @@ export const useAppStore = create<AppState>((set, get) => ({
       return
     }
     if (host !== 'localhost' && host !== '127.0.0.1' && host !== '0.0.0.0') return
-    set({ previewOpen: true, previewUrl: rawUrl, previewPhase: 'ready', previewError: null })
+    set({
+      previewOpen: true,
+      canvasOpen: false,
+      previewUrl: rawUrl,
+      previewPhase: 'ready',
+      previewError: null
+    })
   },
   setRailOpen: (railOpen) => set({ railOpen }),
   toggleRail: () => set((state) => ({ railOpen: !state.railOpen })),
+
+  openCanvas: (mode) => {
+    // Taking the slot from the browser means hiding its native view too — a flag
+    // alone would leave the page floating over the canvas.
+    if (get().browserOpen) void window.sylor?.browser?.setVisible(false)
+    set({
+      canvasOpen: true,
+      browserOpen: false,
+      previewOpen: false,
+      ...(mode ? { canvasMode: mode } : {})
+    })
+  },
+  closeCanvas: () => set({ canvasOpen: false }),
+  setCanvasMode: (canvasMode) => {
+    if (!get().canvasOpen) {
+      get().openCanvas(canvasMode)
+      return
+    }
+    set({ canvasMode })
+  },
+  toggleCanvas: (mode) => {
+    const { canvasOpen, canvasMode } = get()
+    // Clicking a different surface while open switches to it rather than closing —
+    // only a click on the surface already showing means "hide this".
+    if (canvasOpen && (mode == null || mode === canvasMode)) {
+      get().closeCanvas()
+      return
+    }
+    get().openCanvas(mode)
+  },
+  setLogLane: (logLane) => set({ logLane }),
+  showLane: (logLane) => {
+    set({ logLane })
+    get().openCanvas('log')
+  },
+  armCheckpoint: (armedCheckpoint) => {
+    set({ armedCheckpoint })
+    if (armedCheckpoint != null) get().openCanvas('timeline')
+  },
+  openPalette: () => set({ paletteOpen: true }),
+  closePalette: () => set({ paletteOpen: false }),
+  togglePalette: () => set({ paletteOpen: !get().paletteOpen }),
 
   setTheme: async (theme) => {
     // Apply immediately for instant feedback, then persist through settings.
@@ -294,6 +443,31 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ planFirst })
     const { settings } = get()
     await get().saveSettings({ ...settings, ui: { ...settings.ui, planFirst } })
+  },
+
+  setStatusWidget: async (statusWidget) => {
+    // The save IS the toggle: main listens for it and opens/destroys the floating
+    // card, so there is one writer and the window can't disagree with the setting.
+    set({ statusWidget })
+    const { settings } = get()
+    await get().saveSettings({ ...settings, ui: { ...settings.ui, statusWidget } })
+  },
+
+  setFullAccess: async (fullAccess) => {
+    // Reflect immediately, then persist. Main reads `ui.fullAccess` fresh on every
+    // enforcement decision (fs sandbox + permission matrix), so the save alone
+    // flips the posture — no restart, and turning it back off re-confines at once.
+    set({ fullAccess })
+    const { settings } = get()
+    await get().saveSettings({ ...settings, ui: { ...settings.ui, fullAccess } })
+  },
+
+  setAutoSend: async (autoSend) => {
+    // Same immediate-then-persist path as full access; `autoSendEnabled()` in main
+    // gates it behind full access, so the save alone flips the send posture.
+    set({ autoSend })
+    const { settings } = get()
+    await get().saveSettings({ ...settings, ui: { ...settings.ui, autoSend } })
   },
 
   setWorkMode: async (mode) => {
@@ -329,7 +503,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       model: settings.modelName || settings.modelId,
       theme: settings.ui.theme,
       effort: settings.ui.effort,
-      planFirst: settings.ui.planFirst
+      planFirst: settings.ui.planFirst,
+      statusWidget: settings.ui.statusWidget,
+      fullAccess: settings.ui.fullAccess,
+      autoSend: settings.ui.autoSend
       // workMode is intentionally NOT restored from settings: every launch starts
       // in cowork (the store default), regardless of the last-used mode. This is a
       // deliberate product choice — reopening the app always lands on the cowork
@@ -350,7 +527,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       model: saved.modelName || saved.modelId,
       theme: saved.ui.theme,
       effort: saved.ui.effort,
-      planFirst: saved.ui.planFirst
+      planFirst: saved.ui.planFirst,
+      statusWidget: saved.ui.statusWidget,
+      fullAccess: saved.ui.fullAccess,
+      autoSend: saved.ui.autoSend
       // workMode deliberately omitted (see loadSettings): a theme/effort/plan save
       // must never silently flip the live work mode back to a persisted value.
     })

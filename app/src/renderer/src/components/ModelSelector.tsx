@@ -349,9 +349,9 @@ export function ModeSelector({ openUp = false }: { openUp?: boolean } = {}) {
 }
 
 /**
- * Plan-first toggle: a pill that flips the composer's "write plan.md first"
- * posture. When on, an edit turn is told to emit only a `plan.md` and stop, so
- * the user reviews the plan before any code lands. Persisted via settings.
+ * Plan-first toggle: a pill that flips the composer's approval posture. When on,
+ * an edit turn still plans and builds in one go, but it halts once the plan is
+ * ready and waits for a go-ahead before touching a file. Persisted via settings.
  */
 export function PlanFirstToggle() {
   const planFirst = useAppStore((s) => s.planFirst)
@@ -364,7 +364,7 @@ export function PlanFirstToggle() {
       aria-pressed={planFirst}
       title={
         planFirst
-          ? 'Plan-first is on: edits write plan.md first, then pause'
+          ? 'Plan-first is on: I show you the plan and wait for your go-ahead before building'
           : 'Plan-first is off: edits proceed directly'
       }
       className={

@@ -104,6 +104,7 @@ export type MemoryDocId =
   | 'state'
   | 'tasks'
   | 'audit'
+  | 'followups'
 
 /** One memory document: how to name it, budget it, and scaffold it. */
 interface MemoryDocSpec {
@@ -388,6 +389,21 @@ const DOCS: readonly MemoryDocSpec[] = [
     // Written once, when the roadmap finishes (§35). Never scaffolded — an empty
     // audit would read as "audited, nothing found" — and not injected, because a
     // report of a finished project is not context for the work that produced it.
+    inject: false
+  },
+  {
+    id: 'followups',
+    file: 'FOLLOWUPS.md',
+    purpose: 'out-of-scope work spotted and deliberately deferred',
+    budget: 1_000,
+    // Append-only log: keep the most recent entries, drop the oldest.
+    tail: true,
+    rank: 9,
+    // Deliberately NOT injected. Feeding a list of unrelated open issues into every
+    // prompt would invite exactly the scope creep the flag exists to prevent — the
+    // agent would start "helpfully" fixing them mid-task. It is a record for the
+    // USER to pick from, so it is read when they act on it, not on every turn.
+    // Never scaffolded either: an empty file would read as "checked, nothing found".
     inject: false
   }
 ]

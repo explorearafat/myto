@@ -19,7 +19,7 @@ import { extname, join } from 'node:path'
  */
 
 /** Bumped when the on-disk shape changes; an older/newer file loads as empty. */
-export const INDEX_VERSION = 1
+export const INDEX_VERSION = 2
 
 /** Longest prefix of a file we read to summarise it (a 5 MB bundle stays cheap). */
 const HEAD_BYTES = 64 * 1024
@@ -40,6 +40,14 @@ export interface FileIndexEntry {
   summary: string
   /** Notable symbol names (exports / headings / JSON keys), for a richer overview. */
   symbols?: string[]
+  /**
+   * Module specifiers this file imports, verbatim (`'react'`, `'./utils'`,
+   * `'@renderer/lib/x'`). Persisted from v2 so the dependency graph can be drawn
+   * for files the current run never opened — resolving a specifier to a path is
+   * the graph's job, not the index's. Absent on entries written before v2 and on
+   * non-code files, which is not the same as "imports nothing".
+   */
+  imports?: string[]
   /** Wall-clock ms the entry was last (re)computed — diagnostics only. */
   indexedAt: number
 }
@@ -180,8 +188,12 @@ function declaredExports(content: string): string[] {
   return [...new Set(names)]
 }
 
-/** Imported module specifiers (`from 'react'`, bare `import './x'`), deduped. */
-function importedModules(content: string): string[] {
+/**
+ * Imported module specifiers (`from 'react'`, bare `import './x'`), deduped.
+ * Exported because the dependency graph resolves these into edges — it needs the
+ * raw specifiers, not the clipped `imports: a, b, …` prose in the summary.
+ */
+export function importedModules(content: string): string[] {
   const mods: string[] = []
   for (const m of content.matchAll(/^\s*import\b[^'"]*?from\s*['"]([^'"]+)['"]/gm)) mods.push(m[1])
   for (const m of content.matchAll(/^\s*import\s*['"]([^'"]+)['"]/gm)) mods.push(m[1])
@@ -213,6 +225,12 @@ function jsonTopKeys(content: string): string[] | null {
 export interface SourceSummary {
   summary: string
   symbols: string[]
+  /**
+   * Raw import specifiers, for code files only — empty for markdown/JSON/text,
+   * which have no import graph to draw. The summary line already *mentions* the
+   * first few; this is the unclipped list the graph resolves.
+   */
+  imports: string[]
 }
 
 /**
@@ -222,7 +240,7 @@ export interface SourceSummary {
  * can't parse structurally still gets a first-line summary.
  */
 export function summarizeSource(relPath: string, content: string): SourceSummary {
-  if (looksBinary(content)) return { summary: '(binary)', symbols: [] }
+  if (looksBinary(content)) return { summary: '(binary)', symbols: [], imports: [] }
   const ext = extname(relPath).toLowerCase()
 
   if (CODE_EXTS.has(ext)) {
@@ -240,7 +258,7 @@ export function summarizeSource(relPath: string, content: string): SourceSummary
       parts.push(`imports: ${shown}${imports.length > MAX_IMPORTS ? ', …' : ''}`)
     }
     const summary = parts.join(' · ') || firstNonEmptyLine(content)
-    return { summary: clipSummary(summary), symbols: exports.slice(0, MAX_SYMBOLS) }
+    return { summary: clipSummary(summary), symbols: exports.slice(0, MAX_SYMBOLS), imports }
   }
 
   if (ext === '.md' || ext === '.markdown') {
@@ -248,10 +266,11 @@ export function summarizeSource(relPath: string, content: string): SourceSummary
     if (heads.length) {
       return {
         summary: clipSummary(`headings: ${heads.slice(0, MAX_HEADINGS).join(' › ')}`),
-        symbols: heads.slice(0, MAX_SYMBOLS)
+        symbols: heads.slice(0, MAX_SYMBOLS),
+        imports: []
       }
     }
-    return { summary: clipSummary(firstNonEmptyLine(content)), symbols: [] }
+    return { summary: clipSummary(firstNonEmptyLine(content)), symbols: [], imports: [] }
   }
 
   if (ext === '.json') {
@@ -260,11 +279,12 @@ export function summarizeSource(relPath: string, content: string): SourceSummary
       const shown = keys.slice(0, MAX_SYMBOLS).join(', ')
       return {
         summary: clipSummary(`keys: ${shown}${keys.length > MAX_SYMBOLS ? ', …' : ''}`),
-        symbols: keys.slice(0, MAX_SYMBOLS)
+        symbols: keys.slice(0, MAX_SYMBOLS),
+        imports: []
       }
     }
-    return { summary: clipSummary(firstNonEmptyLine(content)), symbols: [] }
+    return { summary: clipSummary(firstNonEmptyLine(content)), symbols: [], imports: [] }
   }
 
-  return { summary: clipSummary(firstNonEmptyLine(content)), symbols: [] }
+  return { summary: clipSummary(firstNonEmptyLine(content)), symbols: [], imports: [] }
 }

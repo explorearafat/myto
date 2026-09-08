@@ -6,6 +6,7 @@ import { contextManager } from '@main/context/manager'
 import { SCAFFOLD_MARKER, memoryDocPath, scaffoldMemory } from '@main/context/projectMemory'
 import {
   appendDecision,
+  appendFollowup,
   archivePlan,
   archivedPlanPath,
   latestCheckpointPath,
@@ -298,6 +299,60 @@ describe('appendDecision', () => {
     const doc = read('.sylor/DECISIONS.md')
     expect(doc).not.toContain(SCAFFOLD_MARKER)
     expect(doc).toContain('the first real call')
+  })
+})
+
+describe('appendFollowup', () => {
+  it('creates the log with an explanatory header and records the entry', () => {
+    expect(
+      appendFollowup({
+        title: 'Fix the stale README badge',
+        note: 'It points at the old CI workflow name.',
+        files: ['README.md', '.github/workflows/ci.yml']
+      })
+    ).toBe('recorded')
+
+    const doc = read('.sylor/FOLLOWUPS.md')
+    expect(doc).toContain('# Follow-ups')
+    // The header has to say nothing here has been actioned, or the list reads as a
+    // changelog of work that was done.
+    expect(doc).toContain('Nothing here has been actioned')
+    expect(doc).toMatch(/## \d{4}-\d{2}-\d{2} — Fix the stale README badge/)
+    expect(doc).toContain('- Note: It points at the old CI workflow name.')
+    expect(doc).toContain('- Files: README.md, .github/workflows/ci.yml')
+  })
+
+  it('omits the optional lines entirely when there is nothing to say', () => {
+    appendFollowup({ title: 'Drop the dead flag' })
+    const doc = read('.sylor/FOLLOWUPS.md')
+    expect(doc).toContain('— Drop the dead flag')
+    expect(doc).not.toContain('- Note:')
+    expect(doc).not.toContain('- Files:')
+  })
+
+  it('appends newest last', () => {
+    appendFollowup({ title: 'first finding' })
+    appendFollowup({ title: 'second finding' })
+    const doc = read('.sylor/FOLLOWUPS.md')
+    expect(doc.indexOf('first finding')).toBeLessThan(doc.indexOf('second finding'))
+  })
+
+  it('deduplicates on the title, case- and whitespace-insensitively', () => {
+    expect(appendFollowup({ title: 'Fix the badge' })).toBe('recorded')
+    expect(appendFollowup({ title: '  fix THE badge  ' })).toBe('duplicate')
+    const doc = read('.sylor/FOLLOWUPS.md')
+    expect(doc.match(/^## /gm)?.length).toBe(1)
+  })
+
+  it('reports `unrecorded` for a blank title and writes nothing', () => {
+    expect(appendFollowup({ title: '   ' })).toBe('unrecorded')
+    expect(existsSync(join(root, '.sylor/FOLLOWUPS.md'))).toBe(false)
+  })
+
+  it('is never scaffolded — the file only exists once something was flagged', () => {
+    // An empty follow-up list would read as "checked, nothing to do".
+    expect(scaffoldMemory()).not.toContain(memoryDocPath('followups'))
+    expect(existsSync(join(root, '.sylor/FOLLOWUPS.md'))).toBe(false)
   })
 })
 

@@ -42,11 +42,29 @@ vi.mock('@main/settings', () => ({
   // The engine now resolves each skill via isSkillEnabled(name, defaultOn); these
   // tests drive enablement purely through the disabled-name set (defaultOn is
   // irrelevant here since the catalog merge is stubbed to identity below).
-  isSkillEnabled: (name: string) => !disabledSkills.has(name)
+  isSkillEnabled: (name: string) => !disabledSkills.has(name),
+  // Full-PC access stays off in these tests, so the permission matrix keeps its
+  // default posture. The engine calls this directly (not via try/catch), so the
+  // mock must export it or every gated op throws.
+  fullAccessEnabled: () => false,
+  // Auto-send (hands-free browser send) is likewise off here — same reason it must
+  // be exported: the engine calls it directly when deciding a browse gate.
+  autoSendEnabled: () => false
 }))
 
 const listFiles = vi.fn<() => string[]>(() => ['package.json', 'src/index.ts'])
 const buildOverview = vi.fn<() => string>(() => 'PROJECT OVERVIEW')
+/**
+ * The read cache's freshness token. A real stamp (not null) is what lets the dedup
+ * path work at all, so these tests can prove a repeat read is answered from a note.
+ * Per-path and stable, so "unchanged since" holds; a test that needs a file to look
+ * MODIFIED bumps the counter for that path.
+ */
+const stampBump = new Map<string, number>()
+const fileStamp = vi.fn<(path: string) => { size: number; mtime: number } | null>((path) => ({
+  size: 100,
+  mtime: 1_000 + (stampBump.get(path) ?? 0)
+}))
 // Pass-through spy for the run-root pin: records the root it was handed and still
 // runs the wrapped body, so a run given `request.root` behaves normally while the
 // test can assert the whole run was confined to that folder (Problem 2).
@@ -56,13 +74,31 @@ vi.mock('@main/context/manager', () => ({
     listFiles: () => listFiles(),
     buildOverview: () => buildOverview(),
     getRoot: () => '/test',
+    // The checkpoint trigger compares these two: equal means "we are acting on the
+    // user's real project", which is the only case that gets a restore point. Both
+    // answer '/test' here so that branch is the one the tests exercise.
+    getProjectRoot: () => '/test',
     runWithRoot: (root: string, fn: () => unknown) => runWithRoot(root, fn),
-    fileStamp: () => null,
+    fileStamp: (path: string) => fileStamp(path),
     noteRead: () => {},
     noteWrite: () => {},
     indexSummaryFor: () => undefined,
     flushIndex: () => {}
   }
+}))
+
+/**
+ * Checkpoints (Phase 5) are stubbed, not exercised: the real one spawns git and would
+ * create directories under `/test` on the machine running the suite. The spy is also
+ * the assertion hook for "a restore point is taken before every mutating op", and it
+ * reports `created: true` so the engine emits the event a real first snapshot would.
+ */
+const createCheckpoint = vi.fn(async (_root: string, label: string) => ({
+  checkpoint: { id: 'cp-test', at: 1_000, label, kind: 'git' as const, sha: 'deadbeef' },
+  created: true
+}))
+vi.mock('@main/checkpoint/checkpoints', () => ({
+  createCheckpoint: (root: string, label: string) => createCheckpoint(root, label)
 }))
 
 const classifyIntent = vi.fn<() => Promise<IntentAnalysis>>()
@@ -82,7 +118,15 @@ const proposeWrite = vi.fn((_path: string, content: string) => ({
   oldContent: '',
   newContent: content
 }))
+/**
+ * Project-relative paths whose write must FAIL, so the read-only-checkout path can be
+ * exercised (a follow-up that couldn't be logged still has to be surfaced). Cleared
+ * per test — `writeProjectFile` is only `mockClear()`ed, so an overridden
+ * implementation would otherwise leak into every later test in the file.
+ */
+const unwritable = new Set<string>()
 const writeProjectFile = vi.fn<(path: string, content: string) => void>((path, content) => {
+  if (unwritable.has(path)) throw new Error('EROFS: read-only file system')
   const abs = join(fsRoot, path)
   mkdirSync(dirname(abs), { recursive: true })
   writeFileSync(abs, content)
@@ -97,12 +141,63 @@ const findFiles = vi.fn<
 const readProjectFile = vi.fn<(path: string) => string>(() => {
   throw new Error('ENOENT')
 })
+/**
+ * The gathering tools (Problem 1 / `gather.ts`). `readFileSlice` records the window
+ * it was ACTUALLY handed — which is the assertion that proves `planReadWindow`
+ * dropped the model's guessed `offset`/`limit` — and answers with a fixed body. The
+ * other three keep a read batch from erroring out mid-way.
+ */
+const readFileSlice = vi.fn<
+  (
+    path: string,
+    offset?: number,
+    limit?: number
+  ) => { output: string; truncated: boolean; summary: string }
+>((path) => ({ output: `1\t// ${path}\n2\tconst a = 1`, truncated: false, summary: '2 lines' }))
+const listDirectory = vi.fn<
+  (path: string) => { output: string; truncated: boolean; summary: string }
+>(() => ({ output: 'a.ts\nb.ts', truncated: false, summary: '2 entries' }))
+const searchProject = vi.fn<
+  (query: string) => { output: string; truncated: boolean; summary: string }
+>(() => ({ output: 'src/a.ts:1: hit', truncated: false, summary: '1 match' }))
+// A surgical `edit_file` resolves to a write proposal via `applyEdits`: read the file
+// once, then fold each edit's old→new over the EVOLVING content. Backed by a small
+// in-memory source (`editSource`) a test seeds, so we can prove several edits to one
+// file land in a SINGLE write. (The real applyEdits' miss/ambiguity/order semantics are
+// covered in operations.test.ts; here the mock only has to reflect the wiring.)
+const editSource = new Map<string, string>()
+const applyEdits = vi.fn<
+  (
+    path: string,
+    edits: ReadonlyArray<{ oldString: string; newString: string; replaceAll: boolean }>
+  ) => { oldContent: string; newContent: string }
+>((path, edits) => {
+  const oldContent = editSource.get(path) ?? ''
+  let newContent = oldContent
+  for (const e of edits) {
+    newContent = e.replaceAll
+      ? newContent.split(e.oldString).join(e.newString)
+      : newContent.replace(e.oldString, e.newString)
+  }
+  return { oldContent, newContent }
+})
 vi.mock('@main/fs/operations', () => ({
   proposeWrite: (path: string, content: string) => proposeWrite(path, content),
   writeProjectFile: (path: string, content: string) => writeProjectFile(path, content),
   resolveSafe: (path: string) => join(fsRoot, path),
   findFiles: (glob: string, path: string) => findFiles(glob, path),
-  readProjectFile: (path: string) => readProjectFile(path)
+  readProjectFile: (path: string) => readProjectFile(path),
+  readFileSlice: (path: string, offset?: number, limit?: number) =>
+    readFileSlice(path, offset, limit),
+  applyEdits: (
+    path: string,
+    edits: ReadonlyArray<{ oldString: string; newString: string; replaceAll: boolean }>
+  ) => applyEdits(path, edits),
+  // Never an image in these tests: null means "ordinary file", so read_file falls
+  // through to the line reader (the vision path has its own coverage).
+  readMediaFile: () => null,
+  listDirectory: (path: string) => listDirectory(path),
+  searchProject: (query: string) => searchProject(query)
 }))
 
 /**
@@ -263,6 +358,7 @@ const {
   runWorkflow,
   cancelWorkflow,
   resolveToolDecision,
+  resolveQuestion,
   capWords,
   buildConversationRecap,
   compactHistory,
@@ -713,7 +809,10 @@ describe('runWorkflow', () => {
     expect(outbound[0].content).toMatch(/immediately emit/i)
   })
 
-  it('injects the plan-first directive on an edit turn when planFirst is on', async () => {
+  it('halts an edit turn for a go-ahead when planFirst is on, then builds on approve', async () => {
+    // #2 — "Plan first" is an approval checkpoint, not a separate mode: the plan is
+    // put to the user BEFORE the builder runs, and approving builds it in the SAME
+    // turn (no re-send).
     classifyIntent.mockResolvedValue({
       kind: 'edit',
       summary: 'Build a thing',
@@ -721,15 +820,25 @@ describe('runWorkflow', () => {
     })
     streamCompletion.mockResolvedValue(undefined)
 
-    const { emit } = collector()
-    await runWorkflow(req('rp', { planFirst: true }), emit, noTerminal)
+    const { events, emit } = collector()
+    const p = runWorkflow(req('rp', { planFirst: true }), emit, noTerminal)
 
-    const outbound = streamCompletion.mock.calls[0][1] as ChatMessage[]
-    expect(outbound[0].content).toContain('PLAN-FIRST MODE')
-    expect(outbound[0].content).toContain('plan.md')
+    await vi.waitFor(() => firstPlanApproval(events))
+    const { approval } = firstPlanApproval(events)
+    // A real plan is on offer, and not one line of it has been executed yet.
+    expect(approval.steps.length).toBeGreaterThan(0)
+    expect(streamCompletion).not.toHaveBeenCalled()
+
+    resolveToolDecision('rp', approval.id, 'approve')
+    await p
+
+    expect(streamCompletion).toHaveBeenCalled()
+    expect(events.at(-1)?.type).toBe('done')
   })
 
-  it('omits the plan-first directive for a non-edit turn even when planFirst is on', async () => {
+  it('never halts for a non-edit turn even when planFirst is on', async () => {
+    // Nothing is being built, so there is no plan worth approving — the turn must
+    // not stop to ask.
     classifyIntent.mockResolvedValue({
       kind: 'question',
       summary: 'A question',
@@ -737,11 +846,11 @@ describe('runWorkflow', () => {
     })
     streamCompletion.mockResolvedValue(undefined)
 
-    const { emit } = collector()
+    const { events, emit } = collector()
     await runWorkflow(req('rp2', { planFirst: true }), emit, noTerminal)
 
-    const outbound = streamCompletion.mock.calls[0][1] as ChatMessage[]
-    expect(outbound[0].content).not.toContain('PLAN-FIRST MODE')
+    expect(types(events)).not.toContain('plan-approval')
+    expect(events.at(-1)?.type).toBe('done')
   })
 
   it('errors with actionable guidance when no model is configured', async () => {
@@ -790,6 +899,17 @@ function firstToolResult(events: WorkflowEvent[]) {
 }
 
 /**
+ * Extracts the "Plan first" approval checkpoint (#2), or fails. Its `approval.id`
+ * is answered with {@link resolveToolDecision} — a plan rides the ordinary
+ * tool-decision channel.
+ */
+function firstPlanApproval(events: WorkflowEvent[]) {
+  const e = events.find((ev) => ev.type === 'plan-approval')
+  if (!e || e.type !== 'plan-approval') throw new Error('no plan-approval emitted')
+  return e
+}
+
+/**
  * All message content the engine ever sent to the provider, concatenated. The
  * synthesized "Results of the actions…" turn is fed back on a later step, so a
  * robust assertion searches every outbound call rather than guessing which index
@@ -804,8 +924,18 @@ function feedbackText(): string {
 const WRITE_BLOCK =
   '```sylor-tool\n{ "tool": "write_file", "path": "src/new.ts", "content": "export const x = 1" }\n```\n'
 const CMD_BLOCK = '```sylor-tool\n{ "tool": "run_command", "command": "npm test" }\n```\n'
+const TODOS_BLOCK =
+  '```sylor-tool\n{ "tool": "update_todos", "todos": [' +
+  '{ "text": "Add the route", "status": "in_progress" }, ' +
+  '{ "text": "Wire the button", "status": "pending" }] }\n```\n'
+const ASK_BLOCK =
+  '```sylor-tool\n{ "tool": "ask_user", "question": "Which auth should I use?", ' +
+  '"header": "Auth method", "options": ["Email", "Google"] }\n```\n'
 const REMEMBER_BLOCK =
   '```sylor-tool\n{ "tool": "remember", "note": "This project uses pnpm" }\n```\n'
+const FOLLOWUP_BLOCK =
+  '```sylor-tool\n{ "tool": "flag_followup", "title": "Fix the stale README badge", ' +
+  '"note": "It points at the old CI workflow name.", "files": ["README.md"] }\n```\n'
 const MCP_BLOCK =
   '```sylor-tool\n{ "tool": "mcp_call", "server": "fs", "name": "read_file", "arguments": { "path": "a.txt" } }\n```\n'
 const USE_SKILL_BLOCK = '```sylor-tool\n{ "tool": "use_skill", "name": "pdf-tools" }\n```\n'
@@ -816,10 +946,34 @@ const PREVIEW_SCREENSHOT_BLOCK =
   '```sylor-tool\n{ "tool": "preview_inspect", "action": "screenshot" }\n```\n'
 const PREVIEW_INSPECT_BLOCK =
   '```sylor-tool\n{ "tool": "preview_inspect", "action": "inspect", "selector": ".cta", "styles": ["color"] }\n```\n'
+const PREVIEW_EVAL_BLOCK =
+  '```sylor-tool\n{ "tool": "preview_inspect", "action": "eval", "expression": "document.title" }\n```\n'
+const PREVIEW_SERVER_LOGS_BLOCK =
+  '```sylor-tool\n{ "tool": "preview_inspect", "action": "server_logs", "level": "error" }\n```\n'
 
 /** A write_file block for an arbitrary path/content (for multi-block completions). */
 function writeBlock(path: string, content: string): string {
   return '```sylor-tool\n' + JSON.stringify({ tool: 'write_file', path, content }) + '\n```\n'
+}
+
+/** An edit_file block carrying an ordered list of edits — one consolidated action. */
+function editBlock(
+  path: string,
+  edits: ReadonlyArray<{ old: string; new: string; all?: boolean }>
+): string {
+  return (
+    '```sylor-tool\n' +
+    JSON.stringify({
+      tool: 'edit_file',
+      path,
+      edits: edits.map((e) => ({
+        old_string: e.old,
+        new_string: e.new,
+        replace_all: e.all === true
+      }))
+    }) +
+    '\n```\n'
+  )
 }
 
 describe('runWorkflow tool execution', () => {
@@ -828,6 +982,9 @@ describe('runWorkflow tool execution', () => {
     classifyIntent.mockReset()
     proposeWrite.mockClear()
     writeProjectFile.mockClear()
+    applyEdits.mockClear()
+    editSource.clear()
+    unwritable.clear()
     runCommand.mockClear()
     findFiles.mockClear()
     fetchUrl.mockClear()
@@ -852,6 +1009,7 @@ describe('runWorkflow tool execution', () => {
     })
     appendProjectMemory.mockClear()
     mcpCallTool.mockClear()
+    createCheckpoint.mockClear()
     mcpTools = []
     skills = []
     disabledSkills = new Set()
@@ -890,6 +1048,114 @@ describe('runWorkflow tool execution', () => {
     expect(prose).not.toContain('sylor-tool')
     expect(prose).toContain('I will create the file.')
     expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('carries "what this file is for" onto the proposal the card renders', async () => {
+    // The user asked to be told what each file is for, not just that it appeared.
+    // The prose says it once and scrolls away; the purpose rides the proposal, so
+    // the row still explains itself when the transcript is reopened weeks later.
+    streamCompletion.mockImplementationOnce(
+      emitsText(
+        'Creating the login endpoint.\n```sylor-tool\n' +
+          JSON.stringify({
+            tool: 'write_file',
+            path: 'src/api.ts',
+            content: 'export const login = 1',
+            purpose: 'the login endpoint the dashboard calls'
+          }) +
+          '\n```\n'
+      )
+    )
+
+    const { events, emit } = collector()
+    await runWorkflow(req('purpose1', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    expect(firstToolRequest(events).proposal).toMatchObject({
+      kind: 'write_file',
+      path: 'src/api.ts',
+      purpose: 'the login endpoint the dashboard calls'
+    })
+    expect(writeProjectFile).toHaveBeenCalledWith('src/api.ts', 'export const login = 1')
+  })
+
+  it('leaves the purpose off a proposal when the block carried none', async () => {
+    // Every existing block shape keeps working, with no empty subtitle to render.
+    streamCompletion.mockImplementationOnce(emitsText(WRITE_BLOCK))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('purpose2', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    expect(firstToolRequest(events).proposal).not.toHaveProperty('purpose')
+  })
+
+  it('takes a restore point before the write lands, and announces it', async () => {
+    // Phase 5: the snapshot is the reason a write is safe to auto-approve, so it has
+    // to happen for an auto-edit write too — and BEFORE the bytes change, otherwise
+    // it records the state the user is trying to get back from.
+    streamCompletion.mockImplementationOnce(emitsText(WRITE_BLOCK))
+    createCheckpoint.mockImplementationOnce(async (_root: string, label: string) => ({
+      checkpoint: { id: 'cp-1', at: 1_000, label, kind: 'git' as const, sha: 'abc' },
+      created: true
+    }))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('cp1', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    expect(createCheckpoint).toHaveBeenCalledWith('/test', 'Before writing src/new.ts')
+    // Ordered by vitest's global invocation counter rather than by a shared array,
+    // because the run also writes its own `.sylor/` bookkeeping and only the write of
+    // the proposed file is the one the snapshot has to precede.
+    const target = writeProjectFile.mock.calls.findIndex(([path]) => path === 'src/new.ts')
+    expect(target).toBeGreaterThan(-1)
+    expect(writeProjectFile.mock.invocationCallOrder[target]).toBeGreaterThan(
+      createCheckpoint.mock.invocationCallOrder[0]
+    )
+    const point = events.find((e) => e.type === 'checkpoint')
+    expect(point).toMatchObject({ checkpoint: { id: 'cp-1', label: 'Before writing src/new.ts' } })
+  })
+
+  it('announces no restore point when the tree had not changed', async () => {
+    // A step that changed nothing since the last snapshot must not add a timeline
+    // row: `created: false` means the existing point already covers this state, and
+    // an event would put a second identical entry in front of the user.
+    streamCompletion.mockImplementationOnce(emitsText(WRITE_BLOCK))
+    createCheckpoint.mockImplementationOnce(async (_root: string, label: string) => ({
+      checkpoint: { id: 'cp-old', at: 500, label, kind: 'git' as const, sha: 'abc' },
+      created: false
+    }))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('cp2', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    expect(createCheckpoint).toHaveBeenCalledTimes(1)
+    expect(events.some((e) => e.type === 'checkpoint')).toBe(false)
+    // The write still went through — a deduped snapshot is not a blocked op.
+    expect(writeProjectFile).toHaveBeenCalledWith('src/new.ts', 'export const x = 1')
+  })
+
+  it('reports the measured context load off the array being sent', async () => {
+    // Phase 4: the meter's numbers are counted in the engine, because only the engine
+    // sees the assembled array — the renderer would have to guess at the system prompt
+    // and the tool output fed back between turns.
+    streamCompletion.mockImplementationOnce(emitsText('Nothing to do.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('ctx1'), emit, noTerminal)
+
+    const usages = events.filter(
+      (e): e is Extract<WorkflowEvent, { type: 'context' }> => e.type === 'context'
+    )
+    expect(usages.length).toBeGreaterThan(0)
+    const first = usages[0].usage
+    // Measured, not invented: the system prompt is real text and the budget is the
+    // engine's own fold threshold, so both are positive and the parts fit the whole.
+    expect(first.systemChars).toBeGreaterThan(0)
+    expect(first.budget).toBeGreaterThan(0)
+    expect(first.chars).toBeGreaterThanOrEqual(
+      first.systemChars + first.historyChars + first.assistantChars + first.toolChars
+    )
+    // Nothing has grown yet, so nothing is queued to be condensed.
+    expect(first.foldSteps).toBe(0)
   })
 
   it('auto-edit applies a write without running any command', async () => {
@@ -1001,6 +1267,105 @@ describe('runWorkflow tool execution', () => {
     expect(events.at(-1)?.type).toBe('done')
   })
 
+  it('records a flag_followup to the follow-up log and offers it as a chip', async () => {
+    streamCompletion.mockImplementation(emitsText('Done with the button.\n' + FOLLOWUP_BLOCK))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('fu1'), emit, noTerminal)
+
+    // Written to the project's own log, on the engine's plain fs path — no approval
+    // card, because appending to a markdown list the user reads is not a proposal.
+    const logWrite = writeProjectFile.mock.calls.find((c) => c[0] === '.sylor/FOLLOWUPS.md')
+    expect(logWrite).toBeTruthy()
+    expect(logWrite?.[1]).toContain('— Fix the stale README badge')
+    expect(logWrite?.[1]).toContain('- Note: It points at the old CI workflow name.')
+    expect(logWrite?.[1]).toContain('- Files: README.md')
+    expect(events.some((e) => e.type === 'tool-request')).toBe(false)
+
+    // And surfaced as its own event so the UI can offer "Do it now" — with the file
+    // it actually landed in, since the chip must not claim a record that isn't there.
+    const flags = events.filter((e) => e.type === 'followup')
+    expect(flags).toHaveLength(1)
+    expect(flags[0]).toMatchObject({
+      type: 'followup',
+      followup: {
+        title: 'Fix the stale README badge',
+        note: 'It points at the old CI workflow name.',
+        files: ['README.md'],
+        recordedIn: '.sylor/FOLLOWUPS.md'
+      }
+    })
+
+    const prose = events
+      .filter((e) => e.type === 'delta')
+      .map((e) => (e as { text: string }).text)
+      .join('')
+    expect(prose).toContain('Follow-up noted in .sylor/FOLLOWUPS.md')
+    expect(prose).toContain('Fix the stale README badge')
+    expect(prose).not.toContain('sylor-tool')
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('stays silent about a follow-up the log already carries', async () => {
+    // Agents re-notice the same loose end on every pass over the same code; a list
+    // that repeats itself is a list nobody reads.
+    readProjectFile.mockImplementation((path) => {
+      if (path === '.sylor/FOLLOWUPS.md') {
+        return '# Follow-ups\n\n## 2026-01-01 — fix the STALE readme badge\n'
+      }
+      throw new Error('ENOENT')
+    })
+    streamCompletion.mockImplementation(emitsText('Noticed again.\n' + FOLLOWUP_BLOCK))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('fu2'), emit, noTerminal)
+
+    expect(writeProjectFile.mock.calls.some((c) => c[0] === '.sylor/FOLLOWUPS.md')).toBe(false)
+    expect(events.some((e) => e.type === 'followup')).toBe(false)
+    const prose = events
+      .filter((e) => e.type === 'delta')
+      .map((e) => (e as { text: string }).text)
+      .join('')
+    expect(prose).not.toContain('Follow-up noted')
+  })
+
+  it('flags at most three per message', async () => {
+    const flag = (title: string): string =>
+      '```sylor-tool\n' + JSON.stringify({ tool: 'flag_followup', title }) + '\n```\n'
+    streamCompletion.mockImplementation(
+      emitsText('Spotted a few.\n' + flag('one') + flag('two') + flag('three') + flag('four'))
+    )
+
+    const { events, emit } = collector()
+    await runWorkflow(req('fu3'), emit, noTerminal)
+
+    // A turn that flags everything it walks past has stopped doing the asked-for work.
+    const titles = events
+      .filter((e) => e.type === 'followup')
+      .map((e) => (e as { followup: { title: string } }).followup.title)
+    expect(titles).toEqual(['one', 'two', 'three'])
+  })
+
+  it('flags the finding even when the log cannot be written', async () => {
+    unwritable.add('.sylor/FOLLOWUPS.md')
+    streamCompletion.mockImplementation(emitsText('Noticed.\n' + FOLLOWUP_BLOCK))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('fu4'), emit, noTerminal)
+
+    // Losing the finding is worse than losing the file, so the chip still appears —
+    // with `recordedIn` absent, and prose that says so rather than naming a file.
+    const flags = events.filter((e) => e.type === 'followup')
+    expect(flags).toHaveLength(1)
+    expect((flags[0] as { followup: { recordedIn?: string } }).followup.recordedIn).toBeUndefined()
+    const prose = events
+      .filter((e) => e.type === 'delta')
+      .map((e) => (e as { text: string }).text)
+      .join('')
+    expect(prose).toContain('this session only — nothing could be written')
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
   it('injects existing project memory into the system prompt', async () => {
     projectMemory = '- Uses pnpm\n- Strict TypeScript'
     streamCompletion.mockResolvedValue(undefined)
@@ -1065,6 +1430,131 @@ describe('runWorkflow tool execution', () => {
     expect(result.result).toMatchObject({ kind: 'write_file', ok: false })
   })
 
+  it('treats a user rejection as a decision, not a failure to retry (no nudge)', async () => {
+    // A rejected write flows back through the same `ok: false` result as a write that
+    // *threw*. Without the refusal set, `lastFailures` cannot tell them apart, and the
+    // retry-on-failure nudge ("Do not stop here…") then pushes the model to re-attempt
+    // the very thing the user just declined. Recording the id must suppress that nudge.
+    const seenLastMessage: string[] = []
+    let call = 0
+    streamCompletion.mockImplementation(async (_model, messages, onChunk) => {
+      seenLastMessage.push(messages.at(-1)?.content ?? '')
+      call += 1
+      // First pass proposes the write; every later pass only concludes with prose, so
+      // the loop can continue *solely* if something re-nudges it back to work.
+      onChunk({
+        delta: call === 1 ? WRITE_BLOCK : 'Understood — leaving that file as it is.'
+      } as Omit<CompletionChunk, 'streamId'>)
+    })
+
+    const { events, emit } = collector()
+    const p = runWorkflow(req('reject-noretry', { permissionMode: 'ask' }), emit, noTerminal)
+
+    await vi.waitFor(() => firstToolRequest(events))
+    resolveToolDecision('reject-noretry', firstToolRequest(events).proposal.id, 'reject')
+    await p
+
+    // The write never hit disk and the run ended cleanly…
+    expect(agentWrites()).toEqual([])
+    expect(firstToolResult(events).result).toMatchObject({ kind: 'write_file', ok: false })
+    expect(events.at(-1)?.type).toBe('done')
+
+    // …and, crucially, the model was never fed the retry-on-failure nudge for it.
+    expect(seenLastMessage.some((m) => m.includes('Do not stop here'))).toBe(false)
+  })
+
+  it('surfaces the lead checklist as a todos event and keeps the loop alive', async () => {
+    // A checklist-only turn is the model declaring its plan: it must emit a `todos`
+    // event AND loop for another step (like a read-only turn), never end the run on
+    // the strength of a plan with no work behind it yet.
+    streamCompletion
+      .mockImplementationOnce(emitsText('Here is the plan.\n' + TODOS_BLOCK))
+      .mockImplementation(emitsText('Both steps are done.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('todos-loop'), emit, noTerminal)
+
+    const todoEvents = events.filter((e) => e.type === 'todos')
+    expect(todoEvents).toHaveLength(1)
+    expect(todoEvents[0]).toMatchObject({
+      todos: [
+        { text: 'Add the route', status: 'in_progress' },
+        { text: 'Wire the button', status: 'pending' }
+      ]
+    })
+    // The checklist alone did not end the run — the model got a second turn to act.
+    expect(streamCompletion.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(events.at(-1)?.type).toBe('done')
+    // A checklist is not a side effect: nothing was written to disk.
+    expect(agentWrites()).toEqual([])
+  })
+
+  it('asks a clarifying question, blocks, then continues with the answer fed back', async () => {
+    // `ask_user` halts the turn on a user answer: the engine emits a `question`
+    // event, waits, and only after `resolveQuestion` resumes — feeding the answer
+    // back so the next turn acts on it.
+    let secondCallUserContent = ''
+    let call = 0
+    streamCompletion.mockImplementation(async (_model, messages, onChunk) => {
+      call++
+      if (call === 1) {
+        onChunk({ delta: 'Let me check.\n' + ASK_BLOCK } as Omit<CompletionChunk, 'streamId'>)
+      } else {
+        if (call === 2) {
+          // Snapshot now: `messages` is the mutated `outbound` array (aliased).
+          secondCallUserContent = messages
+            .filter((m) => m.role === 'user')
+            .map((m) => m.content)
+            .join('\n')
+        }
+        onChunk({ delta: 'Using Google then.' } as Omit<CompletionChunk, 'streamId'>)
+      }
+    })
+
+    const { events, emit } = collector()
+    const p = runWorkflow(req('ask1'), emit, noTerminal)
+
+    // The question surfaces and the run blocks on it.
+    await vi.waitFor(() => {
+      if (!events.some((e) => e.type === 'question')) throw new Error('no question yet')
+    })
+    const q = events.find((e) => e.type === 'question')
+    expect(q).toMatchObject({
+      question: {
+        question: 'Which auth should I use?',
+        header: 'Auth method',
+        options: ['Email', 'Google']
+      }
+    })
+    const questionId = q && q.type === 'question' ? q.question.id : ''
+
+    // Answer it — the run resumes and finishes.
+    resolveQuestion('ask1', questionId, 'Google')
+    await p
+
+    expect(streamCompletion.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(events.at(-1)?.type).toBe('done')
+    // The answer was fed back to the model as the next user turn.
+    expect(secondCallUserContent).toContain('Google')
+    // Asking a question writes nothing.
+    expect(agentWrites()).toEqual([])
+  })
+
+  it('cancelWorkflow unblocks a pending clarifying question', async () => {
+    streamCompletion.mockImplementationOnce(emitsText('One question.\n' + ASK_BLOCK))
+
+    const { events, emit } = collector()
+    const p = runWorkflow(req('ask-cancel'), emit, noTerminal)
+
+    await vi.waitFor(() => {
+      if (!events.some((e) => e.type === 'question')) throw new Error('no question yet')
+    })
+    cancelWorkflow('ask-cancel')
+    // The run unwinds without hanging and without a `done` event.
+    await expect(p).resolves.toBeUndefined()
+    expect(events.some((e) => e.type === 'done')).toBe(false)
+  })
+
   it('cancelWorkflow unblocks a pending tool decision', async () => {
     streamCompletion.mockImplementationOnce(emitsText(WRITE_BLOCK))
 
@@ -1114,21 +1604,213 @@ describe('runWorkflow tool execution', () => {
     expect(events.at(-1)?.type).toBe('done')
   })
 
-  it('does not loop back after a plan-first pass', async () => {
-    // Plan-first only writes plan.md and yields to the user. Even though the model
-    // proposes a tool on EVERY completion (persistent mock), the engine must run
-    // exactly one pass and never feed a result back.
-    streamCompletion.mockImplementation(emitsText('Writing the plan.\n' + WRITE_BLOCK))
+  it('stops asking about writes for the rest of the run once "always" is granted', async () => {
+    // The reason long builds stall in `ask` mode: every file is its own prompt, so a
+    // user who steps away comes back to a run frozen on file 3. "Always" is one
+    // approval that covers the class — the second write must run with no prompt at
+    // all, not merely a faster one.
+    const SECOND_WRITE =
+      '```sylor-tool\n{ "tool": "write_file", "path": "src/second.ts", "content": "export const y = 2" }\n```\n'
+    streamCompletion
+      .mockImplementationOnce(emitsText('First file.\n' + WRITE_BLOCK))
+      .mockImplementationOnce(emitsText('Second file.\n' + SECOND_WRITE))
+      .mockImplementationOnce(emitsText('Both files are in place.'))
 
     const { events, emit } = collector()
-    await runWorkflow(
+    const p = runWorkflow(req('always1', { permissionMode: 'ask' }), emit, noTerminal)
+
+    await vi.waitFor(() => firstToolRequest(events))
+    resolveToolDecision('always1', firstToolRequest(events).proposal.id, 'approve-always')
+    await p
+
+    const requests = events.filter((e) => e.type === 'tool-request') as { auto: boolean }[]
+    expect(requests).toHaveLength(2)
+    expect(requests[0].auto).toBe(false)
+    // Flagged auto: surfaced as a card, never waited on.
+    expect(requests[1].auto).toBe(true)
+    expect(agentWrites()).toEqual(['src/new.ts', 'src/second.ts'])
+
+    // The grant is recorded in the conversation, once — a policy the user can see
+    // they gave, rather than a run that mysteriously stopped asking.
+    const prose = events
+      .filter((e) => e.type === 'delta')
+      .map((e) => (e as { text: string }).text)
+      .join('')
+    expect(prose.match(/won't ask again about file edits/g)).toHaveLength(1)
+  })
+
+  it('keeps asking about a DIFFERENT command after "always" on one', async () => {
+    // A command grant is keyed on the exact command: yes to `npm test` a dozen times
+    // is not yes to whatever the model types next.
+    const RM_BLOCK = '```sylor-tool\n{ "tool": "run_command", "command": "rm -rf build" }\n```\n'
+    streamCompletion
+      .mockImplementationOnce(emitsText(CMD_BLOCK))
+      .mockImplementationOnce(emitsText(RM_BLOCK))
+      .mockImplementationOnce(emitsText('Stopped there.'))
+
+    const { events, emit } = collector()
+    const p = runWorkflow(req('always2', { permissionMode: 'ask' }), emit, noTerminal)
+
+    await vi.waitFor(() => firstToolRequest(events))
+    resolveToolDecision('always2', firstToolRequest(events).proposal.id, 'approve-always')
+
+    const requests = () => events.filter((e) => e.type === 'tool-request') as { auto: boolean }[]
+    await vi.waitFor(() => expect(requests()).toHaveLength(2))
+    expect(requests()[1].auto).toBe(false)
+    const second = events.filter((e) => e.type === 'tool-request').at(-1) as {
+      proposal: { id: string }
+    }
+    resolveToolDecision('always2', second.proposal.id, 'reject')
+    await p
+
+    // Only the approved command ever ran.
+    expect(runCommand).toHaveBeenCalledOnce()
+  })
+
+  it("carries the user's reason for saying no back to the model", async () => {
+    // A bare "Skipped by user" tells the model it was blocked but not what to do
+    // instead, so the next step is a guess. The reason is the most useful sentence in
+    // the turn — quoted as the user's words, and bounded so one pasted essay can't
+    // flood the context.
+    streamCompletion
+      .mockImplementationOnce(emitsText('Writing it.\n' + WRITE_BLOCK))
+      .mockImplementationOnce(emitsText('Understood — I will put it under src/lib instead.'))
+
+    const { events, emit } = collector()
+    const p = runWorkflow(req('rr1', { permissionMode: 'ask' }), emit, noTerminal)
+
+    await vi.waitFor(() => firstToolRequest(events))
+    resolveToolDecision('rr1', firstToolRequest(events).proposal.id, 'reject', {
+      reason: 'wrong folder — it belongs under src/lib'
+    })
+    await p
+
+    expect(agentWrites()).toEqual([])
+    // The card and the model see the same sentence: no private channel.
+    expect(firstToolResult(events).result).toMatchObject({
+      kind: 'write_file',
+      ok: false,
+      error: 'Skipped by user — they said: “wrong folder — it belongs under src/lib”'
+    })
+    expect(feedbackText()).toContain('they said: “wrong folder — it belongs under src/lib”')
+  })
+
+  it('writes the bytes the user edited in the diff, and says the file is theirs', async () => {
+    // Edit-then-approve. The model proposed `x = 1`; the user fixed it in the diff
+    // before it reached disk. What lands has to be THEIR text — and the model has to
+    // be told, or the next step edits a file it only remembers writing.
+    const MINE = 'export const x = 99 // mine'
+    streamCompletion
+      .mockImplementationOnce(emitsText('Writing it.\n' + WRITE_BLOCK))
+      .mockImplementationOnce(emitsText('Done — using your version.'))
+
+    const { events, emit } = collector()
+    const p = runWorkflow(req('edit1', { permissionMode: 'ask' }), emit, noTerminal)
+
+    await vi.waitFor(() => firstToolRequest(events))
+    resolveToolDecision('edit1', firstToolRequest(events).proposal.id, 'approve', {
+      editedContent: MINE
+    })
+    await p
+
+    const write = writeProjectFile.mock.calls.find((c) => c[0] === 'src/new.ts')
+    expect(write?.[1]).toBe(MINE)
+    expect(firstToolResult(events).result).toMatchObject({ kind: 'write_file', ok: true })
+    expect(firstToolResult(events).result).toHaveProperty('edited', true)
+    expect(feedbackText()).toContain('applied with the user’s own edits')
+    expect(feedbackText()).toContain('the file holds THEIR version')
+  })
+
+  it('ignores an editedContent that changes nothing, and one on a non-write op', async () => {
+    // "The user edited this" has to MEAN they did: a diff opened and closed without a
+    // change must not be reported as theirs. And the flag is only ever honoured for a
+    // write_file — the engine refuses it elsewhere rather than trusting the payload.
+    streamCompletion
+      .mockImplementationOnce(emitsText(CMD_BLOCK))
+      .mockImplementationOnce(emitsText('Writing it.\n' + WRITE_BLOCK))
+      .mockImplementationOnce(emitsText('All done.'))
+
+    const { events, emit } = collector()
+    const p = runWorkflow(req('edit2', { permissionMode: 'ask' }), emit, noTerminal)
+
+    await vi.waitFor(() => firstToolRequest(events))
+    resolveToolDecision('edit2', firstToolRequest(events).proposal.id, 'approve', {
+      editedContent: 'rm -rf /'
+    })
+    const requests = (): WorkflowEvent[] => events.filter((e) => e.type === 'tool-request')
+    await vi.waitFor(() => expect(requests()).toHaveLength(2))
+    const second = requests().at(-1) as Extract<WorkflowEvent, { type: 'tool-request' }>
+    resolveToolDecision('edit2', second.proposal.id, 'approve', {
+      editedContent: 'export const x = 1'
+    })
+    await p
+
+    // The command ran as proposed; the payload was not spliced into it.
+    expect(runCommand.mock.calls.map((c) => c[0])).toEqual(['npm test'])
+    // The write landed as the model composed it, and is NOT flagged as edited.
+    const write = writeProjectFile.mock.calls.find((c) => c[0] === 'src/new.ts')
+    expect(write?.[1]).toBe('export const x = 1')
+    const results = events.filter((e) => e.type === 'tool-result')
+    for (const r of results) expect(r).not.toHaveProperty('result.edited')
+    expect(feedbackText()).not.toContain('THEIR version')
+  })
+
+  it('folds several edits to one file into a single write in one action', async () => {
+    // Consolidated edit: one edit_file block carries TWO replacements. The engine reads
+    // the file once, applies both in order, and stages ONE write_file proposal — one
+    // diff, one approval, one action — so the model never has to split edits to the same
+    // file across several messages. (applyEdits' own order/miss semantics live in
+    // operations.test.ts; here we prove the WIRING: tool.edits → applyEdits → one write.)
+    editSource.set('src/App.tsx', 'const a = 1\nconst b = 2\n')
+    streamCompletion
+      .mockImplementationOnce(
+        emitsText(
+          'Editing it.\n' +
+            editBlock('src/App.tsx', [
+              { old: 'const a = 1', new: 'const a = 10' },
+              { old: 'const b = 2', new: 'const b = 20' }
+            ])
+        )
+      )
+      .mockImplementation(emitsText('Done.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('me1', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    // Read once, applied as ONE action: a single applyEdits call, one tool-request, one write.
+    expect(applyEdits).toHaveBeenCalledTimes(1)
+    expect(events.filter((e) => e.type === 'tool-request')).toHaveLength(1)
+    expect(agentWrites()).toEqual(['src/App.tsx'])
+    // The single write reflects BOTH edits.
+    const write = writeProjectFile.mock.calls.find((c) => c[0] === 'src/App.tsx')
+    expect(write?.[1]).toBe('const a = 10\nconst b = 20\n')
+  })
+
+  it('builds nothing when the plan is rejected', async () => {
+    // A rejected plan is a decision, not a failure: the turn ends having touched no
+    // file, even though the model would propose one on EVERY completion (persistent
+    // mock). Nothing is retried and nothing is fed back.
+    streamCompletion.mockImplementation(emitsText('Writing the file.\n' + WRITE_BLOCK))
+
+    const { events, emit } = collector()
+    const p = runWorkflow(
       req('pf1', { permissionMode: 'auto-edit', planFirst: true }),
       emit,
       noTerminal
     )
 
-    expect(streamCompletion).toHaveBeenCalledTimes(1)
-    expect(agentWrites()).toHaveLength(1)
+    await vi.waitFor(() => firstPlanApproval(events))
+    resolveToolDecision('pf1', firstPlanApproval(events).approval.id, 'reject')
+    await p
+
+    expect(streamCompletion).not.toHaveBeenCalled()
+    expect(agentWrites()).not.toContain('src/new.ts')
+    // And it says so, rather than ending on a silent `done`.
+    const prose = events
+      .filter((e) => e.type === 'delta')
+      .map((e) => (e as { text: string }).text)
+      .join('')
+    expect(prose).toMatch(/stopped before building/i)
     expect(events.at(-1)?.type).toBe('done')
   })
 
@@ -1401,6 +2083,56 @@ describe('runWorkflow tool execution', () => {
     // The loop continued (a second completion ran) and the failure was fed back.
     expect(streamCompletion.mock.calls.length).toBeGreaterThan(1)
     expect(feedbackText()).toContain('preview_inspect screenshot → error')
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('sends a preview_inspect eval expression through to the page', async () => {
+    // `eval` is the escape hatch that makes the preview a real browser: whatever the
+    // model needs to read or drive that no other action covers. The code itself is
+    // the whole request, so it must survive the parse → proposal → transport hops.
+    classifyIntent.mockResolvedValue({ kind: 'question', summary: 'verify', needsContext: false })
+    setPreviewInspectTransport(previewInspect)
+    previewInspect.mockResolvedValue({
+      requestId: '',
+      ok: true,
+      output: '"Sylor"',
+      truncated: false,
+      summary: '"Sylor"'
+    })
+    streamCompletion.mockImplementationOnce(emitsText('Reading the title.\n' + PREVIEW_EVAL_BLOCK))
+    streamCompletion.mockImplementation(emitsText('The title is right.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('prev4', { permissionMode: 'ask' }), emit, noTerminal)
+
+    expect(previewInspect).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'eval', expression: 'document.title' })
+    )
+    expect(firstToolRequest(events).proposal).toMatchObject({
+      kind: 'preview_inspect',
+      action: 'eval',
+      expression: 'document.title'
+    })
+    expect(feedbackText()).toContain('preview_inspect eval → "Sylor"')
+  })
+
+  it('answers preview_inspect server_logs in main, with no renderer round-trip', async () => {
+    // The dev server's output lives in main, so this action is the one that still
+    // works when nothing ever loaded — which is exactly when it is needed. No
+    // transport is wired here (the pane is closed) and the read still succeeds.
+    classifyIntent.mockResolvedValue({ kind: 'question', summary: 'verify', needsContext: false })
+    streamCompletion.mockImplementationOnce(emitsText(PREVIEW_SERVER_LOGS_BLOCK))
+    streamCompletion.mockImplementation(emitsText("I'll start the dev server."))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('prev5', { permissionMode: 'ask' }), emit, noTerminal)
+
+    expect(previewInspect).not.toHaveBeenCalled()
+    const result = firstToolResult(events)
+    expect(result.result).toMatchObject({ kind: 'preview_inspect', ok: true, action: 'server_logs' })
+    // No dev server has run in this process, and the answer says exactly that
+    // rather than showing an empty log, which would read as "no errors".
+    expect(feedbackText()).toMatch(/No dev server has been started/i)
     expect(events.at(-1)?.type).toBe('done')
   })
 
@@ -1967,5 +2699,250 @@ describe('runWorkflow step narration', () => {
     expect(system).toMatch(/never\s+narrate DELIBERATION/i)
     expect(system).toMatch(/show the decision, never the debate/)
     expect(events.at(-1)?.type).toBe('done')
+  })
+})
+
+// ---- The gathering pass (Problem 1) -----------------------------------------
+
+/**
+ * One look, then say what you found. The user's report: thirteen inspection steps
+ * before a one-line CSS fix, including `HeroSection.tsx · lines 55–94 of 168` and a
+ * third read of `PromoBanner.tsx`. `gather.ts` and `readCache.ts` are unit-tested on
+ * their own; these lock in the wiring that makes them bite in a real run — the
+ * guessed window never reaching the reader, a repeat read producing no card at all,
+ * and the loop closing the pass instead of allowing a fourteenth look.
+ */
+describe('runWorkflow gathering (one look, then findings)', () => {
+  beforeEach(() => {
+    streamCompletion.mockReset()
+    classifyIntent.mockReset()
+    classifyIntent.mockResolvedValue({ kind: 'edit', summary: 'edit', needsContext: false })
+    readFileSlice.mockClear()
+    listDirectory.mockClear()
+    searchProject.mockClear()
+    writeProjectFile.mockClear()
+    // Every file looks unchanged since it was read, unless a test says otherwise.
+    stampBump.clear()
+    readProjectFile.mockReset()
+    readProjectFile.mockImplementation(() => {
+      throw new Error('ENOENT')
+    })
+    mcpTools = []
+    skills = []
+    projectMemory = ''
+    projectInstructions = ''
+  })
+
+  /** A `read_file` block carrying whatever window (or purpose) the model guessed. */
+  function readBlock(
+    path: string,
+    extra: { offset?: number; limit?: number; purpose?: string } = {}
+  ): string {
+    return '```sylor-tool\n' + JSON.stringify({ tool: 'read_file', path, ...extra }) + '\n```\n'
+  }
+
+  /** Every status line the run emitted, in order. */
+  const statusMessages = (events: WorkflowEvent[]): string[] =>
+    events.filter((e) => e.type === 'status').map((e) => (e as { message: string }).message)
+
+  const toolRequests = (events: WorkflowEvent[]): WorkflowEvent[] =>
+    events.filter((e) => e.type === 'tool-request')
+
+  /**
+   * Streams `text`, first recording the turn the model was handed at the END of its
+   * context — the synthesized feedback turn for the previous step.
+   *
+   * It has to be captured HERE, inside the call. The engine hands `streamCompletion`
+   * its live `outbound` array and keeps pushing to it, so every entry in
+   * `mock.calls` aliases the same array: read after the run, call #0 looks exactly
+   * like the last one.
+   */
+  function capture(into: string[], text: string): Provider['streamCompletion'] {
+    return async (_model, msgs, onChunk) => {
+      into.push((msgs as ChatMessage[]).at(-1)?.content ?? '')
+      onChunk({ delta: text } as Omit<CompletionChunk, 'streamId'>)
+    }
+  }
+
+  it('reads the WHOLE file even when the model asked for a keyhole window', async () => {
+    // `lines 830–889 of 1769` is the shape of the defect: a guessed window is a
+    // keyhole, it costs a second read, and it is its own cache key so it dedupes
+    // against nothing. The reader must be handed no window at all on a first look.
+    streamCompletion.mockImplementationOnce(
+      emitsText(
+        'Opening the component.\n' +
+          readBlock('src/AgentChat.tsx', {
+            offset: 830,
+            limit: 60,
+            purpose: 'to find what overlaps the banner'
+          })
+      )
+    )
+    streamCompletion.mockImplementation(emitsText('Read it.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('g1'), emit, noTerminal)
+
+    expect(readFileSlice).toHaveBeenCalledTimes(1)
+    expect(readFileSlice).toHaveBeenCalledWith('src/AgentChat.tsx', undefined, undefined)
+
+    // The proposal the CARD renders carries no window either, so the row can never
+    // read `lines 830–889 of 1769`.
+    const request = firstToolRequest(events)
+    expect(request.auto).toBe(true) // a read never asks
+    expect(request.proposal).toMatchObject({
+      kind: 'read',
+      op: 'read_file',
+      path: 'src/AgentChat.tsx'
+    })
+    expect(request.proposal).not.toHaveProperty('offset')
+    expect(request.proposal).not.toHaveProperty('limit')
+
+    // One status line for the look, naming ONLY the file being opened — no purpose
+    // tail, no grep query, no count. The user sees just "Reading <filename>".
+    expect(statusMessages(events)).toContain('Reading AgentChat.tsx')
+    // …and never the model's private purpose in the status the user reads.
+    expect(statusMessages(events).join('\n')).not.toContain('to find what overlaps the banner')
+  })
+
+  it('answers a repeat read from a note — no second card, no second disk hit', async () => {
+    // Step 2 is the report's third read: `Navbar.tsx · lines 1–70 of 172`, asked for
+    // after the whole file was already held. Those lines are verbatim above in the
+    // conversation, so nothing may reach disk — and the user must not even see a row
+    // for it, because re-reading is not work, it is the agent forgetting.
+    streamCompletion.mockImplementationOnce(emitsText('Reading it.\n' + readBlock('src/Navbar.tsx')))
+    streamCompletion.mockImplementationOnce(
+      emitsText('Let me look again.\n' + readBlock('src/Navbar.tsx', { offset: 1, limit: 70 }))
+    )
+    streamCompletion.mockImplementation(emitsText('The banner overlaps it.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('g2'), emit, noTerminal)
+
+    expect(readFileSlice).toHaveBeenCalledTimes(1)
+    expect(toolRequests(events)).toHaveLength(1)
+    expect(events.filter((e) => e.type === 'tool-result')).toHaveLength(1)
+    // The MODEL still hears about it — the note is what actually stops the loop.
+    expect(feedbackText()).toContain('already read')
+    expect(feedbackText()).toContain('src/Navbar.tsx')
+  })
+
+  it('re-reads a file that genuinely changed on disk between two looks', async () => {
+    // The dedup must never serve a stale copy: if the user edited the file in their
+    // editor mid-turn, the second read is real work and has to hit disk.
+    streamCompletion.mockImplementationOnce(emitsText('Reading it.\n' + readBlock('src/Navbar.tsx')))
+    streamCompletion.mockImplementationOnce(async (_model, _msgs, onChunk) => {
+      stampBump.set('src/Navbar.tsx', 1) // the file changed underneath us
+      onChunk({ delta: 'Checking it again.\n' + readBlock('src/Navbar.tsx') } as Omit<
+        CompletionChunk,
+        'streamId'
+      >)
+    })
+    streamCompletion.mockImplementation(emitsText('Now it is current.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('g3'), emit, noTerminal)
+
+    expect(readFileSlice).toHaveBeenCalledTimes(2)
+    expect(toolRequests(events)).toHaveLength(2)
+    expect(feedbackText()).not.toContain('already read')
+  })
+
+  it('opens a whole batch of files in ONE step, naming each file as it reads', async () => {
+    // Two files, one message: reads are exempt from the one-action cut precisely so
+    // gathering is a single act. Both must run, and the user sees one clean
+    // "Reading <filename>" per file (each replacing the last on the single status
+    // line) — never a combined list, a count, or the model's purpose.
+    streamCompletion.mockImplementationOnce(
+      emitsText(
+        'Opening both.\n' +
+          readBlock('src/Navbar.tsx', { purpose: 'to find what overlaps the banner' }) +
+          readBlock('src/PromoBanner.tsx')
+      )
+    )
+    streamCompletion.mockImplementation(emitsText('Both read.'))
+
+    const { events, emit } = collector()
+    await runWorkflow(req('g4'), emit, noTerminal)
+
+    expect(readFileSlice.mock.calls.map((c) => c[0])).toEqual([
+      'src/Navbar.tsx',
+      'src/PromoBanner.tsx'
+    ])
+    const msgs = statusMessages(events)
+    expect(msgs).toContain('Reading Navbar.tsx')
+    expect(msgs).toContain('Reading PromoBanner.tsx')
+    // No combined line, no count, and no purpose leaked into the status the user reads.
+    expect(msgs.join('\n')).not.toContain('Navbar.tsx, PromoBanner.tsx')
+    expect(msgs.join('\n')).not.toContain('to find what overlaps the banner')
+  })
+
+  it('closes the first pass by demanding findings, then refuses a second look', async () => {
+    // The hand-off the loop was missing. Pass 1 → "say what you found, and how you
+    // will fix it, before you touch anything". Pass 2 → the agent went looking again
+    // instead, and is told to stop and act.
+    const handed: string[] = []
+    streamCompletion.mockImplementationOnce(
+      capture(handed, 'Opening both.\n' + readBlock('src/Navbar.tsx') + readBlock('src/PromoBanner.tsx'))
+    )
+    streamCompletion.mockImplementationOnce(
+      capture(handed, 'One more look.\n' + readBlock('src/Hero.tsx'))
+    )
+    streamCompletion.mockImplementation(
+      capture(handed, 'The banner overlaps the navbar; fixing it now.')
+    )
+
+    const { events, emit } = collector()
+    await runWorkflow(req('g5'), emit, noTerminal)
+
+    const afterPass1 = handed[1]
+    expect(afterPass1).toContain('gathering pass is done')
+    expect(afterPass1).toContain('src/Navbar.tsx, src/PromoBanner.tsx')
+    expect(afterPass1).toContain('no tool block yet')
+    expect(afterPass1).toContain('how you are going to fix it')
+
+    const afterPass2 = handed[2]
+    expect(afterPass2).toContain('round 2')
+    expect(afterPass2).toContain('Stop gathering')
+    // Everything held so far is named, including the file from this very pass.
+    expect(afterPass2).toContain('src/Navbar.tsx, src/PromoBanner.tsx, src/Hero.tsx')
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('does not close the pass when the step also changed something', async () => {
+    // A step that reads AND writes is not a gathering pass — it is the fix, with the
+    // one genuinely-missing file opened alongside it, exactly as the nudges ask. It
+    // must not be answered with "your gathering pass is done".
+    streamCompletion.mockImplementationOnce(
+      emitsText('Fixing it.\n' + readBlock('src/Navbar.tsx') + WRITE_BLOCK)
+    )
+    streamCompletion.mockImplementation(emitsText('Done.'))
+
+    const { emit } = collector()
+    await runWorkflow(req('g6', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    expect(agentWrites()).toContain('src/new.ts')
+    expect(feedbackText()).not.toContain('gathering pass is done')
+    expect(feedbackText()).not.toContain('Stop gathering')
+  })
+
+  it('tells the model to gather once, whole files, and then report', async () => {
+    // The prompt is the first line of defence; the cache and the nudges are the
+    // second. If this rule ever silently disappears, the mechanism still holds but
+    // the model stops gathering in one pass, so the wording is pinned here.
+    let system = ''
+    streamCompletion.mockImplementationOnce(async (_model, msgs, onChunk) => {
+      system = (msgs as ChatMessage[])[0].content
+      onChunk({ delta: 'Hi.' } as Omit<CompletionChunk, 'streamId'>)
+    })
+
+    const { emit } = collector()
+    await runWorkflow(req('g7'), emit, noTerminal)
+
+    expect(system).toContain('GATHERING')
+    expect(system).toMatch(/open it ALL in ONE message/)
+    expect(system).toMatch(/NEVER open the same file twice/)
+    expect(system).toMatch(/read_file gives you the WHOLE file/)
+    expect(system).toMatch(/Do not pass "offset" or "limit"/)
   })
 })

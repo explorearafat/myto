@@ -3,15 +3,18 @@ import type {
   ChatImage,
   ChatMessage,
   CompletionOptions,
+  ContextUsage,
   HookEvent,
   IntentKind,
   McpCategory,
   McpToolInfo,
   PermissionMode,
+  PreviewInspectResponse,
   ReasoningEffort,
   SkillInfo,
   TaskNode,
   ToolDecision,
+  ToolDecisionDetail,
   ToolKind,
   ToolProposal,
   ToolResult,
@@ -19,13 +22,17 @@ import type {
   WorkflowRunRequest,
   WorkflowStage
 } from '../../shared/types'
+import { standingApprovalKey, standingApprovalNote } from '../../shared/approvals'
+import { contextWindowFor } from '../../shared/context-window'
 import { providerFromSettings, type Provider } from '../providers'
 import { toErrorMessage } from '../providers/http'
 import {
   getSettings,
   isSkillEnabled,
   getUserProfileForPrompt,
-  appendUserProfile
+  appendUserProfile,
+  fullAccessEnabled,
+  autoSendEnabled
 } from '../settings'
 import { contextManager } from '../context/manager'
 import { buildInstructionsPreamble } from '../context/instructions'
@@ -40,13 +47,14 @@ import {
 } from '../context/projectMemory'
 import {
   appendDecision,
+  appendFollowup,
   archivePlan as archiveActivePlan,
   readProjectState,
   updateProjectState,
   writeSessionCheckpoint
 } from '../context/projectState'
 import {
-  applyEdit,
+  applyEdits,
   findFiles,
   listDirectory,
   proposeWrite,
@@ -60,6 +68,7 @@ import { describeIssues, recheckWrittenFile, verifyWrittenFile } from '../fs/ver
 import { appendProjectMemory, getProject, listProjectKnowledge } from '../db/projects'
 import { runCommand } from '../terminal/runner'
 import {
+  devServerLogs,
   looksLikeDevServer,
   notePreviewRuntimeError,
   previewHealth,
@@ -85,6 +94,7 @@ import { decideAuto, decideBrowse, type PermissionOutcome } from './permission'
 import { ToolStreamParser, parseToolBlock, type ParsedTool } from './toolStream'
 import { ReasoningStripper, stripReasoningTags } from './reasoning'
 import { isAbort, withRetry, type RetryNotice } from './resilience'
+import { writingProgress } from './writingProgress'
 import { resolveRole, roleDirective, roleIds, reportWordBudget } from './orchestrator/roles'
 import {
   allowsTool,
@@ -97,13 +107,27 @@ import {
   runOrchestrator,
   type NodeRunOptions,
   type NodeRunResult,
+  type PlanDecision,
+  type PlanProposal,
   type VerifyOutcome
 } from './orchestrator/orchestrator'
 import type { MemoryPort } from './orchestrator/staging'
-import { classifyComplexityHeuristic } from './orchestrator/complexity'
+import { classifyComplexity } from './orchestrator/complexity'
 import { createWorktree, finalizeWorktree, type WorktreeHandle } from './worktree'
+import { createCheckpoint } from '../checkpoint/checkpoints'
 import { runHooks, type HookCommandRunner } from './hooks'
-import { servedFromReadCache, updateReadCache } from './readCache'
+import {
+  hasCompleteRead,
+  servedFromReadCache,
+  updateReadCache,
+  type ReadCacheEntry
+} from './readCache'
+import {
+  findingsNudge,
+  isGatherTool,
+  planReadWindow,
+  stopGatheringNudge
+} from './gather'
 
 /** Sink the engine emits events to (wired to IPC in workflow-ipc.ts). */
 export type EventSink = (event: WorkflowEvent) => void
@@ -206,7 +230,8 @@ const MEMORY_BLOCK = `PROJECT MEMORY — understand once, then remember:
   this for the task in front of me, and is it already in memory? Opening a file to learn what
   it is for, re-listing a directory you have already seen, or re-searching a fact you were
   already given is wasted work — and a READ → SEARCH → READ → SEARCH loop is exactly how a
-  turn ends with nothing built. Inspect what you are about to change; skip the rest.
+  turn ends with nothing built. Inspect what you are about to change; skip the rest — and
+  open all of it in the ONE gathering step, never a file per step.
 - When something errors, do NOT restart discovery. Name the actual error, inspect the
   smallest scope it implicates, fix the root cause, verify it, and carry on.
 - Keep the documents true as you go: the file map when files appear, disappear or change
@@ -228,7 +253,7 @@ terminal commands — but only by PROPOSING actions the user approves.
 To edit a file or run a command, emit a fenced block in this exact format:
 
 \`\`\`sylor-tool
-{ "tool": "write_file", "path": "relative/path.ts", "content": "<full new file contents>" }
+{ "tool": "write_file", "path": "relative/path.ts", "content": "<full new file contents>", "purpose": "<what this file is for, one short phrase>" }
 \`\`\`
 
 or
@@ -240,7 +265,7 @@ or
 YOU CAN LOOK AT THE PROJECT — DO IT BEFORE YOU CHANGE ANYTHING:
 
 \`\`\`sylor-tool
-{ "tool": "read_file", "path": "src/App.tsx" }
+{ "tool": "read_file", "path": "src/App.tsx", "purpose": "to find where the layout wraps the page" }
 \`\`\`
 
 \`\`\`sylor-tool
@@ -256,16 +281,36 @@ YOU CAN LOOK AT THE PROJECT — DO IT BEFORE YOU CHANGE ANYTHING:
 \`\`\`
 
 These four only LOOK — they change nothing, so they run immediately without asking the
-user, and (unlike an action) you may emit several in one message to gather what you need
-before deciding. read_file takes optional "offset" (1-based first line) and "limit" for a
-big file, and — pointed at an image ("png"/"jpg"/"gif"/"webp") — hands you the picture itself
-to SEE, not its raw bytes. search_files takes a regular expression; "path" and "glob" are
-optional filters; add "before"/"after"/"context" for N lines around each hit (like grep
--B/-A/-C), "multiline": true for a pattern that spans lines, or "mode": "files" (just the
-matching paths) / "count" (per-file tallies) instead of the default matching lines.
-find_files lists files by a name/path glob (\`**\` across folders, \`*\` within one, \`{a,b}\`
-alternatives) — use it to locate files by name when search_files (which greps CONTENTS) is
-the wrong tool.
+user, and (unlike an action) you MUST emit them together in ONE message: see GATHERING
+below. Each takes an optional "purpose" — a half-sentence on what you are trying to find
+out; it is a note for you, not shown to the user, who simply sees "Reading <filename>" as
+each file opens. Keep it short or omit it.
+
+read_file gives you the WHOLE file. Do not pass "offset" or "limit" — you cannot know which
+lines matter before you have seen the file, and a 60-line window is never enough to edit
+against. If a file is genuinely too large for one read, the result says exactly where it
+stopped and which "offset" to continue from; that — continuing through a file you have
+already started — is the only time an "offset" belongs in a read_file block. Pointed at an
+image ("png"/"jpg"/"gif"/"webp"), read_file hands you the picture itself to SEE, not its raw
+bytes. search_files takes a regular expression; "path" and "glob" are optional filters; add
+"before"/"after"/"context" for N lines around each hit (like grep -B/-A/-C), "multiline":
+true for a pattern that spans lines, or "mode": "files" (just the matching paths) / "count"
+(per-file tallies) instead of the default matching lines. find_files lists files by a
+name/path glob (\`**\` across folders, \`*\` within one, \`{a,b}\` alternatives) — use it to
+locate files by name when search_files (which greps CONTENTS) is the wrong tool.
+
+GATHERING — look once, then say what you found:
+- Work out everything you need to see, and open it ALL in ONE message: every file, in full,
+  in a single batch of read-only blocks. One reading step, not five.
+- NEVER open the same file twice. Its whole text stays in this conversation, word for word;
+  re-reading it tells you nothing you do not already have, and you will be told so.
+- Then, before you touch anything, send ONE message with no tool block: what you read, what
+  you actually found — the real problem and exactly where it lives (file, and the line or
+  the class/symbol) — every problem if there are several, and how you are going to fix it as
+  concrete steps in order. That message is what the user is waiting for; a wall of file
+  cards followed by a silent edit is not.
+- Then take the first step. If something you never read turns out to be needed, read it in
+  the SAME message as your next action — never as a step of its own.
 
 When a task genuinely needs the outside world — reading a doc page, an API reference, or
 the text of an error — fetch a URL:
@@ -291,12 +336,19 @@ it reaches the network, so it IS an action: it needs approval and ENDS your mess
 normal flow is search → pick the best result → web_fetch that URL to read it in full. Prefer
 primary sources (official docs, the project's own repo) over blog summaries.
 
-To change part of an existing file, replace an exact piece of it — do NOT rewrite the
-whole file:
+To change part of an existing file, replace exact pieces of it — do NOT rewrite the
+whole file. Read the file once (in full), work out EVERY change it needs, then make them
+ALL in a single edit_file with an "edits" list, applied in order:
 
 \`\`\`sylor-tool
-{ "tool": "edit_file", "path": "src/App.tsx", "old_string": "<exact text to replace>", "new_string": "<replacement>" }
+{ "tool": "edit_file", "path": "src/App.tsx", "edits": [
+  { "old_string": "<exact text to replace>", "new_string": "<replacement>" },
+  { "old_string": "<another exact snippet>", "new_string": "<replacement>" }
+], "purpose": "<what these changes are for>" }
 \`\`\`
+
+For a single change you may pass "old_string"/"new_string" directly instead of an "edits"
+list — but never split several edits to the SAME file across several messages.
 
 Rules that matter more than any others when working on code that already exists:
 - NEVER edit a file you have not read this turn. Guessing at contents you haven't seen
@@ -304,9 +356,13 @@ Rules that matter more than any others when working on code that already exists:
 - Prefer edit_file over write_file for any file that already exists. write_file replaces
   the ENTIRE file, so using it on a real file silently deletes everything you forgot to
   reproduce. Use write_file for NEW files (and for a rewrite the user actually asked for).
-- "old_string" must match the file byte for byte, including indentation, and must be unique.
-  Include a few surrounding lines if the snippet appears more than once, or set
-  "replace_all": true to change every occurrence.
+- One consolidated edit per file. When a file needs several changes, do not edit it, wait
+  for the result, then edit it again — put every change in ONE edit_file's "edits" list.
+  Small repeated edits to the same file are slow and error-prone; one pass is not.
+- Each "old_string" (in the list or on its own) must match the file byte for byte,
+  including indentation, and must be unique. Include a few surrounding lines if the snippet
+  appears more than once, or set "replace_all": true to change every occurrence. Edits
+  apply in order, so a later one may target text an earlier one just introduced.
 - read_file prints line numbers for reference ONLY. They are not in the file — never
   include them in "old_string".
 - When something doesn't work, investigate before rewriting: read the file, search for the
@@ -358,8 +414,15 @@ Rules for tool blocks:
   diagnostics, or mcp_call block ENDS your message: say one short line, emit that single block, and
   stop. The app runs it and reports back, and only THEN do you continue. Anything you write after an
   action block is discarded unseen — so never stack a second file, a summary, or "next I'll…" behind it.
-  (Read-only blocks are the sole exception: several read_file / list_files / search_files /
-  find_files in one message is fine, since they only gather context before you act.)
+  (Read-only blocks are the sole exception, and for them the opposite rule applies: put ALL the
+  read_file / list_files / search_files / find_files you need in the SAME message — one gathering
+  step — instead of one file per step. See GATHERING above.)
+- ALWAYS include "purpose" on a write_file or edit_file block: one short phrase for what
+  that file is FOR ("the login endpoint the dashboard calls", "shared Button used by every
+  page"), not what you did to it ("created a file"). It is shown to the user next to the
+  file, so they can tell why each file exists long after the conversation has scrolled past.
+  On a read-only block "purpose" is optional (a note for you) — the user only sees
+  "Reading <filename>".
 - To create or change several files, emit them one per message across several steps — file,
   result, next file — never many at once.
 - One JSON object per block.
@@ -381,9 +444,10 @@ CRITICAL — how to deliver code (this is the rule models most often break):
 - If you intend for a file to exist, emit a write_file block for it — one block per file.
   Whenever you catch yourself about to open a plain code fence to "show" a file, stop and
   emit a write_file block instead.
-- For a multi-file project, build it ONE FILE AT A TIME: say briefly what this file is, emit
-  the single write_file block for it, and after the app reports it applied, move to the next
-  file. Do not dump the whole project in one message — that is the opposite of what's wanted.
+- For a multi-file project, build it ONE FILE AT A TIME: say briefly what this file is and
+  what it is for, emit the single write_file block for it, and after the app reports it
+  applied, move to the next file. Do not dump the whole project in one message — that is the
+  opposite of what's wanted.
   This think → act → think rhythm, one file per step, is expected and required.
 - Reserve plain Markdown fences for tiny inline illustration only (a shell one-liner or a
   1–2 line snippet) that is NOT meant to become a file.
@@ -417,6 +481,10 @@ VERIFY IN THE PREVIEW — don't just claim it works, SEE that it works:
 { "tool": "preview_inspect", "action": "inspect", "selector": ".cta", "styles": ["color", "background-color"] }
 \`\`\`
 
+\`\`\`sylor-tool
+{ "tool": "preview_inspect", "action": "eval", "expression": "document.querySelectorAll('.todo').length" }
+\`\`\`
+
 - The actions: "screenshot" (a rendered picture of the page — you SEE it), "snapshot" (the
   page's text + structure), "inspect" (computed CSS for a "selector" — the most reliable way
   to verify a color/font/spacing, better than eyeballing a screenshot), "console_logs"
@@ -424,12 +492,26 @@ VERIFY IN THE PREVIEW — don't just claim it works, SEE that it works:
   requests; add "filter": "failed" for only failures), "click" (click a "selector"), "fill"
   ("selector" + "value" to type into an input), and "resize" ("preset": "mobile"/"tablet"/
   "desktop", or "width"/"height", to test responsive layout).
+- Three more give you the rest of a real browser:
+  - "eval" runs an "expression" INSIDE the page and returns its value — the way to do anything
+    the fixed actions don't cover: hover or key events
+    (\`el.dispatchEvent(new MouseEvent('mouseover', {bubbles:true}))\`), scrolling
+    (\`window.scrollTo(0, 500)\`), reading app state (\`localStorage.getItem('theme')\`), or
+    calling a function the page exposes. Objects, arrays and elements come back readable. Use
+    an expression; for several steps, wrap them in an IIFE that RETURNS the value.
+  - "navigate" points the preview at another page of the app — \`{"action": "navigate", "url":
+    "/about"}\` for a route, or no "url" at all to reload. Localhost only: it is the user's own
+    app, and the real web is the browse tool's job.
+  - "server_logs" reads the DEV SERVER's own output (add "level": "error" for just the
+    failures). This is where a compile error lives — the one thing the page itself cannot tell
+    you. Reach for it FIRST when the preview is blank, stale, or won't load: the guest console
+    is empty in exactly that case because nothing was ever served.
 - After a visible change, prefer "inspect" for exact style values and "console_logs"
   ("level": "error") to catch runtime errors, then a "screenshot" to confirm the look. These
   only observe/drive the user's OWN local preview — they change no files and reach no network,
   so they run immediately without asking.
 - SAFETY: "fill" refuses password / token / card / secret-looking fields. Never try to type a
-  credential into the preview.
+  credential into the preview, and never use "eval" to read one out of a page.
 
 CHECK YOUR WORK WITH THE PROJECT'S OWN CHECKERS (diagnostics):
 - \`diagnostics\` runs the checkers the project already has — TypeScript (\`tsc --noEmit\`) and
@@ -462,6 +544,9 @@ HOW YOU COMMUNICATE — narrate the WORK, never the THINKING:
   and what's next: "Config's in — wiring the router now." One or two sentences, present
   tense, name the file. Then the block. The user is watching a progress feed, not reading
   an essay.
+- The gathering step is the one exception to "one short line": once the files come back, the
+  user gets a real paragraph — what you read, what is wrong and where, and the fix in order
+  (see GATHERING). After that, back to one line per step.
 - Narrate FACTS: what you are about to do, what you just found, what changed. Never
   narrate DELIBERATION: how you are deciding, options you are weighing, a mind you just
   changed. The same step, done right and done wrong:
@@ -608,22 +693,6 @@ function intentDirective(kind: IntentKind): string {
 }
 
 /**
- * A directive appended to the system prompt when the composer's "Plan first"
- * toggle is on and the turn is an edit. Sylor writes a `plan.md` capturing the
- * whole plan and stops, so the user can review before any code is written.
- */
-function planDirective(planFirst: boolean, kind: IntentKind): string {
-  if (!planFirst || kind !== 'edit') return ''
-  return (
-    '\n\nPLAN-FIRST MODE is on. Before making ANY other change, write a file named `plan.md` ' +
-    'at the project root containing: the goal in one line, the files you will create or modify, ' +
-    'and the work as a numbered, ordered checklist. Emit ONLY the write_file tool block for ' +
-    '`plan.md` this turn — do not edit any other file or run any command yet. End by telling the ' +
-    'user to review plan.md and reply to proceed.'
-  )
-}
-
-/**
  * A directive telling the model which shell `run_command` blocks execute in, so
  * the commands it proposes are valid for the host. On Windows the runner spawns
  * Windows PowerShell 5.1, which rejects `&&`/`||`; elsewhere it's a POSIX shell.
@@ -734,6 +803,82 @@ function spawnDirective(): string {
 }
 
 /**
+ * The lead-only directive teaching the `update_todos` block — a flat, visible
+ * checklist the model keeps for the user (Claude-Code's TodoWrite). It is NOT the
+ * orchestrator's phase plan: it's the lead's own short list of concrete steps, so
+ * even a simple turn can show "where we are". Handled outside executeTool (no side
+ * effect, no approval) and taught to the lead only, so a subagent never clobbers
+ * the lead's list. Skipped for one-step changes — ceremony must be earned.
+ */
+function todosDirective(): string {
+  return (
+    '\n\n## Keeping a task checklist (for multi-step work)\n' +
+    'When a task has more than a couple of steps, keep a short, visible checklist so the user sees ' +
+    'the plan and how far along you are. Write or update it with:\n\n' +
+    '```sylor-tool\n{ "tool": "update_todos", "todos": [\n' +
+    '  { "text": "Add the /logout route", "status": "in_progress" },\n' +
+    '  { "text": "Wire the header button to it", "status": "pending" },\n' +
+    '  { "text": "Add a test for logout", "status": "pending" }\n' +
+    '] }\n```\n\n' +
+    'Rules: always send the WHOLE list (it replaces the previous one). Keep exactly ONE item ' +
+    '"in_progress" as you work; flip it to "completed" the moment it is done; add items if the work ' +
+    'grows. Keep it to a handful of concrete steps — not sub-tasks — and skip it entirely for a ' +
+    'one-step change. The checklist is your plan, not a substitute for doing the work: a list on its ' +
+    'own is not progress, so always follow it with a real action (a tool block) in the same or the ' +
+    'next message.'
+  )
+}
+
+/**
+ * The lead-only directive teaching the `ask_user` block — a blocking clarifying
+ * question (Claude-Code's AskUserQuestion). Unlike Sylor's usual "assume the most
+ * reasonable default and note it", this HALTS the turn until the user answers, so
+ * it is reserved for genuine forks the answer changes: a real ambiguity in the
+ * request, or a choice between approaches with real trade-offs. The turn does not
+ * continue — no files are written, no commands run — until the answer comes back.
+ */
+function askDirective(): string {
+  return (
+    '\n\n## Asking the user a question (only when you are genuinely blocked)\n' +
+    'Your default is to pick the most reasonable option and say so, then keep moving — do NOT ask ' +
+    'about things you can decide yourself or verify in the code. But when the request is genuinely ' +
+    'ambiguous, or you are at a fork between approaches with real trade-offs and the wrong guess would ' +
+    'waste real work, ask ONE focused question and wait for the answer:\n\n' +
+    '```sylor-tool\n{ "tool": "ask_user", "question": "Which auth should the login page use?", ' +
+    '"header": "Auth method", "options": ["Email + password", "Google sign-in", "Both"] }\n```\n\n' +
+    'Rules: ask only when blocked, one question at a time, and keep `options` to a few concrete ' +
+    'choices (the user can always type their own answer instead, so options are suggestions, not a ' +
+    'closed set). `header` is a short topic label. After you emit the block, STOP and wait — the run ' +
+    'pauses until the user answers, and their answer arrives as the next turn for you to act on.'
+  )
+}
+
+/**
+ * The directive teaching the `flag_followup` block — how to report an out-of-scope
+ * issue WITHOUT doing it (Claude-Desktop's `spawn_task`). This closes the gap where
+ * an agent has exactly two bad options on spotting an unrelated problem: fix it and
+ * bloat the change, or say nothing and lose the finding. Taught to subagents too —
+ * a reviewer reading the whole diff is precisely who notices the loose ends.
+ */
+function followupDirective(): string {
+  return (
+    '\n\n## Flagging something out of scope (instead of fixing it)\n' +
+    'While working you will notice real problems that are NOT what you were asked to do — dead code, ' +
+    'a stale doc, a missing test, a TODO that turned out to be true, a security smell. Do not widen ' +
+    'your change to fix them, and do not stay silent about them. Flag each one:\n\n' +
+    '```sylor-tool\n{ "tool": "flag_followup", "title": "Fix the stale README badge", ' +
+    '"note": "It points at the old CI workflow name, so it always renders as unknown.", ' +
+    '"files": ["README.md"] }\n```\n\n' +
+    'Rules: the `title` must stand on its own as a task someone could pick up cold — imperative, ' +
+    'specific, no "this"/"that" referring to the current conversation. Flag only what you actually ' +
+    'saw in the code, only when fixing it would bloat the work you were asked to do, and at most a ' +
+    'couple per turn: a trivial fix you can make inline is not a follow-up, and neither is a vague ' +
+    'code smell or a hunch you have not verified. Flagging is never a substitute for doing your own ' +
+    'task — record it and carry straight on with the work.'
+  )
+}
+
+/**
  * The role-specific operating instruction seeding a subagent's system prompt
  * (requirement B). Each subagent is a focused specialist: it has the gated tool
  * protocol (write_file / run_command / mcp_call / use_skill) — narrowed to the
@@ -749,7 +894,19 @@ function roleDirectiveFor(role: Exclude<AgentRole, 'lead'>): string {
 
 /** A pending tool decision the engine is blocked on, keyed by toolId. */
 interface PendingDecision {
-  resolve: (decision: ToolDecision) => void
+  resolve: (decision: ToolDecision, detail?: ToolDecisionDetail) => void
+  /**
+   * Which agent is parked on this decision (absent = the lead). Cancelling ONE
+   * subagent has to unblock exactly its own waiting approvals: leave them and the
+   * agent never notices it was stopped, resolve them all and a sibling lane loses
+   * an approval the user never answered.
+   */
+  agentId?: string
+}
+
+/** A pending clarifying question the engine is blocked on, keyed by questionId. */
+interface PendingQuestionSlot {
+  resolve: (answer: string) => void
 }
 
 /** Tracks a running workflow so it can be cancelled and answered. */
@@ -757,6 +914,13 @@ interface RunHandle {
   controller: AbortController
   /** Tool requests awaiting a renderer decision, keyed by toolId. */
   pending: Map<string, PendingDecision>
+  /**
+   * Clarifying questions (the `ask_user` tool) awaiting a renderer answer, keyed by
+   * questionId. Mirrors {@link pending}: the loop blocks on the promise, the renderer
+   * unblocks it with the user's answer, and a cancel resolves every slot so a run
+   * waiting on an unanswered question can still tear down.
+   */
+  pendingQuestions: Map<string, PendingQuestionSlot>
   /**
    * In-flight background subagents (spawned with `background: true`). The lead
    * keeps working while these run; each one's report is drained into a later
@@ -767,13 +931,51 @@ interface RunHandle {
   backgroundTasks: Promise<void>[]
   /**
    * Per-run read-dedup cache (Problem 1). Maps a `read_file` window key (root +
-   * path + line range, see `readCache.ts`) to the file's `size:mtime` stamp when
-   * it was served, so a second identical read of a file unchanged since is
-   * answered from a short note instead of a fresh disk hit AND a second full-content
-   * copy in the model's context. Evicted on a write to that path; cleared after any
-   * command (which could touch arbitrary files).
+   * path + line range, see `readCache.ts`) to the file's `size:mtime` stamp when it
+   * was served plus whether that read reached the end of the file, so a second read
+   * of a file unchanged since is answered from a short note instead of a fresh disk
+   * hit AND a second full-content copy in the model's context. Because
+   * {@link planReadWindow} makes the first read of any path whole, the whole-file
+   * entry also answers every later WINDOW of that path. Evicted on a write to that
+   * path; cleared after any command (which could touch arbitrary files).
    */
-  readCache: Map<string, string>
+  readCache: Map<string, ReadCacheEntry>
+  /**
+   * Standing approvals granted from the permission bar with "Always" — keys from
+   * {@link standingApprovalKey}. Shared by the lead and every subagent (they all
+   * share this handle), which is the point: a 9-phase build asks once about file
+   * edits instead of once per file. Run-scoped only — nothing here is persisted,
+   * so the next turn starts from the user's configured mode again.
+   */
+  standingApprovals: Set<string>
+  /**
+   * Tool ids the user explicitly REJECTED at the permission bar. A refusal is a
+   * decision to respect, not a technical failure: without this, a rejected write
+   * lands in `lastFailures` exactly like a write that threw, and the
+   * retry-on-failure nudge then pushes the model to re-attempt the very thing the
+   * user just declined. Recording the id here lets the loop skip it. Run-scoped;
+   * ids are globally unique (salted counter) so entries never collide.
+   */
+  refused: Set<string>
+  /**
+   * Per-subagent abort controllers, keyed by agentId. Each is chained to the run's
+   * own controller (cancelling the run cancels every agent), but not the other way
+   * round — which is the entire point: the user can stop one lane that has gone
+   * wrong and let the rest of the turn finish. The lead has no entry here; it lives
+   * and dies with the run.
+   */
+  agents: Map<string, AbortController>
+}
+
+/**
+ * The abort signal that governs `agentId` — its own if it is a subagent, otherwise
+ * the run's. Every abort check inside the agent loop and the tool gate goes through
+ * here, so "stop this one agent" and "stop the run" are the same mechanism at two
+ * scopes instead of two code paths that can disagree.
+ */
+function signalFor(handle: RunHandle, agentId?: string): AbortSignal {
+  const own = agentId ? handle.agents.get(agentId) : undefined
+  return own ? own.signal : handle.controller.signal
 }
 
 const activeRuns = new Map<string, RunHandle>()
@@ -855,7 +1057,7 @@ const RAW_CODE_NUDGE =
   'STOP. You wrote file contents as plain Markdown code blocks, so NOTHING was created — the ' +
   'user cannot use code pasted into chat. For EVERY file you just showed, emit a separate ' +
   'write_file sylor-tool block now:\n\n' +
-  '```sylor-tool\n{ "tool": "write_file", "path": "relative/path.ext", "content": "<the full file>" }\n```\n\n' +
+  '```sylor-tool\n{ "tool": "write_file", "path": "relative/path.ext", "content": "<the full file>", "purpose": "<what it is for>" }\n```\n\n' +
   'Use the complete contents you already wrote. Emit only the write_file block(s) — do not ' +
   're-explain. If there are many files, stage the first few now; you will be asked to continue.'
 
@@ -895,7 +1097,7 @@ const START_BUILD_NUDGE =
   'user is left with an empty result. Do not stop at a description or a promise like "I\'ll ' +
   'create…". Right now, emit the write_file sylor-tool block(s) that actually create the first ' +
   'file(s):\n\n' +
-  '```sylor-tool\n{ "tool": "write_file", "path": "relative/path.ext", "content": "<the full file>" }\n```\n\n' +
+  '```sylor-tool\n{ "tool": "write_file", "path": "relative/path.ext", "content": "<the full file>", "purpose": "<what it is for>" }\n```\n\n' +
   'Start with the most important file and keep going in small steps. Build the thing — do not just ' +
   'talk about it.'
 
@@ -972,6 +1174,21 @@ const TOOL_ID_SALT = Date.now().toString(36)
 let toolCounter = 0
 const nextToolId = (): string => `tool-${TOOL_ID_SALT}-${++toolCounter}`
 
+/**
+ * Ids for clarifying questions (the `ask_user` tool). Transient — never persisted,
+ * unlike tool ops — but salted the same way so a renderer keying its pending-question
+ * UI on them can't collide two questions from different launches.
+ */
+let questionCounter = 0
+const nextQuestionId = (): string => `q-${TOOL_ID_SALT}-${++questionCounter}`
+
+/**
+ * Ids for flagged follow-ups. Transient like question ids — the durable record is
+ * the `FOLLOWUPS.md` entry, so this only has to key a chip and its dismissal.
+ */
+let followupCounter = 0
+const nextFollowupId = (): string => `fu-${TOOL_ID_SALT}-${++followupCounter}`
+
 /** Monotonic counter for subagent ids (unique within a process run). */
 let agentCounter = 0
 const nextAgentId = (): string => `agent-${++agentCounter}`
@@ -1005,8 +1222,12 @@ export async function runWorkflow(
   const handle: RunHandle = {
     controller,
     pending: new Map(),
+    pendingQuestions: new Map(),
     backgroundTasks: [],
-    readCache: new Map()
+    readCache: new Map(),
+    standingApprovals: new Set(),
+    refused: new Set(),
+    agents: new Map()
   }
   activeRuns.set(runId, handle)
 
@@ -1073,7 +1294,6 @@ export async function runWorkflow(
         outbound,
         maxSteps: MAX_STEPS,
         intentKind: 'question',
-        planFirstStop: false,
         allowSpawn: false,
         runId,
         permissionMode,
@@ -1102,7 +1322,7 @@ export async function runWorkflow(
 
     // 1. Understand the request (lightweight intent parse).
     emit({ type: 'status', runId, stage: 'understanding', message: 'Analyzing your request…' })
-    const intent = await classifyIntent(lastUser, settings)
+    const intent = await classifyIntent(lastUser, settings, controller.signal)
     if (controller.signal.aborted) return
     emit({ type: 'intent', runId, intent })
 
@@ -1148,15 +1368,12 @@ export async function runWorkflow(
     let overview = ''
     if (intent.needsContext) {
       emit({ type: 'status', runId, stage: 'scanning', message: 'Scanning the project structure…' })
-      const files = contextManager.listFiles()
       if (controller.signal.aborted) return
 
-      emit({
-        type: 'status',
-        runId,
-        stage: 'reading',
-        message: files.length > 0 ? `Reading ${describeFiles(files)}` : 'Reading files for context…'
-      })
+      // A bulk internal scan of many files at once — there is no single "current file"
+      // to name, and a `(12 files)` count is exactly the noise the reading status is
+      // meant to drop, so this stays a plain neutral line.
+      emit({ type: 'status', runId, stage: 'reading', message: 'Reading the project for context…' })
       overview = contextManager.buildOverview()
       if (controller.signal.aborted) return
     }
@@ -1190,19 +1407,28 @@ export async function runWorkflow(
       skillsRegistry.getSkills(contextManager.getRoot())
     ).filter((s) => isSkillEnabled(s.name, s.defaultOn ?? true))
 
+    // How big is this turn? The MODEL decides (see {@link classifyComplexity}),
+    // once, here — and the same verdict is handed to the orchestrator below, so a
+    // turn is never sized twice and the effort tier can never disagree with the
+    // roadmap it is thinking for. Only a build (edit intent) is sized at all;
+    // chat and questions get no round-trip.
+    const turnComplexity =
+      intent.kind === 'edit'
+        ? await classifyComplexity(lastUser, settings, controller.signal, { overview })
+        : null
+    if (controller.signal.aborted) return
+
     // Project creation must not be starved of thinking budget. When the turn is a
-    // build (edit intent) that the cheap heuristic sizes as `complex` — "from
-    // scratch", broadly-scoped, multi-domain, or several deliverables — force the
-    // `max` tier regardless of the composer setting. That lifts both levers at
-    // once: extended-thinking budget (via effortDirective + the gateway) and the
-    // output cap (via completionOptions → MAX_OUTPUT_TOKENS), so a whole scaffold
-    // reasons hard and generates to completion instead of being cut short. Smaller
-    // turns keep the requested effort so everyday edits stay fast.
+    // build the model sized as `complex` — a whole product, or a change across the
+    // codebase — force the `max` tier regardless of the composer setting. That
+    // lifts both levers at once: extended-thinking budget (via effortDirective +
+    // the gateway) and the output cap (via completionOptions → MAX_OUTPUT_TOKENS),
+    // so a whole scaffold reasons hard and generates to completion instead of
+    // being cut short. Smaller turns keep the requested effort so everyday edits
+    // stay fast.
     const requestedEffort = effort ?? 'medium'
     const effectiveEffort: ReasoningEffort =
-      intent.kind === 'edit' && classifyComplexityHeuristic(lastUser) === 'complex'
-        ? 'max'
-        : requestedEffort
+      turnComplexity === 'complex' ? 'max' : requestedEffort
 
     const outbound = buildMessages(
       messages,
@@ -1210,15 +1436,29 @@ export async function runWorkflow(
       projectPreamble,
       effectiveEffort,
       intent.kind,
-      planFirst ?? false,
       mcpTools,
       enabledSkills
     )
 
-    // Plan-first only writes plan.md and yields to the user, so it must run a
-    // single pass and never loop back for more work.
-    const planFirstStop = (planFirst ?? false) && intent.kind === 'edit'
-    const maxSteps = planFirstStop ? 1 : MAX_STEPS
+    // The context meter's opening reading (§Phase 4), taken once the turn's array is
+    // assembled and before anything is appended to it. The agent loop re-measures at
+    // every step, but a turn that delegates all of its work never enters that loop —
+    // the specialists run their own private histories, and those are deliberately not
+    // reported — so without this the meter would sit frozen through exactly the
+    // longest turns. `outbound.length` is the pinned prologue: nothing has grown yet.
+    emit({
+      type: 'context',
+      runId,
+      usage: measureContext(outbound, outbound.length, settings.modelId)
+    })
+
+    // "Plan first" (#2) is an APPROVAL CHECKPOINT, not a separate mode: the turn
+    // runs the ordinary orchestrated flow, and the orchestrator halts after the
+    // plan — before a single file is touched — for the user's go-ahead. Approving
+    // builds it in the SAME turn; rejecting stops the run having written only the
+    // plan. Only an edit turn has a plan worth approving.
+    const planApprovalGate = (planFirst ?? false) && intent.kind === 'edit'
+    const maxSteps = MAX_STEPS
 
     // Everything a delegated subagent needs to be framed exactly as the lead was
     // (requirement B): the same project overview, preamble, effort, MCP tools, and
@@ -1245,7 +1485,6 @@ export async function runWorkflow(
       outbound,
       maxSteps,
       intentKind: intent.kind,
-      planFirstStop,
       allowSpawn: true,
       runId,
       permissionMode,
@@ -1268,20 +1507,49 @@ export async function runWorkflow(
     // multi-domain request fans out across scoped specialists.
     //
     // Deliberately NOT orchestrated: chat/question intents (nothing to build, so
-    // planning and review would be pure overhead) and plan-first turns (the user
-    // explicitly asked for a plan and a stop, which is its own gate).
-    if (intent.kind === 'edit' && !planFirstStop) {
-      // One non-streaming completion, paced + retried like every other model call.
-      // Used for both the review verdict and document authoring; safe to replay
-      // verbatim because nothing it produces has been shown to the user yet.
-      const complete = async (msgs: ChatMessage[], settled: string): Promise<string> => {
+    // planning and review would be pure overhead). "Plan first" turns DO run this
+    // gate — the plan they promise is the orchestrator's, and the halt they promise
+    // is its APPROVE stage (#2).
+    if (intent.kind === 'edit') {
+      // One internal completion, paced + retried like every other model call.
+      // Used for document authoring (audit, spec, phase plan) and the review
+      // verdict; safe to replay verbatim because nothing it produces has been
+      // shown to the user yet. Collected over the STREAMING transport (see
+      // {@link collectCompletion}), so a 26-section phase plan is bounded by
+      // silence rather than by total generation time — and the signal means a
+      // Stop kills the HTTP request instead of orphaning it.
+      //
+      // `working` is what the status row says while the call is in flight. These
+      // are the longest silent stretches of a staged turn (minutes, at high
+      // reasoning effort), and a row still reading `Phase 1 of 9` through one of
+      // them is indistinguishable from a hang — so the caller names the document
+      // and {@link writingProgress} counts what has actually arrived.
+      const complete = async (
+        msgs: ChatMessage[],
+        settled: string,
+        working?: string
+      ): Promise<string> => {
         const retry = retryReporter(runId, emit)
-        const text = await withRetry(
-          () => provider.getCompletion(settings.modelId, msgs, completionOptions(effort ?? 'medium')),
-          { signal: controller.signal, onRetry: retry.onRetry }
-        )
-        retry.clear(settled)
-        return text
+        const progress = working ? writingProgress({ runId, label: working, emit }) : null
+        try {
+          const text = await withRetry(
+            () =>
+              provider.getCompletion(
+                settings.modelId,
+                msgs,
+                completionOptions(effectiveEffort),
+                controller.signal,
+                progress?.onProgress
+              ),
+            { signal: controller.signal, onRetry: retry.onRetry }
+          )
+          retry.clear(settled)
+          return text
+        } finally {
+          // Before `retry.clear`'s own line would land, so the counter can't
+          // narrate over whatever the next stage puts on the row.
+          progress?.stop()
+        }
       }
       await pinToRunRoot(() =>
         runOrchestrator({
@@ -1289,22 +1557,60 @@ export async function runWorkflow(
           request: lastUser,
           overview,
           settings,
+          // Already decided, by the model, above. Passed down so the orchestrator
+          // does not re-ask and the two stages can't disagree.
+          complexity: turnComplexity ?? undefined,
           emit,
           signal: controller.signal,
           executeNode: (node, opts) => executeNode(node, opts, leadArgs),
           // plan.md goes through the same approval gate as any other write.
           writePlan: async (markdown) => {
             await executeTool(
-              { tool: 'write_file', path: activePlanPath(), content: markdown },
+              {
+                tool: 'write_file',
+                path: activePlanPath(),
+                content: markdown,
+                purpose: 'the plan for this phase — what gets built, in what order, and why'
+              },
               { runId, permissionMode, handle, emit, onTerminal }
             )
           },
           verify: () => verifyProject({ runId, permissionMode, handle, emit, onTerminal }),
-          judge: (msgs) => complete(msgs, 'Reviewing…'),
+          // #2 — the "Plan first" checkpoint. Supplied ONLY when the toggle is on, so
+          // an ordinary turn never pays a click. A plan is a proposed action like any
+          // other, so it is answered over the same tool-decision channel the
+          // permission bar already uses — no second answer-back path to keep in sync.
+          ...(planApprovalGate
+            ? {
+                approvePlan: async (proposal: PlanProposal): Promise<PlanDecision> => {
+                  const id = nextToolId()
+                  emit({
+                    type: 'plan-approval',
+                    runId,
+                    approval: {
+                      id,
+                      complexity: proposal.complexity,
+                      steps: proposal.steps,
+                      ...(proposal.wrotePlan ? { planPath: activePlanPath() } : {}),
+                      ...(proposal.phase ? { phase: proposal.phase } : {})
+                    }
+                  })
+                  const { decision } = await awaitDecision(handle, id)
+                  // Every non-approval is a stop: a cancel resolves pending decisions
+                  // with 'reject', and no standing grant can widen a one-off plan.
+                  return decision === 'approve' || decision === 'approve-always'
+                    ? 'approve'
+                    : 'reject'
+                }
+              }
+            : {}),
+          judge: (msgs) => complete(msgs, 'Reviewing…', 'Reviewing the work…'),
           // Staged execution (§12–§27): the run becomes one phase of a roadmap that
           // persists in the project's own agent-memory folder.
           memory: projectMemoryPort(),
-          scribe: (msgs) => complete(msgs, 'Writing the plan…'),
+          // Each document names itself on the status row while it is being written
+          // (the label comes from the stage that asked for it).
+          scribe: (msgs, label) => complete(msgs, 'Writing the plan…', label ?? 'Writing…'),
           // Named in the plan's verification checklist so the phase's definition of
           // done is the project's real checks, not a generic wish.
           verifyCommands: detectVerifyCommands(),
@@ -1395,7 +1701,6 @@ interface AgentLoopArgs {
   outbound: ChatMessage[]
   maxSteps: number
   intentKind: IntentKind
-  planFirstStop: boolean
   /** Whether spawn_agent blocks are honored — true for the lead only. */
   allowSpawn: boolean
   runId: string
@@ -1433,6 +1738,13 @@ interface AgentLoopArgs {
  * on the single evolving activity line (not as prose in the reply, which would
  * pollute the assistant turn and get persisted). `_…_` renders italic/muted; the
  * `retrying` marker lets the renderer dim it further.
+ *
+ * The wording follows the failure kind, because the two mean different things to
+ * someone watching. A rejection ("Request failed") really is worth waiting out —
+ * a quota rolls over. A deadline ("no response in time") is not the same story:
+ * the request was accepted and simply took too long, we're giving it one quick
+ * second chance, and saying "attempt 2/10" there would promise eight more tries
+ * that will never happen.
  */
 function emitRetryNotice(
   notice: RetryNotice,
@@ -1440,12 +1752,16 @@ function emitRetryNotice(
   emit: EventSink,
   agentId?: string
 ): void {
-  const seconds = Math.round(notice.delayMs / 1000)
+  const seconds = Math.max(1, Math.round(notice.delayMs / 1000))
+  const what =
+    notice.kind === 'timeout'
+      ? `No response in time (${notice.reason})`
+      : `Request failed (${notice.reason})`
   emit({
     type: 'status',
     runId,
     stage: 'generating',
-    message: `Request failed (${notice.reason}) — retrying in ${seconds}s · attempt ${notice.attempt + 1}/${notice.max}`,
+    message: `${what} — retrying in ${seconds}s · attempt ${notice.attempt + 1}/${notice.max}`,
     ...(agentId ? { agentId } : {}),
     retrying: true
   })
@@ -1513,10 +1829,10 @@ function describeSubagentReport(
  */
 async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
   const {
+    agentId,
     outbound,
     maxSteps,
     intentKind,
-    planFirstStop,
     allowSpawn,
     runId,
     permissionMode,
@@ -1528,7 +1844,7 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     emit,
     onTerminal
   } = args
-  const signal = handle.controller.signal
+  const signal = signalFor(handle, agentId)
 
   // Skills whose instructions have already been injected this turn, so a repeated
   // `use_skill` doesn't re-inject the whole SKILL.md body each step.
@@ -1557,6 +1873,14 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
   // subagent). Gates the start-build nudge so a genuine closing summary — prose after real
   // work — is treated as a finish, not a stall.
   let built = false
+  // How many steps this turn consisted ONLY of looking (read/list/search/find and
+  // nothing else), and every path opened along the way. This is the count the user's
+  // 13-step report was really about: gathering is one pass, not a habit, so pass 1
+  // gets the "now tell me what you found" hand-off and every pass after gets told to
+  // stop. Paths accumulate across passes so the nudge can name what is already held
+  // in full. See `gather.ts`.
+  let gatherPasses = 0
+  const gathered: string[] = []
   // The agent's latest non-empty prose — its conclusion, returned as the report.
   let report = ''
   // Reports from BACKGROUND subagents that have finished since the last feedback
@@ -1602,12 +1926,9 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
    * one investigative act, and splitting it would just cost three round-trips.
    * `spawn_agent` only counts when this agent may actually spawn — otherwise the
    * block is filtered out later and stopping on it would end the step having done
-   * nothing at all. Plan-first is exempt too: it is contractually a single pass that
-   * writes plan.md and breaks, so there is nothing to interleave and cutting its
-   * closing summary would only lose the explanation the user asked for.
+   * nothing at all.
    */
   const stopAfter = (tool: ParsedTool): boolean => {
-    if (planFirstStop) return false
     return (
       tool.tool === 'write_file' ||
       tool.tool === 'edit_file' ||
@@ -1619,6 +1940,10 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
       tool.tool === 'preview_inspect' ||
       tool.tool === 'browse' ||
       tool.tool === 'diagnostics' ||
+      // A clarifying question ends the message too — the model asks, then waits; it
+      // must not narrate its way past the question into work that depends on the
+      // still-unknown answer.
+      tool.tool === 'ask_user' ||
       (allowSpawn && tool.tool === 'spawn_agent')
     )
   }
@@ -1648,6 +1973,15 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
         stage: 'generating',
         message: 'Condensing earlier steps to stay within context…'
       })
+    }
+
+    // Report the measured context load for the footer meter (§Phase 4), AFTER any
+    // fold above so the number is the one actually being sent. Lead only: a
+    // subagent runs its own private `outbound`, and letting those emit would make
+    // the meter flip between unrelated conversations. `stampEmit` deliberately
+    // doesn't attribute this variant either, so gating here is the whole guard.
+    if (agentId == null) {
+      emit({ type: 'context', runId, usage: measureContext(outbound, baseLen, modelId) })
     }
 
     // 4a. Stream one completion, demuxing prose from tool blocks. Accumulate the
@@ -1759,6 +2093,18 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
       recordUserProfile(userNotes, runId, emit)
     }
 
+    // 4b″. Record any `flag_followup` notices — out-of-scope work the agent spotted
+    // and deliberately did NOT do. Inline for the same reason as `remember`: it only
+    // appends to a markdown log the user reads, so gating it would be noise. Not
+    // lead-gated (unlike the checklist and the question): a subagent reviewing code
+    // is the likeliest one to notice a loose end, and its flag belongs to the run.
+    const followupNotices = parser.tools.filter(
+      (t): t is Extract<ParsedTool, { tool: 'flag_followup' }> => t.tool === 'flag_followup'
+    )
+    if (followupNotices.length > 0) {
+      recordFollowups(followupNotices, runId, emit)
+    }
+
     // 4c. Skill activations. `use_skill` loads a disk-authored SKILL.md's
     // instructions into the conversation so the next iteration follows them —
     // like the CLI's Skill tool. It's inline (no approval): reading a local
@@ -1801,18 +2147,45 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
         )
       : []
 
+    // 4d″. The lead's flat TODO checklist (Claude-Code's TodoWrite). Handled here,
+    // outside executeTool: it has no side effect and needs no approval — it only
+    // replaces the live checklist panel. Lead-only (`!agentId`): a subagent's list
+    // would clobber the lead's, and subagents are never taught the tool anyway. The
+    // list is replace-wholesale, so the LAST block in a message wins.
+    const todoRequests = !agentId
+      ? parser.tools.filter(
+          (t): t is Extract<ParsedTool, { tool: 'update_todos' }> => t.tool === 'update_todos'
+        )
+      : []
+    if (todoRequests.length > 0) {
+      emit({ type: 'todos', runId, todos: todoRequests[todoRequests.length - 1].todos })
+    }
+
+    // 4d‴. The lead's clarifying question (Claude-Code's AskUserQuestion). Like the
+    // checklist it is handled here, outside executeTool: it writes nothing and needs
+    // no approval — it BLOCKS the turn on a user answer instead. Lead-only (`!agentId`):
+    // subagents are never taught the tool and must not stop the whole run to ask. Only
+    // the FIRST question in a message is honoured; the model is told to ask one at a
+    // time, and it must not queue several. The actual emit + await happens in the
+    // feedback step (4h) so any reads in the same message still execute first.
+    const askRequests = !agentId
+      ? parser.tools.filter(
+          (t): t is Extract<ParsedTool, { tool: 'ask_user' }> => t.tool === 'ask_user'
+        )
+      : []
+
     // 4d′. Raw-code guard. On an edit turn where the model proposed no tools, no
     // subagent, and no skill, but pasted file contents as plain Markdown fences,
     // nothing was staged and the user got un-actionable code. Nudge it — up to
     // MAX_NUDGES times — to re-emit those files as write_file blocks, then loop so
     // it can. This is also what makes a "here's the code / now I'll stage it" turn
-    // read as think → act → think. Skipped in plan-first (single-pass) mode.
+    // read as think → act → think.
     if (
       sideEffects.length === 0 &&
       spawnRequests.length === 0 &&
       !skillInjection.text &&
+      askRequests.length === 0 &&
       intentKind === 'edit' &&
-      !planFirstStop &&
       nudges < MAX_NUDGES &&
       hasPlainCodeFence(proseText)
     ) {
@@ -1832,16 +2205,16 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     // tool, subagent, or skill — on an edit turn but `plan.md` still has unchecked
     // `- [ ]` items, the build isn't finished; nudge it to implement the next item
     // and loop, instead of stopping right after the plan. Gated to the lead, edit
-    // intent, non-plan-first, with continuation budget left and a step to spare —
-    // and only when open plan items actually remain, so a small task with no
-    // plan.md (or a fully-checked one) still stops here and pays nothing.
+    // intent, with continuation budget left and a step to spare — and only when open
+    // plan items actually remain, so a small task with no plan.md (or a fully-checked
+    // one) still stops here and pays nothing.
     if (
       sideEffects.length === 0 &&
       spawnRequests.length === 0 &&
       !skillInjection.text &&
+      askRequests.length === 0 &&
       allowSpawn &&
       intentKind === 'edit' &&
-      !planFirstStop &&
       continues < MAX_CONTINUES &&
       step < maxSteps - 1 &&
       /- \[ \]/.test(readPlanMd())
@@ -1858,14 +2231,13 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     // kind — and nothing has been built yet this turn, with no plan.md checklist to fall
     // back on (e.g. a one-shot "build me a signup page"). Push it to emit the first
     // write_file block(s) now, the way Claude Code just starts writing. Gated tightly:
-    // lead + edit intent + non-plan-first + zero parsed tools (so a remember- or
-    // skill-only turn is exempt) + real prose present + not a raw-code dump (that has its
-    // own nudge above) + budget and a step to spare.
+    // lead + edit intent + zero parsed tools (so a remember- or skill-only turn is
+    // exempt) + real prose present + not a raw-code dump (that has its own nudge
+    // above) + budget and a step to spare.
     if (
       parser.tools.length === 0 &&
       allowSpawn &&
       intentKind === 'edit' &&
-      !planFirstStop &&
       !built &&
       !hasPlainCodeFence(proseText) &&
       proseText.trim().length > 0 &&
@@ -1879,8 +2251,17 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
       continue
     }
 
-    // The turn wants to end here: nothing was proposed, delegated, or activated.
-    const ending = sideEffects.length === 0 && spawnRequests.length === 0 && !skillInjection.text
+    // The turn wants to end here: nothing was proposed, delegated, or activated. A
+    // bare checklist update is NOT an ending — the model declared its plan and must
+    // get another iteration to act on it (like a read-only turn), so it counts here.
+    // A pending clarifying question is likewise not an ending: the turn is paused on
+    // the user, not finished, and must resume with their answer.
+    const ending =
+      sideEffects.length === 0 &&
+      spawnRequests.length === 0 &&
+      !skillInjection.text &&
+      todoRequests.length === 0 &&
+      askRequests.length === 0
 
     // 4d‴′. Background-agent join (lead only). The turn wants to end, but a
     // subagent the lead fired off with `background: true` may still be running —
@@ -1890,7 +2271,7 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     // instead of stopping with the fan-out still pending. Bounded — subagents
     // can't spawn (depth 1) and each background task settles exactly once, so
     // after draining, `ending` is reached again with nothing left and falls
-    // through. Plan-first never spawns, so it is naturally exempt.
+    // through.
     //
     // The `allowSpawn` guard makes this genuinely lead-only: `handle.backgroundTasks`
     // is SHARED across the whole run, so an un-guarded subagent reaching its own
@@ -1924,8 +2305,7 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     // is still failing its static check — the model wrote something broken and is
     // about to tell the user it's done. Send it back to the file. Applies to every
     // agent and every intent, because a file that cannot parse is broken regardless
-    // of who wrote it or why; plan-first is exempt since it is contractually
-    // single-pass.
+    // of who wrote it or why.
     if (ending && pendingIssues.size > 0) {
       // Re-check each one against the file as it stands NOW. An issue can be
       // resolved by a later write to a different file — the missing stylesheet
@@ -1943,7 +2323,6 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     }
     if (
       ending &&
-      !planFirstStop &&
       pendingIssues.size > 0 &&
       fixNudges < MAX_FIX_NUDGES &&
       step < maxSteps - 1
@@ -1960,10 +2339,9 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     // MCP call failed — and the model is about to conclude without addressing it.
     // Send it back to make the thing work, or (only if it genuinely can't) to say so
     // honestly instead of implying success. Bounded by MAX_FAIL_NUDGES so a
-    // legitimately-red command can't loop forever; plan-first is exempt (single-pass).
+    // legitimately-red command can't loop forever.
     if (
       ending &&
-      !planFirstStop &&
       pendingIssues.size === 0 &&
       lastFailures.length > 0 &&
       failNudges < MAX_FAIL_NUDGES &&
@@ -2029,16 +2407,34 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     // its structured outcome so the results can be fed back to the model.
     const outcomes: Array<{ tool: ExecutableTool; result: ToolResult }> = []
     if (sideEffects.length > 0) {
-      const batch = describeBatch(sideEffects)
-      emit({ type: 'status', runId, stage: batch.stage, message: batch.message })
+      // A pure-look batch (only read/list/search/find) narrates itself file by file:
+      // one `Reading <filename>` before each read runs, each replacing the last on the
+      // single status line, so the user sees only the file being opened right now — no
+      // grep query, glob, purpose, or count. Any other batch keeps its one
+      // describeBatch line (Editing…, Verifying…, etc.), unchanged.
+      const readingBatch = sideEffects.every((t) => isGatherTool(t.tool))
+      if (!readingBatch) {
+        const batch = describeBatch(sideEffects)
+        emit({ type: 'status', runId, stage: batch.stage, message: batch.message })
+      }
       for (const tool of sideEffects) {
         if (signal.aborted) return report
+        if (readingBatch) {
+          emit({
+            type: 'status',
+            runId,
+            stage: 'reading',
+            message:
+              tool.tool === 'read_file' ? `Reading ${baseName(tool.path)}` : 'Reading the project…'
+          })
+        }
         const result = await executeTool(tool, {
           runId,
           permissionMode,
           handle,
           emit,
           onTerminal,
+          agentId,
           capabilities: args.capabilities,
           toolAllowlist: args.toolAllowlist,
           filesWritten: args.filesWritten
@@ -2059,6 +2455,25 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
       if (signal.aborted) return report
     }
 
+    // 4e″. Gathering-pass bookkeeping. A step whose whole output was read-only blocks
+    // changed nothing: it was a LOOK. One look is right and necessary; the defect this
+    // counts is the habit — thirteen inspection steps before a one-line CSS fix,
+    // because nothing ever declared the looking finished. So count the passes, and
+    // remember every file now held in full, for the hand-off pushed in 4h.
+    const gatherOnly =
+      outcomes.length > 0 &&
+      spawnRequests.length === 0 &&
+      outcomes.every(({ tool }) => isGatherTool(tool.tool))
+    if (gatherOnly) {
+      gatherPasses++
+      for (const { tool, result } of outcomes) {
+        // Only a SUCCESSFUL read is "held word for word" — the claim the nudges make.
+        // A listing or a search told the model where to look, not what the code says.
+        if (tool.tool !== 'read_file' || result.kind !== 'read' || !result.ok) continue
+        if (!gathered.includes(tool.path)) gathered.push(tool.path)
+      }
+    }
+
     // Record which ops ERRORED this step (a command that exited non-zero, a write
     // or MCP call that failed), so the retry-on-failure nudge can catch the model
     // trying to end on an unresolved failure. Recomputed every executed step —
@@ -2067,6 +2482,9 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     // not a broken deliverable, and the model already reacts to it from the fed-back
     // result without being forced to retry.
     lastFailures = outcomes.flatMap(({ tool, result }) => {
+      // A user-rejected op is a "no", not a failure — it must never feed the retry
+      // nudge, which would push the model to re-attempt what the user just declined.
+      if (handle.refused.has(result.id)) return []
       if (result.kind === 'write_file' && !result.ok) {
         const path = tool.tool === 'write_file' || tool.tool === 'edit_file' ? tool.path : ''
         return [`write ${path} failed: ${result.error ?? 'unknown error'}`]
@@ -2121,9 +2539,6 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     }
     if (signal.aborted) return report
 
-    // 4f. Plan-first runs exactly once — never loop back after writing plan.md.
-    if (planFirstStop) break
-
     // 4g. Out of budget: tell the user and stop rather than silently truncating.
     if (step === maxSteps - 1) {
       emitProse(
@@ -2144,6 +2559,56 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
     // lead reacts to their reports mid-build rather than only at the very end.
     if (backgroundReports.length > 0) feedback.push(backgroundReports.splice(0).join('\n\n'))
     if (skillInjection.text) feedback.push(skillInjection.text)
+    // A checklist-only turn keeps the loop alive (it isn't an ending) but produced no
+    // result to feed back, so nudge the model onward — the list is a plan, not the work.
+    if (todoRequests.length > 0 && sideEffects.length === 0 && spawnRequests.length === 0) {
+      feedback.push(
+        'Task checklist updated. That is your plan, not progress — now take the next real step ' +
+          '(a tool block that does the work).'
+      )
+    }
+    // The gathering hand-off, riding the feedback turn that was being sent anyway.
+    // Pass 1 closes the pass and asks for the findings message — what was read, what
+    // is actually wrong and where, and the fix in order — which is the message the
+    // user wants to read before anything is touched. Every pass after that is the
+    // agent going back for "one more look" instead, and gets told to stop; uncapped
+    // on purpose (it costs no extra step, and the honest answer to a fifth round is a
+    // firmer version of the same instruction), with MAX_STEPS as the backstop.
+    if (gatherOnly) {
+      feedback.push(
+        gatherPasses === 1 ? findingsNudge(gathered) : stopGatheringNudge(gatherPasses, gathered)
+      )
+    }
+    // 4h′. A pending clarifying question (lead only). The model asked and stopped;
+    // now BLOCK the turn on the user's answer. Emit the question so the renderer
+    // shows the answer bar, await the reply, then fold the exchange into this same
+    // feedback turn so the next iteration acts on it. Only the first question is
+    // honoured (the model is told to ask one at a time). A cancel resolves the wait
+    // with an empty string and flips `signal.aborted`, so we bail without feeding a
+    // phantom answer back.
+    if (askRequests.length > 0) {
+      const ask = askRequests[0]
+      const questionId = nextQuestionId()
+      emit({
+        type: 'question',
+        runId,
+        question: {
+          id: questionId,
+          question: ask.question,
+          ...(ask.header ? { header: ask.header } : {}),
+          ...(ask.options ? { options: ask.options } : {})
+        }
+      })
+      emit({
+        type: 'status',
+        runId,
+        stage: 'generating',
+        message: 'Waiting for your answer…'
+      })
+      const answer = await awaitAnswer(handle, questionId)
+      if (signal.aborted) return report
+      feedback.push(`You asked: "${ask.question}"\n\nMy answer: ${answer}`)
+    }
     // An image `read_file` attaches its bytes to this fed-back turn so a
     // vision-capable model actually SEES the file — the text summary already
     // named it. A `preview_inspect` "screenshot" and a visual `browse` "read" ride
@@ -2220,13 +2685,21 @@ export function buildConversationRecap(messages: readonly ChatMessage[]): string
 
 /**
  * Trigger and window sizes for mid-run context compaction, in characters
- * (≈4 chars/token). Deliberately conservative so a small local model's window
- * isn't overrun before folding kicks in; a short turn never reaches the trigger,
- * so the common case is untouched. Tunable — a model-aware budget is the eventual
- * refinement, but a fixed floor already removes the unbounded-growth failure.
+ * (≈4 chars/token). A short turn never reaches the trigger, so the common case is
+ * untouched. Tunable — a model-aware budget is the eventual refinement, but a fixed
+ * floor already removes the unbounded-growth failure.
+ *
+ * Sized ABOVE one whole-file read, deliberately. `MAX_READ_CHARS` is 80k because
+ * reading a real source file in full is what stops the repeated-read loop
+ * (`workflow/gather.ts`); if the fold trigger sat below that, opening one big file
+ * would compact the conversation — and spend a summarisation model call — on every
+ * single step after it, which is both slower and lossier than the reads it was
+ * meant to pay for. 240k leaves room for the gathering pass (several whole files)
+ * plus the build that follows, and `RECENT_KEEP_CHARS` keeps the last ~90k — the
+ * files just read, and the edits made against them — verbatim past a fold.
  */
-const MAX_CONTEXT_CHARS = 48_000
-const RECENT_KEEP_CHARS = 18_000
+const MAX_CONTEXT_CHARS = 240_000
+const RECENT_KEEP_CHARS = 90_000
 /** Most file paths / commands listed in one compaction note before eliding. */
 const MAX_COMPACTION_ITEMS = 12
 /**
@@ -2386,6 +2859,45 @@ function planCompaction(
 }
 
 /**
+ * The context meter's numbers, measured off the array that is actually about to be
+ * sent (§Phase 4). Every field is counted here rather than in the renderer, because
+ * the renderer never sees two of the biggest consumers — the assembled system prompt
+ * and the tool output fed back between turns — and would have to guess at them.
+ *
+ * `foldSteps` comes from {@link planCompaction}, the same boundary the real fold
+ * uses, so "N earlier steps will be condensed next" is a fact rather than an
+ * estimate. `windowTokens` is omitted whenever the model's real window is unknown
+ * (see `shared/context-window.ts`): the meter then reports its own fold budget and
+ * says "unknown" for the model, instead of drawing a percentage of a guess.
+ */
+export function measureContext(
+  messages: ChatMessage[],
+  baseLen: number,
+  modelId: string,
+  budget = MAX_CONTEXT_CHARS,
+  recentBudget = RECENT_KEEP_CHARS
+): ContextUsage {
+  const sum = (list: ChatMessage[]): number => list.reduce((n, m) => n + m.content.length, 0)
+  const head = messages.slice(0, baseLen)
+  const appended = messages.slice(baseLen)
+  const systemChars = sum(head.filter((m) => m.role === 'system'))
+  // Anything appended that is not the model's own turn arrived as tool output: the
+  // engine feeds every result back as a user turn (see the step loop below).
+  const assistantChars = sum(appended.filter((m) => m.role === 'assistant'))
+  const windowTokens = contextWindowFor(modelId)
+  return {
+    chars: sum(messages),
+    budget,
+    systemChars,
+    historyChars: sum(head) - systemChars,
+    assistantChars,
+    toolChars: sum(appended) - assistantChars,
+    foldSteps: planCompaction(messages, baseLen, budget, recentBudget)?.folded.length ?? 0,
+    ...(windowTokens === undefined ? {} : { windowTokens })
+  }
+}
+
+/**
  * Mid-run context compaction (§17). Every step the agent loop appends the model's
  * turn (which can carry a whole file's contents) and a user feedback turn (tool
  * output), so across a long build `outbound` grows without bound and would
@@ -2468,7 +2980,8 @@ async function summarizeFoldedWithModel(
       { role: 'system', content: COMPACTION_SUMMARY_SYSTEM },
       { role: 'user', content: renderFoldedTranscript(folded) }
     ],
-    completionOptions('low')
+    completionOptions('low'),
+    signal
   )
 }
 
@@ -2513,6 +3026,17 @@ async function runSubagent(
   let worktree: WorktreeHandle | null = null
   let report = ''
   let ok = false
+  // This agent's own kill switch (requirement: cancel one subagent without killing
+  // the run). Chained downward only: the run aborting aborts this, but stopping this
+  // lane leaves the run and its siblings alone. Registered under the agentId so
+  // `cancelAgent` can find it, and removed in the `finally` so a lane that has
+  // already settled can't be "cancelled" afterwards.
+  const ctl = new AbortController()
+  const runSignal = parent.handle.controller.signal
+  const onRunAbort = (): void => ctl.abort()
+  if (runSignal.aborted) ctl.abort()
+  else runSignal.addEventListener('abort', onRunAbort, { once: true })
+  parent.handle.agents.set(agentId, ctl)
   try {
     // Worktree isolation (requirement: sub-agent power-up). When requested, carve a
     // private git worktree and run the WHOLE loop inside `runWithRoot(dir, …)` so
@@ -2521,7 +3045,7 @@ async function runSubagent(
     // colliding. `createWorktree` returns null (no git / not a repo / failure), in
     // which case we simply run in the shared root: isolation is best-effort.
     if (spawn.isolation === 'worktree') {
-      worktree = await createWorktree(agentId, parent.handle.controller.signal)
+      worktree = await createWorktree(agentId, ctl.signal)
     }
     const runLoop = (): Promise<string> =>
       runAgentLoop({
@@ -2531,18 +3055,19 @@ async function runSubagent(
         outbound,
         maxSteps: SUBAGENT_MAX_STEPS,
         intentKind: 'edit',
-        planFirstStop: false,
         allowSpawn: false,
         capabilities: resolveRole(role).capabilities,
         filesWritten: opts.filesWritten,
         emit: stampEmit(parent.emit, agentId)
       })
     report = worktree ? await contextManager.runWithRoot(worktree.dir, runLoop) : await runLoop()
-    ok = !parent.handle.controller.signal.aborted
+    ok = !ctl.signal.aborted
   } catch (err) {
     report = `Subagent error: ${toErrorMessage(err)}`
     ok = false
   } finally {
+    parent.handle.agents.delete(agentId)
+    runSignal.removeEventListener('abort', onRunAbort)
     // Always wind the worktree down — syncing the agent's changes back into the
     // project and removing the temp branch — even on abort or error, so work isn't
     // stranded and temp dirs don't accumulate. No signal: teardown must complete
@@ -2551,6 +3076,18 @@ async function runSubagent(
       const note = await finalizeWorktree(worktree)
       if (note) report = report ? `${report}\n\n${note}` : note
     }
+  }
+
+  // Stopped by hand while the run itself carries on: say that plainly, rather than
+  // letting a half-finished report read as a conclusion the lead can build on. Files
+  // it had already written stay where they are — claiming otherwise would be the lie,
+  // since nothing is rolled back here.
+  if (ctl.signal.aborted && !runSignal.aborted) {
+    const partial = report.trim()
+    report =
+      'Cancelled by you before it finished. Anything it had already written is still there.' +
+      (partial ? `\n\nHow far it got:\n${partial}` : '')
+    ok = false
   }
 
   // Bound the handoff: the orchestrator (and the nested-agent UI) only ever see a
@@ -2812,6 +3349,9 @@ function readPlanMd(): string {
  * conversation (so references survive a fresh context), the current `plan.md`,
  * the orchestrator's scoped shared-context digest, and finally the assigned task.
  * `spawnDirective` is deliberately omitted: subagents can't spawn (depth 1).
+ * `followupDirective` deliberately is NOT omitted: a specialist reading code it was
+ * not asked to change is the likeliest one to spot an out-of-scope loose end, and
+ * flagging one writes nothing it wasn't already allowed to write.
  */
 function buildSubagentSystem(
   role: Exclude<AgentRole, 'lead'>,
@@ -2829,6 +3369,7 @@ function buildSubagentSystem(
     mcpDirective(mcpTools) +
     skillsDirective(skills) +
     effortDirective(ctx.effort) +
+    followupDirective() +
     roleDirectiveFor(role)
   const userProfile = buildUserProfilePreamble(task)
   if (userProfile) system += `\n\n${userProfile}`
@@ -2871,6 +3412,12 @@ interface ExecContext {
   handle: RunHandle
   emit: EventSink
   onTerminal: TerminalSink
+  /**
+   * The subagent this op belongs to, if any. Two things key off it: which abort
+   * signal governs the op ({@link signalFor}), and which lane a pending approval
+   * belongs to when the user stops one agent. Absent = the lead / orchestrator.
+   */
+  agentId?: string
   /**
    * The acting role's capabilities. When present, a tool kind the role isn't
    * granted is refused before any approval is asked for. Absent = unrestricted
@@ -2979,6 +3526,71 @@ async function runLifecycleHooks(
   }
 }
 
+/** Cap on a `server_logs` reply — the tail is kept, since the failure is newest. */
+const MAX_SERVER_LOG_CHARS = 8_000
+
+/**
+ * Answer a `server_logs` preview action from the dev server's own output.
+ *
+ * Shaped like a renderer reply so the executor can use it interchangeably with a
+ * round-trip result. The two "no logs" cases are kept apart on purpose (the same
+ * honesty rule the browse reads follow): a static preview never had a server to
+ * print anything, which is a different fact from a server that ran and stayed
+ * quiet, and a filtered read that finds nothing must not read as "all clear" when
+ * the filter itself is what hid the lines.
+ */
+function readDevServerLogs(level: 'all' | 'error' | 'warn' | undefined): PreviewInspectResponse {
+  const wanted = level ?? 'all'
+  const { command, lines, total, watching } = devServerLogs(wanted)
+  const header = command ? `$ ${command}\n` : ''
+  if (!watching) {
+    return {
+      requestId: '',
+      ok: true,
+      output:
+        'No dev server has been started, so there is no server output to read. This preview is served statically — a compile error would come from a build command instead.',
+      truncated: false,
+      summary: 'no dev server'
+    }
+  }
+  if (lines.length === 0) {
+    const scope = wanted === 'error' ? 'errors' : wanted === 'warn' ? 'warnings or errors' : 'output'
+    const note =
+      total > 0 && wanted !== 'all'
+        ? ` ${total} other line${total === 1 ? '' : 's'} were logged — read them with level "all".`
+        : ''
+    return {
+      requestId: '',
+      ok: true,
+      output: `${header}The dev server has printed no ${scope}.${note}`,
+      truncated: false,
+      summary: `0 ${scope}`
+    }
+  }
+  const body = header + lines.join('\n')
+  const truncated = body.length > MAX_SERVER_LOG_CHARS
+  return {
+    requestId: '',
+    ok: true,
+    output: truncated ? `…(earlier output dropped)\n${body.slice(-MAX_SERVER_LOG_CHARS)}` : body,
+    truncated,
+    summary: `${lines.length} line${lines.length === 1 ? '' : 's'}${
+      wanted === 'all' ? '' : ` (${wanted})`
+    }`
+  }
+}
+
+/**
+ * Turns a proposal into the checkpoint's timeline label — what the user is going
+ * back to a point *before*. Deliberately names the specific file or command, since
+ * "Before step 4" tells nobody anything a week later.
+ */
+function checkpointLabel(proposal: ToolProposal): string {
+  if (proposal.kind === 'write_file') return `Before writing ${proposal.path}`
+  if (proposal.kind === 'run_command') return `Before running ${proposal.command.slice(0, 120)}`
+  return 'Before an edit'
+}
+
 /**
  * Turns a parsed tool op into a proposal, requests a decision (auto-approved or
  * user-driven per the permission mode), and — if approved — executes it,
@@ -2990,34 +3602,52 @@ async function runLifecycleHooks(
 async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<ToolResult | null> {
   const { runId, permissionMode, handle, emit, onTerminal } = ctx
   const id = nextToolId()
+  // Agent-scoped: cancelling one lane must stop that lane's ops, and only those.
+  const signal = signalFor(handle, ctx.agentId)
 
   // Build the proposal (resolving file diffs up front for write_file / edit_file).
   let proposal: ToolProposal
   try {
     if (tool.tool === 'write_file') {
       const { exists, oldContent, newContent } = proposeWrite(tool.path, tool.content)
-      proposal = { id, kind: 'write_file', path: tool.path, oldContent, newContent, exists }
+      proposal = {
+        id,
+        kind: 'write_file',
+        path: tool.path,
+        oldContent,
+        newContent,
+        exists,
+        ...(tool.purpose ? { purpose: tool.purpose } : {})
+      }
     } else if (tool.tool === 'edit_file') {
-      // A surgical edit becomes an ordinary write_file proposal: the exact-string
-      // replacement is resolved against the file's CURRENT contents here, so the
-      // user still reviews a diff, the permission gate is unchanged, and every
+      // A surgical edit becomes an ordinary write_file proposal: every replacement is
+      // resolved (in order) against the file's CURRENT contents here, so one block
+      // carrying several edits still yields ONE diff, ONE approval, and one action.
+      // The user reviews that diff, the permission gate is unchanged, and every
       // downstream consumer (diff stats, filesWritten, auto-preview) keeps working.
       // A miss or an ambiguous match throws and lands in the catch below.
-      const { oldContent, newContent } = applyEdit(
-        tool.path,
-        tool.oldString,
-        tool.newString,
-        tool.replaceAll
-      )
-      proposal = { id, kind: 'write_file', path: tool.path, oldContent, newContent, exists: true }
+      const { oldContent, newContent } = applyEdits(tool.path, tool.edits)
+      proposal = {
+        id,
+        kind: 'write_file',
+        path: tool.path,
+        oldContent,
+        newContent,
+        exists: true,
+        ...(tool.purpose ? { purpose: tool.purpose } : {})
+      }
     } else if (tool.tool === 'read_file') {
+      // The window the read ACTUALLY uses is not the one the model asked for: the
+      // first read of a path is always whole. A model cannot pick a useful line
+      // range before it has seen the file, so a guessed `offset`/`limit` buys a
+      // keyhole, a second read, and a distinct cache key that dedupes against
+      // nothing — the `lines 830–889 of 1769` loop. See `gather.ts`.
       proposal = {
         id,
         kind: 'read',
         op: 'read_file',
         path: tool.path,
-        offset: tool.offset,
-        limit: tool.limit
+        ...planReadWindow(hasCompleteRead(handle.readCache, tool.path), tool.offset)
       }
     } else if (tool.tool === 'list_files') {
       proposal = { id, kind: 'read', op: 'list_files', path: tool.path }
@@ -3089,7 +3719,9 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
         filter: tool.filter,
         preset: tool.preset,
         width: tool.width,
-        height: tool.height
+        height: tool.height,
+        expression: tool.expression,
+        url: tool.url
       }
     }
   } catch (err) {
@@ -3109,7 +3741,13 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
   let outcome: PermissionOutcome
   if (proposal.kind === 'browse') {
     const risk = proposal.risk ?? 'read'
-    const verdict = decideBrowse(risk, getSettings().browser, permissionMode)
+    const verdict = decideBrowse(
+      risk,
+      getSettings().browser,
+      permissionMode,
+      fullAccessEnabled(),
+      autoSendEnabled()
+    )
     if (verdict === 'block') {
       emit({ type: 'tool-request', runId, proposal, auto: false })
       const result = rejectedResult(
@@ -3124,7 +3762,16 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
     }
     outcome = verdict
   } else {
-    outcome = decideAuto(permissionMode, proposal.kind)
+    outcome = decideAuto(permissionMode, proposal.kind, fullAccessEnabled())
+    // A standing approval granted earlier in this run answers for this op, so a
+    // long build stops re-asking about the same class of work. The key is
+    // re-derived here rather than trusted from the renderer, so only what
+    // {@link standingApprovalKey} deems escalatable can ever be covered — and the
+    // browse branch above never reaches this, keeping the browser policy supreme.
+    if (outcome === 'ask') {
+      const standing = standingApprovalKey(proposal)
+      if (standing && handle.standingApprovals.has(standing)) outcome = 'auto'
+    }
   }
 
   // Mode gate (Cowork). A hard whitelist, checked before capabilities: Cowork is a
@@ -3157,15 +3804,69 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
     return result
   }
 
+  // Read-dedup (Problem 1), checked BEFORE the card is emitted. A repeat read of a
+  // file nothing has changed since is not work — it is the agent forgetting what it
+  // already has — so it must not look like work either: no `Read Navbar.tsx ·
+  // already read (unchanged)` row for the user to scroll past, no approval prompt,
+  // no hooks, no disk hit. The note still goes back to the MODEL as this call's
+  // result (via `summarizeResults`), which is what actually stops the loop.
+  //
+  // Because `planReadWindow` makes the first read of a path whole, the whole-file
+  // entry also answers a later window of the same path — the `lines 1–70 of 172`
+  // third read in the report that prompted this.
+  const cachedRead = servedFromReadCache(handle.readCache, proposal)
+  if (cachedRead) return cachedRead
+
   emit({ type: 'tool-request', runId, proposal, auto: outcome === 'auto' })
 
-  const decision = outcome === 'auto' ? 'approve' : await awaitDecision(handle, id)
-  if (handle.controller.signal.aborted) return null
+  const { decision, detail } =
+    outcome === 'auto'
+      ? { decision: 'approve' as ToolDecision, detail: undefined }
+      : await awaitDecision(handle, id, ctx.agentId)
+  if (signal.aborted) return null
+
+  // "Always" is an approval plus a standing grant for the rest of the run. Record
+  // it before acting, so an op proposed while this one was waiting is covered too —
+  // and record it in the conversation as well, because a grant quietly changes how
+  // the rest of the run behaves and the user should be able to see they gave it.
+  if (decision === 'approve-always') {
+    const standing = standingApprovalKey(proposal)
+    if (standing && !handle.standingApprovals.has(standing)) {
+      handle.standingApprovals.add(standing)
+      const note = standingApprovalNote(proposal)
+      if (note) emit({ type: 'delta', runId, text: `\n\n_${note}_\n\n` })
+    }
+  }
 
   if (decision === 'reject') {
-    const result = rejectedResult(proposal)
+    // A user "no" is a decision to respect, not a failure to retry: record the id so
+    // the retry-on-failure nudge skips it (§4d⁗′). The "Skipped by user" result still
+    // goes back to the model, so it can adjust or ask — just not be pushed to re-attempt
+    // the exact thing the user declined.
+    handle.refused.add(proposal.id)
+    // …and when they said WHY, that is the most useful sentence in the whole turn:
+    // "wrong folder" turns a dead end into a correction. Quoted and bounded, so it
+    // reads as the user's words and one pasted essay can't flood the context.
+    const why = detail?.reason?.trim()
+    const result = rejectedResult(
+      proposal,
+      why ? `Skipped by user — they said: “${capReason(why)}”` : undefined
+    )
     emit({ type: 'tool-result', runId, result })
     return result
+  }
+
+  // Edit-then-approve: the user fixed the file in the diff before it reached disk, so
+  // THEIR bytes are what gets written. Only a write_file can carry this (the renderer
+  // only offers it there, and the engine refuses to honor it anywhere else rather than
+  // trusting the payload), and the swap happens before the hooks below so a PreToolUse
+  // hook sees the content that is actually about to land.
+  let userEdited = false
+  if (proposal.kind === 'write_file' && detail?.editedContent != null) {
+    if (detail.editedContent !== proposal.newContent) {
+      proposal = { ...proposal, newContent: detail.editedContent }
+      userEdited = true
+    }
   }
 
   // PreToolUse hooks (Phase 4). A non-zero exit BLOCKS the tool — the final
@@ -3178,9 +3879,9 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
       hooks,
       'PreToolUse',
       { toolName: tool.tool, env: toolHookEnv('PreToolUse', tool) },
-      hookRunner(handle.controller.signal)
+      hookRunner(signal)
     )
-    if (handle.controller.signal.aborted) return null
+    if (signal.aborted) return null
     if (pre.blocked) {
       const result = rejectedResult(proposal, pre.reason ?? 'Blocked by a PreToolUse hook.')
       emit({ type: 'tool-result', runId, result })
@@ -3188,16 +3889,40 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
     }
   }
 
-  // Read-dedup (Problem 1): a repeat `read_file` of a file unchanged since we last
-  // served it this run is answered from a short note — no second disk read, no
-  // second full-content copy in the model's context. Any other op (a first read, a
-  // changed file, a write/command) falls through to `applyTool` and then updates
-  // the per-run cache + the persistent `.sylor` index. Everything below runs on
-  // `result` either way; the write-guarded blocks are naturally skipped for a
-  // cached read, and a PostToolUse hook still fires (matching a real read).
-  const cached = servedFromReadCache(handle.readCache, proposal)
-  const result = cached ?? (await applyTool(proposal, onTerminal, handle.controller.signal))
-  if (!cached) updateReadCache(handle.readCache, proposal, result)
+  // A restore point, taken BEFORE the bytes change (Phase 5) — after the approval and
+  // the PreToolUse gate, so nothing is recorded for an op that never happens.
+  //
+  // Only against the user's real project root: a worktree-isolated subagent already
+  // has git's own branch as its way back, and snapshotting a directory that is about
+  // to be torn down would leave the timeline pointing at nothing. `createCheckpoint`
+  // dedupes by tree, so a step that changed nothing adds no row and emits nothing;
+  // it also resolves null rather than throwing, so a project git can't reach cannot
+  // stop the write.
+  if (proposal.kind === 'write_file' || proposal.kind === 'run_command') {
+    const root = contextManager.getRoot()
+    if (root === contextManager.getProjectRoot()) {
+      // The no-git fallback can only copy files it is told about: everything this run
+      // has written so far, plus the one about to be overwritten.
+      const files = new Set(ctx.filesWritten ?? [])
+      if (proposal.kind === 'write_file') files.add(proposal.path)
+      const snapshot = await createCheckpoint(root, checkpointLabel(proposal), {
+        runId,
+        files: [...files],
+        signal
+      })
+      if (snapshot?.created) {
+        emit({ type: 'checkpoint', runId, checkpoint: snapshot.checkpoint })
+      }
+    }
+  }
+
+  // The op actually runs, and the per-run read cache + the persistent `.sylor` index
+  // record what it did: a read is remembered by window (with whether it reached the
+  // end of the file), a write evicts every cached window of that path, and a command
+  // clears the cache outright since it could have touched anything. The dedup
+  // short-circuit above is the only reader of that state.
+  const result = await applyTool(proposal, onTerminal, signal)
+  updateReadCache(handle.readCache, proposal, result)
   // Record what actually landed on disk, so the orchestrator can attribute files
   // to the task node that changed them (and decide whether to verify at all).
   if (
@@ -3217,32 +3942,52 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
   if (proposal.kind === 'write_file' && result.kind === 'write_file' && result.ok) {
     const issues = verifyWrittenFile(proposal.path, proposal.newContent)
     if (issues.length > 0) result.issues = issues.map((issue) => issue.message)
+    // Say so when the bytes on disk are the user's edit rather than the model's own
+    // text, so the next step works from what is really there instead of quietly
+    // diverging from it. `summarizeResults` puts this in front of the model.
+    if (userEdited) result.edited = true
   }
   // PostToolUse hooks (Phase 4): fired for side effects (a formatter, a notifier,
   // a log) after the op ran. They CANNOT block — the tool already happened — so
   // exit codes are ignored. Skipped on a cancelled run. Reuses the same config
   // read above so a mid-run settings edit can't split Pre/Post.
-  if (hooks?.PostToolUse?.length && !handle.controller.signal.aborted) {
+  if (hooks?.PostToolUse?.length && !signal.aborted) {
     const env = toolHookEnv('PostToolUse', tool)
     env.SYLOR_TOOL_OK = String('ok' in result ? result.ok !== false : true)
-    await runHooks(
-      hooks,
-      'PostToolUse',
-      { toolName: tool.tool, env },
-      hookRunner(handle.controller.signal)
-    )
+    await runHooks(hooks, 'PostToolUse', { toolName: tool.tool, env }, hookRunner(signal))
   }
   emit({ type: 'tool-result', runId, result })
   return result
 }
 
-/** Blocks until the renderer resolves the decision for `toolId` (or run aborts). */
-function awaitDecision(handle: RunHandle, toolId: string): Promise<ToolDecision> {
+/**
+ * Blocks until the renderer resolves the decision for `toolId` (or the run/agent
+ * aborts). Resolves with the verb AND whatever the user attached to it — the file
+ * they edited first, the reason they said no.
+ */
+function awaitDecision(
+  handle: RunHandle,
+  toolId: string,
+  agentId?: string
+): Promise<{ decision: ToolDecision; detail?: ToolDecisionDetail }> {
   return new Promise((resolve) => {
     handle.pending.set(toolId, {
-      resolve: (decision) => {
+      agentId,
+      resolve: (decision, detail) => {
         handle.pending.delete(toolId)
-        resolve(decision)
+        resolve({ decision, detail })
+      }
+    })
+  })
+}
+
+/** Blocks until the renderer answers `questionId` (or the run aborts/cancels). */
+function awaitAnswer(handle: RunHandle, questionId: string): Promise<string> {
+  return new Promise((resolve) => {
+    handle.pendingQuestions.set(questionId, {
+      resolve: (answer) => {
+        handle.pendingQuestions.delete(questionId)
+        resolve(answer)
       }
     })
   })
@@ -3316,7 +4061,9 @@ function failedPreparation(
         filter: tool.filter,
         preset: tool.preset,
         width: tool.width,
-        height: tool.height
+        height: tool.height,
+        expression: tool.expression,
+        url: tool.url
       },
       result: {
         id,
@@ -3384,6 +4131,18 @@ function failedPreparation(
     proposal: { id, kind: 'write_file', path, oldContent: '', newContent: '', exists: false },
     result: { id, kind: 'write_file', ok: false, error }
   }
+}
+
+/**
+ * Longest rejection reason carried back to the model. The reason is the user's own
+ * words typed at the permission bar, so it is normally a phrase — the cap only
+ * exists so a pasted stack trace can't take a slice of every later prompt.
+ */
+const REJECT_REASON_CHARS = 400
+
+/** The user's reason, bounded and marked when it had to be cut. */
+function capReason(text: string): string {
+  return text.length <= REJECT_REASON_CHARS ? text : `${text.slice(0, REJECT_REASON_CHARS)}…`
 }
 
 /** A rejected (or refused) proposal's skipped result, with the reason shown. */
@@ -3660,17 +4419,26 @@ async function applyTool(
   // "screenshot" comes back with `media` bytes that ride the vision path (step 4h).
   if (proposal.kind === 'preview_inspect') {
     onTerminal(`\r\n\x1b[38;5;39m🔍 preview: ${proposal.action}\x1b[0m\r\n`)
-    const res = await requestPreviewInspect({
-      action: proposal.action,
-      selector: proposal.selector,
-      styles: proposal.styles,
-      value: proposal.value,
-      level: proposal.level,
-      filter: proposal.filter,
-      preset: proposal.preset,
-      width: proposal.width,
-      height: proposal.height
-    })
+    // server_logs is the one action answered HERE: the dev server's output belongs
+    // to the main process, so a round-trip to the renderer would ask the wrong
+    // process — and it works even when no page ever loaded, which is exactly when a
+    // compile error needs reading.
+    const res =
+      proposal.action === 'server_logs'
+        ? readDevServerLogs(proposal.level)
+        : await requestPreviewInspect({
+            action: proposal.action,
+            selector: proposal.selector,
+            styles: proposal.styles,
+            value: proposal.value,
+            level: proposal.level,
+            filter: proposal.filter,
+            preset: proposal.preset,
+            width: proposal.width,
+            height: proposal.height,
+            expression: proposal.expression,
+            url: proposal.url
+          })
     if (res.ok) {
       onTerminal(`\x1b[32m✓ ${res.summary}\x1b[0m\r\n`)
     } else {
@@ -3790,20 +4558,6 @@ function baseName(path: string): string {
   return i >= 0 ? path.slice(i + 1) : path
 }
 
-/**
- * A short, human label for the files being read — the first few basenames plus a
- * "+N more" tail — so the live "Reading…" status names real files (requirement
- * #3) rather than a bare count. Purely cosmetic: drawn from the already-built
- * file index, never the file contents.
- */
-function describeFiles(files: string[]): string {
-  const names = files.map(baseName).filter(Boolean)
-  const head = names.slice(0, 3).join(', ')
-  const rest = names.length - 3
-  const label = rest > 0 ? `${head} +${rest} more` : head
-  return `${label} (${files.length} file${files.length === 1 ? '' : 's'})`
-}
-
 /** Matches a command that is clearly a verification/build step, not a mutation. */
 const VERIFY_RE = /\b(tests?|vitest|jest|typecheck|tsc|lint|eslint|build|check)\b/i
 
@@ -3919,24 +4673,14 @@ function describeBatch(tools: ExecutableTool[]): { stage: WorkflowStage; message
     }
   }
 
-  // Pure inspection → the reading phase, naming what's being looked at. This is
-  // the status the user sees while Sylor is orienting itself in their code.
+  // Pure inspection → the reading phase. Live look-only batches are narrated file by
+  // file in the execute loop (one `Reading <filename>` each, replacing the last); this
+  // branch stays only as a defensive fallback and never leaks a grep query, glob,
+  // purpose, or count — just the file being opened, or a neutral note for a search/list.
   if (reads.length > 0 && commands.length === 0 && writes.length === 0) {
-    const search = reads.find((r) => r.tool === 'search_files')
-    if (search && search.tool === 'search_files') {
-      return { stage: 'scanning', message: `Searching for "${search.query}"` }
-    }
-    const find = reads.find((r) => r.tool === 'find_files')
-    if (find && find.tool === 'find_files') {
-      return { stage: 'scanning', message: `Finding ${find.glob}` }
-    }
     const files = reads.filter((r) => r.tool === 'read_file').map((r) => baseName(r.path))
-    if (files.length > 0) {
-      const head = files.slice(0, 2).join(', ')
-      const rest = files.length - 2
-      return { stage: 'reading', message: `Reading ${rest > 0 ? `${head} +${rest} more` : head}` }
-    }
-    return { stage: 'scanning', message: 'Looking through the project…' }
+    if (files.length > 0) return { stage: 'reading', message: `Reading ${files[0]}` }
+    return { stage: 'scanning', message: 'Reading the project…' }
   }
 
   // A command batch that's purely checks/builds → the verifying phase.
@@ -3990,13 +4734,20 @@ function summarizeResults(outcomes: Array<{ tool: ExecutableTool; result: ToolRe
       // An edit_file was staged as a write_file, so name the verb the model used.
       const verb = tool.tool === 'edit_file' ? 'edit_file' : 'write_file'
       const path = tool.tool === 'write_file' || tool.tool === 'edit_file' ? tool.path : ''
-      const head = `${verb} ${path} → ${result.ok ? 'applied' : (result.error ?? 'failed')}`
+      const applied = result.edited ? 'applied with the user’s own edits' : 'applied'
+      const head = `${verb} ${path} → ${result.ok ? applied : (result.error ?? 'failed')}`
       // A successful write that failed its static check reports both: the file IS
       // on disk, and here is what's wrong with it. Silence means nothing was
       // detected — never a claim that the file is correct.
       const check = describeIssues(result.issues ?? [])
       if (check) broken = true
-      return check ? `${head}\n${check}` : head
+      // An edited write means the file no longer matches what the model composed, so
+      // saying so is not politeness — it is the difference between the next step
+      // building on the file and building on a memory of it.
+      const edited = result.edited
+        ? 'The user changed your content before it was written; the file holds THEIR version. Read it again before editing it further.'
+        : ''
+      return [head, check, edited].filter(Boolean).join('\n')
     }
     if (result.kind === 'read') {
       const label =
@@ -4008,9 +4759,11 @@ function summarizeResults(outcomes: Array<{ tool: ExecutableTool; result: ToolRe
               ? `${tool.tool} ${tool.path}`
               : 'read'
       if (!result.ok) return `${label} → error: ${result.error ?? 'failed'}`
-      const truncNote = result.truncated
-        ? ' — truncated, ask for a narrower range if you need more'
-        : ''
+      // A clipped read already carries its own tail note naming the exact `offset` to
+      // continue from (see `readFileSlice`). The old note here said "ask for a
+      // narrower range if you need more", which invited precisely the keyhole reads
+      // this change exists to end — a narrower range is never what was needed.
+      const truncNote = result.truncated ? ' — see the note at the end for the rest' : ''
       return `${label} → ${result.summary}${truncNote}\n${result.output}`
     }
     if (result.kind === 'mcp_call') {
@@ -4133,10 +4886,55 @@ function buildSkillInjections(
 
 /**
  * Resolves a pending tool decision from the renderer. No-op if the run or tool
- * is unknown (e.g. a late click after cancel).
+ * is unknown (e.g. a late click after cancel). `detail` carries edit-then-approve
+ * content and the user's reason for a refusal; both are optional and the engine
+ * validates them itself (see {@link executeTool}).
  */
-export function resolveToolDecision(runId: string, toolId: string, decision: ToolDecision): void {
-  activeRuns.get(runId)?.pending.get(toolId)?.resolve(decision)
+export function resolveToolDecision(
+  runId: string,
+  toolId: string,
+  decision: ToolDecision,
+  detail?: ToolDecisionDetail
+): void {
+  activeRuns.get(runId)?.pending.get(toolId)?.resolve(decision, detail)
+}
+
+/**
+ * Stops ONE subagent, leaving the run and its sibling lanes running. Aborts that
+ * agent's own controller and unblocks only the approvals IT was parked on, so its
+ * loop unwinds promptly; `runSubagent` then reports the cancellation to the lead,
+ * which decides what to do without that slice. No-op for an unknown run/agent, or
+ * for one that has already finished (its entry is gone by then).
+ */
+export function cancelAgent(runId: string, agentId: string): void {
+  const handle = activeRuns.get(runId)
+  const ctl = handle?.agents.get(agentId)
+  if (!handle || !ctl) return
+  ctl.abort()
+  for (const [toolId, p] of handle.pending) {
+    if (p.agentId === agentId) {
+      handle.pending.delete(toolId)
+      p.resolve('reject')
+    }
+  }
+}
+
+/**
+ * Withdraws a run-scoped standing approval ("Always"), so the next op of that class
+ * asks again. Keys come from `standingApprovalKey`; an unknown key or run is a no-op,
+ * which is exactly right for a late click after the run ended.
+ */
+export function revokeStandingApproval(runId: string, key: string): void {
+  activeRuns.get(runId)?.standingApprovals.delete(key)
+}
+
+/**
+ * Resolves a pending clarifying question (the `ask_user` tool) with the user's
+ * answer. No-op if the run or question is unknown (e.g. a late submit after the
+ * run was cancelled). Mirrors {@link resolveToolDecision}.
+ */
+export function resolveQuestion(runId: string, questionId: string, answer: string): void {
+  activeRuns.get(runId)?.pendingQuestions.get(questionId)?.resolve(answer)
 }
 
 /** Cancels an in-flight run by id (no-op if unknown). */
@@ -4147,6 +4945,10 @@ export function cancelWorkflow(runId: string): void {
   // Unblock any awaiting tool decisions so the run can unwind promptly.
   for (const p of handle.pending.values()) p.resolve('reject')
   handle.pending.clear()
+  // Unblock any awaiting clarifying question the same way — the loop checks
+  // `signal.aborted` right after the await, so the empty answer is never used.
+  for (const q of handle.pendingQuestions.values()) q.resolve('')
+  handle.pendingQuestions.clear()
   activeRuns.delete(runId)
 }
 
@@ -4156,6 +4958,8 @@ export function cancelAllWorkflows(): void {
     handle.controller.abort()
     for (const p of handle.pending.values()) p.resolve('reject')
     handle.pending.clear()
+    for (const q of handle.pendingQuestions.values()) q.resolve('')
+    handle.pendingQuestions.clear()
   }
   activeRuns.clear()
 }
@@ -4172,7 +4976,6 @@ function buildMessages(
   projectPreamble: string,
   effort: ReasoningEffort,
   intentKind: IntentKind,
-  planFirst: boolean,
   mcpTools: McpToolInfo[],
   skills: SkillInfo[]
 ): ChatMessage[] {
@@ -4182,9 +4985,11 @@ function buildMessages(
     mcpDirective(mcpTools) +
     skillsDirective(skills) +
     spawnDirective() +
+    todosDirective() +
+    askDirective() +
+    followupDirective() +
     effortDirective(effort) +
-    intentDirective(intentKind) +
-    planDirective(planFirst, intentKind)
+    intentDirective(intentKind)
   const lastUser = [...history].reverse().find((m) => m.role === 'user')?.content ?? ''
   const userProfile = buildUserProfilePreamble(lastUser)
   if (userProfile) system += `\n\n${userProfile}`
@@ -4305,6 +5110,63 @@ function recordUserProfile(
       }
     } catch (err) {
       console.error('[sylor] failed to append user profile:', err)
+    }
+  }
+}
+
+/**
+ * How many follow-ups one model message may flag. A turn that "notices" nine
+ * unrelated problems has stopped doing the work it was asked to do, and nine chips
+ * are nine things the user now has to triage — so the extras are dropped.
+ */
+const MAX_FOLLOWUPS_PER_MESSAGE = 3
+
+/**
+ * Records `flag_followup` notices — out-of-scope work the agent spotted and left
+ * undone — to the project's `FOLLOWUPS.md`, and surfaces each as a `followup` event
+ * the UI turns into a one-click chip.
+ *
+ * Three deliberate choices:
+ *
+ *  - **A duplicate is silent.** {@link appendFollowup} dedupes on the title, and a
+ *    finding already on the list is not re-chipped: agents re-notice the same loose
+ *    end on every pass, and a chip row that repeats itself is one the user ignores.
+ *  - **An unwritable file still flags.** A read-only checkout (or a chat with no
+ *    folder) loses the durable record, not the finding — the chip still appears, and
+ *    `recordedIn` is left absent so nothing claims a file that isn't there.
+ *  - **Best-effort, never fatal.** Like {@link recordMemory}, a failure is logged and
+ *    the turn carries on: flagging is bookkeeping, not a gate.
+ */
+function recordFollowups(
+  notices: Array<Extract<ParsedTool, { tool: 'flag_followup' }>>,
+  runId: string,
+  emit: EventSink
+): void {
+  for (const notice of notices.slice(0, MAX_FOLLOWUPS_PER_MESSAGE)) {
+    try {
+      const outcome = appendFollowup(notice)
+      if (outcome === 'duplicate') continue
+      const recordedIn = outcome === 'recorded' ? memoryDocPath('followups') : undefined
+      emit({
+        type: 'followup',
+        runId,
+        followup: {
+          id: nextFollowupId(),
+          title: notice.title,
+          ...(notice.note ? { note: notice.note } : {}),
+          ...(notice.files ? { files: notice.files } : {}),
+          ...(recordedIn ? { recordedIn } : {})
+        }
+      })
+      emit({
+        type: 'delta',
+        runId,
+        text: recordedIn
+          ? `\n\n📌 Follow-up noted in ${recordedIn}: ${notice.title}`
+          : `\n\n📌 Follow-up (this session only — nothing could be written): ${notice.title}`
+      })
+    } catch (err) {
+      console.error('[sylor] failed to record follow-up:', err)
     }
   }
 }

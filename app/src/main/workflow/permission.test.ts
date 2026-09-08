@@ -50,6 +50,25 @@ describe('decideAuto (permission matrix)', () => {
     const modes: PermissionMode[] = ['ask', 'auto-edit', 'autonomous']
     expect(modes.map((m) => decideAuto(m, 'read'))).toEqual(['auto', 'auto', 'auto'])
   })
+
+  it('auto-approves every side effect in every mode when full access is on', () => {
+    // The opt-in full-PC switch waives the prompt for writes, commands, mcp, and
+    // web — in `ask` and `auto-edit` too, not just `autonomous`.
+    const modes: PermissionMode[] = ['ask', 'auto-edit', 'autonomous']
+    const kinds: ToolKind[] = ['write_file', 'run_command', 'mcp_call', 'web_fetch', 'web_search']
+    for (const mode of modes) {
+      for (const kind of kinds) {
+        expect(decideAuto(mode, kind, true)).toBe('auto')
+      }
+    }
+  })
+
+  it('leaves the matrix unchanged when full access is off (explicit false)', () => {
+    // Passing the flag as false must behave exactly like omitting it.
+    for (const [mode, kind, expected] of cases) {
+      expect(decideAuto(mode, kind, false)).toBe(expected)
+    }
+  })
 })
 
 /**
@@ -135,5 +154,50 @@ describe('decideBrowse (browsing gate)', () => {
   it('treats an allowed click/fill as auto in every mode', () => {
     expect(decideBrowse('click', policy({ click: 'allow' }))).toBe('auto')
     expect(decideBrowse('fill', policy({ fill: 'allow' }), 'ask')).toBe('auto')
+  })
+
+  it('full-PC access upgrades click/fill but keeps payment/send/delete gated', () => {
+    // The two browser gates that survive full access: money is never spent, and
+    // posting/deleting as the user still asks once. Everything milder goes auto,
+    // even in `ask` mode.
+    expect(decideBrowse('click', DEFAULT_BROWSER_PERMISSIONS, 'ask', true)).toBe('auto')
+    expect(decideBrowse('fill', DEFAULT_BROWSER_PERMISSIONS, 'ask', true)).toBe('auto')
+    expect(decideBrowse('navigate', DEFAULT_BROWSER_PERMISSIONS, 'ask', true)).toBe('auto')
+    expect(decideBrowse('send', DEFAULT_BROWSER_PERMISSIONS, 'ask', true)).toBe('ask')
+    expect(decideBrowse('delete', DEFAULT_BROWSER_PERMISSIONS, 'ask', true)).toBe('ask')
+    expect(decideBrowse('payment', policy({ payment: 'allow' }), 'ask', true)).toBe('block')
+    // An explicit block is still honoured — full access widens, it doesn't override a block.
+    expect(decideBrowse('click', policy({ click: 'block' }), 'ask', true)).toBe('block')
+  })
+
+  it('auto-send (5th arg) upgrades ONLY send — delete still asks, payment still blocks', () => {
+    // The opt-in hands-free-send waiver: with it on, posting/messaging/mailing as
+    // the user goes auto instead of asking, in every mode. It is deliberately narrow.
+    const modes: PermissionMode[] = ['ask', 'auto-edit', 'autonomous']
+    for (const mode of modes) {
+      // send is waived...
+      expect(decideBrowse('send', DEFAULT_BROWSER_PERMISSIONS, mode, true, true)).toBe('auto')
+      // ...but delete still asks and payment still blocks, even hands-free.
+      expect(decideBrowse('delete', DEFAULT_BROWSER_PERMISSIONS, mode, true, true)).toBe('ask')
+      expect(decideBrowse('payment', policy({ payment: 'allow' }), mode, true, true)).toBe('block')
+    }
+  })
+
+  it('auto-send waives send without needing full access or a hands-free mode', () => {
+    // The two flags are independent inputs to the gate; the *coupling* to full
+    // access lives in `autoSendEnabled`, not here. Passed true, send goes auto even
+    // in plain `ask` mode with full access off.
+    expect(decideBrowse('send', DEFAULT_BROWSER_PERMISSIONS, 'ask', false, true)).toBe('auto')
+  })
+
+  it('an explicit send:block still refuses even with auto-send on', () => {
+    // Auto-send widens an `ask`; it never overrides a hard block the user set.
+    expect(decideBrowse('send', policy({ send: 'block' }), 'ask', true, true)).toBe('block')
+  })
+
+  it('leaves send asking when auto-send is off (default 5th arg)', () => {
+    // Omitting the flag behaves exactly like passing false — the historical gate.
+    expect(decideBrowse('send', DEFAULT_BROWSER_PERMISSIONS, 'autonomous', true)).toBe('ask')
+    expect(decideBrowse('send', DEFAULT_BROWSER_PERMISSIONS, 'ask', true, false)).toBe('ask')
   })
 })

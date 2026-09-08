@@ -90,6 +90,16 @@ export class ContextManager {
   }
 
   /**
+   * The project root the user actually opened, ignoring any {@link runWithRoot}
+   * override. Use this to tell "we are acting inside a subagent's private worktree"
+   * apart from "we are acting on the user's project" — checkpoints, for one, are only
+   * meaningful for the latter (`getRoot() === getProjectRoot()`).
+   */
+  getProjectRoot(): string {
+    return this.root
+  }
+
+  /**
    * Runs `fn` with `root` installed as the active root for the whole async
    * subtree of the call (survives every `await` inside `fn`). Used to confine a
    * worktree-isolated subagent's writes and commands without threading a root
@@ -288,12 +298,13 @@ export class ContextManager {
       const index = this.ensureIndex()
       const existing = index.files[key]
       if (existing && existing.size === st.size && existing.mtime === st.mtimeMs) return
-      const { summary, symbols } = summarizeSource(rel, readHead(abs))
+      const { summary, symbols, imports } = summarizeSource(rel, readHead(abs))
       index.files[key] = {
         size: st.size,
         mtime: st.mtimeMs,
         summary,
         symbols: symbols.length ? symbols : undefined,
+        imports: imports.length ? imports : undefined,
         indexedAt: Date.now()
       }
       this.indexDirty = true
@@ -313,13 +324,14 @@ export class ContextManager {
     try {
       const { rel, abs, key } = this.toProjectRel(path)
       const st = statSync(abs)
-      const { summary, symbols } = summarizeSource(rel, content.slice(0, INDEX_HEAD_CHARS))
+      const { summary, symbols, imports } = summarizeSource(rel, content.slice(0, INDEX_HEAD_CHARS))
       const index = this.ensureIndex()
       index.files[key] = {
         size: st.size,
         mtime: st.mtimeMs,
         summary,
         symbols: symbols.length ? symbols : undefined,
+        imports: imports.length ? imports : undefined,
         indexedAt: Date.now()
       }
       this.indexDirty = true
@@ -337,6 +349,21 @@ export class ContextManager {
   indexSummaryFor(path: string): string | undefined {
     if (this.getRoot() !== this.root || !this.index) return undefined
     return this.index.files[this.toProjectRel(path).key]?.summary
+  }
+
+  /**
+   * The live project index — the in-memory one when a run has already loaded it,
+   * otherwise whatever is on disk. The dependency graph reads through this rather
+   * than `loadIndex` directly so a file summarised earlier in *this* run is part of
+   * the picture; `.sylor/index.json` is only written at the end of a run, so going
+   * straight to disk would draw the graph as it was before the run started.
+   *
+   * Always the persistent project's index, never a worktree override's — a
+   * subagent's throwaway tree has no index of its own (see {@link noteRead}).
+   */
+  projectIndex(): ProjectIndex {
+    if (this.getRoot() !== this.root) return loadIndex(this.root)
+    return this.ensureIndex()
   }
 
   /**

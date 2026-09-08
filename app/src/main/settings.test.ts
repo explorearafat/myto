@@ -12,8 +12,17 @@ const { USERDATA } = vi.hoisted(() => ({
 }))
 vi.mock('electron', () => ({ app: { getPath: () => USERDATA } }))
 
-import { normalise, getUserProfile, appendUserProfile } from '@main/settings'
+import {
+  normalise,
+  getUserProfile,
+  appendUserProfile,
+  saveSettings,
+  fullAccessEnabled,
+  autoSendEnabled
+} from '@main/settings'
 import { DEFAULT_PROVIDER_SETTINGS } from '@shared/defaults'
+
+const BASE = DEFAULT_PROVIDER_SETTINGS
 
 afterAll(() => {
   try {
@@ -53,6 +62,80 @@ describe('normalise — workspaceRoot (requirement A)', () => {
       mode: DEFAULT_PROVIDER_SETTINGS.ui.mode,
       workspaceRoot: '/work'
     })
+  })
+})
+
+describe('normalise — fullAccess (opt-in full-PC access)', () => {
+  it('defaults to false when absent', () => {
+    expect(normalise({ ui: {} }).ui.fullAccess).toBe(false)
+    expect(normalise({}).ui.fullAccess).toBe(false)
+  })
+
+  it('keeps an explicit boolean', () => {
+    expect(normalise({ ui: { fullAccess: true } }).ui.fullAccess).toBe(true)
+    expect(normalise({ ui: { fullAccess: false } }).ui.fullAccess).toBe(false)
+  })
+
+  it('ignores a non-boolean and falls back to the safe default', () => {
+    expect(normalise({ ui: { fullAccess: 'yes' } }).ui.fullAccess).toBe(false)
+    expect(normalise({ ui: { fullAccess: 1 } }).ui.fullAccess).toBe(false)
+    expect(normalise({ ui: { fullAccess: null } }).ui.fullAccess).toBe(false)
+  })
+})
+
+describe('normalise — autoSend (opt-in hands-free sending)', () => {
+  it('defaults to false when absent', () => {
+    expect(normalise({ ui: {} }).ui.autoSend).toBe(false)
+    expect(normalise({}).ui.autoSend).toBe(false)
+  })
+
+  it('keeps an explicit boolean', () => {
+    expect(normalise({ ui: { autoSend: true } }).ui.autoSend).toBe(true)
+    expect(normalise({ ui: { autoSend: false } }).ui.autoSend).toBe(false)
+  })
+
+  it('ignores a non-boolean and falls back to the safe default', () => {
+    expect(normalise({ ui: { autoSend: 'yes' } }).ui.autoSend).toBe(false)
+    expect(normalise({ ui: { autoSend: 1 } }).ui.autoSend).toBe(false)
+    expect(normalise({ ui: { autoSend: null } }).ui.autoSend).toBe(false)
+  })
+
+  it('is independent of fullAccess in storage (coupling lives in autoSendEnabled)', () => {
+    // normalise just persists the raw switch; the "only while full access" rule is
+    // enforced at read time, not by scrubbing the stored value.
+    const out = normalise({ ui: { fullAccess: false, autoSend: true } })
+    expect(out.ui.fullAccess).toBe(false)
+    expect(out.ui.autoSend).toBe(true)
+  })
+})
+
+// The read-time coupling: auto-send is a sub-permission of full access, so
+// `autoSendEnabled()` is true ONLY when both switches are on. These persist through
+// the real on-disk store (the stubbed userData path) and read it back.
+describe('autoSendEnabled / fullAccessEnabled (read-time coupling)', () => {
+  const save = (ui: Partial<(typeof BASE)['ui']>): void => {
+    saveSettings({ ...BASE, ui: { ...BASE.ui, ...ui } })
+  }
+
+  it('auto-send is off unless BOTH full access and auto-send are on', () => {
+    save({ fullAccess: false, autoSend: false })
+    expect(autoSendEnabled()).toBe(false)
+
+    save({ fullAccess: false, autoSend: true })
+    expect(autoSendEnabled()).toBe(false) // auto-send alone is inert
+
+    save({ fullAccess: true, autoSend: false })
+    expect(autoSendEnabled()).toBe(false)
+
+    save({ fullAccess: true, autoSend: true })
+    expect(autoSendEnabled()).toBe(true)
+  })
+
+  it('fullAccessEnabled tracks just the full-access switch', () => {
+    save({ fullAccess: true, autoSend: false })
+    expect(fullAccessEnabled()).toBe(true)
+    save({ fullAccess: false, autoSend: true })
+    expect(fullAccessEnabled()).toBe(false)
   })
 })
 

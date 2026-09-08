@@ -2,14 +2,19 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import type { IPty } from '@lydell/node-pty'
 import { contextManager } from '@main/context/manager'
-import type { PreviewEvent } from '@shared/types'
+import { __setPtyBackendForTest } from '@main/terminal/pty'
+import type { PreviewEvent, PreviewStartResult } from '@shared/types'
 import {
   DEV_SERVER_RE,
+  devServerLogs,
+  extractDevUrl,
   looksLikeDevServer,
   resolveDevCommand,
   setPreviewEmitter,
   startAuto,
+  startDev,
   startStatic,
   stopPreview
 } from '@main/preview/server'
@@ -85,6 +90,48 @@ describe('looksLikeDevServer (dev-server command detection)', () => {
     // must not, since the engine tests each proposed command independently.
     expect(DEV_SERVER_RE.test('npm run dev')).toBe(true)
     expect(DEV_SERVER_RE.test('npm run dev')).toBe(true)
+  })
+})
+
+describe('extractDevUrl (scraping the address out of pty output)', () => {
+  it('does not let an erase-line escape become part of the URL', () => {
+    // The reported bug, verbatim shape: Vite prints the URL followed by `\x1b[K`,
+    // and the address bar read `http://localhost:8080/[K`.
+    expect(extractDevUrl('  ➜  Local:   http://localhost:8080/\x1b[K\r\n')).toBe(
+      'http://localhost:8080/'
+    )
+    expect(extractDevUrl('http://localhost:3000\x1b[2K\x1b[1G\r\n')).toBe('http://localhost:3000')
+    expect(extractDevUrl('\x1b]0;vite\x07  Local: http://localhost:5173/\r\n')).toBe(
+      'http://localhost:5173/'
+    )
+  })
+
+  it('keeps the coloured, decorated line a bundler actually prints', () => {
+    expect(
+      extractDevUrl('  \x1b[32m➜\x1b[39m  \x1b[1mLocal\x1b[22m:   \x1b[36mhttp://localhost:4321/\x1b[39m\r\n')
+    ).toBe('http://localhost:4321/')
+  })
+
+  it('rewrites hosts a webview cannot load to loopback', () => {
+    expect(extractDevUrl('Serving on http://0.0.0.0:8000/\n')).toBe('http://127.0.0.1:8000/')
+    expect(extractDevUrl('ready on http://[::1]:5000/\n')).toBe('http://127.0.0.1:5000/')
+    expect(extractDevUrl('Local: http://127.0.0.1:1234/\n')).toBe('http://127.0.0.1:1234/')
+  })
+
+  it('drops the punctuation a log line puts after a URL', () => {
+    expect(extractDevUrl('Serving HTTP on port 8000 (http://0.0.0.0:8000/) ...\n')).toBe(
+      'http://127.0.0.1:8000/'
+    )
+    expect(extractDevUrl('open http://localhost:9000/index.html.\n')).toBe(
+      'http://localhost:9000/index.html'
+    )
+  })
+
+  it('finds nothing in output that has no URL yet', () => {
+    expect(extractDevUrl('\x1b[36mvite\x1b[39m v7.0.0 starting...\r\n')).toBeNull()
+    expect(extractDevUrl('')).toBeNull()
+    // A remote URL is not a preview target; only localhost forms match.
+    expect(extractDevUrl('see https://vite.dev/config/\n')).toBeNull()
   })
 })
 
@@ -246,5 +293,193 @@ describe('startAuto (previewing a project the way it actually renders)', () => {
     const result = await startAuto('notes.md')
     expect(result.ok).toBe(true)
     expect(result.url).toMatch(/\/notes\.md$/)
+  })
+})
+
+/**
+ * Deliberately placed before the spawning cases below: the log is module state, so
+ * "no dev server has ever run" is only true until the first {@link startDev}.
+ */
+describe('devServerLogs (before any dev server has run)', () => {
+  it('reports that nothing was watching, rather than an empty log', async () => {
+    // A static serve has no server output to be missing — a different answer from
+    // "it ran and printed nothing", which the caller must be able to tell apart.
+    writeFileSync(join(root, 'index.html'), '<!doctype html><title>static</title>')
+    await startStatic()
+
+    const logs = devServerLogs()
+    expect(logs.watching).toBe(false)
+    expect(logs.command).toBeNull()
+    expect(logs.lines).toEqual([])
+    expect(logs.total).toBe(0)
+  })
+})
+
+/** A fake pty the test drives by hand, mirroring the harness in `pty.test.ts`. */
+interface FakePty {
+  onData: (cb: (data: string) => void) => void
+  onExit: (cb: (ev: { exitCode: number }) => void) => void
+  write: (data: string) => void
+  resize: (cols: number, rows: number) => void
+  kill: () => void
+  fireData: (data: string) => void
+  fireExit: (code: number) => void
+}
+
+function makeFakePty(): FakePty {
+  let dataCb: (data: string) => void = () => {}
+  let exitCb: (ev: { exitCode: number }) => void = () => {}
+  return {
+    onData: (cb) => {
+      dataCb = cb
+    },
+    onExit: (cb) => {
+      exitCb = cb
+    },
+    write: () => {},
+    resize: () => {},
+    kill: () => {},
+    fireData: (data) => dataCb(data),
+    fireExit: (code) => exitCb({ exitCode: code })
+  }
+}
+
+/**
+ * The dev server's own output — the answer to "why is the preview blank?", which
+ * the guest console cannot give because in exactly that case nothing loaded. A
+ * real pty is impossible here (it would need a real project and a real server), so
+ * these drive the backend seam: `startDev` reaches `spawnCommandPty` synchronously
+ * when the project has no `package.json` to install, so the fake exists the moment
+ * the call returns and every case settles the start it began.
+ */
+describe('devServerLogs (what the running dev server said)', () => {
+  let spawned: FakePty[]
+
+  beforeEach(() => {
+    spawned = []
+    __setPtyBackendForTest({
+      spawn: (): IPty => {
+        const p = makeFakePty()
+        spawned.push(p)
+        return p as unknown as IPty
+      }
+    })
+  })
+
+  afterEach(() => {
+    __setPtyBackendForTest(null)
+  })
+
+  /** Start a dev server and hand back its fake pty plus the pending start. */
+  function start(command = 'npm run dev'): { pty: FakePty; done: Promise<PreviewStartResult> } {
+    const done = startDev(command)
+    expect(spawned).toHaveLength(1)
+    return { pty: spawned[0], done }
+  }
+
+  it('keeps the boot output, ANSI-stripped, and names the command', async () => {
+    const { pty, done } = start()
+    pty.fireData('\x1b[36mvite\x1b[39m v7.0.0 \x1b[32mready in 312 ms\x1b[39m\r\n')
+    pty.fireData('  \x1b[32m➜\x1b[39m  Local:   http://localhost:5173/\x1b[K\r\n')
+    await expect(done).resolves.toMatchObject({ ok: true, url: 'http://localhost:5173/' })
+
+    const logs = devServerLogs()
+    expect(logs.watching).toBe(true)
+    expect(logs.command).toBe('npm run dev')
+    expect(logs.lines).toContain('vite v7.0.0 ready in 312 ms')
+    // The whole log is plain text: an escape that reached the model would read as
+    // corruption, and one inside a URL is the `[K` bug all over again.
+    const all = logs.lines.join('\n')
+    expect(all).not.toContain('\x1b')
+    expect(all).not.toContain('[K')
+  })
+
+  it('does not let an escape split across two chunks survive as text', async () => {
+    // Stripping per chunk would leave the orphaned `[K` in the line, because the
+    // `\x1b` that introduces it arrived in the chunk before.
+    const { pty, done } = start()
+    pty.fireData('  Local:   http://localhost:5173/')
+    pty.fireData('\x1b')
+    pty.fireData('[K\r\n')
+    await expect(done).resolves.toMatchObject({ ok: true })
+
+    // Leading indentation is kept (a bundler's output is aligned on purpose); only
+    // the trailing `\r` and the escape go.
+    expect(devServerLogs().lines).toContain('  Local:   http://localhost:5173/')
+  })
+
+  it('filters to the lines that explain a failure', async () => {
+    const { pty, done } = start()
+    pty.fireData('  Local:   http://localhost:5173/\r\n')
+    await done
+    pty.fireData('Failed to compile.\r\n')
+    pty.fireData('./src/App.tsx:3:10: ERROR: Could not resolve "./missing"\r\n')
+    pty.fireData('warning: deprecated option\r\n')
+    pty.fireData('page reload src/App.tsx\r\n')
+
+    const errors = devServerLogs('error').lines.join('\n')
+    expect(errors).toMatch(/Failed to compile/)
+    expect(errors).toMatch(/Could not resolve/)
+    // A chatty line is not a failure; showing it would bury the two that are.
+    expect(errors).not.toMatch(/page reload/)
+    expect(errors).not.toMatch(/deprecated/)
+
+    expect(devServerLogs('warn').lines.join('\n')).toMatch(/deprecated/)
+    // Filtering hides lines, it never drops them: `total` is the whole log.
+    expect(devServerLogs('error').total).toBe(devServerLogs().lines.length)
+  })
+
+  it('keeps the output of a server that died before printing a URL', async () => {
+    // The case that needs the log most: there is no page, so there is no console.
+    const { pty, done } = start()
+    pty.fireData('Error: listen EADDRINUSE: address already in use :::5173\r\n')
+    pty.fireExit(1)
+    await expect(done).resolves.toMatchObject({ ok: false })
+
+    const logs = devServerLogs()
+    // The command survives the process, so the log still says what was run.
+    expect(logs.command).toBe('npm run dev')
+    expect(logs.watching).toBe(true)
+    expect(logs.lines.join('\n')).toMatch(/EADDRINUSE/)
+    expect(logs.lines).toContain('[sylor] dev server exited (code 1)')
+  })
+
+  it('includes the last line even when it never got its newline', async () => {
+    const { pty, done } = start()
+    pty.fireData('  Local:   http://localhost:5173/\r\n')
+    await done
+    // A crash mid-line: the tail sits in the partial buffer, unterminated.
+    pty.fireData('Fatal: out of memory')
+
+    expect(devServerLogs().lines).toContain('Fatal: out of memory')
+  })
+
+  it('holds a bounded tail of a chatty server, newest kept', async () => {
+    const { pty, done } = start()
+    pty.fireData('  Local:   http://localhost:5173/\r\n')
+    await done
+    pty.fireData(`${Array.from({ length: 500 }, (_, i) => `line ${i}`).join('\n')}\n`)
+
+    const logs = devServerLogs()
+    expect(logs.lines).toHaveLength(400)
+    expect(logs.lines[399]).toBe('line 499')
+    expect(logs.lines[0]).toBe('line 100')
+  })
+
+  it('starts a fresh log for the next dev server', async () => {
+    const first = start()
+    first.pty.fireData('  Local:   http://localhost:5173/\r\n')
+    await first.done
+    first.pty.fireData('stale output from the old server\r\n')
+
+    // A different command replaces the running server; its log replaces the old one.
+    const done = startDev('npm run start')
+    expect(spawned).toHaveLength(2)
+    spawned[1].fireData('  Local:   http://localhost:3000/\r\n')
+    await done
+
+    const logs = devServerLogs()
+    expect(logs.command).toBe('npm run start')
+    expect(logs.lines.join('\n')).not.toMatch(/stale output/)
   })
 })

@@ -2,12 +2,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   withRetry,
   isRetryable,
+  classifyFailure,
   isAbort,
   pace,
   sleep,
   AbortError,
   MAX_RETRY_ATTEMPTS,
   RETRY_DELAY_MS,
+  MAX_TIMEOUT_RETRY_ATTEMPTS,
+  TIMEOUT_RETRY_DELAY_MS,
   __resetPacing,
   __setRequestGap,
   type RetryNotice
@@ -64,6 +67,38 @@ describe('isRetryable', () => {
   })
 })
 
+describe('classifyFailure', () => {
+  it('separates a deadline failure from a rejection — only one is fixed by waiting', () => {
+    // Accepted-but-too-slow: the clock ran out, nothing was rejected.
+    for (const message of [
+      'Request timed out after 120000ms',
+      'HTTP 408 Request Timeout',
+      'HTTP 504 Gateway Timeout',
+      'HTTP 524 A timeout occurred',
+      'ETIMEDOUT'
+    ]) {
+      expect(classifyFailure(new Error(message)), message).toBe('timeout')
+    }
+
+    // Rejected: a quota rolls over, an overloaded upstream recovers.
+    for (const message of [
+      'HTTP 429 Too Many Requests',
+      'HTTP 503 Service Unavailable',
+      'HTTP 502 Bad Gateway',
+      'HTTP 522 Connection timed out',
+      'socket hang up',
+      'ECONNRESET',
+      'Model is overloaded, try again'
+    ]) {
+      expect(classifyFailure(new Error(message)), message).toBe('transient')
+    }
+  })
+
+  it('keeps a permanent status permanent even when it mentions a timeout', () => {
+    expect(classifyFailure(new Error('HTTP 401: session timed out'))).toBe('permanent')
+  })
+})
+
 describe('withRetry', () => {
   it('returns the value without retrying when the call succeeds', async () => {
     const fn = vi.fn().mockResolvedValue('ok')
@@ -106,6 +141,48 @@ describe('withRetry', () => {
     expect(notices[0]).toMatchObject({ attempt: 1, max: 10, delayMs: 60_000 })
     // The final failure is surfaced, not swallowed, so the turn reports honestly.
     expect((error as Error).message).toContain('429')
+  })
+
+  it('does NOT spend the transient budget on a timeout — an unchanged replay hits the same clock', async () => {
+    vi.useFakeTimers()
+    const fn = vi.fn().mockRejectedValue(new Error('Request timed out after 120000ms'))
+    const notices: RetryNotice[] = []
+
+    // The reported bug: this used to burn 10 × 120s + 9 × 60s ≈ 29 minutes to
+    // arrive at the identical error. A deadline gets one quick second chance.
+    const settled = withRetry(fn, { onRetry: (n) => notices.push(n) }).catch((e: Error) => e)
+    await vi.advanceTimersByTimeAsync(MAX_TIMEOUT_RETRY_ATTEMPTS * TIMEOUT_RETRY_DELAY_MS)
+
+    const error = await settled
+    expect(fn).toHaveBeenCalledTimes(MAX_TIMEOUT_RETRY_ATTEMPTS)
+    expect(notices).toHaveLength(MAX_TIMEOUT_RETRY_ATTEMPTS - 1)
+    // The notice must not promise nine more tries it will never make.
+    expect(notices[0]).toMatchObject({
+      attempt: 1,
+      max: MAX_TIMEOUT_RETRY_ATTEMPTS,
+      delayMs: TIMEOUT_RETRY_DELAY_MS,
+      kind: 'timeout'
+    })
+    expect((error as Error).message).toContain('timed out')
+  })
+
+  it('still gives a rate limit the full minute-apart budget after a timeout', async () => {
+    vi.useFakeTimers()
+    // A timeout first, then rate limits: the budget must follow the CURRENT
+    // failure, so the 429s still get their long waits.
+    const fn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Request timed out after 120000ms'))
+      .mockRejectedValueOnce(new Error('HTTP 429 rate limit'))
+      .mockResolvedValue('recovered')
+    const notices: RetryNotice[] = []
+
+    const settled = withRetry(fn, { onRetry: (n) => notices.push(n) })
+    await vi.advanceTimersByTimeAsync(TIMEOUT_RETRY_DELAY_MS + RETRY_DELAY_MS)
+
+    await expect(settled).resolves.toBe('recovered')
+    expect(notices.map((n) => n.kind)).toEqual(['timeout', 'transient'])
+    expect(notices.map((n) => n.delayMs)).toEqual([TIMEOUT_RETRY_DELAY_MS, RETRY_DELAY_MS])
   })
 
   it('gives up immediately on a permanent failure', async () => {

@@ -11,11 +11,21 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { StatusWidget } from './components/StatusWidget'
+
+/*
+ * One bundle, two windows.
+ *
+ * `main/widget.ts` loads this same entry at `#/widget` so the floating status card
+ * inherits the preload bridge, the CSP, the theme tokens and the fonts for free —
+ * a second HTML entry would have to be given all four again. There is no router
+ * here (and adding one for a single frameless card would be a lot of machinery for
+ * one branch), so the hash is checked directly.
+ */
+const isWidget = window.location.hash.startsWith('#/widget')
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
+    <ErrorBoundary>{isWidget ? <StatusWidget /> : <App />}</ErrorBoundary>
   </React.StrictMode>
 )

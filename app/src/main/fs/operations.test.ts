@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   existsSync,
   mkdirSync,
@@ -8,11 +8,26 @@ import {
   symlinkSync,
   writeFileSync
 } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { contextManager } from '@main/context/manager'
+
+/**
+ * Full-PC access is read by `resolveSafe` through `fullAccessEnabled()`. We mock
+ * that single seam so the sandbox can be toggled per-test without writing real
+ * settings to disk. Default false — every existing sandbox test runs confined.
+ */
+let fullAccessFlag = false
+vi.mock('@main/settings', async (importActual) => {
+  const actual = await importActual<typeof import('@main/settings')>()
+  return { ...actual, fullAccessEnabled: () => fullAccessFlag }
+})
+afterEach(() => {
+  fullAccessFlag = false
+})
 import {
   applyEdit,
+  applyEdits,
   EditMatchError,
   findFiles,
   listDirectory,
@@ -104,6 +119,33 @@ describe('resolveSafe (sandbox boundary)', () => {
     mkdirSync(join(root, 'realdir'), { recursive: true })
     expect(resolveSafe('realdir/ok.ts')).toBe(join(root, 'realdir', 'ok.ts'))
   })
+
+  describe('full-PC access (sandbox off)', () => {
+    it('lets an absolute path outside the root through', () => {
+      fullAccessFlag = true
+      const outside = process.platform === 'win32' ? 'C:\\Windows\\system32' : '/etc/passwd'
+      // Confined, this throws PathEscapeError; with full access it resolves as-is.
+      expect(resolveSafe(outside)).toBe(resolve(outside))
+    })
+
+    it('lets a parent-traversal path out of the root', () => {
+      fullAccessFlag = true
+      // `../escape.ts` resolves to the root's parent, no longer refused.
+      expect(resolveSafe('../escape.ts')).toBe(resolve(root, '../escape.ts'))
+    })
+
+    it('still resolves a project-relative path against the root', () => {
+      fullAccessFlag = true
+      // Ordinary "src/foo.ts" keeps meaning "inside the project" — the switch only
+      // stops REFUSING escapes, it doesn't change where relative paths anchor.
+      expect(resolveSafe('src/foo.ts')).toBe(join(root, 'src', 'foo.ts'))
+    })
+
+    it('re-confines immediately when the switch is turned back off', () => {
+      fullAccessFlag = false
+      expect(() => resolveSafe('../escape.ts')).toThrow(PathEscapeError)
+    })
+  })
 })
 
 describe('writeProjectFile / readProjectFile', () => {
@@ -167,11 +209,35 @@ describe('readFileSlice', () => {
   it('windows by offset/limit, numbering from the real line and flagging the rest', () => {
     writeProjectFile('look/ten.ts', Array.from({ length: 10 }, (_, i) => `line${i + 1}`).join('\n'))
     const out = readFileSlice('look/ten.ts', 4, 2)
-    expect(out.output).toBe('4\tline4\n5\tline5')
+    expect(out.output).toContain('4\tline4\n5\tline5')
     expect(out.summary).toBe('lines 4–5 of 10')
     // More file remains past the window — the model must be told, or it will
     // assume it has seen everything and edit against a partial picture.
     expect(out.truncated).toBe(true)
+    // And told the ONE way to get it: the exact next offset. Anything vaguer ('ask
+    // for a narrower range') is what turned one read into a run of keyholes.
+    expect(out.output).toContain('stopped at line 5 of 10')
+    expect(out.output).toContain('"offset": 6')
+  })
+
+  it('stops at a whole line when the char cap bites, and says which line', () => {
+    // 40 lines × ~4k chars each overflows MAX_READ_CHARS (80k) around line 20, so
+    // the summary must name the line the text really ended on — not line 40, which
+    // is what the old clip-the-joined-string path claimed.
+    const fat = Array.from({ length: 40 }, (_, i) => `${i + 1}:${'x'.repeat(4_000)}`).join('\n')
+    writeProjectFile('look/fat.ts', fat)
+    const out = readFileSlice('look/fat.ts')
+    expect(out.truncated).toBe(true)
+    const shown = out.summary.match(/^lines 1–(\d+) of 40$/)
+    expect(shown).not.toBeNull()
+    const shownEnd = Number(shown?.[1])
+    expect(shownEnd).toBeGreaterThan(0)
+    expect(shownEnd).toBeLessThan(40)
+    // The last line present is whole (it ends in x, never mid-escape), and the tail
+    // hands back the offset to resume from.
+    expect(out.output).toContain(`${shownEnd}:${'x'.repeat(4_000)}`)
+    expect(out.output).toContain('the rest would not fit in one read')
+    expect(out.output).toContain(`"offset": ${shownEnd + 1}`)
   })
 
   it('says so for an empty file rather than returning nothing', () => {
@@ -463,5 +529,58 @@ describe('applyEdit', () => {
 
   it('is sandbox-checked', () => {
     expect(() => applyEdit('../outside.ts', 'a', 'b')).toThrow(PathEscapeError)
+  })
+})
+
+describe('applyEdits', () => {
+  const edit = (oldString: string, newString: string, replaceAll = false): {
+    oldString: string
+    newString: string
+    replaceAll: boolean
+  } => ({ oldString, newString, replaceAll })
+
+  it('applies a sequence of edits in one pass, reading the file once', () => {
+    writeProjectFile('edits/seq.ts', 'const a = 1\nconst b = 2\nconst c = 3\n')
+    const { oldContent, newContent } = applyEdits('edits/seq.ts', [
+      edit('const a = 1', 'const a = 10'),
+      edit('const c = 3', 'const c = 30')
+    ])
+    expect(oldContent).toBe('const a = 1\nconst b = 2\nconst c = 3\n')
+    expect(newContent).toBe('const a = 10\nconst b = 2\nconst c = 30\n')
+    // Staging only — disk is untouched until the write_file proposal is approved.
+    expect(readProjectFile('edits/seq.ts')).toBe('const a = 1\nconst b = 2\nconst c = 3\n')
+  })
+
+  it('lets a later edit target text an earlier edit introduced', () => {
+    // Edits fold over the evolving content, not the original — so the second edit can
+    // match what the first one just wrote.
+    writeProjectFile('edits/chain.ts', 'value = OLD\n')
+    const { newContent } = applyEdits('edits/chain.ts', [
+      edit('OLD', 'MID'),
+      edit('MID', 'NEW')
+    ])
+    expect(newContent).toBe('value = NEW\n')
+  })
+
+  it('honors replace_all per edit', () => {
+    writeProjectFile('edits/all.ts', 'x = 1\ny = 2\nx = 1\n')
+    const { newContent } = applyEdits('edits/all.ts', [edit('x = 1', 'x = 9', true)])
+    expect(newContent).toBe('x = 9\ny = 2\nx = 9\n')
+  })
+
+  it('throws if any edit in the sequence misses, leaving nothing written', () => {
+    writeProjectFile('edits/miss.ts', 'first\nsecond\n')
+    expect(() =>
+      applyEdits('edits/miss.ts', [edit('first', 'FIRST'), edit('nope', 'x')])
+    ).toThrow(EditMatchError)
+    expect(readProjectFile('edits/miss.ts')).toBe('first\nsecond\n')
+  })
+
+  it('refuses to edit a file that does not exist, pointing at write_file', () => {
+    expect(() => applyEdits('edits/ghost.ts', [edit('a', 'b')])).toThrow(/does not exist/i)
+  })
+
+  it('is sandbox-checked', () => {
+    expect(() => applyEdits('../outside.ts', [edit('a', 'b')])).toThrow(PathEscapeError)
   })
 })

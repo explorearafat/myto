@@ -8,7 +8,7 @@
  * with a {@link PreviewInspectResponse}. It is the mirror of the engine's
  * controller/perception, but for the app's own dev preview rather than the web.
  *
- * The eight actions mirror the CC preview_* tools:
+ * The actions mirror the CC preview_* tools:
  *   - `snapshot`     — accessibility/DOM listing (text + interactive elements).
  *   - `screenshot`   — a PNG of the rendered page (handed to the vision model).
  *   - `inspect`      — computed styles + box of one element (verify colors/size).
@@ -16,13 +16,23 @@
  *   - `network`      — resource-timing entries (spot failed/slow requests).
  *   - `click`/`fill` — drive an interaction, then the engine re-snapshots.
  *   - `resize`       — emulate a mobile/tablet/custom viewport.
+ *   - `eval`         — run an expression in the guest and report its value: the
+ *                      escape hatch for everything the fixed actions don't cover
+ *                      (hover, keys, scroll, app state, calling page functions).
+ *   - `navigate`     — aim the preview at another loopback page, or reload it.
+ *
+ * `server_logs` is the one action that never reaches here: the dev server's output
+ * lives in the main process, so the engine answers it there without a round-trip.
  *
  * SECURITY: like the browse executor, `fill` refuses password/credential
- * fields outright — verification never types secrets. Everything here observes or
- * drives the user's OWN local preview; nothing reaches the network or disk.
+ * fields outright — verification never types secrets. `navigate` is confined to
+ * loopback, so the guest (and therefore `eval`) can only ever reach the user's own
+ * running app; the real web stays behind the separately gated `browse` tool.
+ * Everything here observes or drives the local preview; nothing touches disk.
  */
 import type { WebviewElement } from '@renderer/types/webview'
 import type { PreviewInspectRequest, PreviewInspectResponse } from '@shared/types'
+import { useAppStore } from '@renderer/store/useAppStore'
 import { perceivePage } from './perception'
 
 /** A reply minus the correlation id (the IPC handler re-attaches `requestId`). */
@@ -32,6 +42,18 @@ type InspectReply = Omit<PreviewInspectResponse, 'requestId'>
 const MAX_OUTPUT = 8_000
 const MAX_CONSOLE = 200
 const MAX_NETWORK = 120
+
+/** Hosts the preview is allowed to load — loopback only, in every form. */
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1'])
+
+/** How long a navigation may take to settle before we report what we have. */
+const SETTLE_TIMEOUT_MS = 8_000
+/** How often to re-check `isLoading()` while a navigation settles. */
+const SETTLE_POLL_MS = 50
+/** Beat to let a same-page reload actually start before polling for its end. */
+const RELOAD_GRACE_MS = 150
+/** Guest-side cap on a formatted `eval` value, so no page ships a megabyte over IPC. */
+const MAX_EVAL_CHARS = 20_000
 
 /** Field names/labels we refuse to auto-fill — mirrors the browse executor. */
 const SENSITIVE_FIELD_RE = /pass|secret|token|cvv|cvc|card|ssn|otp|pin|credential/i
@@ -48,7 +70,34 @@ let consoleBuffer: { level: string; text: string }[] = []
 let detachConsole: (() => void) | null = null
 let initialized = false
 
-/** PLACEHOLDER_BODY */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Wait for a navigation to come to rest and return the guest that is live
+ * afterwards.
+ *
+ * `before` is the element held when the navigation was requested. Aiming the
+ * preview goes through the store, and the panel remounts the guest on a URL change
+ * (`key={url}`), so the element we end up with is usually a NEW one — hence the
+ * poll re-reads the module ref each tick instead of closing over it, and waits for
+ * a different element rather than trusting `isLoading()` on the outgoing one. A
+ * same-element reload passes `before: null` (nothing to outlive) plus a short
+ * grace period, since `isLoading()` is still false for the first tick after
+ * `reload()` and would otherwise read as "already settled". On timeout the live
+ * guest is returned anyway: reporting a slow page beats reporting nothing.
+ */
+async function settle(before: WebviewElement | null, graceMs = 0): Promise<WebviewElement | null> {
+  if (graceMs > 0) await sleep(graceMs)
+  const deadline = Date.now() + SETTLE_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    const el = webview
+    if (el && el !== before && !el.isLoading()) return el
+    await sleep(SETTLE_POLL_MS)
+  }
+  return webview
+}
 
 /** Clip long output to the cap, flagging truncation. */
 function clip(text: string): { output: string; truncated: boolean } {
@@ -352,6 +401,212 @@ function doResize(
   return { ok: true, output: `Resized the preview to ${w}×${h}${preset ? ` (${preset})` : ''}.`, truncated: false, summary: `${w}×${h}` }
 }
 
+/**
+ * Build the script `eval` actually runs in the guest.
+ *
+ * The value is formatted to text INSIDE the page on purpose: an arbitrary result
+ * (a DOM node, a class instance, something cyclic) is not structured-cloneable, so
+ * returning it raw would reject on the way back across the webview boundary and
+ * the model would read an opaque serialization error instead of its answer. The
+ * body is `await`ed, so a promise-returning expression resolves before formatting.
+ */
+function guestEvalSource(body: string): string {
+  return `(async function () {
+  function fmt(v) {
+    if (v === undefined) return 'undefined';
+    if (v === null) return 'null';
+    var t = typeof v;
+    if (t === 'string') return v;
+    if (t === 'number' || t === 'boolean' || t === 'bigint' || t === 'symbol') return String(v);
+    if (t === 'function') return 'function ' + (v.name || '(anonymous)') + '()';
+    if (v instanceof Error) return String(v.stack || v.message || v);
+    if (typeof Node !== 'undefined' && v instanceof Node) return String(v.outerHTML || v.textContent || v.nodeName);
+    if (typeof v.length === 'number' && typeof v !== 'string' && !Array.isArray(v) && typeof v.item === 'function') {
+      var parts = [];
+      for (var i = 0; i < v.length && i < 40; i++) parts.push(fmt(v[i]));
+      return '(' + v.length + ') [\\n' + parts.join('\\n') + (v.length > 40 ? '\\n…' : '') + '\\n]';
+    }
+    try {
+      var seen = [];
+      var json = JSON.stringify(v, function (k, val) {
+        if (typeof val === 'function') return '[Function]';
+        if (typeof val === 'bigint') return String(val);
+        if (val && typeof val === 'object') {
+          if (seen.indexOf(val) !== -1) return '[Circular]';
+          seen.push(val);
+          if (typeof Node !== 'undefined' && val instanceof Node) return '[' + val.nodeName + ']';
+          if (typeof Window !== 'undefined' && val instanceof Window) return '[Window]';
+        }
+        return val;
+      }, 2);
+      return json === undefined ? String(v) : json;
+    } catch (e) { return String(v); }
+  }
+  function cap(s) { return s.length > ${MAX_EVAL_CHARS} ? s.slice(0, ${MAX_EVAL_CHARS}) + '\\n…(truncated)' : s; }
+  try {
+    var __value = ${body};
+    return { ok: true, text: cap(fmt(__value)) };
+  } catch (e) {
+    return { ok: false, text: cap(String((e && (e.stack || e.message)) || e)) };
+  }
+})()`
+}
+
+/** What one attempt at running guest code produced. */
+type GuestEval = { kind: 'value'; ok: boolean; text: string } | { kind: 'threw'; message: string }
+
+/** Run one wrapped body in the guest, normalising both failure paths. */
+async function runGuestEval(el: WebviewElement, body: string): Promise<GuestEval> {
+  try {
+    const raw = (await el.executeJavaScript(guestEvalSource(body))) as {
+      ok?: boolean
+      text?: string
+    } | null
+    if (!raw || typeof raw.text !== 'string') {
+      return { kind: 'threw', message: 'the guest page returned nothing' }
+    }
+    return { kind: 'value', ok: raw.ok === true, text: raw.text }
+  } catch (e) {
+    return { kind: 'threw', message: String((e as Error)?.message ?? e) }
+  }
+}
+
+/**
+ * Run `expression` in the guest page and report its value — the general-purpose
+ * verification hatch (hover, key events, scrolling, reading app state, calling a
+ * function the page exposes).
+ *
+ * Two shapes are accepted. An expression (`document.title`) is the common case; a
+ * statement body (`const el = …; return el.offsetTop`) is only a *syntax* error in
+ * the expression wrapper, so a SyntaxError retries as a function body rather than
+ * being reported to the model as its own mistake. A statement body must `return`
+ * its value — unlike a devtools console, a function body has no completion value.
+ */
+async function doEval(el: WebviewElement, expression: string): Promise<InspectReply> {
+  // The closing paren goes on its own line so a trailing `// comment` in the
+  // expression cannot swallow it.
+  let res = await runGuestEval(el, `await (\n${expression}\n)`)
+  if (res.kind === 'threw' && /syntax|unexpected/i.test(res.message)) {
+    res = await runGuestEval(el, `await (async function () {\n${expression}\n})()`)
+  }
+  if (res.kind === 'threw') {
+    return {
+      ok: false,
+      output: `Could not evaluate that in the preview: ${res.message}`,
+      truncated: false,
+      summary: 'error',
+      error: res.message
+    }
+  }
+  const { output, truncated } = clip(res.text)
+  if (!res.ok) {
+    return {
+      ok: false,
+      output: output || 'The expression threw.',
+      truncated,
+      summary: 'threw',
+      error: res.text.split('\n')[0] || 'threw'
+    }
+  }
+  const firstLine = res.text.split('\n')[0] ?? ''
+  return {
+    ok: true,
+    output: output || '(no value)',
+    truncated,
+    summary: firstLine.length > 60 ? `${firstLine.slice(0, 60)}…` : firstLine || 'evaluated'
+  }
+}
+
+/**
+ * Resolve a requested address to an absolute loopback URL, or say why not.
+ *
+ * `raw` may be absolute (`http://localhost:5173/about`) or relative to whatever the
+ * preview currently holds (`/about`, `about.html`), which is what a model naturally
+ * writes when walking the routes of the app it just built. Anything that is not
+ * loopback http(s) is refused by NAME here rather than being silently dropped:
+ * the preview pane is the user's own app, and the open web has its own gated tool.
+ */
+function resolveLoopback(raw: string, base: string): { url?: string; error?: string } {
+  let parsed: URL
+  try {
+    parsed = new URL(raw, base || undefined)
+  } catch {
+    return {
+      error: `"${raw}" is not an address the preview can load. Use an absolute http://localhost:PORT/… URL, or a path like /about once a page is loaded.`
+    }
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { error: `Refused to load "${raw}" — the preview only loads http(s) pages.` }
+  }
+  if (!LOOPBACK_HOSTS.has(parsed.hostname)) {
+    return {
+      error: `Refused to send the preview to ${parsed.hostname} — this pane shows the user's own app on localhost. Use the browse tool to visit the real web.`
+    }
+  }
+  // 0.0.0.0 and ::1 are bind addresses a guest cannot reliably load: use loopback.
+  if (parsed.hostname === '0.0.0.0' || parsed.hostname === '::1') parsed.hostname = '127.0.0.1'
+  return { url: parsed.href }
+}
+
+/**
+ * Point the preview at another loopback page, or reload the current one when no
+ * `url` is given (the refresh after a rebuild).
+ *
+ * Aiming goes through the store rather than `loadURL` on the element, so the
+ * panel's address bar and the store's `previewUrl` stay truthful about what is
+ * loaded — and the guest remount that follows is what {@link settle} waits for.
+ */
+async function doNavigate(rawUrl: string | undefined): Promise<InspectReply> {
+  const current = useAppStore.getState().previewUrl ?? webview?.getURL() ?? ''
+  const before = webview
+  const reload = async (el: WebviewElement): Promise<InspectReply> => {
+    el.reload()
+    const live = await settle(null, RELOAD_GRACE_MS)
+    const at = live?.getURL() || current
+    return { ok: true, output: `Reloaded ${at}.`, truncated: false, summary: 'reloaded' }
+  }
+  if (!rawUrl) {
+    if (!before) {
+      return {
+        ok: false,
+        output: 'There is no preview page to reload yet — start the preview first.',
+        truncated: false,
+        summary: 'no preview',
+        error: 'no webview'
+      }
+    }
+    return reload(before)
+  }
+  const resolved = resolveLoopback(rawUrl, current)
+  if (resolved.error || !resolved.url) {
+    return {
+      ok: false,
+      output: resolved.error ?? 'Could not resolve that address.',
+      truncated: false,
+      summary: 'refused',
+      error: 'not loopback'
+    }
+  }
+  // Asking for the page already loaded reads as "refresh it" — and aiming the store
+  // at an unchanged URL would remount nothing for settle() to wait for.
+  if (resolved.url === current && before) return reload(before)
+  useAppStore.getState().showLocalPreviewUrl(resolved.url)
+  const live = await settle(before)
+  if (!live) {
+    return {
+      ok: false,
+      output: `The preview never loaded ${resolved.url}.`,
+      truncated: false,
+      summary: 'no preview',
+      error: 'no webview'
+    }
+  }
+  const at = live.getURL() || resolved.url
+  const title = live.getTitle()
+  const { output, truncated } = clip(`Navigated to ${at}.${title ? `\ntitle: ${title}` : ''}`)
+  return { ok: true, output, truncated, summary: title || 'navigated' }
+}
+
 /** Turn a `data:` URL into the engine's media shape, or undefined if malformed. */
 function toMedia(dataUrl: string): { kind: 'image'; mediaType: string; dataBase64: string } | undefined {
   const match = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl)
@@ -361,6 +616,9 @@ function toMedia(dataUrl: string): { kind: 'image'; mediaType: string; dataBase6
 
 /** Route one request to its action handler. */
 async function dispatch(req: PreviewInspectRequest): Promise<InspectReply> {
+  // navigate runs before the guard below: aiming the pane is exactly what you do
+  // when nothing is loaded yet, so it must not be refused for having no page.
+  if (req.action === 'navigate') return doNavigate(req.url)
   const el = webview
   if (!el) {
     return { ok: false, output: 'The preview pane has no page loaded yet.', truncated: false, summary: 'no preview', error: 'no webview' }
@@ -382,6 +640,8 @@ async function dispatch(req: PreviewInspectRequest): Promise<InspectReply> {
       return doFill(el, req.selector ?? '', req.value ?? '')
     case 'resize':
       return doResize(el, req.preset, req.width, req.height)
+    case 'eval':
+      return doEval(el, req.expression ?? '')
     default:
       return { ok: false, output: `Unknown preview action.`, truncated: false, summary: 'unknown', error: 'unknown action' }
   }

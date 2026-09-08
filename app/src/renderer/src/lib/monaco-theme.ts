@@ -10,3 +10,46 @@ import type { Theme } from '@shared/types'
 export function monacoThemeFor(theme: Theme): 'vs' | 'vs-dark' {
   return theme === 'dark' ? 'vs-dark' : 'vs'
 }
+
+/**
+ * Maps a file extension to a Monaco language id for diff syntax highlighting.
+ * Lives here rather than beside one of its callers because the chat pane's tool
+ * card, the approval bar and the canvas diff all need the same answer — three
+ * copies would drift, and a diff highlighted as `plaintext` in one surface and
+ * TypeScript in another reads as a bug in the diff itself.
+ */
+export function languageForPath(path: string): string {
+  const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
+  switch (ext) {
+    case 'ts':
+    case 'mts':
+    case 'cts':
+      return 'typescript'
+    case 'tsx':
+      return 'typescript'
+    case 'js':
+    case 'mjs':
+    case 'cjs':
+    case 'jsx':
+      return 'javascript'
+    case 'json':
+      return 'json'
+    case 'css':
+      return 'css'
+    case 'html':
+      return 'html'
+    case 'md':
+    case 'markdown':
+      return 'markdown'
+    case 'py':
+      return 'python'
+    case 'sh':
+    case 'bash':
+      return 'shell'
+    case 'yml':
+    case 'yaml':
+      return 'yaml'
+    default:
+      return 'plaintext'
+  }
+}

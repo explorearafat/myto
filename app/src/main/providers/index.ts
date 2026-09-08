@@ -9,6 +9,7 @@ import { OllamaProvider } from './ollama'
 import type { Provider } from './provider'
 
 export type { Provider } from './provider'
+export { collectCompletion } from './collect'
 
 /** Build a provider from an explicit kind + (possibly unsaved) config. */
 export function createProvider(

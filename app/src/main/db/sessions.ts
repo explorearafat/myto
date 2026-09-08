@@ -274,7 +274,8 @@ export function loadSession(id: string): PersistedSession | null {
 
   const toolRows = getDb()
     .prepare(
-      `SELECT id, after_msg_id, run_id, auto, decision, proposal_json, result_json, content_offset
+      `SELECT id, after_msg_id, run_id, auto, decision, proposal_json, result_json, content_offset,
+              agent_id, agent_role, started_at, ended_at
        FROM tool_ops WHERE session_id = ? ORDER BY seq`
     )
     .all(id) as Array<{
@@ -286,6 +287,10 @@ export function loadSession(id: string): PersistedSession | null {
     proposal_json: string
     result_json: string | null
     content_offset: number | null
+    agent_id: string | null
+    agent_role: string | null
+    started_at: number | null
+    ended_at: number | null
   }>
   const tools: PersistedToolOp[] = toolRows.map((t) => ({
     id: t.id,
@@ -295,7 +300,11 @@ export function loadSession(id: string): PersistedSession | null {
     ...(t.decision != null ? { decision: t.decision as PersistedToolOp['decision'] } : {}),
     proposal: JSON.parse(t.proposal_json) as ToolProposal,
     ...(t.result_json != null ? { result: JSON.parse(t.result_json) as ToolResult } : {}),
-    ...(t.content_offset != null ? { contentOffset: t.content_offset } : {})
+    ...(t.content_offset != null ? { contentOffset: t.content_offset } : {}),
+    ...(t.agent_id != null ? { agentId: t.agent_id } : {}),
+    ...(t.agent_role != null ? { agentRole: t.agent_role as PersistedToolOp['agentRole'] } : {}),
+    ...(t.started_at != null ? { startedAt: t.started_at } : {}),
+    ...(t.ended_at != null ? { endedAt: t.ended_at } : {})
   }))
 
   const terminalRows = getDb()
@@ -419,11 +428,13 @@ export function appendToolOp(sessionId: string, op: PersistedToolOp, now: number
   getDb()
     .prepare(
       `INSERT INTO tool_ops
-         (id, session_id, seq, after_msg_id, run_id, auto, decision, proposal_json, result_json, content_offset)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         (id, session_id, seq, after_msg_id, run_id, auto, decision, proposal_json, result_json,
+          content_offset, agent_id, agent_role, started_at, ended_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          decision = excluded.decision,
-         result_json = excluded.result_json`
+         result_json = excluded.result_json,
+         ended_at = excluded.ended_at`
     )
     .run(
       op.id,
@@ -439,7 +450,14 @@ export function appendToolOp(sessionId: string, op: PersistedToolOp, now: number
       // where it was proposed (think → act → think). Set once at first insert;
       // not in the ON CONFLICT UPDATE (the result arrives later but the anchor
       // never moves). Nullable — older rows / non-anchored ops stay NULL.
-      op.contentOffset ?? null
+      op.contentOffset ?? null,
+      // Who did it (absent = the lead) and when. Like the anchor, the attribution
+      // and the start time are fixed at first insert; only `ended_at` can arrive
+      // later, alongside the result it belongs to.
+      op.agentId ?? null,
+      op.agentRole ?? null,
+      op.startedAt ?? null,
+      op.endedAt ?? null
     )
   touch(sessionId, now)
 }

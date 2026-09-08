@@ -1,22 +1,32 @@
 import { create } from 'zustand'
 import { isBundlerEntryHtml } from '@shared/preview'
 import { parseSlash } from '@shared/commands'
+import { standingApprovalKey } from '@shared/approvals'
 import type {
   AgentRole,
   Attachment,
   ChatMessage,
+  CheckpointInfo,
+  ContextUsage,
+  Followup,
   IntentAnalysis,
+  PendingPlan,
+  PendingQuestion,
   PersistedSession,
   PersistedToolOp,
+  RestoreResult,
   RunProgress,
   TaskState,
+  TodoItem,
   ToolDecision,
+  ToolDecisionDetail,
   ToolProposal,
   ToolResult,
   WorkflowEvent,
   WorkflowStage
 } from '@shared/types'
 import { useAppStore } from './useAppStore'
+import { takeReveal } from '../lib/reveal'
 
 /**
  * Commands that produce a static build (into dist/, build/, out/, …). After one
@@ -34,6 +44,9 @@ const BUILD_RE =
  * Appending to a growing Markdown message on every token would re-parse and
  * re-highlight the whole thing each time — O(n²) work that freezes the UI on a
  * large response. Coalescing to ~15fps keeps streaming smooth without a hang.
+ *
+ * It doubles as the reveal cadence: a tick shows part of whatever is queued (see
+ * `lib/reveal.ts`), so text that arrived as one big delta still types out.
  */
 const DELTA_FLUSH_MS = 66
 
@@ -109,6 +122,22 @@ export interface ToolCardUI {
   agentId?: string
   /** The subagent's role, mirrored from its {@link AgentCardUI} for rendering. */
   agentRole?: AgentRole
+  /**
+   * Wall-clock ms the op was proposed / its result landed, taken from the event's
+   * own stamp (see {@link WorkflowEventMeta}) rather than measured in the renderer,
+   * so a card restored from disk reports the same times as the live one. Both
+   * absent on ops from before the columns existed; the UI then shows no duration
+   * instead of a made-up one.
+   */
+  startedAt?: number
+  endedAt?: number
+  /**
+   * True when the user rewrote the proposal in the diff before approving it, so
+   * what landed on disk is their text. The card's `proposal.newContent` is swapped
+   * to the edited body at the same time — the diff you review afterwards is the
+   * one that actually happened, not the one that was offered.
+   */
+  edited?: boolean
 }
 
 /** Lifecycle of a nested subagent card in the chat thread. */
@@ -143,6 +172,13 @@ export interface AgentCardUI {
   background?: boolean
   /** Running in a private git worktree (isolated writes/commands). */
   isolation?: 'worktree'
+  /**
+   * Set the moment the user asks for this lane to stop, cleared by the `agent-end`
+   * that actually closes it. The engine has to unwind the loop (and any tool it is
+   * mid-way through), so the gap is real — the lane says "Stopping…" for it rather
+   * than pretending the click already took effect.
+   */
+  cancelling?: boolean
 }
 
 /** Live activity line shown while a run is in progress. */
@@ -170,37 +206,116 @@ export interface RunProgressUI extends RunProgress {
 }
 
 /**
- * One step in the live activity timeline. Every `status` event the engine emits
- * appends a step; the previous step is marked `done` the moment the next arrives,
- * so the UI can render completed phases quietly (with a ✓) and the current phase
- * as active. This turns the engine's already-real status stream into the
- * progressive, sequential timeline the UI shows (Understanding → Reading →
- * Planning → …) instead of a single re-labeling line. Renderer-only UI state:
- * never persisted and never an IPC payload — derived entirely from live events.
+ * What a run-log row is about, so the log can style it and link it back to the
+ * card that holds the full input/output. `phase` rows are the engine's own status
+ * stream; the rest mark a concrete event.
+ */
+export type ActivityKind =
+  | 'phase'
+  | 'tool'
+  | 'agent'
+  | 'plan'
+  | 'question'
+  | 'followup'
+  | 'checkpoint'
+  | 'run-end'
+
+/**
+ * One step in the run log: a flat, append-ordered, timestamped list of everything
+ * the engine reported this turn, with `agentId` attributing a row to the subagent
+ * that caused it. This is the single event trace the log surface reads — phases,
+ * tool proposals and their outcomes, subagent spawns and reports — and `toolId` /
+ * `agentId` link a row back to the {@link ToolCardUI} / {@link AgentCardUI} that
+ * already holds the full detail, so no payload is duplicated here.
+ *
+ * `done` marks a *phase* row superseded by the next one, so the log can render
+ * finished phases quietly and the current one as active. Renderer-only state: it
+ * is never an IPC payload, and it is rebuilt (from persisted ops) rather than
+ * stored when a conversation is reopened.
  */
 export interface ActivityStep {
   id: string
+  /** Wall-clock ms from the event's own stamp; falls back to arrival time. */
+  at: number
+  kind: ActivityKind
   stage: WorkflowStage
   message: string
   done: boolean
+  /** The subagent this row belongs to; absent = the lead. */
+  agentId?: string
+  agentRole?: AgentRole
+  /** The tool op this row is about, matching {@link ToolCardUI.id}. */
+  toolId?: string
+  /** Outcome, once known: `false` renders calm-amber rather than red. */
+  ok?: boolean
 }
 
 /**
- * Append a status to the activity timeline, marking the prior step done. A status
- * identical to the current tail (same stage AND message) is a no-op — the engine
- * can re-emit the same phase and we don't want duplicate rows. Returns the same
- * array reference when nothing changed so callers can skip a needless re-render.
+ * Append a phase row, marking the previous PHASE row done — the previous row may
+ * now be a tool/agent row, and a concrete op finishing says nothing about whether
+ * the phase around it did. A status identical to the current tail is a no-op (the
+ * engine can re-emit the same phase back to back); the same status *after* an op
+ * is a new row, because chronologically it happened again. Returns the same array
+ * reference when nothing changed so callers can skip a needless re-render.
  */
 function appendActivity(
   list: ActivityStep[],
   stage: WorkflowStage,
-  message: string
+  message: string,
+  at: number
 ): ActivityStep[] {
   const last = list[list.length - 1]
-  if (last && last.stage === stage && last.message === message) return list
-  const next = last && !last.done ? [...list.slice(0, -1), { ...last, done: true }] : [...list]
-  next.push({ id: nextActivityId(), stage, message, done: false })
+  if (last && last.kind === 'phase' && last.stage === stage && last.message === message) return list
+  const next = closeLastPhase(list)
+  next.push({ id: nextActivityId(), at, kind: 'phase', stage, message, done: false })
   return next
+}
+
+/**
+ * Append a concrete event row (a tool op, a subagent spawn, a flagged follow-up).
+ * Never deduplicated — each row records that a specific thing happened at a
+ * specific time — and never touches the surrounding phase rows.
+ */
+function appendEvent(list: ActivityStep[], row: Omit<ActivityStep, 'id'>): ActivityStep[] {
+  return [...list, { id: nextActivityId(), ...row }]
+}
+
+/**
+ * Flip an in-flight row to finished once its outcome is known (a tool result, a
+ * subagent's report, an answered question). Matches on the id the row was opened
+ * with — `toolId` covers every kind of row keyed by an engine-minted id, since
+ * those ids are unique across ops, questions and plans — so an event that arrives
+ * for a row we never saw is simply ignored rather than mislabelling one.
+ * `ok` is only recorded when the engine actually states it — a tool row leaves it
+ * unset and the log reads success/failure off the linked card, so the rule for
+ * "did this op fail" lives in exactly one place.
+ */
+function finishActivity(
+  list: ActivityStep[],
+  match: { toolId?: string; agentId?: string },
+  ok?: boolean
+): ActivityStep[] {
+  const i = list.findIndex((s) =>
+    match.toolId != null
+      ? s.toolId === match.toolId
+      : s.kind === 'agent' && s.agentId === match.agentId
+  )
+  if (i < 0) return list
+  const next = [...list]
+  next[i] = { ...next[i], done: true, ...(ok != null ? { ok } : {}) }
+  return next
+}
+
+/** Mark the most recent phase row done (a new phase, or the run itself, ended). */
+function closeLastPhase(list: ActivityStep[]): ActivityStep[] {
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i].kind !== 'phase') continue
+    if (list[i].done) break
+    const next = [...list]
+    next[i] = { ...next[i], done: true }
+    return next
+  }
+  return [...list]
 }
 
 /**
@@ -233,6 +348,13 @@ function clip(text: string, max: number): string {
 }
 
 /**
+ * Prefix for the sticky row while a gated op sits unanswered. The row is the one
+ * line always on screen, so it must not read as work in flight when Sylor is
+ * blocked on a decision the user has not made yet.
+ */
+const AWAITING_PREFIX = 'Waiting for your go-ahead · '
+
+/**
  * Turns a proposed tool op into the live status line the top bar shows — an
  * active-voice "what's happening now" with the concrete target, e.g. "Creating
  * index.html", "Editing App.tsx", "Reading types.ts", "Reviewing engine.ts".
@@ -247,7 +369,11 @@ function describeProposal(
     case 'write_file':
       return {
         stage: 'executing',
-        message: `${proposal.exists ? 'Editing' : 'Creating'} ${baseName(proposal.path)}`
+        // The purpose the model attached, when it did — "Creating Button.tsx" says
+        // what is happening, "· the shared button every page uses" says why.
+        message:
+          `${proposal.exists ? 'Editing' : 'Creating'} ${baseName(proposal.path)}` +
+          (proposal.purpose ? ` · ${proposal.purpose}` : '')
       }
     case 'read': {
       if (proposal.op === 'read_file') {
@@ -273,7 +399,7 @@ function describeProposal(
     case 'install_plugin':
       return { stage: 'executing', message: `Installing ${clip(proposal.source, 48)}` }
     case 'preview_inspect':
-      return { stage: 'verifying', message: `Checking the preview · ${proposal.action}` }
+      return { stage: 'verifying', message: previewStatus(proposal) }
     case 'browse':
       return { stage: 'executing', message: browseStatus(proposal) }
     case 'diagnostics':
@@ -323,6 +449,47 @@ function browseStatus(proposal: Extract<ToolProposal, { kind: 'browse' }>): stri
 }
 
 /**
+ * Status line for a preview step, phrased as the thing the user can watch happen
+ * in the preview pane ("Looking at the preview", "Opening /about") rather than as
+ * an action name. Mirrors {@link browseStatus} for the pane beside it.
+ */
+function previewStatus(proposal: Extract<ToolProposal, { kind: 'preview_inspect' }>): string {
+  const target = clip(proposal.selector ?? 'an element', 32)
+  switch (proposal.action) {
+    case 'screenshot':
+      return 'Looking at the preview'
+    case 'snapshot':
+      return 'Reading the preview'
+    case 'inspect':
+      return `Inspecting ${target}`
+    case 'console_logs':
+      return 'Checking the preview console'
+    case 'network':
+      return 'Checking the preview requests'
+    case 'click':
+      return `Clicking ${target}`
+    case 'fill':
+      return `Typing into ${target}`
+    case 'resize':
+      return `Resizing the preview${
+        proposal.preset
+          ? ` to ${proposal.preset}`
+          : proposal.width && proposal.height
+            ? ` to ${proposal.width}×${proposal.height}`
+            : ''
+      }`
+    case 'eval':
+      return 'Running JS in the preview'
+    case 'navigate':
+      return proposal.url ? `Opening ${clip(proposal.url, 40)}` : 'Reloading the preview'
+    case 'server_logs':
+      return 'Checking the dev server log'
+    default:
+      return 'Checking the preview'
+  }
+}
+
+/**
  * An attachment being sent with a user turn. `textContent` is the decoded body
  * for text-like files (read by the composer), inlined into the engine history so
  * the model can see the file; binary/image files carry only metadata and are
@@ -364,8 +531,52 @@ interface LiveRun {
    * doesn't count for us because the renderer already receives every transition.
    */
   taskStates: Map<string, TaskState>
+  /**
+   * The lead's flat, self-maintained TODO checklist for this run (Claude-Code's
+   * TodoWrite). Replaced wholesale by each `todos` event. Live-only — never
+   * persisted; the finished assistant turn stands on its own, so a reopened run
+   * with no live entry shows no checklist.
+   */
+  todos: TodoItem[]
+  /**
+   * The clarifying question (the `ask_user` tool) this run is currently BLOCKED on,
+   * or null when it isn't waiting on one. Set by a `question` event and cleared when
+   * the user answers ({@link ChatStore.answerQuestion}). Live-only — like the
+   * checklist it is never persisted; a reopened finished run is never blocked.
+   */
+  question: PendingQuestion | null
+  /**
+   * The plan this run is BLOCKED on for a go-ahead (the "Plan first" checkpoint),
+   * or null. Set by a `plan-approval` event and cleared when the user decides.
+   * Live-only, like {@link question} — a reopened finished run is never waiting.
+   */
+  planApproval: PendingPlan | null
+  /**
+   * Out-of-scope issues this run flagged (the `flag_followup` tool), oldest first.
+   * Appended to, never replaced. Unlike {@link LiveRun.todos} these are NOT cleared
+   * when the turn ends — the user acts on them afterwards — so the chips are dropped
+   * only when the conversation moves on (a new send, a regenerate, a clear, a switch).
+   */
+  followups: Followup[]
   /** Ordered activity timeline (one step per distinct status), mirrored while visible. */
   activity: ActivityStep[]
+  /**
+   * Measured context load for the next completion, or null before the first step.
+   * Comes from the engine (only it can see the assembled array), lead only.
+   *
+   * Restore points are deliberately NOT here: a checkpoint belongs to the project on
+   * disk, not to one conversation, so the list lives on {@link ChatState} alone and
+   * is read back with `checkpoints.list()`.
+   */
+  usage: ContextUsage | null
+  /**
+   * Standing approvals granted with "Always" this run — the renderer's mirror of the
+   * engine's own set, keyed by {@link standingApprovalKey}. Its only job is to make a
+   * grant VISIBLE (and withdrawable) while it is in force: an approval that silently
+   * changes how the rest of the run behaves is the one thing the permission bar exists
+   * to prevent. The engine remains the authority — it re-derives every key itself.
+   */
+  standing: string[]
   /** Intent interpretation for this run. */
   intent: IntentAnalysis | null
   /** Cancels the main-process run and detaches its event listener. */
@@ -412,13 +623,57 @@ export interface ChatState {
    */
   progress: RunProgressUI | null
   /**
+   * The active run's flat TODO checklist — the lead's own `update_todos` list,
+   * rendered as a small evolving panel during the turn. Empty when idle or when
+   * the turn keeps no checklist. Live-only, cleared when the turn ends.
+   */
+  todos: TodoItem[]
+  /**
+   * The clarifying question the active run is blocked on (the `ask_user` tool), or
+   * null. When set, the composer shows an answer bar; answering it resumes the run.
+   * Live-only, cleared when the turn ends or the user answers.
+   */
+  question: PendingQuestion | null
+  /**
+   * The plan the active run is waiting on a go-ahead for ("Plan first"), or null.
+   * When set, an approval bar is shown; approving builds the plan in the same turn,
+   * rejecting stops the run. Live-only, cleared when the turn ends or is decided.
+   */
+  planApproval: PendingPlan | null
+  /**
+   * Out-of-scope issues the last/active run flagged, rendered as chips above the
+   * composer: each one can be started as its own turn or dismissed. They deliberately
+   * OUTLIVE the turn (the user reads the answer, then decides), and are cleared when
+   * the conversation moves on — the next send, a regenerate, a clear, a session switch.
+   * The project's `FOLLOWUPS.md` is the durable record; these chips are the affordance.
+   */
+  followups: Followup[]
+  /**
    * Ordered live activity timeline for the active run — the progressive sequence
    * of phases (Understanding → Reading → Planning → …) the UI renders in place of
    * a single spinner. Empty when idle.
    */
   activity: ActivityStep[]
+  /**
+   * Standing approvals in force for the active run (keys from `standingApprovalKey`),
+   * shown as chips above the composer so "I stopped being asked" is always something
+   * the user can SEE and undo. Empty when idle — a grant dies with its run.
+   */
+  standing: string[]
   /** The intent interpretation for the active/last run ("You want to…"). */
   intent: IntentAnalysis | null
+  /**
+   * Restore points recorded for this project, newest first. Read from disk with
+   * `checkpoints.list()` ({@link ChatState.refreshCheckpoints}) and extended live by
+   * the engine's `checkpoint` events. Project-scoped, not conversation-scoped: the
+   * timeline is about the folder, so it survives switching chats.
+   */
+  checkpoints: CheckpointInfo[]
+  /**
+   * Measured context load for the active run's next completion, or null when idle /
+   * before its first step. Drives the footer meter.
+   */
+  usage: ContextUsage | null
   /** Disposer for the active run's event subscription. */
   disposer: (() => void) | null
   /** The persisted session this conversation is being written to, or null. */
@@ -445,10 +700,53 @@ export interface ChatState {
    * expanded prompt.
    */
   send: (text: string, attachments?: OutgoingAttachment[], engineText?: string) => void
-  /** Approve or reject a pending tool proposal. */
-  decideTool: (toolId: string, decision: ToolDecision) => void
+  /**
+   * Approve or reject a pending tool proposal. `detail` carries the two things a
+   * verdict can come with: the file body the user edited in the diff before letting
+   * it through, and the reason they said no (both fed to the engine as-is).
+   */
+  decideTool: (toolId: string, decision: ToolDecision, detail?: ToolDecisionDetail) => void
+  /**
+   * Stop ONE subagent lane without ending the run. The lane shows "Stopping…" until
+   * the engine's `agent-end` closes it; the lead carries on with that report.
+   */
+  cancelAgent: (agentId: string) => void
+  /**
+   * Withdraw a standing "Always" approval, so the next op of that class asks again.
+   * Keyed by {@link standingApprovalKey}; a no-op once the run has ended.
+   */
+  revokeStanding: (key: string) => void
+  /**
+   * Answer the clarifying question the active run is blocked on (the `ask_user`
+   * tool), resuming it. No-op when nothing is waiting. Clears {@link ChatState.question}.
+   */
+  answerQuestion: (answer: string) => void
+  /**
+   * Approve or reject the plan the active run is waiting on ("Plan first").
+   * Approving lets the SAME turn build it; rejecting stops the run without a retry —
+   * a reject is a decision, not a failure. No-op when nothing is waiting.
+   */
+  decidePlan: (decision: 'approve' | 'reject') => void
+  /**
+   * Drop a flagged follow-up's chip. The entry in `FOLLOWUPS.md` is deliberately
+   * LEFT ALONE — dismissing means "not now", and the written record is the whole
+   * point of flagging it. A no-op when the id isn't showing.
+   */
+  dismissFollowup: (id: string) => void
   /** Cancel the active run, keeping whatever was streamed so far. */
   cancel: () => void
+  /**
+   * Re-read the project's restore points from disk into {@link ChatState.checkpoints}.
+   * Called when the timeline opens and after a restore, so the list is never a stale
+   * copy of a folder that has moved on.
+   */
+  refreshCheckpoints: () => void
+  /**
+   * Roll the project back to one checkpoint. Resolves the engine's own verdict — how
+   * many files were rewritten, and the safety point taken first — so the caller can
+   * report what actually happened instead of assuming it worked. Refreshes the list.
+   */
+  restoreCheckpoint: (id: string) => Promise<RestoreResult>
   /** Clear the whole conversation (cancels any active run first). */
   clear: () => void
   /**
@@ -544,11 +842,42 @@ function buildAttachmentContext(attachments: OutgoingAttachment[]): string {
   return parts.join('\n\n')
 }
 
+/**
+ * Rebuild Run Log rows for a reopened conversation from its persisted tool ops.
+ *
+ * Only the LAST run's ops become rows: the log is a trace of one turn, and a
+ * reload should show the turn that just happened rather than every op the
+ * conversation ever ran. Ops written before migration v9 carry no `startedAt`,
+ * so their row time is 0 — the sentinel the log renders as `--:--:--` instead of
+ * inventing a clock reading (an op that was never timed must not look timed).
+ */
+function restoredActivity(tools: ToolCardUI[]): ActivityStep[] {
+  if (tools.length === 0) return []
+  const lastRunId = tools[tools.length - 1].runId
+  return tools
+    .filter((t) => t.runId === lastRunId)
+    .map((t) => {
+      const desc = describeProposal(t.proposal, t.agentRole)
+      return {
+        id: nextActivityId(),
+        at: t.startedAt ?? 0,
+        kind: 'tool' as ActivityKind,
+        stage: desc.stage,
+        message: desc.message,
+        done: true,
+        toolId: t.id,
+        ...(t.agentId != null ? { agentId: t.agentId } : {}),
+        ...(t.agentRole != null ? { agentRole: t.agentRole } : {})
+      }
+    })
+}
+
 /** Rehydrate UI state from a loaded session (messages + completed tool cards). */
 function hydrate(loaded: PersistedSession): {
   messages: ChatMessageUI[]
   tools: ToolCardUI[]
   attachments: Attachment[]
+  activity: ActivityStep[]
 } {
   const messages: ChatMessageUI[] = loaded.messages.map((m) => ({
     id: m.id,
@@ -559,6 +888,8 @@ function hydrate(loaded: PersistedSession): {
     ...(m.flagged ? { flagged: true } : {})
   }))
   // Persisted tool ops are always terminal → restored as read-only 'complete'.
+  // Attribution and timing ride along (migration v9) so a reopened conversation
+  // shows which subagent did what, and when, instead of flattening it to the lead.
   const tools: ToolCardUI[] = loaded.tools.map((t) => ({
     id: t.id,
     runId: t.runId,
@@ -568,7 +899,11 @@ function hydrate(loaded: PersistedSession): {
     status: 'complete',
     ...(t.decision != null ? { decision: t.decision } : {}),
     ...(t.result != null ? { result: t.result } : {}),
-    ...(t.contentOffset != null ? { contentOffset: t.contentOffset } : {})
+    ...(t.contentOffset != null ? { contentOffset: t.contentOffset } : {}),
+    ...(t.agentId != null ? { agentId: t.agentId } : {}),
+    ...(t.agentRole != null ? { agentRole: t.agentRole } : {}),
+    ...(t.startedAt != null ? { startedAt: t.startedAt } : {}),
+    ...(t.endedAt != null ? { endedAt: t.endedAt } : {})
   }))
 
   // Advance id/run counters past everything restored.
@@ -586,7 +921,12 @@ function hydrate(loaded: PersistedSession): {
       runCounter = Math.max(runCounter, n)
     }
   )
-  return { messages, tools, attachments: loaded.attachments }
+  return {
+    messages,
+    tools,
+    attachments: loaded.attachments,
+    activity: restoredActivity(tools)
+  }
 }
 
 /**
@@ -598,7 +938,7 @@ function hydrate(loaded: PersistedSession): {
  * the session has no live run, returns the base view marked idle.
  */
 function projectLiveRun(
-  base: { messages: ChatMessageUI[]; tools: ToolCardUI[] },
+  base: { messages: ChatMessageUI[]; tools: ToolCardUI[]; activity?: ActivityStep[] },
   sessionId: string | null
 ): {
   messages: ChatMessageUI[]
@@ -609,8 +949,14 @@ function projectLiveRun(
   disposer: (() => void) | null
   status: ActivityStatus | null
   progress: RunProgressUI | null
+  todos: TodoItem[]
+  question: PendingQuestion | null
+  planApproval: PendingPlan | null
+  followups: Followup[]
   activity: ActivityStep[]
+  standing: string[]
   intent: IntentAnalysis | null
+  usage: ContextUsage | null
 } {
   const run = sessionId ? liveRuns.get(sessionId) : undefined
   if (!run) {
@@ -624,8 +970,24 @@ function projectLiveRun(
       disposer: null,
       status: null,
       progress: null,
-      activity: [],
-      intent: null
+      todos: [],
+      question: null,
+      planApproval: null,
+      // Follow-up chips belong to the run that raised them and aren't persisted, so
+      // opening a conversation with no live run shows none. Nothing is lost: the
+      // finding is in FOLLOWUPS.md, which is why the chip can be this transient.
+      followups: [],
+      // Rebuilt from the persisted ops of the last turn (see `restoredActivity`), so
+      // reopening a conversation still has a Run Log rather than an empty panel.
+      activity: base.activity ?? [],
+      // A standing grant is scoped to the run that gave it, so an idle conversation
+      // holds none — nothing is being auto-approved behind the user's back.
+      standing: [],
+      intent: null,
+      // The meter measures the array a LIVE run is about to send, so an idle
+      // conversation has nothing to report — and says "no reading" rather than
+      // leaving the last run's number on screen as if it still applied.
+      usage: null
     }
   }
 
@@ -654,8 +1016,14 @@ function projectLiveRun(
     disposer: run.disposer,
     status: run.status,
     progress: run.progress,
+    todos: run.todos,
+    question: run.question,
+    planApproval: run.planApproval,
+    followups: run.followups,
     activity: run.activity,
-    intent: run.intent
+    standing: run.standing,
+    intent: run.intent,
+    usage: run.usage
   }
 }
 
@@ -716,8 +1084,14 @@ export const useChatStore = create<ChatState>((set, get) => {
       status: null,
       progress: null,
       taskStates: new Map(),
+      todos: [],
+      question: null,
+      planApproval: null,
+      followups: [],
       activity: [],
+      standing: [],
       intent: null,
+      usage: null,
       disposer: () => {},
       buffer: '',
       agentBuffers: new Map(),
@@ -742,15 +1116,25 @@ export const useChatStore = create<ChatState>((set, get) => {
     /** Is this run's owner session the conversation currently on screen? */
     const isVisible = (): boolean => get().sessionId === ownerSessionId
 
-    /** Drain buffered deltas (lead prose + each subagent's) into the store, if visible. */
-    const flush = (): void => {
+    /**
+     * Drain buffered deltas (lead prose + each subagent's) into the store, if visible.
+     *
+     * `all` drains the queue completely, for the moments where a partial reveal would
+     * be *wrong* rather than just slower: a tool or subagent card anchors at the
+     * current prose length, so any text still queued would land after the card it was
+     * written before; and the end of a run must show the whole reply. Everything else
+     * goes through {@link takeReveal}, which passes a live token stream straight
+     * through and types out a block that arrived all at once.
+     */
+    const flush = (all = false): void => {
       if (run.flushTimer != null) {
         clearTimeout(run.flushTimer)
         run.flushTimer = null
       }
       // Lead prose accrues into the assistant message (the persisted turn)…
-      const leadText = run.buffer
-      run.buffer = ''
+      const lead = all ? { shown: run.buffer, rest: '' } : takeReveal(run.buffer)
+      const leadText = lead.shown
+      run.buffer = lead.rest
       if (leadText) run.content += leadText
       // …and is checkpointed to the DB on a throttled cadence so an interrupted
       // run (app reopened / new session / crash) keeps its reply, not just its
@@ -767,12 +1151,20 @@ export const useChatStore = create<ChatState>((set, get) => {
           })
         }
       }
-      // …and each subagent's prose accrues into its own nested card.
+      // …and each subagent's prose accrues into its own nested card, revealed the
+      // same way: a subagent narrates in a stream, but its closing report can land
+      // as one block.
       const agentDrains: Array<{ agentId: string; text: string }> = []
       for (const [agentId, buf] of run.agentBuffers) {
-        if (buf) agentDrains.push({ agentId, text: buf })
+        if (!buf) continue
+        const part = all ? { shown: buf, rest: '' } : takeReveal(buf)
+        if (part.shown) agentDrains.push({ agentId, text: part.shown })
+        if (part.rest) run.agentBuffers.set(agentId, part.rest)
+        else run.agentBuffers.delete(agentId)
       }
-      run.agentBuffers.clear()
+      // Keep the reveal ticking while text is still queued — the next tick has to
+      // come from here, since no further delta may arrive to schedule one.
+      if (run.buffer !== '' || run.agentBuffers.size > 0) scheduleFlush()
       // Update the background source of truth immutably (used on session switch),
       // reading each card's pre-flush content so the delta is applied exactly once.
       for (const { agentId, text } of agentDrains) {
@@ -815,12 +1207,17 @@ export const useChatStore = create<ChatState>((set, get) => {
         result,
         ...(card.contentOffset != null ? { contentOffset: card.contentOffset } : {}),
         ...(card.agentId != null ? { agentId: card.agentId } : {}),
-        ...(card.agentRole != null ? { agentRole: card.agentRole } : {})
+        ...(card.agentRole != null ? { agentRole: card.agentRole } : {}),
+        ...(card.startedAt != null ? { startedAt: card.startedAt } : {}),
+        ...(card.endedAt != null ? { endedAt: card.endedAt } : {})
       }
       window.sylor.sessions.appendToolOp(ownerSessionId, op)
     }
 
     const onEvent = (event: WorkflowEvent): void => {
+      // The engine's own stamp (applied once, in the IPC sink) is the log's clock;
+      // arrival time is only a fallback for a sink that doesn't stamp (CLI/SDK).
+      const at = event.at ?? Date.now()
       switch (event.type) {
         case 'intent':
           run.intent = event.intent
@@ -832,7 +1229,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           // streamed prose convey progress instead.
           if (event.agentId) break
           run.status = { stage: event.stage, message: event.message, retrying: event.retrying }
-          run.activity = appendActivity(run.activity, event.stage, event.message)
+          run.activity = appendActivity(run.activity, event.stage, event.message, at)
           // §33 — merged, not replaced: the engine sends `progress` when something
           // changes (phase start, then again once the checks have run), so a later
           // event that carries only `checks` must not erase the phase.
@@ -855,8 +1252,9 @@ export const useChatStore = create<ChatState>((set, get) => {
           scheduleFlush()
           break
         case 'tool-request': {
-          // Flush first so the anchor offset reflects all prose streamed so far.
-          flush()
+          // Drain fully first: the anchor offset must cover all prose streamed so
+          // far, or text still queued would appear below the card it preceded.
+          flush(true)
           // A subagent's op nests inside its card; its offset is relative to the
           // agent's own streamed prose. The lead's ops anchor to the assistant
           // message's content instead.
@@ -871,6 +1269,7 @@ export const useChatStore = create<ChatState>((set, get) => {
             auto: event.auto,
             status: event.auto ? 'running' : 'awaiting',
             contentOffset: agent ? agent.content.length : run.content.length,
+            startedAt: at,
             ...(event.agentId ? { agentId: event.agentId } : {}),
             ...(agent ? { agentRole: agent.role } : {})
           }
@@ -880,8 +1279,24 @@ export const useChatStore = create<ChatState>((set, get) => {
           // text — for the lead and for a subagent alike, so the user sees the
           // actual file work rather than "Delegating to the frontend…".
           const desc = describeProposal(event.proposal, agent?.role)
-          run.status = { stage: desc.stage, message: desc.message }
-          run.activity = appendActivity(run.activity, desc.stage, desc.message)
+          // A gated op is NOT happening yet — it is waiting on the user. The sticky
+          // row is the one line always on screen, so it says so instead of claiming
+          // work is under way; the activity trace keeps the plain description, since
+          // the op either runs or is refused moments later.
+          run.status = {
+            stage: desc.stage,
+            message: event.auto ? desc.message : `${AWAITING_PREFIX}${desc.message}`
+          }
+          run.activity = appendEvent(run.activity, {
+            at,
+            kind: 'tool',
+            stage: desc.stage,
+            message: desc.message,
+            done: false,
+            toolId: event.proposal.id,
+            ...(event.agentId ? { agentId: event.agentId } : {}),
+            ...(agent ? { agentRole: agent.role } : {})
+          })
           if (isVisible()) {
             set((state) => ({
               tools: [...state.tools, card],
@@ -896,14 +1311,18 @@ export const useChatStore = create<ChatState>((set, get) => {
           const idx = run.tools.findIndex((t) => t.id === event.result.id)
           let card: ToolCardUI | undefined
           if (idx >= 0) {
-            card = { ...run.tools[idx], status: 'complete', result: event.result }
+            card = { ...run.tools[idx], status: 'complete', result: event.result, endedAt: at }
             run.tools[idx] = card
           }
+          run.activity = finishActivity(run.activity, { toolId: event.result.id })
           if (isVisible()) {
             set((state) => ({
               tools: state.tools.map((t) =>
-                t.id === event.result.id ? { ...t, status: 'complete', result: event.result } : t
-              )
+                t.id === event.result.id
+                  ? { ...t, status: 'complete', result: event.result, endedAt: at }
+                  : t
+              ),
+              activity: run.activity
             }))
           }
           if (card) persistToolOp(card, event.result)
@@ -942,8 +1361,8 @@ export const useChatStore = create<ChatState>((set, get) => {
           break
         }
         case 'agent-start': {
-          // Flush first so the card anchors after all lead prose streamed so far.
-          flush()
+          // Drain fully so the card anchors after all lead prose streamed so far.
+          flush(true)
           const card: AgentCardUI = {
             agentId: event.agentId,
             runId,
@@ -967,8 +1386,19 @@ export const useChatStore = create<ChatState>((set, get) => {
             const startStage: WorkflowStage = event.role === 'reviewer' ? 'verifying' : 'generating'
             const startMsg = event.role === 'reviewer' ? 'Reviewing the changes…' : 'Working…'
             run.status = { stage: startStage, message: startMsg }
-            run.activity = appendActivity(run.activity, startStage, startMsg)
           }
+          // The log gets its own row either way — a background spawn is exactly the
+          // work that would otherwise be invisible, so it must be traceable even
+          // though it deliberately doesn't own the status line.
+          run.activity = appendEvent(run.activity, {
+            at,
+            kind: 'agent',
+            stage: event.role === 'reviewer' ? 'verifying' : 'generating',
+            message: `${event.role} · ${clip(event.task, 90)}`,
+            done: false,
+            agentId: event.agentId,
+            agentRole: event.role
+          })
           if (isVisible()) {
             // Push a copy so the store and the run's source-of-truth card never
             // share a mutable reference (flush updates each independently).
@@ -988,16 +1418,26 @@ export const useChatStore = create<ChatState>((set, get) => {
               ...run.agents[idx],
               status: 'complete',
               report: event.report,
-              ok: event.ok
+              ok: event.ok,
+              // The lane has actually stopped now, so "Stopping…" comes off.
+              cancelling: false
             }
           }
+          run.activity = finishActivity(run.activity, { agentId: event.agentId }, event.ok)
           if (isVisible()) {
             set((state) => ({
               agents: state.agents.map((a) =>
                 a.agentId === event.agentId
-                  ? { ...a, status: 'complete', report: event.report, ok: event.ok }
+                  ? {
+                      ...a,
+                      status: 'complete',
+                      report: event.report,
+                      ok: event.ok,
+                      cancelling: false
+                    }
                   : a
-              )
+              ),
+              activity: run.activity
             }))
           }
           break
@@ -1007,7 +1447,14 @@ export const useChatStore = create<ChatState>((set, get) => {
           // total is known before the first node moves.
           run.taskStates = new Map(event.tasks.map((t) => [t.id, t.state]))
           run.progress = withTasks(run.progress, run.taskStates)
-          if (isVisible()) set({ progress: run.progress })
+          run.activity = appendEvent(run.activity, {
+            at,
+            kind: 'plan',
+            stage: 'planning',
+            message: `Planned ${event.tasks.length} step${event.tasks.length === 1 ? '' : 's'} (${event.complexity})`,
+            done: true
+          })
+          if (isVisible()) set({ progress: run.progress, activity: run.activity })
           break
         }
         case 'task-update': {
@@ -1016,8 +1463,97 @@ export const useChatStore = create<ChatState>((set, get) => {
           if (isVisible()) set({ progress: run.progress })
           break
         }
+        case 'todos': {
+          // The lead's flat checklist, replaced wholesale each time (the model
+          // always re-sends the full list). Mirrored to the view only while this
+          // run's session is the one on screen.
+          run.todos = event.todos
+          if (isVisible()) set({ todos: run.todos })
+          break
+        }
+        case 'question': {
+          // The run is blocked on a clarifying question (the `ask_user` tool).
+          // Record it so the composer shows an answer bar; answering it calls
+          // `answerQuestion`, which resolves the wait in the main process.
+          run.question = event.question
+          // The row stays OPEN until the answer goes back, so the log shows the
+          // wait honestly rather than a question that looks already handled.
+          run.activity = appendEvent(run.activity, {
+            at,
+            kind: 'question',
+            stage: 'understanding',
+            message: `${AWAITING_PREFIX}${clip(event.question.question, 120)}`,
+            done: false,
+            toolId: event.question.id
+          })
+          if (isVisible()) set({ question: run.question, activity: run.activity })
+          break
+        }
+        case 'plan-approval': {
+          // "Plan first": the plan exists, nothing has been built, and the run is
+          // parked on the user's go-ahead. `decidePlan` answers it over the ordinary
+          // tool-decision channel, which is what unblocks the engine.
+          run.planApproval = event.approval
+          run.activity = appendEvent(run.activity, {
+            at,
+            kind: 'plan',
+            stage: 'planning',
+            message: `${AWAITING_PREFIX}approve the plan (${event.approval.steps.length} step${
+              event.approval.steps.length === 1 ? '' : 's'
+            })`,
+            done: false,
+            toolId: event.approval.id
+          })
+          if (isVisible()) set({ planApproval: run.planApproval, activity: run.activity })
+          break
+        }
+        case 'checkpoint': {
+          // A restore point the engine took before changing something. Prepended
+          // (newest first, deduped by id) rather than replacing the list, because the
+          // list also holds points from earlier turns read off disk. Project-scoped,
+          // so it is set even when this run's session isn't the one on screen — the
+          // folder changed either way, and the timeline is about the folder.
+          const known = get().checkpoints
+          if (!known.some((c) => c.id === event.checkpoint.id)) {
+            set({ checkpoints: [event.checkpoint, ...known] })
+          }
+          run.activity = appendEvent(run.activity, {
+            at,
+            kind: 'checkpoint',
+            stage: run.status?.stage ?? 'executing',
+            message: `Saved a restore point · ${clip(event.checkpoint.label, 90)}`,
+            done: true,
+            ok: true
+          })
+          if (isVisible()) set({ activity: run.activity })
+          break
+        }
+        case 'context': {
+          // Measured context load for the step about to run. No activity row: this
+          // fires every step and would bury the trace in rows nobody asked for — the
+          // meter is where it belongs, and the fold it predicts gets its own status.
+          run.usage = event.usage
+          if (isVisible()) set({ usage: run.usage })
+          break
+        }
+        case 'followup': {
+          // An out-of-scope issue the agent spotted and deliberately did NOT do
+          // (the `flag_followup` tool). Appended, never replaced: each flag is its
+          // own event and the list only grows. These deliberately survive `done` —
+          // the user acts on them after the turn — so nothing clears them here.
+          run.followups = [...run.followups, event.followup]
+          run.activity = appendEvent(run.activity, {
+            at,
+            kind: 'followup',
+            stage: run.status?.stage ?? 'generating',
+            message: `Flagged for later · ${clip(event.followup.title, 90)}`,
+            done: true
+          })
+          if (isVisible()) set({ followups: run.followups, activity: run.activity })
+          break
+        }
         case 'done': {
-          flush()
+          flush(true)
           run.disposer() // detach the listener (cancel is a no-op post-completion)
           if (ownerSessionId) liveRuns.delete(ownerSessionId)
           syncLiveSessions()
@@ -1028,6 +1564,14 @@ export const useChatStore = create<ChatState>((set, get) => {
               content: run.content
             })
           }
+          run.activity = appendEvent(closeLastPhase(run.activity), {
+            at,
+            kind: 'run-end',
+            stage: 'done',
+            message: 'Finished',
+            done: true,
+            ok: true
+          })
           if (isVisible()) {
             set((state) => ({
               messages: state.messages.map((m) =>
@@ -1041,7 +1585,19 @@ export const useChatStore = create<ChatState>((set, get) => {
               running: false,
               status: null,
               progress: null,
-              activity: [],
+              todos: [],
+              question: null,
+              planApproval: null,
+              // The trace deliberately OUTLIVES the turn: the Run Log is a record of
+              // what just happened, and wiping it the instant the answer lands is
+              // exactly when the user wants to read it. The next `send` clears it.
+              activity: run.activity,
+              // Grants do NOT outlive it: the engine drops them with the run, so the
+              // chips must go too rather than implying the next turn is pre-approved.
+              standing: [],
+              // Nor does the meter: it reads the array a live step is about to send,
+              // and there is no next step. The chip falls back to its own estimate.
+              usage: null,
               runId: null,
               disposer: null
             }))
@@ -1049,7 +1605,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           break
         }
         case 'error': {
-          flush()
+          flush(true)
           run.disposer()
           if (ownerSessionId) liveRuns.delete(ownerSessionId)
           syncLiveSessions()
@@ -1063,6 +1619,14 @@ export const useChatStore = create<ChatState>((set, get) => {
               error: event.message
             })
           }
+          run.activity = appendEvent(closeLastPhase(run.activity), {
+            at,
+            kind: 'run-end',
+            stage: 'done',
+            message: `Stopped · ${clip(event.message, 120)}`,
+            done: true,
+            ok: false
+          })
           if (isVisible()) {
             set((state) => ({
               messages: state.messages.map((m) =>
@@ -1081,7 +1645,14 @@ export const useChatStore = create<ChatState>((set, get) => {
               running: false,
               status: null,
               progress: null,
-              activity: [],
+              todos: [],
+              question: null,
+              planApproval: null,
+              // Kept, like on `done` — a failed turn is precisely the one whose trace
+              // the user needs to read.
+              activity: run.activity,
+              standing: [],
+              usage: null,
               runId: null,
               disposer: null
             }))
@@ -1146,8 +1717,15 @@ export const useChatStore = create<ChatState>((set, get) => {
     runId: null,
     status: null,
     progress: null,
+    todos: [],
+    question: null,
+    planApproval: null,
+    followups: [],
     activity: [],
+    standing: [],
     intent: null,
+    checkpoints: [],
+    usage: null,
     disposer: null,
     sessionId: null,
     projectId: null,
@@ -1205,8 +1783,17 @@ export const useChatStore = create<ChatState>((set, get) => {
         running: true,
         status: null,
         progress: null,
+        todos: [],
+        question: null,
+        planApproval: null,
+        // The conversation is moving on, so last turn's follow-up chips go — including
+        // when this send IS "Do it now" on one of them. FOLLOWUPS.md keeps the record.
+        followups: [],
         activity: [],
-        intent: null
+        // Last run's grants died with it; this one starts asking again from scratch.
+        standing: [],
+        intent: null,
+        usage: null
       }))
 
       // Persist the user turn immediately (fire-and-forget). The assistant turn is
@@ -1230,27 +1817,176 @@ export const useChatStore = create<ChatState>((set, get) => {
       startRun(assistantId, history)
     },
 
-    decideTool: (toolId, decision) => {
+    decideTool: (toolId, decision, detail) => {
       const { runId, tools } = get()
       const card = tools.find((t) => t.id === toolId)
       if (!runId || !card || card.status !== 'awaiting') return
-      window.sylor.workflow.toolDecision(runId, toolId, decision)
+      window.sylor.workflow.toolDecision(runId, toolId, decision, detail)
+      // "Always" is a standing grant for the rest of the run, so the ops ALREADY
+      // waiting under the same grant are answered too — otherwise the bar keeps
+      // asking about precisely what the user just said to stop asking about. Only
+      // the clicked op carries the escalation over IPC (the engine records the grant
+      // from it); the siblings go as plain approvals.
+      const standing = decision === 'approve-always' ? standingApprovalKey(card.proposal) : null
+      const siblings = standing
+        ? tools.filter(
+            (t) =>
+              t.id !== toolId &&
+              t.status === 'awaiting' &&
+              standingApprovalKey(t.proposal) === standing
+          )
+        : []
+      // No `detail` for the siblings: an edited body and a reason are about the one
+      // proposal the user actually had in front of them.
+      for (const s of siblings) window.sylor.workflow.toolDecision(runId, s.id, 'approve')
+
+      // What gets recorded against each op is the plain verb: the standing part
+      // belongs to the run, not to any one op, and it is never persisted.
+      const settled: ToolDecision = decision === 'reject' ? 'reject' : 'approve'
+      const answered = new Set([toolId, ...siblings.map((s) => s.id)])
+      // The user changed the body in the diff before letting it through, so the card
+      // must carry THEIR version: the diff they scroll back to later is then the one
+      // that actually hit the disk, not the model's original proposal.
+      const edited =
+        settled === 'approve' &&
+        card.proposal.kind === 'write_file' &&
+        detail?.editedContent != null &&
+        detail.editedContent !== card.proposal.newContent
+          ? detail.editedContent
+          : null
+      // The row has been reading "Waiting for your go-ahead"; that stops being true
+      // the moment the user answers, so it must change either way — and it must not
+      // swing to the opposite lie. Approved, the op is genuinely under way; refused,
+      // nothing is happening but the model deciding what to do instead.
+      const desc = describeProposal(card.proposal, card.agentRole)
+      const status: { stage: WorkflowStage; message: string } =
+        settled === 'approve'
+          ? { stage: desc.stage, message: desc.message }
+          : { stage: 'generating', message: 'Skipped that — deciding what to do next' }
+      /** Apply the verdict (and any edit) to one card, live or projected. */
+      const settle = <T extends ToolCardUI>(t: T): T =>
+        edited != null && t.id === toolId && t.proposal.kind === 'write_file'
+          ? {
+              ...t,
+              status: 'running',
+              decision: settled,
+              edited: true,
+              proposal: { ...t.proposal, newContent: edited }
+            }
+          : { ...t, status: 'running', decision: settled }
       // Record the decision on the live run too, so it survives a session switch
       // and is persisted with the op when the result arrives.
       const run = liveRuns.get(get().sessionId ?? '')
       if (run) {
-        const rc = run.tools.find((t) => t.id === toolId)
-        if (rc) {
-          rc.status = 'running'
-          rc.decision = decision
-        }
+        run.tools = run.tools.map((rc) => (answered.has(rc.id) ? settle(rc) : rc))
+        run.status = status
+        if (standing && !run.standing.includes(standing)) run.standing = [...run.standing, standing]
       }
       set((state) => ({
-        tools: state.tools.map((t) => (t.id === toolId ? { ...t, status: 'running', decision } : t))
+        tools: state.tools.map((t) => (answered.has(t.id) ? settle(t) : t)),
+        status,
+        standing:
+          standing && !state.standing.includes(standing)
+            ? [...state.standing, standing]
+            : state.standing
       }))
     },
 
+    cancelAgent: (agentId) => {
+      const { runId, agents } = get()
+      const lane = agents.find((a) => a.agentId === agentId)
+      if (!runId || !lane || lane.status !== 'running' || lane.cancelling) return
+      window.sylor.workflow.cancelAgent(runId, agentId)
+      // The engine still owns the closing `agent-end`, so the lane isn't marked done
+      // here — only "stopping", which is the honest state until that event lands.
+      const run = liveRuns.get(get().sessionId ?? '')
+      if (run) {
+        run.agents = run.agents.map((a) => (a.agentId === agentId ? { ...a, cancelling: true } : a))
+      }
+      set((state) => ({
+        agents: state.agents.map((a) => (a.agentId === agentId ? { ...a, cancelling: true } : a))
+      }))
+    },
+
+    revokeStanding: (key) => {
+      const { runId, standing } = get()
+      if (!runId || !standing.includes(key)) return
+      window.sylor.workflow.revokeApproval(runId, key)
+      const run = liveRuns.get(get().sessionId ?? '')
+      if (run) run.standing = run.standing.filter((k) => k !== key)
+      set((state) => ({ standing: state.standing.filter((k) => k !== key) }))
+    },
+
+    answerQuestion: (answer) => {
+      const { runId, question } = get()
+      if (!runId || !question) return
+      window.sylor.workflow.answerQuestion(runId, question.id, answer)
+      // The run was blocked on this answer; it resumes now. Clear the pending
+      // question from both the live run (so a session switch doesn't re-show it)
+      // and the view, and reflect that we're back to working.
+      const status: { stage: WorkflowStage; message: string } = {
+        stage: 'generating',
+        message: 'Working with your answer…'
+      }
+      const run = liveRuns.get(get().sessionId ?? '')
+      if (run) {
+        run.question = null
+        run.status = status
+        // The engine sends no event for the answer, so the log's open question row
+        // is closed here — otherwise it would read as still waiting forever.
+        run.activity = finishActivity(run.activity, { toolId: question.id })
+        set({ question: null, status, activity: run.activity })
+        return
+      }
+      set({ question: null, status })
+    },
+
+    decidePlan: (decision) => {
+      const { runId, planApproval } = get()
+      if (!runId || !planApproval) return
+      // A plan is a proposed action, so it rides the existing tool-decision channel —
+      // there is no second answer-back path to keep in sync.
+      window.sylor.workflow.toolDecision(runId, planApproval.id, decision)
+      // Approved, the build starts now; rejected, the run stops — and it stops as a
+      // decision, not a failure, so the row must not read like something broke.
+      const status: { stage: WorkflowStage; message: string } =
+        decision === 'approve'
+          ? { stage: 'executing', message: 'Building the plan…' }
+          : { stage: 'generating', message: 'Plan not approved — nothing was built' }
+      const run = liveRuns.get(get().sessionId ?? '')
+      if (run) {
+        run.planApproval = null
+        run.status = status
+        run.activity = finishActivity(run.activity, { toolId: planApproval.id })
+        set({ planApproval: null, status, activity: run.activity })
+        return
+      }
+      set({ planApproval: null, status })
+    },
+
+    dismissFollowup: (id) => {
+      // "Not now": the chip goes, FOLLOWUPS.md keeps the entry. Dropped from the live
+      // run too (not just the view) so it doesn't reappear when this session is
+      // re-opened while the run is still going.
+      const run = liveRuns.get(get().sessionId ?? '')
+      if (run) run.followups = run.followups.filter((f) => f.id !== id)
+      set((state) => ({ followups: state.followups.filter((f) => f.id !== id) }))
+    },
+
     cancel: () => {
+      // Snapshot the trace BEFORE disposal (which drops the run from the map): a
+      // stopped turn keeps its log, closed with a row that says the user stopped it
+      // rather than pretending it completed.
+      const stopped = liveRuns.get(get().sessionId ?? '')
+      const activity = stopped
+        ? appendEvent(closeLastPhase(stopped.activity), {
+            at: Date.now(),
+            kind: 'run-end',
+            stage: 'done',
+            message: 'Stopped by you',
+            done: true
+          })
+        : []
       disposeRun(get().sessionId)
       set((state) => ({
         messages: state.messages.map((m) => (m.pending ? { ...m, pending: false } : m)),
@@ -1263,10 +1999,29 @@ export const useChatStore = create<ChatState>((set, get) => {
         running: false,
         status: null,
         progress: null,
-        activity: [],
+        todos: [],
+        question: null,
+        planApproval: null,
+        activity,
+        usage: null,
         runId: null,
         disposer: null
       }))
+    },
+
+    refreshCheckpoints: () => {
+      void window.sylor.checkpoints
+        .list()
+        .then((checkpoints) => set({ checkpoints }))
+        .catch(() => set({ checkpoints: [] }))
+    },
+
+    restoreCheckpoint: async (id) => {
+      const outcome = await window.sylor.checkpoints.restore(id)
+      // Re-read rather than patch: the restore took its own safety checkpoint, so the
+      // list on disk now has an entry this store has never seen.
+      get().refreshCheckpoints()
+      return outcome
     },
 
     clear: () => {
@@ -1279,8 +2034,14 @@ export const useChatStore = create<ChatState>((set, get) => {
         running: false,
         status: null,
         progress: null,
+        todos: [],
+        question: null,
+        planApproval: null,
+        followups: [],
         activity: [],
+        standing: [],
         intent: null,
+        usage: null,
         runId: null,
         disposer: null
       })
@@ -1304,7 +2065,13 @@ export const useChatStore = create<ChatState>((set, get) => {
           running: false,
           status: null,
           progress: null,
+          todos: [],
+          question: null,
+          planApproval: null,
           activity: [],
+          // The run is gone, and its grants with it.
+          standing: [],
+          usage: null,
           runId: null,
           disposer: null
         }))
@@ -1371,8 +2138,15 @@ export const useChatStore = create<ChatState>((set, get) => {
         running: true,
         status: null,
         progress: null,
+        todos: [],
+        question: null,
+        planApproval: null,
+        // The turn that raised them is being replaced, so its chips go with it.
+        followups: [],
         activity: [],
-        intent: null
+        standing: [],
+        intent: null,
+        usage: null
       }))
       // Clear the persisted copy so a reload shows only the regenerated result.
       if (sessionId) window.sylor.sessions.resetMessage(sessionId, messageId)
@@ -1385,12 +2159,12 @@ export const useChatStore = create<ChatState>((set, get) => {
       // running in the background and route their results to their own session.
       // If the session being opened has a live run, re-attach to it (overlay the
       // live content/cards and restore the running state).
-      const { messages, tools, attachments } = hydrate(loaded)
+      const { messages, tools, attachments, activity } = hydrate(loaded)
       set({
         sessionId: loaded.session.id,
         projectId: loaded.session.projectId,
         attachments,
-        ...projectLiveRun({ messages, tools }, loaded.session.id)
+        ...projectLiveRun({ messages, tools, activity }, loaded.session.id)
       })
     },
 

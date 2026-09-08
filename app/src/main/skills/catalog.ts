@@ -57,19 +57,20 @@ export const SKILLS_CATALOG: readonly SkillCatalogEntry[] = [
   {
     name: 'debugging',
     title: 'Debugging',
-    description: 'Systematic root-cause diagnosis instead of guess-and-patch.',
-    whenToUse: 'When something is broken, failing, or behaving unexpectedly.',
+    description: 'Trace a failure from its error text to the root cause — not guess-and-patch.',
+    whenToUse: 'When something is broken, failing, crashing, or behaving unexpectedly.',
     category: 'debugging',
     defaultOn: true,
     recommended: true,
     instructions: [
-      'Debug methodically, not by guessing:',
-      '1. Reproduce first. Establish the exact input, expected result, and actual result. If you cannot reproduce it, say so and gather more detail.',
-      '2. Read the actual error/stack trace and the code at that line — do not assume.',
-      '3. Form one hypothesis at a time and test it with the cheapest possible check (a log, a targeted read, a minimal run).',
-      '4. Narrow the search space by bisection: confirm what still works to isolate what does not.',
-      '5. Fix the root cause, not the symptom. Then verify the original reproduction now passes and no adjacent behavior broke.',
-      '6. If you changed something to test a hypothesis and it was not the cause, revert it before moving on.'
+      'Debug by tracing to the root cause, not by guessing:',
+      '1. Anchor on the exact error text. Search the codebase for the literal message (and any framework-specific wording) to find where it is THROWN — the throw site, not just where it surfaced.',
+      '2. Find what CATCHES it — a try/catch, an error boundary, a top-level handler. That tells you the blast radius and why the user saw what they saw.',
+      '3. Trace from the throw site back to the trigger through the call chain AND the framework lifecycle. Where a thrown error lands depends on context — e.g. a throw in a UI render/effect is caught very differently from one in an event handler or an already-awaited async path.',
+      '4. Pin the trigger condition — why it happens now, or only sometimes. Read the state and timing that drive the failing call; intermittent failures are usually races, ordering, or lifecycle timing. Correlate with WHEN the user sees it ("only during big tasks", "on the second click").',
+      '5. Reproduce if you can — establish the exact input, expected result, and actual result. If you cannot reproduce on demand, reason statically from the throw site and the trigger you found rather than stalling.',
+      '6. Test one hypothesis at a time with the cheapest possible check (a targeted read, a log, a minimal run). If a change you made to test it was not the cause, revert it before moving on.',
+      '7. Fix the root cause at its source — usually a guard, an ordering fix, or a corrected precondition — not the symptom. Then confirm the original failure is gone, check no adjacent behavior broke, and add a regression test that fails without the fix.'
     ].join('\n')
   },
   {

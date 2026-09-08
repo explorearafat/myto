@@ -43,7 +43,11 @@ export type PermissionOutcome = 'auto' | 'ask'
  * mean opening an unfamiliar repo could run that repo's code without a decision.
  * It therefore takes the same default path as `run_command` (no branch needed).
  */
-export function decideAuto(mode: PermissionMode, kind: ToolKind): PermissionOutcome {
+export function decideAuto(
+  mode: PermissionMode,
+  kind: ToolKind,
+  fullAccess = false
+): PermissionOutcome {
   // Looking is never a side effect — no mode asks about it. `preview_inspect`
   // rides here too: it only observes/drives the user's OWN local preview (no
   // filesystem write, no outbound network), so like a read it is a look-like
@@ -51,6 +55,12 @@ export function decideAuto(mode: PermissionMode, kind: ToolKind): PermissionOutc
   // real risk — typing into a credential field — is refused in the executor, not
   // by asking. Every action is still shown as a tool card.
   if (kind === 'read' || kind === 'preview_inspect') return 'auto'
+  // Full-PC access (opt-in): every side effect on the user's own machine —
+  // write, command, mcp, web — is auto-approved regardless of mode. It is still
+  // surfaced as a (flagged) tool card, exactly like `autonomous`; the only thing
+  // waived is the prompt. Browse keeps its own gate (see `decideBrowse`), so this
+  // never touches payment/send/delete.
+  if (fullAccess) return 'auto'
   switch (mode) {
     case 'autonomous':
       // Hands-free: auto-approve edits, commands, AND mcp calls (still shown & sandboxed).
@@ -81,8 +91,10 @@ export type BrowseOutcome = 'auto' | 'ask' | 'block'
  * cannot be configured away:
  *
  *  - `payment` is ALWAYS blocked. Sylor never spends the user's money, in any mode.
- *  - `send` and `delete` ALWAYS ask, even if the policy says `allow` — posting as
- *    the user or destroying their data is not something to discover after the fact.
+ *  - `delete` ALWAYS asks, even if the policy says `allow` — destroying the user's
+ *    data is not something to discover after the fact.
+ *  - `send` ALWAYS asks too (posting/mailing as the user), UNLESS the user opted
+ *    into hands-free sending via `autoSend` — the one narrow, explicit waiver.
  *  - `read` and `navigate` are auto unless the user explicitly blocked them, the
  *    same reasoning that makes file reads auto: gating "look at the page" makes the
  *    agent unusable, and it changes nothing.
@@ -90,21 +102,40 @@ export type BrowseOutcome = 'auto' | 'ask' | 'block'
  * `autonomous` is honoured only where it is safe to: it upgrades a policy `ask` on
  * `click`/`fill` to auto, so a hands-free run can work through a site — never for
  * `send`/`delete`/`payment`.
+ *
+ * `autoSend` is the deliberate exception to the `send` rule (see `autoSendEnabled`
+ * — it is a sub-permission of full-PC access). When it is on, a `send` goes auto
+ * instead of asking, so Sylor can post/message/mail on its own. It is narrow on
+ * purpose: it does NOT touch `delete` (still asks) or `payment` (still blocked),
+ * and it does nothing on its own — the caller only passes it true when full access
+ * is also on.
  */
 export function decideBrowse(
   risk: BrowserAction,
   policy?: BrowserPermissions,
-  mode: PermissionMode = 'ask'
+  mode: PermissionMode = 'ask',
+  fullAccess = false,
+  autoSend = false
 ): BrowseOutcome {
   if (risk === 'payment') return 'block'
 
   const setting = (policy ?? DEFAULT_BROWSER_PERMISSIONS)[risk] ?? DEFAULT_BROWSER_PERMISSIONS[risk]
   if (setting === 'block') return 'block'
 
-  // Irreversible-to-others actions always surface, whatever the policy or mode says.
-  if (risk === 'send' || risk === 'delete') return 'ask'
+  // Sending AS the user (post / message / mail) normally always surfaces, whatever
+  // the policy or mode says — but this is the one gate the user can deliberately
+  // waive with the opt-in `autoSend` sub-permission, so a "read my mail tonight and
+  // reply" request can actually send. Even then `payment` (above) and `delete`
+  // (below) stay gated: auto-send never spends money or destroys data.
+  if (risk === 'send') return autoSend ? 'auto' : 'ask'
+
+  // Deleting the user's data always surfaces — it reaches outside the machine, is
+  // irreversible, and unlike `send` there is no waiver for it. This is exactly the
+  // gate that survives full-PC access AND auto-send.
+  if (risk === 'delete') return 'ask'
 
   if (setting === 'allow') return 'auto'
-  // setting === 'ask': only a hands-free run may skip the prompt, and only here.
-  return mode === 'autonomous' ? 'auto' : 'ask'
+  // setting === 'ask': a hands-free run (autonomous) or full-PC access may skip
+  // the prompt for a low-risk click/fill/navigate; nothing else reaches here.
+  return mode === 'autonomous' || fullAccess ? 'auto' : 'ask'
 }

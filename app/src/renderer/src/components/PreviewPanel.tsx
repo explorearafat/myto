@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAppStore } from '@renderer/store/useAppStore'
 import { setPreviewWebview } from '@renderer/lib/preview/inspector'
 import type { WebviewElement } from '@renderer/types/webview'
@@ -75,6 +75,26 @@ const iconButton =
   'grid h-7 w-7 place-items-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-text disabled:cursor-not-allowed disabled:opacity-40'
 
 /**
+ * Run an imperative `reload()` on the preview guest, swallowing the throw Electron
+ * raises when the `<webview>` isn't attached / not yet `dom-ready` ("The WebView
+ * must be attached to the DOM and the dom-ready event emitted before this method can
+ * be called."). That throw is otherwise fatal: the reload fires inside a React
+ * effect, so it runs in the commit phase and would trip the workspace ErrorBoundary
+ * — blanking the whole panel — during a rapid rebuild that keeps remounting the
+ * guest. A residual race always remains (the guest can be torn down or navigating
+ * between a readiness check and the call), so this try/catch is the real guard; the
+ * `readyRef` gate in the component only avoids the common, predictable case.
+ */
+function safeReload(el: WebviewElement | null): void {
+  if (!el) return
+  try {
+    el.reload()
+  } catch {
+    // Guest not in a reloadable state; the next dom-ready / file-change retries.
+  }
+}
+
+/**
  * Right-side live preview panel (Phase 2). Shows whatever the main-process
  * preview server is serving — static HTML from the sandbox root, or a spawned
  * dev server — inside an Electron `<webview>` running in its own `preview`
@@ -94,13 +114,39 @@ export function PreviewPanel() {
   const showLocalPreviewUrl = useAppStore((s) => s.showLocalPreviewUrl)
 
   const webviewRef = useRef<WebviewElement | null>(null)
-  // Register the live guest with the inspector so engine `preview_inspect`
-  // requests can drive it. React calls this with null on unmount (and before a
-  // `key={url}` remount), which clears the inspector's ref + console buffer.
-  const registerWebview = (el: WebviewElement | null): void => {
+  // Whether the current guest has emitted `dom-ready`. Until it has, every
+  // imperative webview method throws synchronously (see {@link safeReload}), so the
+  // reload effect below holds off instead of calling into a detached guest.
+  const readyRef = useRef(false)
+  // A file-change reload requested before the guest was ready, flushed on dom-ready
+  // so a refresh that lands mid-load is never silently dropped.
+  const pendingReloadRef = useRef(false)
+  // Detacher for the live guest's `dom-ready` listener, run before each guest swap.
+  const detachReadyRef = useRef<(() => void) | null>(null)
+  // Register the live guest with the inspector so engine `preview_inspect` requests
+  // can drive it, and (re)attach the dom-ready gate. React calls this with null on
+  // unmount (and before a `key={url}` remount), clearing the inspector's ref +
+  // console buffer and detaching the previous guest's listener. Stable (useCallback,
+  // no deps) so an inline identity change can't make React re-run it every render —
+  // which would reset `readyRef` to false after dom-ready had already fired.
+  const registerWebview = useCallback((el: WebviewElement | null): void => {
+    detachReadyRef.current?.()
+    detachReadyRef.current = null
+    readyRef.current = false
+    pendingReloadRef.current = false
     webviewRef.current = el
     setPreviewWebview(el)
-  }
+    if (!el) return
+    const onReady = (): void => {
+      readyRef.current = true
+      if (pendingReloadRef.current) {
+        pendingReloadRef.current = false
+        safeReload(el)
+      }
+    }
+    el.addEventListener('dom-ready', onReady as EventListener)
+    detachReadyRef.current = () => el.removeEventListener('dom-ready', onReady as EventListener)
+  }, [])
   // Draft text for the editable address bar, kept in sync with the live URL so it
   // always reflects what's actually loaded until the user starts editing.
   const [address, setAddress] = useState('')
@@ -108,10 +154,15 @@ export function PreviewPanel() {
     setAddress(url ?? '')
   }, [url])
 
-  // File-change reloads arrive as a bumped nonce (same URL). Skip the initial 0
-  // so a freshly mounted webview isn't reloaded out from under its first load.
+  // File-change reloads arrive as a bumped nonce (same URL). Skip the initial 0 so a
+  // freshly mounted webview isn't reloaded out from under its first load. If the
+  // guest isn't dom-ready yet, defer to the next dom-ready rather than reloading a
+  // detached guest — a synchronous throw here runs in React's commit phase and would
+  // crash the whole panel (the "The workspace hit an error" card).
   useEffect(() => {
-    if (reloadNonce > 0) webviewRef.current?.reload()
+    if (reloadNonce === 0) return
+    if (readyRef.current) safeReload(webviewRef.current)
+    else pendingReloadRef.current = true
   }, [reloadNonce])
 
   // Keep navigation inside the preview: any attempt to leave localhost is sent to
@@ -124,8 +175,14 @@ export function PreviewPanel() {
       const target = (event as unknown as { url?: string }).url
       if (target && !isLocalhost(target)) {
         window.open(target, '_blank')
-        el.stop()
-        void el.loadURL(url)
+        // will-navigate only fires on a live guest, but guard anyway — an uncaught
+        // throw in a DOM listener would surface as a console error.
+        try {
+          el.stop()
+          void el.loadURL(url)
+        } catch {
+          // Guest not in a state to redirect; the store URL still points at our page.
+        }
       }
     }
     el.addEventListener('will-navigate', onWillNavigate as EventListener)
@@ -152,7 +209,7 @@ export function PreviewPanel() {
           type="button"
           aria-label="Reload preview"
           title="Reload"
-          onClick={() => webviewRef.current?.reload()}
+          onClick={() => safeReload(webviewRef.current)}
           disabled={!url}
           className={iconButton}
         >

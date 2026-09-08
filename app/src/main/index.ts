@@ -14,9 +14,13 @@ import { registerCommandsIpc } from './commands-ipc'
 import { registerPluginsIpc } from './plugins-ipc'
 import { registerWorkspaceIpc } from './workspace-ipc'
 import { registerMemoryIpc } from './memory-ipc'
+import { registerCheckpointIpc } from './checkpoint-ipc'
+import { registerGraphIpc } from './graph-ipc'
 import { closeChrome, registerChromeIpc } from './chrome-ipc'
 import { attachBrowserWindow, registerBrowserIpc } from './browser-ipc'
 import { registerSchedulerIpc, stopScheduler } from './scheduler-ipc'
+import { attachAmbientWindow, registerAmbientIpc, stopAmbient } from './ambient-ipc'
+import { applyWidgetPreference } from './widget'
 import { configureBrowserSession } from './browser/session'
 import { destroyBrowserView } from './browser/view'
 import { cancelAllWorkflows } from './workflow/engine'
@@ -26,7 +30,7 @@ import { mcpManager, setMcpBrowserOpener } from './mcp/manager'
 import { contextManager } from './context/manager'
 import { closeDb, setDbPath } from './db/db'
 import { reconcileInterruptedRuns } from './db/sessions'
-import { getSettings, setUserDataDir } from './settings'
+import { getSettings, setSettingsSavedListener, setUserDataDir } from './settings'
 
 /** Registers window-control IPC handlers used by the custom title bar. */
 function registerWindowControls(): void {
@@ -127,6 +131,11 @@ app.whenReady().then(() => {
   registerPluginsIpc()
   registerWorkspaceIpc()
   registerMemoryIpc()
+  // Restorable snapshots the engine takes before it changes anything, and the
+  // one-click way back (see checkpoint-ipc.ts).
+  registerCheckpointIpc()
+  // What imports what, for the canvas graph — read-only, from the project index.
+  registerGraphIpc()
   // The user's real Chrome, driven over DevTools — the path for every site the
   // embedded page view can't sign in to (see chrome-ipc.ts).
   registerChromeIpc()
@@ -135,14 +144,26 @@ app.whenReady().then(() => {
   // Scheduled tasks (Phase 4): rehydrate durable tasks from the DB and start the
   // tick loop. Registered after the DB path is set above so the store can read.
   registerSchedulerIpc()
+  // Sylor outside its own window: the tray, the taskbar dot, and the opt-in
+  // floating status card (see ambient-ipc.ts).
+  registerAmbientIpc()
+  // The floating widget's visibility IS the persisted preference, so the save is
+  // the toggle: one writer, and no second channel that could drift from the value
+  // on disk. Wired here so `settings.ts` itself stays Electron-free.
+  setSettingsSavedListener((saved) => applyWidgetPreference(saved.ui.statusWidget))
   // Present the browsing partition as ordinary desktop Chrome so real sign-ins
   // don't reject it as an "insecure" embedded browser.
   configureBrowserSession()
-  attachBrowserWindow(createWindow())
+  const mainWindow = createWindow()
+  attachBrowserWindow(mainWindow)
+  attachAmbientWindow(mainWindow)
 
   app.on('activate', () => {
     // On macOS, re-create a window when the dock icon is clicked and none are open.
-    if (BrowserWindow.getAllWindows().length === 0) attachBrowserWindow(createWindow())
+    if (BrowserWindow.getAllWindows().length > 0) return
+    const revived = createWindow()
+    attachBrowserWindow(revived)
+    attachAmbientWindow(revived)
   })
 })
 
@@ -160,6 +181,10 @@ app.on('before-quit', () => {
   stopScheduler()
   stopPreview()
   void mcpManager.disconnectAll()
+  // The tray and the floating card. This one is load-bearing for quitting: the
+  // widget is `closable: false`, so a `close()` on it is ignored and the quit would
+  // stall — `stopAmbient` destroys it instead.
+  stopAmbient()
   // Close the controlled browser too: its debugging port is a capability that must
   // not outlive Sylor.
   void closeChrome()

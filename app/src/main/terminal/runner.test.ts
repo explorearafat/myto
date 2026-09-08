@@ -41,6 +41,10 @@ describe.skipIf(!ptyAvailable())('runCommand (real pty)', () => {
       expect(result.output).toContain(MARK)
       expect(streamed).toContain(MARK)
       expect(result.truncated).toBe(false)
+      // The captured copy is read by the model and shown on a tool card, so it
+      // carries no terminal control bytes — a real pty (ConPTY especially) sprays
+      // cursor and erase sequences around every command it runs.
+      expect(result.output).not.toContain('\x1b')
     },
     20_000
   )

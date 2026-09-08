@@ -7,6 +7,7 @@ import { resolveSafe } from '../fs/operations'
 import { spawnCommandPty } from '../terminal/pty'
 import { runCommand } from '../terminal/runner'
 import { isBundlerEntryHtml } from '../../shared/preview'
+import { stripAnsi } from '../../shared/ansi'
 import type { PreviewEvent, PreviewStartResult } from '../../shared/types'
 import type { PreviewHealth } from '../context/projectState'
 
@@ -60,8 +61,18 @@ const CONTENT_TYPES: Record<string, string> = {
 const IGNORE_RE =
   /(^|[/\\])(node_modules|\.git|dist|out|\.vite|\.next|\.turbo|coverage|release)([/\\]|$)/
 
-/** Matches the first localhost dev-server URL a tool prints to stdout. */
-const DEV_URL_RE = /(https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):\d+[^\s'"]*)/i
+/**
+ * Matches the first localhost dev-server URL a tool prints to stdout. The tail
+ * stops at any control byte as well as whitespace and quotes: a bundler prints
+ * `http://localhost:8080/\x1b[K` (erase-to-end-of-line), and ESC is neither
+ * whitespace nor a quote, so a looser tail swallowed the escape and produced a URL
+ * that read `http://localhost:8080/[K`. {@link stripAnsi} removes those first, and
+ * this is the second line of defence for a stray control byte it can't classify.
+ */
+/* eslint-disable no-control-regex -- the point of the tail is to exclude them */
+const DEV_URL_RE =
+  /(https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):\d+[^\s'"\x00-\x1f\x7f]*)/i
+/* eslint-enable no-control-regex */
 
 /**
  * Matches shell commands that (re)start a long-running local dev/preview server —
@@ -113,9 +124,24 @@ function resolveDefaultEntry(): string | null {
   return null
 }
 
-/** ANSI SGR color codes, stripped before URL-matching pty output. */
-// eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1b\[[0-9;]*m/g
+/**
+ * The dev-server URL in a chunk of pty output, ready for a webview, or null when
+ * there isn't one yet.
+ *
+ * Pure and exported so the scrape is testable without spawning a real dev server —
+ * it is the part that was wrong. Escapes are stripped before matching, and the
+ * result is trimmed of the punctuation a log line puts after a URL, so a
+ * `Local: http://localhost:5173/,` never becomes part of the address. Hosts a
+ * webview can't load (`0.0.0.0`, bare IPv6) are rewritten to loopback.
+ */
+export function extractDevUrl(text: string): string | null {
+  const match = stripAnsi(text).match(DEV_URL_RE)
+  if (!match) return null
+  return match[1]
+    .replace(/[.,;:)\]}>'"]+$/, '')
+    .replace('0.0.0.0', '127.0.0.1')
+    .replace('[::1]', '127.0.0.1')
+}
 
 let staticServer: Server | null = null
 let staticBaseUrl: string | null = null
@@ -183,6 +209,96 @@ export function notePreviewRuntimeError(hasErrors: boolean): void {
 function noteDevOutput(text: string): void {
   if (COMPILE_FAIL_RE.test(text)) health = 'COMPILE_ERROR'
   else if (COMPILE_OK_RE.test(text) && health === 'COMPILE_ERROR') health = 'RUNNING'
+}
+
+// ── Dev-server log (the `server_logs` preview action) ────────────────────────
+
+/**
+ * Recent dev-server output, ANSI-stripped, one entry per line, newest last.
+ *
+ * The health signal above answers "is the preview real?" as an enum, which is all
+ * the orchestrator needs — but it throws the TEXT away, and the text is the only
+ * place the actual compile error lives. A blank or stale page is usually explained
+ * by a stack trace the bundler printed in its own terminal, which the guest console
+ * cannot see, so this keeps a bounded window of it for the model to read.
+ */
+const MAX_DEV_LOG_LINES = 400
+/** Cap on a single line still arriving, so a server printing no newlines is bounded. */
+const MAX_DEV_LOG_PARTIAL = 8_000
+let devLog: string[] = []
+let devLogPartial = ''
+/**
+ * The command whose output is in the log, and whether one was ever spawned. Kept
+ * apart from `devCommand` (which only becomes set once a URL is printed, and is
+ * cleared on exit) because the case that needs these logs most is the server that
+ * died before printing anything.
+ */
+let devLogCommand: string | null = null
+let devLogStarted = false
+
+/** A line that reads as a failure — `server_logs` with `level: 'error'`. */
+const LOG_ERROR_RE =
+  /(^|[\s[(])(error|err!|failed|failure|exception|unhandled|cannot find|not found|econnrefused|eaddrinuse|enoent)/i
+/** A line that reads as a warning — folded in by `level: 'warn'`. */
+const LOG_WARN_RE = /(^|[\s[(])(warn|warning|deprecat)/i
+
+/**
+ * Append raw pty output to the log. Text accumulates RAW and is stripped per
+ * completed line, because an escape sequence split across two chunks and stripped
+ * per chunk would leave half of itself behind — the same reasoning as the URL scan
+ * in {@link awaitDevUrl}, and the same bug class as the `[K` that ended up in a URL.
+ */
+function noteDevLog(text: string): void {
+  devLogPartial += text
+  const parts = devLogPartial.split('\n')
+  devLogPartial = parts.pop() ?? ''
+  if (devLogPartial.length > MAX_DEV_LOG_PARTIAL) {
+    devLogPartial = devLogPartial.slice(-MAX_DEV_LOG_PARTIAL)
+  }
+  for (const part of parts) {
+    const line = stripAnsi(part).replace(/\r/g, '').trimEnd()
+    if (line) devLog.push(line)
+  }
+  if (devLog.length > MAX_DEV_LOG_LINES) devLog = devLog.slice(-MAX_DEV_LOG_LINES)
+}
+
+/** What the dev server has been saying, for the `server_logs` action. */
+export interface DevServerLogs {
+  /** The command that produced these lines, when one is (or was) running. */
+  command: string | null
+  /** Lines matching the requested level, oldest first. */
+  lines: string[]
+  /** How many lines are held in total, before filtering. */
+  total: number
+  /**
+   * Whether a dev server was ever spawned. False means the preview is a static
+   * serve (or nothing at all): there is no server output to be missing, which is a
+   * different answer from "it ran and printed nothing".
+   */
+  watching: boolean
+}
+
+/** Read the dev server's recent output, optionally only the noteworthy lines. */
+export function devServerLogs(level: 'all' | 'error' | 'warn' = 'all'): DevServerLogs {
+  // The tail of a crashed server's last line never got its newline; include it.
+  const held = devLogPartial.trim() ? [...devLog, stripAnsi(devLogPartial).trim()] : [...devLog]
+  const lines =
+    level === 'all'
+      ? held
+      : held.filter((line) =>
+          level === 'error'
+            ? LOG_ERROR_RE.test(line) || COMPILE_FAIL_RE.test(line)
+            : LOG_ERROR_RE.test(line) || LOG_WARN_RE.test(line) || COMPILE_FAIL_RE.test(line)
+        )
+  return { command: devLogCommand, lines, total: held.length, watching: devLogStarted }
+}
+
+/** Start a fresh log for a newly spawned dev server. */
+function resetDevLog(command: string): void {
+  devLog = []
+  devLogPartial = ''
+  devLogCommand = command
+  devLogStarted = true
 }
 
 /** Folds a lifecycle event into the health signal. */
@@ -516,6 +632,7 @@ function awaitDevUrl(command: string): Promise<PreviewStartResult> {
       return
     }
     devPty = pty
+    resetDevLog(command)
 
     let settled = false
     let buffer = ''
@@ -529,32 +646,42 @@ function awaitDevUrl(command: string): Promise<PreviewStartResult> {
     }, 120_000)
 
     pty.onData((data) => {
-      const clean = data.replace(ANSI_RE, '')
+      // Every byte the server prints is logged, before and after start-up: the
+      // failure that explains a blank page is just as often in the boot output.
+      noteDevLog(data)
       if (settled) {
         // The server keeps talking after it comes up, and that is where a broken
         // compile shows up (§22): a bundler prints the failure and goes on serving
         // the last good build, so the pane looks fine while the code is broken.
-        noteDevOutput(clean)
+        noteDevOutput(stripAnsi(data))
         return
       }
-      buffer += clean
-      const match = buffer.match(DEV_URL_RE)
-      if (match) {
+      // Buffered raw and stripped only at match time: an escape sequence split
+      // across two chunks, stripped per chunk, would leave half of itself in the
+      // buffer — which is how a control byte ends up inside a URL.
+      buffer += data
+      // Keep the scan buffer bounded on chatty servers.
+      if (buffer.length > 64_000) buffer = buffer.slice(-8_000)
+      // Only scan lines that have fully arrived. A chunk boundary can fall inside
+      // the URL itself, and `http://localhost:51` + `73/` matches as port 51 — a
+      // preview pointed at a port nothing is serving.
+      const lastBreak = buffer.lastIndexOf('\n')
+      if (lastBreak === -1) return
+      const url = extractDevUrl(buffer.slice(0, lastBreak))
+      if (url) {
         settled = true
         clearTimeout(timeout)
-        // A webview can't load 0.0.0.0 or a bare IPv6 host; rewrite to loopback.
-        const url = match[1].replace('0.0.0.0', '127.0.0.1').replace('[::1]', '127.0.0.1')
         devCommand = command
         devUrl = url
         push({ phase: 'ready', url })
         resolve({ ok: true, url })
-        return
       }
-      // Keep the scan buffer bounded on chatty servers.
-      if (buffer.length > 64_000) buffer = buffer.slice(-8_000)
     })
 
     pty.onExit(({ exitCode }) => {
+      // Logged as well as reported: "why is the preview gone" is answered by the
+      // last lines plus the fact that the process ended, in one reading.
+      noteDevLog(`[sylor] dev server exited (code ${exitCode ?? 'null'})\n`)
       if (devPty === pty) {
         devPty = null
         devCommand = null

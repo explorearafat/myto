@@ -6,7 +6,17 @@ import type {
   ListModelsResult,
   TestConnectionResult
 } from '../../shared/types'
-import { httpFetch, httpJson, normaliseBaseUrl, toErrorMessage } from './http'
+import { collectCompletion } from './collect'
+import {
+  COMPLETION_TIMEOUT_MS,
+  httpFetch,
+  httpJson,
+  normaliseBaseUrl,
+  stallGuard,
+  StallError,
+  STREAM_STALL_MS,
+  toErrorMessage
+} from './http'
 import { modelInfo, type Provider } from './provider'
 
 /**
@@ -136,19 +146,20 @@ export class GatewayProvider implements Provider {
     }
   }
 
+  /**
+   * Collected over the streaming endpoint rather than sent as `stream: false` —
+   * see {@link collectCompletion} for why (a non-streaming request's header
+   * deadline is a hard ceiling on total generation time, and every internal
+   * caller of this method is asking for something big).
+   */
   async getCompletion(
     modelId: string,
     messages: ChatMessage[],
-    options?: CompletionOptions
+    options?: CompletionOptions,
+    signal?: AbortSignal,
+    onProgress?: (text: string) => void
   ): Promise<string> {
-    const data = await httpJson<ChatCompletionResponse>(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: this.authHeaders(),
-      timeoutMs: 120_000,
-      body: { model: modelId, stream: false, messages: toOpenAiMessages(messages), ...samplingBody(options) }
-    })
-    if (data.error?.message) throw new Error(data.error.message)
-    return data.choices?.[0]?.message?.content ?? ''
+    return collectCompletion(this, modelId, messages, options, signal, onProgress)
   }
 
   async streamCompletion(
@@ -158,19 +169,44 @@ export class GatewayProvider implements Provider {
     signal?: AbortSignal,
     options?: CompletionOptions
   ): Promise<void> {
+    // The guard replaces the (now gone) body deadline: armed only once bytes are
+    // flowing, reset by each one, so a long-but-alive stream runs as long as it
+    // needs and a dead one fails in STREAM_STALL_MS instead of hanging.
+    const guard = stallGuard(STREAM_STALL_MS, signal)
+    try {
+      await this.streamInner(modelId, messages, onChunk, guard, options)
+    } catch (err) {
+      // A stall aborts the read, which surfaces as a bare cancellation; name it.
+      if (guard.expired && !(err instanceof StallError)) throw new StallError(STREAM_STALL_MS)
+      throw err
+    } finally {
+      guard.stop()
+    }
+  }
+
+  private async streamInner(
+    modelId: string,
+    messages: ChatMessage[],
+    onChunk: (chunk: Omit<CompletionChunk, 'streamId'>) => void,
+    guard: ReturnType<typeof stallGuard>,
+    options?: CompletionOptions
+  ): Promise<void> {
     const res = await httpFetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       // `Accept` nudges gateways that decide streaming from request headers to
       // actually stream; the non-SSE fallback below covers those that ignore it.
       headers: { Accept: 'text/event-stream', ...this.authHeaders() },
-      timeoutMs: 120_000,
-      signal,
+      timeoutMs: COMPLETION_TIMEOUT_MS,
+      signal: guard.signal,
       body: { model: modelId, stream: true, messages: toOpenAiMessages(messages), ...samplingBody(options) }
     })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
       throw new Error(`HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 160)}` : ''}`)
     }
+    // Headers are in, so httpFetch's deadline is gone; hand the body over to the
+    // guard. This covers the buffered-JSON branch below as well as the SSE loop.
+    guard.touch()
 
     // Not every OpenAI-compatible gateway honours `stream:true`. Many routers
     // (e.g. ones proxying Claude/Gemini) ignore it and return a single JSON
@@ -196,27 +232,34 @@ export class GatewayProvider implements Provider {
       )
     }
 
-    await readSse(res.body, (data) => {
-      if (data === '[DONE]') {
-        onChunk({ delta: '', done: true })
-        return
-      }
-      let parsed: ChatCompletionStreamChunk
-      try {
-        parsed = JSON.parse(data) as ChatCompletionStreamChunk
-      } catch {
-        return
-      }
-      if (parsed.error?.message) throw new Error(parsed.error.message)
-      const delta = parsed.choices?.[0]?.delta?.content ?? ''
-      if (delta) onChunk({ delta, done: false })
-    })
+    await readSse(
+      res.body,
+      (data) => {
+        if (data === '[DONE]') {
+          onChunk({ delta: '', done: true })
+          return
+        }
+        let parsed: ChatCompletionStreamChunk
+        try {
+          parsed = JSON.parse(data) as ChatCompletionStreamChunk
+        } catch {
+          return
+        }
+        if (parsed.error?.message) throw new Error(parsed.error.message)
+        const delta = parsed.choices?.[0]?.delta?.content ?? ''
+        if (delta) onChunk({ delta, done: false })
+      },
+      // Progress is *any* byte, including a keep-alive comment line — the point
+      // is that the connection is still producing, not that it produced content.
+      guard.touch
+    )
     onChunk({ delta: '', done: true })
   }
 }
 async function readSse(
   body: ReadableStream<Uint8Array>,
-  onData: (data: string) => void
+  onData: (data: string) => void,
+  onProgress?: () => void
 ): Promise<void> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
@@ -225,6 +268,7 @@ async function readSse(
     for (;;) {
       const { value, done } = await reader.read()
       if (done) break
+      onProgress?.()
       buffer += decoder.decode(value, { stream: true })
       let newline: number
       while ((newline = buffer.indexOf('\n')) !== -1) {

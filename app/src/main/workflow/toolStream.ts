@@ -37,12 +37,22 @@ const OPEN_FENCE = '```sylor-tool'
 
 /** A tool operation parsed from a block, before the engine enriches it. */
 export type ParsedTool =
-  | { tool: 'write_file'; path: string; content: string }
-  | { tool: 'edit_file'; path: string; oldString: string; newString: string; replaceAll: boolean }
-  | { tool: 'read_file'; path: string; offset?: number; limit?: number }
-  | { tool: 'list_files'; path: string }
-  | { tool: 'search_files'; query: string; path: string; glob?: string; before?: number; after?: number; context?: number; multiline?: boolean; mode?: 'content' | 'files' | 'count' }
-  | { tool: 'find_files'; glob: string; path: string }
+  | { tool: 'write_file'; path: string; content: string; purpose?: string }
+  | {
+      tool: 'edit_file'
+      path: string
+      /**
+       * One or more exact-string replacements applied to the file IN ORDER, so a
+       * single block can carry every change to one file (read it once, then edit it
+       * once). The single-edit wire form is normalized into a one-element array.
+       */
+      edits: Array<{ oldString: string; newString: string; replaceAll: boolean }>
+      purpose?: string
+    }
+  | { tool: 'read_file'; path: string; offset?: number; limit?: number; purpose?: string }
+  | { tool: 'list_files'; path: string; purpose?: string }
+  | { tool: 'search_files'; query: string; path: string; glob?: string; before?: number; after?: number; context?: number; multiline?: boolean; mode?: 'content' | 'files' | 'count'; purpose?: string }
+  | { tool: 'find_files'; glob: string; path: string; purpose?: string }
   | { tool: 'run_command'; command: string }
   | { tool: 'web_fetch'; url: string }
   | { tool: 'web_search'; query: string }
@@ -63,6 +73,9 @@ export type ParsedTool =
         | 'click'
         | 'fill'
         | 'resize'
+        | 'eval'
+        | 'navigate'
+        | 'server_logs'
       selector?: string
       styles?: string[]
       value?: string
@@ -71,6 +84,8 @@ export type ParsedTool =
       preset?: 'mobile' | 'tablet' | 'desktop'
       width?: number
       height?: number
+      expression?: string
+      url?: string
     }
   | {
       tool: 'browse'
@@ -87,6 +102,12 @@ export type ParsedTool =
       filter?: 'all' | 'failed'
     }
   | { tool: 'diagnostics'; scope?: 'all' | 'typescript' | 'eslint'; files?: string[] }
+  | {
+      tool: 'update_todos'
+      todos: { text: string; status: 'pending' | 'in_progress' | 'completed' }[]
+    }
+  | { tool: 'ask_user'; question: string; header?: string; options?: string[] }
+  | { tool: 'flag_followup'; title: string; note?: string; files?: string[] }
 
 /**
  * A positive integer field, or undefined when absent/invalid. Used for the
@@ -152,6 +173,48 @@ function findClose(buf: string): { jsonEnd: number; after: number } | null {
   }
 }
 
+/** Longest `purpose` a one-line card subtitle can carry without wrapping away. */
+const MAX_PURPOSE = 120
+
+/** Longest a single TODO line may be; longer text is clipped, never rejected. */
+const MAX_TODO_TEXT = 200
+
+/** Longest a clarifying question may be; longer text is clipped, never rejected. */
+const MAX_QUESTION_TEXT = 500
+
+/** Longest a single answer option (chip label) may be; longer text is clipped. */
+const MAX_OPTION_TEXT = 120
+
+/** Longest the question's short header/topic label may be; longer text is clipped. */
+const MAX_QUESTION_HEADER = 40
+
+/** How many answer options a single question may offer; extras beyond this are dropped. */
+const MAX_QUESTION_OPTIONS = 6
+
+/** Longest a flagged follow-up's one-line title may be; longer text is clipped. */
+const MAX_FOLLOWUP_TITLE = 90
+
+/** Longest a follow-up's explanatory note may be; longer text is clipped. */
+const MAX_FOLLOWUP_NOTE = 400
+
+/** How many files a single follow-up may name; extras beyond this are dropped. */
+const MAX_FOLLOWUP_FILES = 6
+
+/**
+ * The optional `purpose`: on a write, one short phrase saying what the file is for;
+ * on a read/list/search, what the model is trying to find out by looking. Shown
+ * under a write card, so a transcript still explains why each file exists after the
+ * prose has scrolled away. On a read it is context for the model only — the user's
+ * reading status shows just `Reading <filename>`, so purpose there is optional.
+ * Absent, blank or non-string means no subtitle — never a rejected block, because
+ * what an op is *for* must not be able to stop it from happening.
+ */
+function purposeOf(rec: Record<string, unknown>): { purpose?: string } {
+  if (typeof rec.purpose !== 'string') return {}
+  const text = rec.purpose.trim().replace(/\s+/g, ' ')
+  return text ? { purpose: text.slice(0, MAX_PURPOSE) } : {}
+}
+
 /** Validates a raw block body into a {@link ParsedTool}, or null if invalid. */
 export function parseToolBlock(raw: string): ParsedTool | null {
   const trimmed = raw.trim()
@@ -168,7 +231,7 @@ export function parseToolBlock(raw: string): ParsedTool | null {
   const rec = obj as Record<string, unknown>
   if (rec.tool === 'write_file') {
     if (typeof rec.path === 'string' && rec.path.trim() && typeof rec.content === 'string') {
-      return { tool: 'write_file', path: rec.path, content: rec.content }
+      return { tool: 'write_file', path: rec.path, content: rec.content, ...purposeOf(rec) }
     }
     return null
   }
@@ -176,23 +239,35 @@ export function parseToolBlock(raw: string): ParsedTool | null {
     // A surgical replacement: `old_string` must appear in the file, and swapping in
     // `new_string` produces the edit. `new_string` may be '' (a deletion), but the
     // two must differ — a no-op edit is a malformed block, not a valid write.
-    if (
-      typeof rec.path === 'string' &&
-      rec.path.trim() &&
-      typeof rec.old_string === 'string' &&
-      rec.old_string.length > 0 &&
-      typeof rec.new_string === 'string' &&
-      rec.old_string !== rec.new_string
-    ) {
-      return {
-        tool: 'edit_file',
-        path: rec.path,
-        oldString: rec.old_string,
-        newString: rec.new_string,
-        replaceAll: rec.replace_all === true
+    //
+    // Two wire forms, both normalized to the `edits` array so the engine has one
+    // shape to run: a single `old_string`/`new_string`, or an `edits: [...]` list of
+    // them applied in order (every change to one file in ONE action). A list entry
+    // is validated exactly like the single form; invalid entries are dropped, and a
+    // block that ends up with no valid edit is malformed.
+    if (typeof rec.path !== 'string' || !rec.path.trim()) return null
+    const one = (
+      o: unknown,
+      n: unknown,
+      all: unknown
+    ): { oldString: string; newString: string; replaceAll: boolean } | null =>
+      typeof o === 'string' && o.length > 0 && typeof n === 'string' && o !== n
+        ? { oldString: o, newString: n, replaceAll: all === true }
+        : null
+    const edits: Array<{ oldString: string; newString: string; replaceAll: boolean }> = []
+    if (Array.isArray(rec.edits)) {
+      for (const raw of rec.edits) {
+        if (typeof raw !== 'object' || raw === null) continue
+        const e = raw as Record<string, unknown>
+        const parsed = one(e.old_string, e.new_string, e.replace_all)
+        if (parsed) edits.push(parsed)
       }
+    } else {
+      const parsed = one(rec.old_string, rec.new_string, rec.replace_all)
+      if (parsed) edits.push(parsed)
     }
-    return null
+    if (edits.length === 0) return null
+    return { tool: 'edit_file', path: rec.path, edits, ...purposeOf(rec) }
   }
   if (rec.tool === 'read_file') {
     if (typeof rec.path === 'string' && rec.path.trim()) {
@@ -200,7 +275,8 @@ export function parseToolBlock(raw: string): ParsedTool | null {
         tool: 'read_file',
         path: rec.path,
         offset: positiveInt(rec.offset),
-        limit: positiveInt(rec.limit)
+        limit: positiveInt(rec.limit),
+        ...purposeOf(rec)
       }
     }
     return null
@@ -208,7 +284,7 @@ export function parseToolBlock(raw: string): ParsedTool | null {
   if (rec.tool === 'list_files') {
     // `path` is optional here — a bare list_files block means "the project root".
     const path = typeof rec.path === 'string' && rec.path.trim() ? rec.path : '.'
-    return { tool: 'list_files', path }
+    return { tool: 'list_files', path, ...purposeOf(rec) }
   }
   if (rec.tool === 'search_files') {
     if (typeof rec.query === 'string' && rec.query.length > 0) {
@@ -228,7 +304,8 @@ export function parseToolBlock(raw: string): ParsedTool | null {
         after: positiveInt(rec.after),
         context: positiveInt(rec.context),
         multiline: rec.multiline === true ? true : undefined,
-        mode
+        mode,
+        ...purposeOf(rec)
       }
     }
     return null
@@ -238,7 +315,7 @@ export function parseToolBlock(raw: string): ParsedTool | null {
     // the search root, defaulting to the whole project.
     if (typeof rec.glob === 'string' && rec.glob.trim()) {
       const path = typeof rec.path === 'string' && rec.path.trim() ? rec.path : '.'
-      return { tool: 'find_files', glob: rec.glob, path }
+      return { tool: 'find_files', glob: rec.glob, path, ...purposeOf(rec) }
     }
     return null
   }
@@ -343,7 +420,10 @@ export function parseToolBlock(raw: string): ParsedTool | null {
       'network',
       'click',
       'fill',
-      'resize'
+      'resize',
+      'eval',
+      'navigate',
+      'server_logs'
     ] as const
     const action = ACTIONS.find((a) => a === rec.action)
     if (!action) return null
@@ -353,6 +433,14 @@ export function parseToolBlock(raw: string): ParsedTool | null {
     if ((action === 'inspect' || action === 'click' || action === 'fill') && !selector) return null
     // fill must carry the text to type (empty string is a valid "clear the field").
     if (action === 'fill' && typeof rec.value !== 'string') return null
+    // eval is nothing without the code to run; a blank expression would evaluate to
+    // `undefined` and read as a mysteriously empty result.
+    const expression =
+      typeof rec.expression === 'string' && rec.expression.trim() ? rec.expression : undefined
+    if (action === 'eval' && !expression) return null
+    // navigate takes a URL; omitting it means "reload where we are", which is a
+    // real request, so an absent url is allowed here (the executor decides).
+    const url = typeof rec.url === 'string' && rec.url.trim() ? rec.url.trim() : undefined
     const styles =
       Array.isArray(rec.styles) && rec.styles.every((s) => typeof s === 'string' && s.trim())
         ? (rec.styles as string[])
@@ -374,7 +462,9 @@ export function parseToolBlock(raw: string): ParsedTool | null {
       filter,
       preset,
       width: positiveInt(rec.width),
-      height: positiveInt(rec.height)
+      height: positiveInt(rec.height),
+      expression,
+      url
     }
   }
   if (rec.tool === 'browse') {
@@ -458,6 +548,79 @@ export function parseToolBlock(raw: string): ParsedTool | null {
     // Keep the usable paths rather than losing the whole narrowing to one bad entry.
     const files = raw.filter((f): f is string => typeof f === 'string' && f.trim().length > 0)
     return { tool: 'diagnostics', scope, files: files.length > 0 ? files : undefined }
+  }
+  if (rec.tool === 'update_todos') {
+    // The model's flat checklist for the turn. `todos` must be an array; each item
+    // needs non-empty `text`, and `status` falls back to 'pending' for anything
+    // that isn't one of the three known states. Malformed items are dropped rather
+    // than failing the block — but a non-empty input that yields nothing usable is
+    // rejected (a garbage block shouldn't silently clear the list). An empty array
+    // is a valid, deliberate "clear the checklist".
+    if (!Array.isArray(rec.todos)) return null
+    const STATUSES = ['pending', 'in_progress', 'completed'] as const
+    const todos = rec.todos.flatMap((item) => {
+      if (typeof item !== 'object' || item === null) return []
+      const r = item as Record<string, unknown>
+      const text = typeof r.text === 'string' ? r.text.trim().replace(/\s+/g, ' ') : ''
+      if (!text) return []
+      const status = STATUSES.find((s) => s === r.status) ?? 'pending'
+      return [{ text: text.slice(0, MAX_TODO_TEXT), status }]
+    })
+    if (rec.todos.length > 0 && todos.length === 0) return null
+    return { tool: 'update_todos', todos }
+  }
+  if (rec.tool === 'ask_user') {
+    // A clarifying question the model wants answered before it continues. `question`
+    // is required and non-empty (a blank question is nothing to answer). `options`,
+    // when given, are the suggested answer chips: filtered to non-empty strings,
+    // trimmed/capped, and dropped entirely if none survive — a free-text answer is
+    // always allowed, so bad options degrade to "no chips", never a rejected block.
+    // `header` is an optional short topic label shown on the prompt.
+    const question =
+      typeof rec.question === 'string' ? rec.question.trim().replace(/\s+/g, ' ') : ''
+    if (!question) return null
+    const header =
+      typeof rec.header === 'string' && rec.header.trim()
+        ? rec.header.trim().replace(/\s+/g, ' ').slice(0, MAX_QUESTION_HEADER)
+        : undefined
+    const options = Array.isArray(rec.options)
+      ? rec.options
+          .flatMap((o) => {
+            const text = typeof o === 'string' ? o.trim().replace(/\s+/g, ' ') : ''
+            return text ? [text.slice(0, MAX_OPTION_TEXT)] : []
+          })
+          .slice(0, MAX_QUESTION_OPTIONS)
+      : []
+    return {
+      tool: 'ask_user',
+      question: question.slice(0, MAX_QUESTION_TEXT),
+      ...(header ? { header } : {}),
+      ...(options.length > 0 ? { options } : {})
+    }
+  }
+  if (rec.tool === 'flag_followup') {
+    // An out-of-scope issue the model noticed and is deliberately NOT doing now.
+    // `title` is the whole tool: a one-line imperative the user can act on, so a
+    // blank one is nothing to flag and the block is rejected. `note` (why it
+    // matters) and `files` (where it lives) are optional colour — bad values are
+    // dropped rather than failing the block, because what a follow-up *explains*
+    // must not be able to stop it from being recorded.
+    const title = typeof rec.title === 'string' ? rec.title.trim().replace(/\s+/g, ' ') : ''
+    if (!title) return null
+    const note = typeof rec.note === 'string' ? rec.note.trim().replace(/\s+/g, ' ') : ''
+    const raw = Array.isArray(rec.files) ? rec.files : Array.isArray(rec.paths) ? rec.paths : []
+    const files = raw
+      .flatMap((f) => {
+        const text = typeof f === 'string' ? f.trim() : ''
+        return text ? [text] : []
+      })
+      .slice(0, MAX_FOLLOWUP_FILES)
+    return {
+      tool: 'flag_followup',
+      title: title.slice(0, MAX_FOLLOWUP_TITLE),
+      ...(note ? { note: note.slice(0, MAX_FOLLOWUP_NOTE) } : {}),
+      ...(files.length > 0 ? { files } : {})
+    }
   }
   return null
 }

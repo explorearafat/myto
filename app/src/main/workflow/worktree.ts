@@ -23,13 +23,13 @@
  * *uncommitted* edits. That is intended for genuinely independent slices; the
  * lead's prompt is told to reserve isolation for exactly those.
  */
-import { execFile } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { isGitAvailable } from '../plugins/git'
 import { contextManager } from '../context/manager'
+import { runGit } from '../git/exec'
 
 /** A live isolated worktree carved for one subagent. */
 export interface WorktreeHandle {
@@ -39,32 +39,6 @@ export interface WorktreeHandle {
   branch: string
   /** The main project root the worktree was carved from (sync-back target). */
   base: string
-}
-
-/** Result of a git invocation: total (never throws), stdout/stderr captured. */
-interface GitResult {
-  ok: boolean
-  stdout: string
-  stderr: string
-}
-
-/**
- * Runs `git <args>` in `cwd` through `execFile` — no shell, so a hostile path or
- * branch name can't be interpreted as a command. Total: it resolves a
- * {@link GitResult} rather than rejecting, so callers degrade gracefully on any
- * failure (missing git, non-repo, aborted signal) instead of unwinding.
- */
-function runGit(args: string[], cwd: string, signal?: AbortSignal): Promise<GitResult> {
-  return new Promise((resolveResult) => {
-    execFile(
-      'git',
-      args,
-      { cwd, timeout: 30_000, windowsHide: true, signal, maxBuffer: 16 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        resolveResult({ ok: !err, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') })
-      }
-    )
-  })
 }
 
 /**

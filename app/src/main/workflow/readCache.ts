@@ -12,13 +12,27 @@ import { contextManager } from '../context/manager'
  * instead, while staying correct: a write or command that could have changed the
  * file drops it from the cache, and a size/mtime change forces a fresh read.
  *
- * The per-run cache is a `Map<key, stamp>` living on the run handle (so it's
- * cleared when the run ends). `key` identifies a specific read window; `stamp`
- * is the file's `size:mtime` at read time — the freshness guard.
+ * The per-run cache is a `Map<key, ReadCacheEntry>` living on the run handle (so
+ * it's cleared when the run ends). `key` identifies a specific read window; the
+ * entry carries the file's `size:mtime` at read time — the freshness guard — and
+ * whether the read was COMPLETE.
  *
  * These helpers are kept out of `engine.ts` (and its Electron-heavy import chain)
  * so they can be unit-tested directly against the real {@link contextManager}.
  */
+
+/** What a served read is remembered by, per window key. */
+export interface ReadCacheEntry {
+  /** The file's `size:mtime` when we served it — the freshness guard. */
+  stamp: string
+  /**
+   * True when the read reached the end of the file. Only a complete read can
+   * answer for a window it never asked for (see {@link servedFromReadCache}): if
+   * the file was clipped, lines past the cut genuinely were never shown, and a
+   * later `offset` into them is a real continuation, not a repeat.
+   */
+  complete: boolean
+}
 
 /** `size:mtime` stamp string for a stat result — the cache's freshness token. */
 function stampOf(stat: { size: number; mtime: number }): string {
@@ -48,55 +62,92 @@ function pathKeyPrefix(root: string, path: string): string {
 }
 
 /**
- * If this exact `read_file` window was already served this run and the file is
- * unchanged on disk since, returns a short "already read" note to hand back
- * INSTEAD of a second disk read + a second full-content injection. Returns null
- * on the first read, a changed/vanished file (stamp differs — the stale entry is
- * evicted so the caller re-reads), or any non-`read_file` op. Media reads are
- * never cached (they carry image bytes for a vision turn), so only prior TEXT
- * reads ever reach this path.
+ * The fresh entry for `key`, or null when there is none — evicting a stale one on
+ * the way out so it can never mislead a later check. "Stale" covers a file that
+ * changed size/mtime and one that vanished entirely.
  */
-export function servedFromReadCache(
-  cache: Map<string, string>,
-  proposal: ToolProposal
-): ReadResult | null {
-  if (proposal.kind !== 'read' || proposal.op !== 'read_file') return null
-  const key = readCacheKey(contextManager.getRoot(), proposal.path, proposal.offset, proposal.limit)
+function freshEntry(
+  cache: Map<string, ReadCacheEntry>,
+  key: string,
+  path: string
+): ReadCacheEntry | null {
   const seen = cache.get(key)
   if (seen === undefined) return null
-
-  const stamp = contextManager.fileStamp(proposal.path)
-  if (!stamp || stampOf(stamp) !== seen) {
-    // Vanished or changed since we served it — force a fresh read.
+  const stat = contextManager.fileStamp(path)
+  if (!stat || stampOf(stat) !== seen.stamp) {
     cache.delete(key)
     return null
   }
+  return seen
+}
+
+/**
+ * If this `read_file` was already answered this run and the file is unchanged on
+ * disk since, returns a short "already read" note to hand back INSTEAD of a second
+ * disk read + a second full-content injection. Returns null on the first read, a
+ * changed/vanished file (the stale entry is evicted so the caller re-reads), or any
+ * non-`read_file` op. Media reads are never cached (they carry image bytes for a
+ * vision turn), so only prior TEXT reads ever reach this path.
+ *
+ * Two ways to hit. The exact window is the obvious one. The load-bearing one is the
+ * WHOLE-FILE entry answering for a windowed request: `planReadWindow` makes the
+ * first read of any path complete, so "read `Navbar.tsx` lines 1–70" after
+ * `Navbar.tsx` has been read in full is asking for text that is already in the
+ * conversation verbatim — the third read of the same file in the report that
+ * prompted this. Only a `complete` whole-file read may subsume like that; a clipped
+ * one leaves real lines unseen, and an `offset` into them is a continuation.
+ */
+export function servedFromReadCache(
+  cache: Map<string, ReadCacheEntry>,
+  proposal: ToolProposal
+): ReadResult | null {
+  if (proposal.kind !== 'read' || proposal.op !== 'read_file') return null
+  const root = contextManager.getRoot()
+  const exact = readCacheKey(root, proposal.path, proposal.offset, proposal.limit)
+  const whole = readCacheKey(root, proposal.path, undefined, undefined)
+  const served =
+    freshEntry(cache, exact, proposal.path) !== null ||
+    (whole !== exact && freshEntry(cache, whole, proposal.path)?.complete === true)
+  if (!served) return null
 
   const summary = contextManager.indexSummaryFor(proposal.path)
-  const output = summary
-    ? `Already read \`${proposal.path}\` earlier in this turn — unchanged since, so its full content is still above. Structural summary: ${summary}`
-    : `Already read \`${proposal.path}\` earlier in this turn — unchanged since, so its full content is still above.`
+  const structure = summary ? ` Structural summary: ${summary}` : ''
   return {
     id: proposal.id,
     kind: 'read',
     ok: true,
-    output,
+    output:
+      `You already read \`${proposal.path}\` earlier in this turn and nothing has changed it ` +
+      'since, so its full text is still above in this conversation — scroll up to it rather ' +
+      `than asking again.${structure}`,
     truncated: false,
     summary: 'already read (unchanged)'
   }
 }
 
 /**
+ * True when this run has already read `path` in FULL and the file is unchanged
+ * since — the question {@link planReadWindow} needs in order to tell a keyhole
+ * (first look at a file, must be whole) from a continuation (walking through a file
+ * too big for one read).
+ */
+export function hasCompleteRead(cache: Map<string, ReadCacheEntry>, path: string): boolean {
+  const key = readCacheKey(contextManager.getRoot(), path, undefined, undefined)
+  return freshEntry(cache, key, path)?.complete === true
+}
+
+/**
  * Updates the per-run read cache and the persistent project index after a tool
  * actually ran:
- *  - a successful text read is remembered (window → stamp) and fed to the index;
+ *  - a successful text read is remembered (window → stamp + whether it was
+ *    complete) and fed to the index;
  *  - a successful write evicts every cached window of that path (a read-after-write
  *    must return fresh bytes) and refreshes the file's index summary;
  *  - any command clears the whole cache — a command can touch arbitrary files, so
  *    nothing read before it can be trusted as unchanged.
  */
 export function updateReadCache(
-  cache: Map<string, string>,
+  cache: Map<string, ReadCacheEntry>,
   proposal: ToolProposal,
   result: ToolResult
 ): void {
@@ -115,7 +166,9 @@ export function updateReadCache(
         proposal.offset,
         proposal.limit
       )
-      cache.set(key, stampOf(stamp))
+      // `truncated` is the reader's own word for "there is more file past what I
+      // just gave you", so its negation is exactly what `complete` means.
+      cache.set(key, { stamp: stampOf(stamp), complete: !result.truncated })
     }
     contextManager.noteRead(proposal.path)
     return

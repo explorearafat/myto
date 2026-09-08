@@ -7,8 +7,12 @@ import {
   authorPhasePlan,
   closePhase,
   expandSpec,
+  openingNote,
+  planningBrief,
   renderTasksDoc,
   resolvePhase,
+  roadmapSummary,
+  scanNote,
   type AuditInventory,
   type MemoryPort,
   type PhaseContext
@@ -110,6 +114,25 @@ describe('resolvePhase', () => {
     expect(phase.complexity).toBe('complex')
     expect(phase.spec.n).toBe(3)
     expect(phase.spec.name).toBe('Core pages')
+  })
+
+  it('re-sizes a roadmap that has not got past its first phase down to this turn', () => {
+    // A single bad route used to be permanent: the size was written to STATE.md and
+    // preferred forever, so one mis-sized turn ("a login page" reading as two
+    // domains) turned the whole project into a nine-phase build. Nothing has been
+    // delivered against phase 1 yet, so there is no numbering to lose.
+    const { port } = fakeMemory({}, { phase: 1, complexity: 'complex', fresh: false })
+    const phase = resolvePhase(port.readState(), 'simple')
+    expect(phase.total).toBe(3)
+    expect(phase.complexity).toBe('simple')
+    expect(phase.spec.n).toBe(1)
+  })
+
+  it('does not let a single ambitious turn grow a roadmap', () => {
+    const { port } = fakeMemory({}, { phase: 1, complexity: 'simple', fresh: false })
+    const phase = resolvePhase(port.readState(), 'complex')
+    expect(phase.total).toBe(3)
+    expect(phase.complexity).toBe('simple')
   })
 
   it('clamps a phase number past the end of the roadmap to the last phase', () => {
@@ -249,6 +272,36 @@ describe('auditProject', () => {
   })
 })
 
+describe('scanNote', () => {
+  it('says the repo was read first, with the real file count', () => {
+    const note = scanNote({ wrote: ['filemap', 'architecture', 'conventions'] }, 128)
+    expect(note).toContain('**Scanned the project before writing anything** — 128 files mapped')
+    expect(note).toContain('architecture and conventions are now on record')
+    expect(note).toContain('All set')
+  })
+
+  it('does not re-announce learning what it already knew', () => {
+    const note = scanNote({ wrote: ['filemap'] }, 12)
+    expect(note).toContain('12 files mapped')
+    expect(note).toContain('already on record')
+  })
+
+  it('counts one file in the singular', () => {
+    expect(scanNote({ wrote: ['filemap'] }, 1)).toContain('1 file mapped')
+  })
+
+  it('claims nothing when nothing was actually scanned', () => {
+    // "I scanned the project" on a turn where no file was walked is exactly the
+    // reassuring lie the honesty rules exist to prevent.
+    expect(scanNote({ wrote: [], skipped: 'nothing-to-audit' }, 0)).toBeNull()
+    expect(scanNote({ wrote: ['filemap'] }, 0)).toBeNull()
+  })
+
+  it('stays quiet when the scan was cancelled part-way', () => {
+    expect(scanNote({ wrote: ['filemap'], skipped: 'aborted' }, 40)).toBeNull()
+  })
+})
+
 // ── SPEC ─────────────────────────────────────────────────────────────────────
 
 const SPEC_HEADINGS = [
@@ -300,7 +353,7 @@ describe('expandSpec', () => {
   it('tells the scribe to decide rather than ask, and hands it the request verbatim', async () => {
     const { port } = fakeMemory()
     const scribe = fakeScribe(specDoc())
-    await expandSpec({ ...args, complexity: 'medium', memory: port, scribe: scribe.fn })
+    await expandSpec({ ...args, complexity: 'complex', memory: port, scribe: scribe.fn })
 
     const [system, user] = scribe.calls[0]
     expect(system.content).toContain('PRODUCT ARCHITECT')
@@ -316,20 +369,25 @@ describe('expandSpec', () => {
     await expandSpec({
       ...args,
       overview: 'Next 15 app with a working shell and 3 pages.',
-      complexity: 'medium',
+      complexity: 'complex',
       memory: port,
       scribe: scribe.fn
     })
     expect(scribe.calls[0][1].content).toContain('working shell and 3 pages')
   })
 
-  it('never writes a spec for a small change — that is an edit, not a product', async () => {
-    const { port, docs } = fakeMemory()
-    const scribe = fakeScribe(specDoc())
-    const out = await expandSpec({ ...args, complexity: 'simple', memory: port, scribe: scribe.fn })
-    expect(out).toEqual({ wrote: false, skipped: 'too-small' })
-    expect(scribe.fn).not.toHaveBeenCalled()
-    expect(docs.size).toBe(0)
+  it('only writes a spec for a full product build — anything less is an edit', async () => {
+    // A 20-section PROJECT.md is one long call before any code. `medium` used to
+    // pay for it too, so an ordinary two-part feature bought a product spec it
+    // would never read again.
+    for (const complexity of ['simple', 'medium'] as const) {
+      const { port, docs } = fakeMemory()
+      const scribe = fakeScribe(specDoc())
+      const out = await expandSpec({ ...args, complexity, memory: port, scribe: scribe.fn })
+      expect(out).toEqual({ wrote: false, skipped: 'too-small' })
+      expect(scribe.fn).not.toHaveBeenCalled()
+      expect(docs.size).toBe(0)
+    }
   })
 
   it('runs at most once per project: an existing spec is never re-derived', async () => {
@@ -404,6 +462,46 @@ describe('expandSpec', () => {
 })
 
 // ── PLAN ─────────────────────────────────────────────────────────────────────
+
+describe('planningBrief', () => {
+  it('hands the planner the sections that decide how the work splits', () => {
+    const { port } = fakeMemory({ project: specDoc() })
+    const brief = planningBrief(port)
+    expect(brief).toContain('### From the recorded specification')
+    for (const h of [
+      'Objective',
+      'Major features',
+      'Pages and screens',
+      'Component architecture',
+      'Data requirements',
+      'Backend, API and authentication',
+      'Completion criteria'
+    ]) {
+      expect(brief, `${h} should reach the planner`).toContain(`#### ${h}`)
+    }
+  })
+
+  it('leaves out the sections a split does not turn on', () => {
+    // Visual direction and SEO belong to the phase plan and the specialists. Sending
+    // the whole 20-section spec would crowd out the file overview underneath it.
+    const brief = planningBrief(fakeMemory({ project: specDoc() }).port)
+    expect(brief).not.toContain('Visual and interaction direction')
+    expect(brief).not.toContain('Security, performance and SEO')
+    expect(brief).not.toContain('Target users')
+  })
+
+  it('clips a long section instead of flooding the prompt', () => {
+    const long = `## Objective\n\n${'y'.repeat(900)}\n`
+    const brief = planningBrief(fakeMemory({ project: long }).port)
+    expect(brief).toContain('…')
+    expect(brief.length).toBeLessThan(700)
+  })
+
+  it('says nothing at all before a specification exists', () => {
+    expect(planningBrief(fakeMemory().port)).toBe('')
+    expect(planningBrief(fakeMemory({ project: '# Title only\n' }).port)).toBe('')
+  })
+})
 
 describe('authorPhasePlan', () => {
   const args = { request: 'build the portal', tasks: [task('t1')], memoryDigest: '', signal: live }
@@ -488,6 +586,94 @@ describe('authorPhasePlan', () => {
   })
 })
 
+describe('authorPhasePlan — degradation is reported, not hidden', () => {
+  // The skeleton fallback writes a document with a real task list and twenty-odd
+  // "to be determined" sections. Opened, it reads like a finished plan, so the
+  // one thing it must not be is silent about what is missing.
+  const args = { request: 'build the portal', tasks: [task('t1')], memoryDigest: '', signal: live }
+  const failing = (message: string) => async (): Promise<string> => {
+    throw new Error(message)
+  }
+
+  it('reports the provider reason behind a skeleton plan', async () => {
+    const onDegraded = vi.fn()
+    const out = await authorPhasePlan({
+      ...args,
+      phase: ctx('complex', 2),
+      scribe: failing('Request timed out after 600000ms'),
+      onDegraded
+    })
+    expect(onDegraded).toHaveBeenCalledTimes(1)
+    expect(onDegraded.mock.calls[0][0]).toMatch(/timed out/i)
+    expect(out).toContain('_To be determined — ')
+  })
+
+  it('reports an answer that carried no usable sections', async () => {
+    const scribe = fakeScribe('I would start by exploring the repository.')
+    const onDegraded = vi.fn()
+    await authorPhasePlan({ ...args, phase: ctx('medium'), scribe: scribe.fn, onDegraded })
+    expect(onDegraded).toHaveBeenCalledTimes(1)
+    expect(onDegraded.mock.calls[0][0]).toMatch(/no usable sections/)
+  })
+
+  it('keeps the reported reason short enough for a status line', async () => {
+    const onDegraded = vi.fn()
+    await authorPhasePlan({
+      ...args,
+      phase: ctx('medium'),
+      scribe: failing(`upstream rejected the request: ${'context overflow. '.repeat(40)}`),
+      onDegraded
+    })
+    expect(String(onDegraded.mock.calls[0][0]).length).toBeLessThanOrEqual(160)
+  })
+
+  it('says something even when the failure carried no message', async () => {
+    const onDegraded = vi.fn()
+    await authorPhasePlan({ ...args, phase: ctx('medium'), scribe: failing(''), onDegraded })
+    expect(onDegraded).toHaveBeenCalledWith('the call failed')
+  })
+
+  it('stays quiet when a user Stop cancelled the architect', async () => {
+    // A cancellation is not a degradation — the user already knows.
+    const onDegraded = vi.fn()
+    await authorPhasePlan({
+      ...args,
+      phase: ctx('medium'),
+      scribe: async () => {
+        throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+      },
+      onDegraded
+    })
+    expect(onDegraded).not.toHaveBeenCalled()
+
+    // Nor is a reply that arrived after the run was already stopped.
+    const late = fakeScribe(JSON.stringify({ why: 'authored after the abort' }))
+    await authorPhasePlan({
+      ...args,
+      phase: ctx('medium'),
+      signal: dead,
+      scribe: late.fn,
+      onDegraded
+    })
+    expect(onDegraded).not.toHaveBeenCalled()
+  })
+
+  it('stays quiet on a plan the architect actually authored', async () => {
+    const scribe = fakeScribe(
+      JSON.stringify({ why: 'Without the shell there is nowhere to hang a page.' })
+    )
+    const onDegraded = vi.fn()
+    const out = await authorPhasePlan({
+      ...args,
+      phase: ctx('complex', 2),
+      scribe: scribe.fn,
+      onDegraded
+    })
+    expect(out).toContain('nowhere to hang a page')
+    expect(onDegraded).not.toHaveBeenCalled()
+  })
+})
+
 // ── TASKS.md ─────────────────────────────────────────────────────────────────
 
 describe('renderTasksDoc', () => {
@@ -521,6 +707,110 @@ describe('renderTasksDoc', () => {
     expect(doc).toContain('  - [ ] **t4** do t4')
     const phase3 = doc.slice(doc.indexOf('## Phase 3'))
     expect(phase3).not.toContain('**t1**')
+  })
+})
+
+// ── the first readable line ──────────────────────────────────────────────────
+
+describe('openingNote', () => {
+  it('says what is happening, without announcing the size of the process', () => {
+    expect(openingNote(ctx('complex'))).toBe(
+      'Planning this before I write anything — the plan lands here first.\n'
+    )
+  })
+
+  it('reads the same whatever the routing decided', () => {
+    // The old line led with "a big build, 9 phases" / "a decent-sized build, 5
+    // phases", which is ceremony: a label for Sylor's own process, before a single
+    // useful thing has been said. The phase list still arrives — in roadmapSummary,
+    // with each objective — so nothing is lost by keeping this line about the work.
+    const notes = (['complex', 'medium', 'simple'] as const).map((c) => openingNote(ctx(c)))
+    expect(new Set(notes).size).toBe(1)
+    for (const note of notes) {
+      expect(note).not.toMatch(/build|phases|On it/)
+    }
+  })
+
+  it('leads a later phase with where it is picking up', () => {
+    const md = openingNote(ctx('complex', 4))
+    expect(md).toBe('Picking up data and backend — planning it before I write anything.\n')
+  })
+
+  it('promises only the plan — never that the project has been read', () => {
+    // The audit is skipped on a resumed project, so a line claiming otherwise would
+    // be describing work that did not happen. That claim is scanNote's job, and it
+    // is emitted only when files were actually mapped.
+    for (const c of ['complex', 'medium', 'simple'] as const) {
+      expect(openingNote(ctx(c)).toLowerCase()).not.toContain('read')
+    }
+  })
+})
+
+// ── the plan, read back ──────────────────────────────────────────────────────
+
+describe('roadmapSummary', () => {
+  const t = (role: string, description: string): TaskNode => task(role, { role, description })
+
+  it('names how many phases there are, and what each one is for', () => {
+    const md = roadmapSummary(ctx('complex'), [])
+    expect(md).toContain('**Plan ready — 9 phases.**')
+    for (const p of phaseRoadmap('complex')) {
+      expect(md, `phase ${p.n} should be listed`).toContain(`${p.n}. **${p.name}** — ${p.objective}`)
+    }
+  })
+
+  it('marks where the work is about to start', () => {
+    expect(roadmapSummary(ctx('medium'), [])).toContain('**Foundation** — ')
+    expect(roadmapSummary(ctx('medium'), [])).toContain('← starting here')
+  })
+
+  it('lists what this phase actually breaks down into, by role', () => {
+    const md = roadmapSummary(ctx('medium'), [
+      t('database', 'create the schema'),
+      t('backend', 'build the API'),
+      t('frontend', 'build the UI')
+    ])
+    expect(md).toContain('This phase breaks down into 3 tasks:')
+    // Titles, not routing ids — the same name the task wears in its card and in the
+    // closing roll-up, so the plan and the result read as one list.
+    expect(md).toContain('- **Database Engineer** — create the schema')
+    expect(md).toContain('- **Frontend Engineer** — build the UI')
+    expect(md).not.toContain('- **database**')
+  })
+
+  it('counts a single task in the singular', () => {
+    expect(roadmapSummary(ctx('simple'), [t('builder', 'do the thing')])).toContain(
+      'breaks down into 1 task:'
+    )
+  })
+
+  it('says nothing about tasks when the graph is empty', () => {
+    expect(roadmapSummary(ctx('simple'), [])).not.toContain('breaks down into')
+  })
+
+  it('drops the phase list on a later phase, and leads with that phase instead', () => {
+    // By phase 4 the user has seen the nine-line list three times, and TASKS.md
+    // carries it — so a continuing turn says where it is and gets on with it.
+    const md = roadmapSummary(ctx('complex', 4), [t('backend', 'wire the queries')])
+    expect(md).toContain('**Plan ready — Phase 4 of 9 — Data and backend.**')
+    expect(md).toContain('- **Backend Engineer** — wire the queries')
+    expect(md).not.toContain('1. **Discovery and foundation**')
+  })
+
+  it('still lists the roadmap on the first turn a project gains state', () => {
+    // A project can pick up a roadmap on a turn that is not phase 1 (an earlier
+    // turn recorded state without building). That user has never seen the list.
+    const md = roadmapSummary({ ...ctx('complex', 3), fresh: true }, [])
+    expect(md).toContain('**Plan ready — 9 phases.**')
+    expect(md).toContain('1. **Discovery and foundation**')
+    expect(md).toContain('← we are here')
+    expect(md).not.toContain('← starting here')
+  })
+
+  it('renders as markdown a reply can be built from, with no trailing sprawl', () => {
+    const md = roadmapSummary(ctx('medium'), [t('builder', 'scaffold the app')])
+    expect(md.endsWith('scaffold the app\n')).toBe(true)
+    expect(md).not.toContain('\n\n\n')
   })
 })
 

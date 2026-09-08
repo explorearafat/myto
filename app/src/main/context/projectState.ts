@@ -4,7 +4,7 @@ import { memoryDocPath, resolveMemoryHome, SCAFFOLD_MARKER } from './projectMemo
 
 /**
  * Project state bookkeeping — the machine-readable half of `STATE.md`, plus the
- * plan archive, the session checkpoint, and the decision log.
+ * plan archive, the session checkpoint, the decision log, and the follow-up log.
  *
  * `STATE.md` is the one document that answers "where does the work stand?", and
  * the staged workflow has to both READ it (to know which phase is next) and WRITE
@@ -343,6 +343,76 @@ export function appendDecision(entry: DecisionEntry): boolean {
   if (existing === null) return write(rel, `# Decision log\n\n${block}`)
   const body = existing.replace(`${SCAFFOLD_MARKER}\n`, '').replace(SCAFFOLD_MARKER, '')
   return write(rel, `${body.replace(/\s*$/, '')}\n\n${block}`)
+}
+
+// ── Follow-up log ────────────────────────────────────────────────────────────
+
+/** One out-of-scope issue flagged during a turn (the `flag_followup` tool). */
+export interface FollowupEntry {
+  /** One-line imperative ("Fix the stale README badge"). */
+  title: string
+  /** Why it matters / what to do, when the title alone doesn't carry it. */
+  note?: string
+  /** Files it concerns. */
+  files?: string[]
+}
+
+/** What became of a {@link appendFollowup} call. */
+export type FollowupOutcome =
+  /** Written to `FOLLOWUPS.md`. */
+  | 'recorded'
+  /** A follow-up with this title is already on the list; nothing was written. */
+  | 'duplicate'
+  /** Nothing could be written (read-only checkout, no folder) — flag it anyway. */
+  | 'unrecorded'
+
+/** The heading a follow-up entry is written as; the group is its title. */
+function followupHeadings(doc: string): string[] {
+  return [...doc.matchAll(/^##\s+\d{4}-\d{2}-\d{2}\s+—\s+(.+?)\s*$/gm)].map((m) =>
+    m[1].trim().toLowerCase()
+  )
+}
+
+/**
+ * Appends an out-of-scope finding to `FOLLOWUPS.md`, newest LAST — an append-only
+ * log like {@link appendDecision}, because a deferred issue stays open until someone
+ * acts on it and history is never rewritten.
+ *
+ * Deduplicated on the title, case-insensitively: agents re-notice the same loose
+ * end on every pass over the same code, and a list that repeats itself is a list
+ * nobody reads. Creates the doc when absent (it is deliberately never scaffolded —
+ * an empty follow-up list would read as "checked, nothing to do").
+ *
+ * Returns what actually happened rather than a bare boolean: the caller has to tell
+ * the user where the entry went, and must never claim a file that couldn't be
+ * written. Never throws.
+ */
+export function appendFollowup(entry: FollowupEntry): FollowupOutcome {
+  const title = entry.title.trim()
+  if (!title) return 'unrecorded'
+  const rel = memoryDocPath('followups')
+  const existing = read(rel)
+
+  if (existing !== null) {
+    if (followupHeadings(existing).includes(title.toLowerCase())) return 'duplicate'
+  }
+
+  const date = new Date().toISOString().slice(0, 10)
+  const lines = [`## ${date} — ${title}`]
+  if (entry.note?.trim()) lines.push(`- Note: ${entry.note.trim()}`)
+  if (entry.files?.length) lines.push(`- Files: ${entry.files.join(', ')}`)
+  const block = `${lines.join('\n')}\n`
+
+  if (existing === null) {
+    const header =
+      '# Follow-ups\n\n' +
+      'Out-of-scope work noticed while doing something else, and deliberately left ' +
+      'undone. Nothing here has been actioned — each entry is a candidate for its own ' +
+      'turn.\n\n'
+    return write(rel, header + block) ? 'recorded' : 'unrecorded'
+  }
+  const body = existing.replace(`${SCAFFOLD_MARKER}\n`, '').replace(SCAFFOLD_MARKER, '')
+  return write(rel, `${body.replace(/\s*$/, '')}\n\n${block}`) ? 'recorded' : 'unrecorded'
 }
 
 // ── Session checkpoints ──────────────────────────────────────────────────────

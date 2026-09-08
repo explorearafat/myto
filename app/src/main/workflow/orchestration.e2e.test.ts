@@ -57,7 +57,12 @@ vi.mock('@main/providers', () => ({
 const settings = { ...DEFAULT_PROVIDER_SETTINGS, modelId: 'test-model', modelName: 'Test Model' }
 vi.mock('@main/settings', () => ({
   getSettings: () => settings,
-  isSkillEnabled: () => true
+  isSkillEnabled: () => true,
+  // Full-PC access off: the engine calls this directly on every gated op, so the
+  // mock must export it (default safe posture) or the whole run throws.
+  fullAccessEnabled: () => false,
+  // Auto-send off too — same direct-call reason (browse send gate).
+  autoSendEnabled: () => false
 }))
 
 // The root override used by worktree isolation. `runWithRoot` is a pass-through
@@ -70,6 +75,11 @@ vi.mock('@main/context/manager', () => ({
     listFiles: () => ['package.json', 'src/index.ts'],
     buildOverview: () => 'PROJECT OVERVIEW',
     getRoot: () => '/test',
+    // The checkpoint trigger only fires when these two agree, i.e. when the op is
+    // against the user's real project rather than a subagent's worktree. Equal here
+    // (runWithRoot is a pass-through), so the lead's writes reach that branch and the
+    // stub below stands in for the real snapshot.
+    getProjectRoot: () => '/test',
     setRoot: vi.fn(),
     runWithRoot: (root: string, fn: () => unknown) => runWithRoot(root, fn),
     // The §3 audit reads the manifest through the manager; everything else it needs
@@ -81,6 +91,14 @@ vi.mock('@main/context/manager', () => ({
     indexSummaryFor: () => undefined,
     flushIndex: () => {}
   }
+}))
+
+// Checkpoints are stubbed: the real one spawns git and would write into '/test' on
+// the machine running the suite. `created: false` keeps this suite's event stream
+// exactly as it was — the orchestration assertions count and order events, and a
+// snapshot row is not what they are about.
+vi.mock('@main/checkpoint/checkpoints', () => ({
+  createCheckpoint: async () => null
 }))
 
 // Worktree isolation seam. Default: `createWorktree` returns null (no git / not a
@@ -185,14 +203,15 @@ vi.mock('@main/db/projects', () => ({
   appendProjectMemory: vi.fn(() => '')
 }))
 
-const { runWorkflow } = await import('@main/workflow/engine')
+const { runWorkflow, cancelAgent } = await import('@main/workflow/engine')
 
 // ---- Fixtures ---------------------------------------------------------------
 
 /**
- * A request the complexity heuristic routes to `complex` with no LLM call — three
- * distinct domain markers and three deliverables. Pinned (not mocked) so the
- * router genuinely runs and the completion budget below is an exact assertion.
+ * A request that is genuinely broad — three distinct domains and three
+ * deliverables — so the scripted router below sizes it `complex` and the staged
+ * hierarchy actually assembles a team. The offline heuristic agrees, which is why
+ * this fixture is safe to use in the abort tests, where no verdict comes back.
  */
 const COMPLEX_REQUEST = 'add a login API endpoint and a React component and a database migration'
 
@@ -271,6 +290,7 @@ const FINAL_AUDIT_DOC = [
 
 /** The coordination calls, identified by the marker in each one's system prompt. */
 const KINDS: readonly (readonly [marker: string, kind: string])[] = [
+  ['complexity router', 'router'],
   ['PROJECT ANALYST', 'audit'],
   ['AUDITOR', 'final-audit'],
   ['PRODUCT ARCHITECT', 'spec'],
@@ -298,6 +318,17 @@ function coordination(opts: { plan?: string; verdicts?: string[] } = {}): void {
   const verdicts = [...(opts.verdicts ?? [verdict('pass')])]
   getCompletion.mockImplementation(async (_model: string, messages: ChatMessage[]) => {
     switch (kindOf(messages)) {
+      case 'router':
+        // The model sizes every work turn (`classifyComplexity`), so it is part of
+        // the budget rather than a detail. It stands in for a real one here by
+        // agreeing with the fixtures: the three-domain request is a team's worth of
+        // work, a typo is not.
+        return JSON.stringify({
+          reason: 'e2e',
+          complexity: String(messages[1]?.content ?? '').includes(COMPLEX_REQUEST)
+            ? 'complex'
+            : 'simple'
+        })
       case 'audit':
         return AUDIT_DOCS
       case 'final-audit':
@@ -382,6 +413,9 @@ const textOf = (events: WorkflowEvent[]): string =>
 
 const stagesOf = (events: WorkflowEvent[]): string[] =>
   events.filter((e) => e.type === 'status').map((e) => (e as { stage: string }).stage)
+
+const statusMessages = (events: WorkflowEvent[]): string[] =>
+  events.filter((e) => e.type === 'status').map((e) => (e as { message: string }).message)
 
 const messageTypes = (events: WorkflowEvent[]): string[] =>
   events
@@ -509,11 +543,18 @@ describe('E2E — a work turn runs the whole hierarchy', () => {
     expect(plan.complexity).toBe('complex')
     expect(plan.tasks.map((t) => t.id)).toEqual(['t1', 't2'])
     expect(plan.tasks.map((t) => t.role)).toEqual(['backend', 'frontend'])
-    // Five provider completions were spent on coordination, once each: the one-time
-    // audit that records what the project IS, the spec that turns a one-line request
-    // into PROJECT.md, the task graph, the phase plan, and the verdict. Routing,
-    // assignment, integration, the close and the roll-up are code.
-    expect(coordinationCalls()).toEqual(['audit', 'spec', 'plan', 'phase-plan', 'review'])
+    // Six provider completions were spent on coordination, once each: the router that
+    // sizes the request, the one-time audit that records what the project IS, the spec
+    // that turns a one-line request into PROJECT.md, the task graph, the phase plan,
+    // and the verdict. Assignment, integration, the close and the roll-up are code.
+    expect(coordinationCalls()).toEqual([
+      'router',
+      'audit',
+      'spec',
+      'plan',
+      'phase-plan',
+      'review'
+    ])
 
     // ── ASSIGN: the phase plan was persisted through the normal write gate, scoped
     // to phase 1 of the nine-phase roadmap a complex build gets, with the REAL task
@@ -566,9 +607,65 @@ describe('E2E — a work turn runs the whole hierarchy', () => {
     expect(text).toContain(
       '✓ **Phase 1 of 9 — Discovery and foundation** complete — next: Design system and shell.'
     )
-    expect(text).toContain('**Team result** (complex, 2 tasks)')
-    expect(text).toContain('✓ **t1** (Backend Engineer)')
-    expect(text).toContain('✓ **t2** (Frontend Engineer)')
+
+    // The turn answered before it did anything slow. Everything from here to the plan
+    // is an internal document call — nothing streamed, minutes at high reasoning
+    // effort — so this line is what stands between the user and an apparently hung app.
+    // One plain sentence about the work: the scale label and the phase count that used
+    // to lead it were ceremony, and the phases arrive with their objectives below.
+    expect(text.startsWith('Planning this before I write anything')).toBe(true)
+
+    // §3/§33 — the repo was read before anything was written, and said so in the
+    // reply (not just flashed in the status row). Two files are in the fake tree, so
+    // this is a real count, and it has to land ahead of the plan it informed.
+    expect(text).toContain('**Scanned the project before writing anything** — 2 files mapped')
+    expect(text).toContain('All set —')
+    expect(text.indexOf('**Scanned the project')).toBeLessThan(text.indexOf('**Plan ready'))
+
+    // §33 — the plan was read back BEFORE the work, not just filed as plan.md: how
+    // many phases, what each is for, and what this phase breaks down into. A user
+    // who never opens a file still learns the shape of what they asked for.
+    expect(text).toContain('**Plan ready — 9 phases.**')
+    expect(text).toContain('1. **Discovery and foundation** — ')
+    expect(text).toContain('← starting here')
+    expect(text).toContain('9. **Final polish and audit** — ')
+    expect(text).toContain('This phase breaks down into 2 tasks:')
+    expect(text.indexOf('**Plan ready — 9 phases.**')).toBeLessThan(
+      text.indexOf('- ✓ **Backend Engineer**')
+    )
+
+    // …and it landed before the phase plan was authored, not after. That document is
+    // the single longest call in the turn; read back afterwards, the user waits it out
+    // with an empty reply under a frozen phase chip. The authoring call announces
+    // itself on the status row, so the two are orderable within one event stream.
+    const PLAN_LABEL = 'Writing the plan for phase 1 — Discovery and foundation…'
+    const planReadyAt = events.findIndex(
+      (e) => e.type === 'delta' && (e as { text: string }).text.includes('**Plan ready — 9 phases.**')
+    )
+    const authoringAt = events.findIndex(
+      (e) => e.type === 'status' && (e as { message: string }).message === PLAN_LABEL
+    )
+    expect(planReadyAt).toBeGreaterThan(-1)
+    expect(authoringAt).toBeGreaterThan(-1)
+    expect(planReadyAt).toBeLessThan(authoringAt)
+
+    // Every internal document call names itself on the status row while it runs, so a
+    // long generation is distinguishable from a dead one.
+    expect(statusMessages(events)).toEqual(
+      expect.arrayContaining([
+        'Reading the project — its architecture and conventions…',
+        'Writing the project specification…',
+        PLAN_LABEL
+      ])
+    )
+
+    // The closing roll-up is a plain list of who did what — no "Team result (complex,
+    // 2 tasks)" header labelling Sylor's own routing, and no `t1`/`t2`, which are
+    // internal ids the user meets nowhere else in the app.
+    expect(text).toContain('- ✓ **Backend Engineer** — build the login API endpoint')
+    expect(text).toContain('- ✓ **Frontend Engineer** — build the React login form')
+    expect(text).not.toContain('Team result')
+    expect(text).not.toContain('**t1**')
     expect(text).toContain('Files changed: src/api.ts, src/ui.tsx')
     expect(text).toContain('Verified with `npm run typecheck`')
     expect(text).not.toContain('⚠')
@@ -586,6 +683,16 @@ describe('E2E — a work turn runs the whole hierarchy', () => {
     expect(stagesOf(events)).toEqual(
       expect.arrayContaining(['planning', 'generating', 'verifying'])
     )
+
+    // The context meter reads the LEAD's conversation and nothing else. Two
+    // specialists each ran their own agent loop with their own private history, so if
+    // that gate ever came off there would be one `context` event per agent step and
+    // the footer would flicker between unrelated conversations. Fewer events than
+    // agent-loop steps is what proves the subagents stayed out of it.
+    const contexts = events.filter((e) => e.type === 'context')
+    expect(contexts.length).toBeGreaterThan(0)
+    expect(contexts.length).toBeLessThan(streamCompletion.mock.calls.length)
+
     expect(events.at(-1)?.type).toBe('done')
   })
 
@@ -654,8 +761,15 @@ describe('E2E — a work turn runs the whole hierarchy', () => {
     // The analyst judged the audited inventory, not a fresh exploration.
     expect(coordinationPrompt('audit')).toContain('- src/index.ts — Entry point for src.')
 
-    // Closing the phase cost no extra model call: only the five coordination calls.
-    expect(coordinationCalls()).toEqual(['audit', 'spec', 'plan', 'phase-plan', 'review'])
+    // Closing the phase cost no extra model call: only the six coordination calls.
+    expect(coordinationCalls()).toEqual([
+      'router',
+      'audit',
+      'spec',
+      'plan',
+      'phase-plan',
+      'review'
+    ])
     expect(events.at(-1)?.type).toBe('done')
   })
 
@@ -681,13 +795,21 @@ describe('E2E — a work turn runs the whole hierarchy', () => {
     await runWorkflow(req('e2e-resume'), emit, noTerminal)
 
     // §3/§36 — an audited project is never audited again, and a recorded spec is never
-    // re-derived: three calls, none of them about what the project already is.
-    expect(coordinationCalls()).toEqual(['plan', 'phase-plan', 'review'])
+    // re-derived: past the sizing call, three calls, none of them about what the
+    // project already is.
+    expect(coordinationCalls()).toEqual(['router', 'plan', 'phase-plan', 'review'])
     expect(virtualFs.get('.sylor/ARCHITECTURE.md')).toContain('Electron main plus a React renderer.')
     // The planner was told which phase it is planning, and told not to stray.
     const planPrompt = coordinationPrompt('plan')
     expect(planPrompt).toContain('Phase 3 of 9 — Core pages')
     expect(planPrompt).toContain('Plan ONLY the work that belongs to this phase')
+    // …and it split the work FROM the recorded specification rather than inferring the
+    // product a second time from the request: the sections that decide how the work
+    // divides — pages, data, the API boundary — are in the planner's own prompt.
+    expect(planPrompt).toContain('### From the recorded specification')
+    expect(planPrompt).toContain('#### Pages and screens')
+    expect(planPrompt).toContain('#### Data requirements')
+    expect(planPrompt).toContain('#### Backend, API and authentication')
     // The plan-writing call was handed recorded memory instead of a fresh audit.
     expect(coordinationPrompt('phase-plan')).toContain('## What the project already knows')
     expect(coordinationPrompt('phase-plan')).toContain('Specification (recorded)')
@@ -771,7 +893,7 @@ describe('E2E — a work turn runs the whole hierarchy', () => {
       noTerminal
     )
 
-    expect(coordinationCalls()).toEqual(['review']) // the review gate only
+    expect(coordinationCalls()).toEqual(['router', 'review']) // sizing, then the review gate
     expect(virtualFs.has('plan.md')).toBe(false)
     expect(virtualFs.has('.sylor/sessions/latest.md')).toBe(false)
     expect(agentStarts(events)).toHaveLength(0) // the lead IS the node
@@ -785,9 +907,10 @@ describe('E2E — a work turn runs the whole hierarchy', () => {
     expect(filesWritten()).toEqual(['src/fix.ts'])
     // A clean single-node turn ends on the agent's own prose: no team roll-up, and no
     // phase line — "phase 1 of 3" would be noise on a project with no roadmap.
+    // (The roll-up is now unheaded, so the bullet itself is what must be absent.)
     const text = textOf(events)
     expect(text).toContain('Fixed the typo.')
-    expect(text).not.toContain('Team result')
+    expect(text).not.toMatch(/^- [✓·✗] /m)
     expect(text).not.toContain('Phase 1 of 3')
     expect(events.at(-1)?.type).toBe('done')
   })
@@ -885,19 +1008,28 @@ describe('E2E — a failing review dispatches real rework', () => {
     expect(retry?.recipient).toBe('frontend')
     expect(runCommand).toHaveBeenCalledTimes(2) // verify, then re-verify
 
-    // Two review calls: the FAIL and the final PASS, around one audit, one spec and
-    // one plan.
-    expect(coordinationCalls()).toEqual(['audit', 'spec', 'plan', 'phase-plan', 'review', 'review'])
+    // Two review calls: the FAIL and the final PASS, around one sizing, one audit, one
+    // spec and one plan.
+    expect(coordinationCalls()).toEqual([
+      'router',
+      'audit',
+      'spec',
+      'plan',
+      'phase-plan',
+      'review',
+      'review'
+    ])
     // The second review judged the UPDATED blackboard — the rework node's own
     // report is in its digest, so the verdict is about the fixed state.
     const secondReview = coordinationPrompt('review', 1)
     expect(secondReview).toContain('rework-1')
     expect(secondReview).toContain('### Work completed')
 
-    // It ultimately passed, so no failure warning is shown.
+    // It ultimately passed, so no failure warning is shown. The rework line reads as
+    // the specialist and the fix it was given, not as `rework-1`.
     const text = textOf(events)
-    expect(text).toContain('**Team result** (complex, 3 tasks)')
-    expect(text).toContain('✓ **rework-1** (Frontend Engineer)')
+    expect(text).toContain('- ✓ **Frontend Engineer** — Fix what the review rejected:')
+    expect(text).not.toContain('**rework-1**')
     expect(text).not.toContain('Review did not pass')
     expect(text).not.toContain('needs your input')
     expect(events.at(-1)?.type).toBe('done')
@@ -1277,3 +1409,133 @@ describe('E2E — VERIFY reads type/lint problems as structured diagnostics', ()
     expect(events.at(-1)?.type).toBe('done')
   })
 })
+
+// ---- 6. Stopping one lane, not the run (Phase 3) ------------------------------
+
+/**
+ * Per-subagent cancel. The requirement is precise: stopping one lane must leave the
+ * run and its siblings running, and the lead must be TOLD the slice was cancelled
+ * rather than handed a truncated report it would read as a conclusion.
+ *
+ * Both lanes are parked mid-completion here (each hangs until its own signal aborts,
+ * or until the test releases it) because that is the state a user actually reaches
+ * for the stop button in — not a tidy gap between steps.
+ */
+describe('E2E — one subagent can be stopped without ending the run', () => {
+  /** Resolves when `signal` aborts (or immediately if it already has). */
+  const aborted = (signal?: AbortSignal): Promise<void> =>
+    new Promise((resolve) => {
+      if (!signal) return
+      if (signal.aborted) return resolve()
+      signal.addEventListener('abort', () => resolve(), { once: true })
+    })
+
+  it('aborts only the cancelled lane, reports it as cancelled, and lets the run finish', async () => {
+    coordination() // a SIMPLE turn: the review gate is the only coordination call
+
+    let releaseGood: () => void = () => {}
+    const goodParked = new Promise<void>((resolve) => {
+      releaseGood = resolve
+    })
+    let spawns = 0
+    streamCompletion.mockImplementation((async (_model, messages, onChunk, signal) => {
+      const brief = String((messages as ChatMessage[])[1]?.content ?? '')
+      // The doomed lane: it starts work, then never returns on its own. Only its own
+      // abort ends this — which is the whole point of the test.
+      if (brief.includes('the doomed slice')) {
+        onChunk({ delta: 'Started the doomed slice.' } as Omit<CompletionChunk, 'streamId'>)
+        await aborted(signal)
+        return
+      }
+      // The sibling lane: parked too, so "still running after the cancel" is a real
+      // observation about it rather than a race with its own completion.
+      if (brief.includes('the good slice')) {
+        await Promise.race([goodParked, aborted(signal)])
+        onChunk({ delta: 'GOOD_REPORT: finished the good slice.' } as Omit<
+          CompletionChunk,
+          'streamId'
+        >)
+        return
+      }
+      // The lead: fire the two background lanes on separate steps (one action per
+      // message is the parser's guarantee), then wrap up.
+      if (spawns === 0) {
+        spawns++
+        onChunk({
+          delta:
+            'Kicking both off.\n\n' +
+            spawnBlock({ role: 'builder', task: 'the doomed slice', background: true })
+        } as Omit<CompletionChunk, 'streamId'>)
+        return
+      }
+      if (spawns === 1) {
+        spawns++
+        onChunk({
+          delta:
+            'And the other one.\n\n' +
+            spawnBlock({ role: 'reviewer', task: 'the good slice', background: true })
+        } as Omit<CompletionChunk, 'streamId'>)
+        return
+      }
+      onChunk({ delta: 'Lead is done.' } as Omit<CompletionChunk, 'streamId'>)
+    }) as Provider['streamCompletion'])
+
+    const { events, emit } = collector()
+    const p = runWorkflow(
+      req('e2e-cancel-lane', { messages: [{ role: 'user', content: 'fix the typo' }] }),
+      emit,
+      noTerminal
+    )
+
+    // Both lanes are up and parked before anything is cancelled.
+    await vi.waitFor(() => expect(agentStarts(events)).toHaveLength(2))
+    const doomed = agentStarts(events).find((a) => a.task.includes('the doomed slice'))!
+    const good = agentStarts(events).find((a) => a.task.includes('the good slice'))!
+    expect(agentEnds(events)).toHaveLength(0)
+
+    cancelAgent('e2e-cancel-lane', doomed.agentId)
+
+    // Exactly one lane closes, and it is the one that was stopped.
+    await vi.waitFor(() => expect(agentEnds(events)).toHaveLength(1))
+    const closed = events.find(
+      (e): e is Extract<WorkflowEvent, { type: 'agent-end' }> => e.type === 'agent-end'
+    )!
+    expect(closed.agentId).toBe(doomed.agentId)
+    expect(closed.ok).toBe(false)
+    // Said plainly, including that nothing was rolled back — the honest version of
+    // "stopped", not a half-report the lead would build on.
+    expect(closed.report).toContain('Cancelled by you')
+    expect(closed.report).toContain('still there')
+
+    // The sibling is untouched and the run is still going: no `done`, no error.
+    expect(events.some((e) => e.type === 'done')).toBe(false)
+    expect(events.some((e) => e.type === 'error')).toBe(false)
+
+    releaseGood()
+    await p
+
+    // Both lanes are accounted for, with opposite outcomes.
+    const ends = agentEnds(events)
+    expect(ends).toHaveLength(2)
+    const goodEnd = events.find(
+      (e): e is Extract<WorkflowEvent, { type: 'agent-end' }> =>
+        e.type === 'agent-end' && e.agentId === good.agentId
+    )!
+    expect(goodEnd.ok).toBe(true)
+    expect(goodEnd.report).toContain('GOOD_REPORT')
+
+    // The lead was TOLD the slice was cancelled — it decides what to do without it,
+    // which it can only do if the cancellation reached its context.
+    const leadHeard = streamCompletion.mock.calls.some((c) =>
+      (c[1] as ChatMessage[]).some(
+        (m) => typeof m.content === 'string' && m.content.includes('Cancelled by you')
+      )
+    )
+    expect(leadHeard).toBe(true)
+
+    // And the turn concluded normally: one lane stopping is not the run stopping.
+    expect(textOf(events)).toContain('Lead is done.')
+    expect(events.at(-1)?.type).toBe('done')
+  })
+})
+

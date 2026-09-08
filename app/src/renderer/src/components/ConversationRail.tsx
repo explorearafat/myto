@@ -8,16 +8,37 @@ import { ProjectDialog } from '@renderer/components/ProjectDialog'
 import { SylorLogo } from '@renderer/components/SylorLogo'
 
 /** The two top-level working modes, shown as the sidebar's nav-level toggle (item 1). */
-const WORK_MODES: { value: WorkMode; label: string; title: string }[] = [
+const WORK_MODES: { value: WorkMode; label: string; title: string; icon: ReactNode }[] = [
   {
     value: 'cowork',
     label: 'Cowork',
-    title: 'Cowork: chat only — Sylor answers and writes code in the message. No file or terminal access.'
+    title: 'Cowork: chat only — Sylor answers and writes code in the message. No file or terminal access.',
+    icon: (
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path
+          d="M2.6 7.1c0-2.2 2.4-4.1 5.4-4.1s5.4 1.9 5.4 4.1c0 2.3-2.4 4.1-5.4 4.1-.6 0-1.2-.1-1.7-.2l-2.8 1.5.6-2.2a4.2 4.2 0 0 1-1.5-3.2Z"
+          stroke="currentColor"
+          strokeWidth="1.3"
+          strokeLinejoin="round"
+        />
+      </svg>
+    )
   },
   {
     value: 'code',
     label: 'Code',
-    title: 'Code: work on your folder — Sylor reads files, edits, and runs commands (with approval).'
+    title: 'Code: work on your folder — Sylor reads files, edits, and runs commands (with approval).',
+    icon: (
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path
+          d="M6 4L2.5 8 6 12M10 4l3.5 4L10 12"
+          stroke="currentColor"
+          strokeWidth="1.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    )
   }
 ]
 
@@ -81,12 +102,102 @@ function groupSessions(sessions: SessionSummary[]): SessionGroup[] {
   ).filter((g) => g.items.length > 0)
 }
 
-/** Small uppercase section heading used above the projects list and each recents bucket. */
-function RailLabel({ children }: { children: ReactNode }) {
+/**
+ * A section heading that reads as a ruled legend: the label, a hairline running out
+ * to the edge of the rail, and optionally one small action pinned at its end.
+ *
+ * The rule is what gives the rail its regions. Without it five identical uppercase
+ * captions floated in the same column as the rows they were labelling, so Projects
+ * and Today and Older all had the same weight as the chats between them.
+ */
+function RailLabel({ children, action }: { children: ReactNode; action?: ReactNode }) {
   return (
-    <div className="px-1 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
-      {children}
+    <div className="flex items-center gap-2 px-1 pb-1.5 pt-3">
+      <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted">
+        {children}
+      </span>
+      <span aria-hidden="true" className="h-px flex-1 bg-border" />
+      {action}
     </div>
+  )
+}
+
+/**
+ * Cowork / Code, as a switch with an indicator that slides between them.
+ *
+ * This is the one control in the rail that changes what Sylor is *allowed* to do —
+ * Cowork can only talk, Code can read and edit the open folder — so it now sits
+ * above the scroll region with New chat instead of scrolling away as the first item
+ * of a list of destinations. The indicator moves rather than the two labels merely
+ * swapping tints: at this size the movement is the part that registers peripherally,
+ * and the active glyph picking up the accent is what confirms which one landed.
+ */
+function ModeSwitch({ mode, onChange }: { mode: WorkMode; onChange: (m: WorkMode) => void }) {
+  return (
+    <div
+      role="group"
+      aria-label="Working mode"
+      className="relative grid grid-cols-2 rounded-lg bg-surface-2 p-0.5 ring-1 ring-inset ring-border/70"
+    >
+      <span
+        aria-hidden="true"
+        className={
+          'pointer-events-none absolute bottom-0.5 left-0.5 top-0.5 w-[calc(50%-2px)] rounded-md bg-surface shadow-sm ring-1 ring-border transition-transform duration-200 ease-out ' +
+          (mode === 'code' ? 'translate-x-full' : 'translate-x-0')
+        }
+      />
+      {WORK_MODES.map((m) => {
+        const active = m.value === mode
+        return (
+          <button
+            key={m.value}
+            type="button"
+            onClick={() => onChange(m.value)}
+            aria-pressed={active}
+            title={m.title}
+            className={
+              'relative z-10 flex items-center justify-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] font-medium transition-colors ' +
+              (active ? 'text-text' : 'text-muted hover:text-text')
+            }
+          >
+            <span className={'shrink-0 ' + (active ? 'text-primary' : '')}>{m.icon}</span>
+            {m.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * One key of the Configure pad. The cells have no border of their own — the grid's
+ * `gap-px` over a `bg-border` ground draws the hairlines between them — so six
+ * settings destinations cost one rounded block of about ninety pixels instead of
+ * six full-width rows of a hundred and eighty, which is space the chat list wanted.
+ * The label truncates rather than wrapping at the rail's minimum width, hence the
+ * `title` on every key.
+ */
+function TileButton({
+  icon,
+  label,
+  title,
+  onClick
+}: {
+  icon: ReactNode
+  label: string
+  title: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className="sylor-press group flex items-center gap-1.5 bg-surface px-2 py-1.5 text-left transition-colors hover:bg-surface-2"
+    >
+      <span className="shrink-0 text-muted transition-colors group-hover:text-primary">{icon}</span>
+      <span className="truncate text-[11px] text-text">{label}</span>
+    </button>
   )
 }
 
@@ -131,20 +242,24 @@ function NavIconButton({
 }
 
 /**
- * A borderless destination row for the sidebar nav (item 1): the Browser plus the
- * Connectors/Skills/Commands/Plugins/Model deep-links into Settings. Active rows
- * get a soft background tint (no heavy border, per the design brief).
+ * A borderless destination row. The settings deep-links moved into the Configure
+ * pad below, so what is left on a full-width row is the one item that is a *place*
+ * rather than a setting: the Browser panel, which is either beside the chat or it
+ * isn't. `trailing` carries that on/off word, since a row that toggles a panel
+ * should say which way it is currently pointing.
  */
 function NavRow({
   icon,
   label,
   onClick,
-  active = false
+  active = false,
+  trailing
 }: {
   icon: ReactNode
   label: string
   onClick: () => void
   active?: boolean
+  trailing?: ReactNode
 }) {
   return (
     <button
@@ -152,22 +267,24 @@ function NavRow({
       onClick={onClick}
       aria-pressed={active}
       className={
-        'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[12px] transition-colors ' +
+        'sylor-press flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[12px] transition-colors ' +
         (active ? 'bg-primary/12 font-medium text-primary' : 'text-text hover:bg-surface-2')
       }
     >
       <span className={'shrink-0 ' + (active ? 'text-primary' : 'text-muted')}>{icon}</span>
       <span className="truncate">{label}</span>
+      {trailing ? <span className="ml-auto shrink-0">{trailing}</span> : null}
     </button>
   )
 }
 
 /**
- * The left conversation rail (Claude-desktop style): brand + collapse control, a
- * prominent "New chat" button, a search box that filters recents by title, the
- * Projects list, and the recents grouped into date buckets (Today / Yesterday /
- * …) with inline rename/delete on hover. While a search is active the recents
- * collapse to a single flat "Results" list.
+ * The left conversation rail: brand + collapse control, New chat and the Cowork/Code
+ * switch pinned above the scroll, then the Browser destination, a hairline Configure
+ * pad for the six settings panes, the Projects list, and the recents grouped into
+ * date buckets (Today / Yesterday / …) with inline rename/delete on hover. While a
+ * search is active the recents collapse to a single flat "Results" list, and the
+ * footer keeps Settings and the Ctrl+K palette reachable from any scroll position.
  */
 export function ConversationRail() {
   const sessions = useSessionStore((s) => s.sessions)
@@ -185,6 +302,7 @@ export function ConversationRail() {
   const projects = useProjectStore((s) => s.projects)
   const removeProject = useProjectStore((s) => s.remove)
   const openSettings = useAppStore((s) => s.openSettings)
+  const togglePalette = useAppStore((s) => s.togglePalette)
   const toggleRail = useAppStore((s) => s.toggleRail)
   const browserOpen = useAppStore((s) => s.browserOpen)
   const setBrowserOpen = useAppStore((s) => s.setBrowserOpen)
@@ -277,10 +395,19 @@ export function ConversationRail() {
       <div
         key={s.id}
         className={
-          'group flex items-center gap-1 rounded-lg px-2 py-1.5 transition-colors ' +
-          (isActive ? 'bg-primary/12' : 'hover:bg-surface-2')
+          // The accent bar, not the tint, is what identifies the open chat: at 12%
+          // the primary wash is close enough to a hover state that on a long list
+          // you cannot tell which row you are actually in.
+          'group relative flex items-center gap-1 rounded-lg py-1.5 pl-3 pr-2 transition-colors ' +
+          (isActive ? 'bg-primary/10' : 'hover:bg-surface-2')
         }
       >
+        {isActive && (
+          <span
+            aria-hidden="true"
+            className="absolute bottom-1.5 left-0.5 top-1.5 w-[2px] rounded-full bg-primary"
+          />
+        )}
         {isRenaming ? (
           <input
             type="text"
@@ -417,54 +544,34 @@ export function ConversationRail() {
         </div>
       )}
 
-      {/* New chat */}
-      <div className="px-2 pt-1">
+      {/* New chat + the mode switch: the two controls that must never scroll away */}
+      <div className="space-y-1.5 px-2 pt-1">
         <button
           type="button"
           onClick={startNewChat}
-          className="flex w-full items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-[12px] font-medium text-primary transition-colors hover:bg-primary/16"
+          className="sylor-press flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2 text-[12px] font-medium text-bg shadow-sm transition-colors hover:bg-primary/90"
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
           </svg>
           New chat
         </button>
+        <ModeSwitch mode={workMode} onChange={(m) => void setWorkMode(m)} />
       </div>
 
-      {/* Scroll region: mode · destinations · projects · recents (items 1, 10, 16) */}
-      <div className="mt-2 min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-        {/* Working mode: Cowork / Code (item 1) */}
-        <div
-          role="group"
-          aria-label="Working mode"
-          className="flex items-center gap-0.5 rounded-lg bg-surface-2/70 p-0.5"
-        >
-          {WORK_MODES.map((m) => {
-            const active = m.value === workMode
-            return (
-              <button
-                key={m.value}
-                type="button"
-                onClick={() => void setWorkMode(m.value)}
-                aria-pressed={active}
-                title={m.title}
-                className={
-                  'flex-1 rounded-md px-2 py-1 text-[12px] font-medium transition-colors ' +
-                  (active ? 'bg-primary text-bg shadow-sm' : 'text-muted hover:text-text')
-                }
-              >
-                {m.label}
-              </button>
-            )
-          })}
-        </div>
-
-        {/* Destinations: the Browser panel + Settings deep-links (items 1, 3, 10) */}
-        <div className="mt-2 space-y-0.5">
+      {/* Scroll region: destinations · configure · projects · recents (items 1, 10, 16) */}
+      <div className="mt-1 min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+        {/* The one destination that is a place rather than a setting. */}
+        <div className="pt-1">
           <NavRow
             active={browserOpen}
             onClick={() => setBrowserOpen(!browserOpen)}
             label="Browser"
+            trailing={
+              browserOpen ? (
+                <span className="text-[10px] font-medium uppercase tracking-wider text-primary">On</span>
+              ) : null
+            }
             icon={
               <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.3" />
@@ -477,25 +584,17 @@ export function ConversationRail() {
               </svg>
             }
           />
-          <NavRow
-            onClick={() => openSettings('browsing')}
-            label="Browsing rules"
-            icon={
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path
-                  d="M8 1.8l5 1.9v3.4c0 3-2 5.6-5 7-3-1.4-5-4-5-7V3.7l5-1.9Z"
-                  stroke="currentColor"
-                  strokeWidth="1.3"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            }
-          />
-          <NavRow
+        </div>
+
+        {/* Configure: six settings destinations as one hairline pad */}
+        <RailLabel>Configure</RailLabel>
+        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border">
+          <TileButton
             onClick={() => openSettings('connectors')}
             label="Connectors"
+            title="Connectors — MCP servers: turn them on or off, add your own"
             icon={
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <path
                   d="M6 2v3M10 2v3M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0V5ZM8 11v3"
                   stroke="currentColor"
@@ -506,11 +605,12 @@ export function ConversationRail() {
               </svg>
             }
           />
-          <NavRow
+          <TileButton
             onClick={() => openSettings('skills')}
             label="Skills"
+            title="Skills — reusable instruction sets the assistant can invoke"
             icon={
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <path
                   d="M8 1.5l1.8 3.7 4.1.6-3 2.9.7 4L8 10.8 4.4 12.7l.7-4-3-2.9 4.1-.6L8 1.5Z"
                   stroke="currentColor"
@@ -520,11 +620,12 @@ export function ConversationRail() {
               </svg>
             }
           />
-          <NavRow
+          <TileButton
             onClick={() => openSettings('commands')}
             label="Commands"
+            title="Commands — your own slash commands"
             icon={
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <path
                   d="M3.5 5l3 3-3 3M8 11h4.5"
                   stroke="currentColor"
@@ -535,11 +636,12 @@ export function ConversationRail() {
               </svg>
             }
           />
-          <NavRow
+          <TileButton
             onClick={() => openSettings('plugins')}
             label="Plugins"
+            title="Plugins — bundles that ship connectors, skills and commands together"
             icon={
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <path
                   d="M6 2.5v2M10 2.5v2M4 4.5h8v4a4 4 0 0 1-8 0v-4Z"
                   stroke="currentColor"
@@ -549,11 +651,12 @@ export function ConversationRail() {
               </svg>
             }
           />
-          <NavRow
+          <TileButton
             onClick={() => openSettings('model')}
             label="Model"
+            title="Model — which model answers, and its keys"
             icon={
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <rect x="4" y="4" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
                 <path
                   d="M6.5 1.5v2M9.5 1.5v2M6.5 12.5v2M9.5 12.5v2M1.5 6.5h2M1.5 9.5h2M12.5 6.5h2M12.5 9.5h2"
@@ -564,25 +667,42 @@ export function ConversationRail() {
               </svg>
             }
           />
+          <TileButton
+            onClick={() => openSettings('browsing')}
+            label="Browsing"
+            title="Browsing rules — which sites the assistant may open, and what it may do there"
+            icon={
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path
+                  d="M8 1.8l5 1.9v3.4c0 3-2 5.6-5 7-3-1.4-5-4-5-7V3.7l5-1.9Z"
+                  stroke="currentColor"
+                  strokeWidth="1.3"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            }
+          />
         </div>
 
       {/* Projects */}
-      <div className="mt-4">
-        <div className="flex items-center justify-between px-1 pb-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">
-            Projects
-          </span>
-          <button
-            type="button"
-            aria-label="New project"
-            onClick={() => setDialogFor(null)}
-            className="grid h-5 w-5 place-items-center rounded text-muted transition-colors hover:bg-surface-2 hover:text-text"
-          >
-            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-            </svg>
-          </button>
-        </div>
+      <div>
+        <RailLabel
+          action={
+            <button
+              type="button"
+              aria-label="New project"
+              title="New project"
+              onClick={() => setDialogFor(null)}
+              className="grid h-5 w-5 shrink-0 place-items-center rounded text-muted transition-colors hover:bg-surface-2 hover:text-text"
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+            </button>
+          }
+        >
+          Projects
+        </RailLabel>
 
         <div className="space-y-0.5">
           {/* All chats — clears the project scope. */}
@@ -590,10 +710,16 @@ export function ConversationRail() {
             type="button"
             onClick={() => void setActiveProject(null)}
             className={
-              'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] transition-colors ' +
-              (activeProjectId === null ? 'bg-primary/12 font-medium text-primary' : 'text-text hover:bg-surface-2')
+              'sylor-press relative flex w-full items-center gap-2 rounded-lg py-1.5 pl-3 pr-2 text-left text-[12px] transition-colors ' +
+              (activeProjectId === null ? 'bg-primary/10 font-medium text-primary' : 'text-text hover:bg-surface-2')
             }
           >
+            {activeProjectId === null && (
+              <span
+                aria-hidden="true"
+                className="absolute bottom-1.5 left-0.5 top-1.5 w-[2px] rounded-full bg-primary"
+              />
+            )}
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="shrink-0">
               <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
             </svg>
@@ -606,10 +732,16 @@ export function ConversationRail() {
               <div
                 key={p.id}
                 className={
-                  'group flex items-center gap-1 rounded-lg px-2 py-1.5 transition-colors ' +
-                  (isActive ? 'bg-primary/12' : 'hover:bg-surface-2')
+                  'group relative flex items-center gap-1 rounded-lg py-1.5 pl-3 pr-2 transition-colors ' +
+                  (isActive ? 'bg-primary/10' : 'hover:bg-surface-2')
                 }
               >
+                {isActive && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute bottom-1.5 left-0.5 top-1.5 w-[2px] rounded-full bg-primary"
+                  />
+                )}
                 <button
                   type="button"
                   onClick={() => void setActiveProject(p.id)}
@@ -654,14 +786,16 @@ export function ConversationRail() {
       </div>
 
       {/* Recents */}
-      <div className="mt-4">
+      <div>
         {resultCount === 0 ? (
           <div className="px-1 py-4 text-[11px] text-muted">
             {searching ? 'No chats match your search.' : 'No chats yet. Start a new one.'}
           </div>
         ) : searching ? (
           <>
-            <RailLabel>Results</RailLabel>
+            <RailLabel action={<span className="shrink-0 text-[10px] tabular-nums text-muted/70">{resultCount}</span>}>
+              Results
+            </RailLabel>
             <div className="space-y-0.5">{searchResults.map(renderRow)}</div>
           </>
         ) : (
@@ -674,6 +808,36 @@ export function ConversationRail() {
         )}
       </div>
       {/* end scroll region */}
+      </div>
+
+      {/* Footer: settings + the palette's one keyboard entry point */}
+      <div className="flex items-center gap-1 border-t border-border px-2 py-1.5">
+        <button
+          type="button"
+          onClick={() => openSettings()}
+          className="sylor-press flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-[11.5px] text-muted transition-colors hover:bg-surface-2 hover:text-text"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="shrink-0">
+            <circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.3" />
+            <path
+              d="M8 1.8v1.6M8 12.6v1.6M2.5 8H1M15 8h-1.5M4.1 4.1L3 3M13 13l-1.1-1.1M11.9 4.1L13 3M3 13l1.1-1.1"
+              stroke="currentColor"
+              strokeWidth="1.3"
+              strokeLinecap="round"
+            />
+          </svg>
+          <span className="truncate">Settings</span>
+        </button>
+        <button
+          type="button"
+          onClick={togglePalette}
+          title="Command palette — search every action, chat and restore point"
+          aria-label="Open the command palette"
+          className="sylor-press ml-auto flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 transition-colors hover:bg-surface-2"
+        >
+          <kbd className="rounded border border-border px-1 font-mono text-[9.5px] text-muted/70">Ctrl</kbd>
+          <kbd className="rounded border border-border px-1 font-mono text-[9.5px] text-muted/70">K</kbd>
+        </button>
       </div>
 
       {dialogFor !== undefined && (

@@ -10,6 +10,7 @@ import {
 } from 'node:fs'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { contextManager, IGNORED_DIRS } from '../context/manager'
+import { fullAccessEnabled } from '../settings'
 
 /**
  * Sandbox violation: a requested path resolved outside the project root. This is
@@ -39,6 +40,15 @@ export function resolveSafe(requested: string): string {
   const root = contextManager.getRoot()
   // Reject absolute inputs unless they're already within the root.
   const abs = isAbsolute(requested) ? resolve(requested) : resolve(root, requested)
+
+  // Full-PC access (opt-in): the project sandbox is the boundary this function
+  // exists to enforce, so when the user has switched it off we resolve the path
+  // and return it WITHOUT the two escape gates below — any location on the
+  // machine is reachable. A project-relative input is still resolved against the
+  // root (so ordinary "src/x.ts" keeps working); an absolute input goes wherever
+  // it points. The switch is read fresh each call, so turning it back off
+  // re-confines immediately with no restart.
+  if (fullAccessEnabled()) return abs
 
   // Gate 1 — lexical: `rel` starting with '..' (or an absolute path on another
   // drive) means the normalized path escapes the root.
@@ -133,14 +143,28 @@ export function proposeWrite(relPath: string, newContent: string): WriteProposal
 // make a read-after-write loop lie.
 
 /**
- * Hard ceiling on the text one inspection feeds back to the model (≈6k tokens).
- * A read that would exceed it is clipped and flagged `truncated`, so a 2 MB
- * bundle can't blow the context window — the agent narrows with offset/limit.
+ * Hard ceiling on the text one inspection feeds back to the model (≈20k tokens).
+ * A read that would exceed it stops at the last whole line that fits, says where it
+ * stopped, and is flagged `truncated` — so a 2 MB bundle can't blow the context
+ * window.
+ *
+ * Sized to hold a REAL source file whole. It used to be 24k, which clipped an
+ * ordinary 1,700-line component — and a model handed two thirds of a file comes
+ * back for the rest, then for a narrower window, then for another: the repeated-read
+ * loop `workflow/gather.ts` exists to end. One big file in full is cheaper than four
+ * partial looks at it, and far more likely to produce a correct edit. Compaction's
+ * own budget (`MAX_CONTEXT_CHARS`) is sized above this so one whole-file read cannot
+ * by itself force a fold every step.
  */
-const MAX_READ_CHARS = 24_000
+const MAX_READ_CHARS = 80_000
 
-/** Default line window for a read_file with no explicit `limit`. */
-const DEFAULT_READ_LINES = 2_000
+/**
+ * Default line window for a read_file with no explicit `limit` — which, since
+ * `planReadWindow` drops model-supplied limits, is effectively every read. High
+ * enough that {@link MAX_READ_CHARS} is the binding constraint for anything but a
+ * file of very short lines, so "how much did I get" has one answer, not two.
+ */
+const DEFAULT_READ_LINES = 4_000
 
 /** Bounds for a directory listing and a project search. */
 const MAX_LIST_ENTRIES = 400
@@ -162,10 +186,38 @@ export interface ReadOutcome {
   summary: string
 }
 
-/** Clips `text` to {@link MAX_READ_CHARS}, reporting whether it had to. */
+/**
+ * Clips `text` to {@link MAX_READ_CHARS}, reporting whether it had to. Used for
+ * output that is a LIST — a directory listing, search matches, a command's stdout —
+ * where the last entry being cut short costs nothing. A file read goes through
+ * {@link joinUnderCap} instead, which cuts on a line boundary and says where.
+ */
 function clip(text: string): { text: string; truncated: boolean } {
   if (text.length <= MAX_READ_CHARS) return { text, truncated: false }
   return { text: `${text.slice(0, MAX_READ_CHARS)}\n… (output clipped)`, truncated: true }
+}
+
+/**
+ * Joins numbered lines under {@link MAX_READ_CHARS}, cutting at a LINE boundary and
+ * reporting how many made it.
+ *
+ * Cutting mid-line would hand the model a half-written statement it might then quote
+ * back as an `old_string`; and clipping the joined string left the caller unable to
+ * say which line the text actually stopped at, so its summary claimed the whole
+ * window it had asked for. A single line longer than the entire budget — a minified
+ * bundle on one line — is kept, hard-cut, rather than returning nothing at all.
+ */
+function joinUnderCap(lines: string[]): { text: string; kept: number } {
+  let used = 0
+  for (let i = 0; i < lines.length; i++) {
+    const cost = lines[i].length + (i > 0 ? 1 : 0) // +1 for the joining newline
+    if (used + cost > MAX_READ_CHARS) {
+      if (i === 0) return { text: lines[0].slice(0, MAX_READ_CHARS), kept: 1 }
+      return { text: lines.slice(0, i).join('\n'), kept: i }
+    }
+    used += cost
+  }
+  return { text: lines.join('\n'), kept: lines.length }
 }
 
 /** Heuristic binary check: a NUL byte in the first 8 KB means "not source". */
@@ -186,6 +238,14 @@ function toLines(text: string): string[] {
  * model can say "line 412" and the user can follow along — but the numbers are
  * display only and must never be pasted back into an edit's `old_string`.
  *
+ * The window is almost always the whole file: `planReadWindow` refuses a guessed
+ * `offset`/`limit` on a file this run has not read yet, because a keyhole view is
+ * never enough to edit against and buys a second read (see `workflow/gather.ts`).
+ * So the interesting case here is the one where the file genuinely does not fit:
+ * the text stops at a LINE boundary, the summary says which line it stopped at
+ * rather than which line was asked for, and the tail names the exact `offset` to
+ * continue from — the only legitimate reason to read one path twice.
+ *
  * Throws {@link PathEscapeError} on a sandbox escape, or the underlying fs error
  * when the file is missing/unreadable; the caller turns that into a failed result.
  */
@@ -201,14 +261,23 @@ export function readFileSlice(relPath: string, offset?: number, limit?: number):
   const width = String(end).length
   const numbered = window.map((line, i) => `${String(start + i + 1).padStart(width)}\t${line}`)
 
-  const { text, truncated } = clip(numbered.join('\n'))
-  // A window that doesn't reach the end also counts as truncated, so the model
-  // always knows when there is more file left to ask for.
-  const windowed = start > 0 || end < lines.length
+  const { text, kept } = joinUnderCap(numbered)
+  // What actually made it out, as a 1-based line number — NOT what was asked for.
+  const shownEnd = start + kept
+  const more = shownEnd < lines.length
+  const windowed = start > 0 || more
   const summary = windowed
-    ? `lines ${start + 1}–${end} of ${lines.length}`
+    ? `lines ${start + 1}–${shownEnd} of ${lines.length}`
     : `${lines.length} line${lines.length === 1 ? '' : 's'}`
-  return { output: text || '(empty file)', truncated: truncated || end < lines.length, summary }
+  // A window that doesn't reach the end counts as truncated, so the model always
+  // knows there is more file left — and is told precisely how to get it, instead of
+  // being invited to guess a "narrower range" (which is what produced keyholes).
+  const tail = more
+    ? `\n… (stopped at line ${shownEnd} of ${lines.length}${
+        kept < window.length ? ' — the rest would not fit in one read' : ''
+      }; to continue, read \`${relPath}\` again with "offset": ${shownEnd + 1})`
+    : ''
+  return { output: text ? text + tail : '(empty file)', truncated: more, summary }
 }
 
 /** Human-readable byte size for a caption ('245 KB', '1.4 MB'). */
@@ -677,31 +746,24 @@ export class EditMatchError extends Error {
 }
 
 /**
- * Resolves an exact-string replacement against a project file's current contents,
- * returning old and new text for the approval diff. Pure: nothing is written here
- * — the caller stages it as a normal `write_file` proposal, so a surgical edit
- * still shows the user a diff and still passes the permission gate.
+ * Applies ONE exact-string replacement to an in-memory string and returns the
+ * result — the pure core shared by {@link applyEdit} and {@link applyEdits}. Nothing
+ * is read or written here; `relPath` is passed only so the thrown messages name the
+ * file the model was aiming at.
  *
  * `oldString` must occur EXACTLY once unless `replaceAll` is set. Zero occurrences
  * or (without the flag) several both throw {@link EditMatchError}.
  */
-export function applyEdit(
-  relPath: string,
+function applyOneEdit(
+  content: string,
   oldString: string,
   newString: string,
-  replaceAll = false
-): { oldContent: string; newContent: string } {
-  const abs = resolveSafe(relPath)
-  if (!existsSync(abs)) {
-    throw new EditMatchError(
-      `${relPath} does not exist, so there is nothing to edit. Use write_file to create it.`
-    )
-  }
-  const oldContent = readFileSync(abs, 'utf-8')
-
+  replaceAll: boolean,
+  relPath: string
+): string {
   // Count occurrences by scanning, not split(), so an empty needle can't loop.
   let count = 0
-  for (let i = oldContent.indexOf(oldString); i !== -1; i = oldContent.indexOf(oldString, i + oldString.length)) {
+  for (let i = content.indexOf(oldString); i !== -1; i = content.indexOf(oldString, i + oldString.length)) {
     count++
     if (count > 1 && !replaceAll) break
   }
@@ -724,9 +786,59 @@ export function applyEdit(
   // Spliced by index rather than String.replace: a replacement containing `$&`,
   // `$1`, or `` $` `` would otherwise be reinterpreted as a substitution pattern
   // and silently corrupt the file. split/join is likewise pattern-free.
-  const at = oldContent.indexOf(oldString)
-  const newContent = replaceAll
-    ? oldContent.split(oldString).join(newString)
-    : oldContent.slice(0, at) + newString + oldContent.slice(at + oldString.length)
+  const at = content.indexOf(oldString)
+  return replaceAll
+    ? content.split(oldString).join(newString)
+    : content.slice(0, at) + newString + content.slice(at + oldString.length)
+}
+
+/**
+ * Resolves an exact-string replacement against a project file's current contents,
+ * returning old and new text for the approval diff. Pure: nothing is written here
+ * — the caller stages it as a normal `write_file` proposal, so a surgical edit
+ * still shows the user a diff and still passes the permission gate.
+ *
+ * `oldString` must occur EXACTLY once unless `replaceAll` is set. Zero occurrences
+ * or (without the flag) several both throw {@link EditMatchError}.
+ */
+export function applyEdit(
+  relPath: string,
+  oldString: string,
+  newString: string,
+  replaceAll = false
+): { oldContent: string; newContent: string } {
+  const abs = resolveSafe(relPath)
+  if (!existsSync(abs)) {
+    throw new EditMatchError(
+      `${relPath} does not exist, so there is nothing to edit. Use write_file to create it.`
+    )
+  }
+  const oldContent = readFileSync(abs, 'utf-8')
+  return { oldContent, newContent: applyOneEdit(oldContent, oldString, newString, replaceAll, relPath) }
+}
+
+/**
+ * Applies a SEQUENCE of exact-string replacements to one file, reading it once and
+ * folding each edit over the evolving text, so every change to a file lands in a
+ * single `write_file` proposal (one diff, one approval, one action) instead of a
+ * separate round-trip per edit. Each edit is matched against the result of the ones
+ * before it — so a later edit may target text an earlier edit introduced — and any
+ * miss throws {@link EditMatchError} naming the file, leaving nothing written.
+ */
+export function applyEdits(
+  relPath: string,
+  edits: ReadonlyArray<{ oldString: string; newString: string; replaceAll: boolean }>
+): { oldContent: string; newContent: string } {
+  const abs = resolveSafe(relPath)
+  if (!existsSync(abs)) {
+    throw new EditMatchError(
+      `${relPath} does not exist, so there is nothing to edit. Use write_file to create it.`
+    )
+  }
+  const oldContent = readFileSync(abs, 'utf-8')
+  let newContent = oldContent
+  for (const e of edits) {
+    newContent = applyOneEdit(newContent, e.oldString, e.newString, e.replaceAll, relPath)
+  }
   return { oldContent, newContent }
 }
