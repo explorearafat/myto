@@ -5,6 +5,8 @@ export const LINKS = {
   download: 'https://github.com/explorearafat/sylor/releases/latest/download/Sylor-Setup.exe',
   /** The platform chooser — where every Download button on the site points. */
   downloadPage: '/download',
+  /** The Sylor chat — a full chat interface, client-side, that answers questions about Sylor. */
+  chatPage: '/chat',
   /** All releases. */
   releases: 'https://github.com/explorearafat/sylor/releases/latest',
   /** Source repository. */

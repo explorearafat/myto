@@ -1,0 +1,14 @@
+rules_version = '2';
+
+// Firestore security rules for Sylor. Deploy these in the Firebase console
+// (Firestore Database → Rules → paste → Publish) or with `firebase deploy --only firestore:rules`.
+//
+// Each signed-in user can read and write ONLY their own profile document at users/{uid}. Nobody can
+// read anyone else's, and nothing else in the database is accessible from the client.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+  }
+}

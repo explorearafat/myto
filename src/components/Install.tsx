@@ -31,7 +31,7 @@ export function Install() {
           href={LINKS.downloadPage}
           className="mt-6 inline-flex items-center gap-2 rounded-md bg-[#cf5535] px-5 py-2.5 text-[15px] font-medium text-white no-underline transition-colors duration-150 hover:bg-[#b8482c] active:translate-y-px"
         >
-          <Download className="h-4 w-4" />
+          <Download className="h-4 w-4" aria-hidden="true" />
           Download Sylor
         </a>
         <ol

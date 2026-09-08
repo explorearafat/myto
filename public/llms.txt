@@ -6,6 +6,7 @@
 
 - Product page: /
 - Download page: /download — the platform chooser; every "Download" control on the site leads here
+- Chat: /chat — a live, model-backed chat for Sylor, styled like a full chat app; ask a question and it streams an answer. Backed by a same-origin server gateway with a free per-visitor token budget.
 - Machine-readable guide: /llms.txt
 
 ## Product facts
@@ -38,9 +39,12 @@ The download page (/download) is a separate document with its own heading, "Down
 - Linux — Planned. x86-64. Same position as macOS. No download link.
 - Android — Browser only. There is no native Android app and none is planned; the link opens the browser build instead.
 
+The chat (/chat) is a separate document styled like a full chat app — a left sidebar (Sylor, then New chat, Code, Projects, Artifacts, Customize) beside a main column that opens on a time-of-day greeting over one input, then becomes a transcript once a message is sent. It is a live, streaming chat: a visitor's messages are sent to a same-origin server gateway (/api/chat) that holds the model keys, meters a free per-visitor token budget (about 300k tokens per rolling 5 hours), and streams the reply back token by token. Two branded models are offered in the composer — Oraculum Thinking and Oraculum Pro — and replies render as Markdown. If the gateway is unreachable it falls back to a built-in knowledge base so the page still answers. It answers questions about Sylor itself; everything it states is also on the product page and in this file.
+
 ## Links
 
 - Download page: /download
+- Chat: /chat
 - Download (Windows, direct): https://github.com/explorearafat/sylor/releases/latest/download/Sylor-Setup.exe
 - All releases: https://github.com/explorearafat/sylor/releases/latest
 - Source: https://github.com/explorearafat/sylor
@@ -49,7 +53,7 @@ The download page (/download) is a separate document with its own heading, "Down
 ## Reading guidance
 
 - All content is present in the initial document. Sections fade in on scroll, but that is a CSS opacity change only — nothing is loaded, injected, or gated behind it.
-- Stable anchors: #top (hero), #inside (screenshots), #features (what it does), #workspace (everything in one window), #faq (questions), #install (download and steps). On /download: #top and #platforms.
+- Stable anchors: #top (hero), #inside (screenshots), #features (what it does), #workspace (everything in one window), #faq (questions), #install (download and steps). On /download: #top and #platforms. On /chat: #chat-input (the message box); that page has its own app-style sidebar instead of the site header and footer.
 - The FAQ answers are always expanded; there is nothing to click open.
 - Screenshots in "A look inside" are real captures of the app; their alt text describes each one, and the sample project shown in them is illustrative.
 - The Download controls are supplementary; both pages read without operating them. Every one of them navigates to /download, except the direct installer link on /download itself.

@@ -95,7 +95,7 @@ export function DownloadPage() {
                     }
                     style={{ transitionDelay: '220ms' }}
                   >
-                    {p.ready ? <Download className="h-4 w-4" /> : null}
+                    {p.ready ? <Download className="h-4 w-4" aria-hidden="true" /> : null}
                     {p.cta}
                   </a>
                 ) : (
@@ -134,7 +134,7 @@ export function DownloadPage() {
                 href="/#features"
                 className="inline-flex items-center gap-1.5 text-[#141413] underline decoration-[#cbc6ba] transition-colors duration-150 hover:decoration-[#cf5535]"
               >
-                <ArrowLeft className="h-3.5 w-3.5" />
+                <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
                 Read what Sylor does
               </a>
             </p>

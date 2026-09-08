@@ -1,4 +1,4 @@
-import { Download } from 'lucide-react';
+import { ArrowRight, Download } from 'lucide-react';
 import { GLANCE, LINKS } from '../data';
 import { Backdrop } from './Backdrop';
 import { Words } from './Words';
@@ -33,7 +33,7 @@ export function Hero() {
             href={LINKS.downloadPage}
             className="inline-flex items-center gap-2 rounded-md bg-[#cf5535] px-5 py-2.5 text-[15px] font-medium text-white no-underline transition-colors duration-150 hover:bg-[#b8482c] active:translate-y-px"
           >
-            <Download className="h-4 w-4" />
+            <Download className="h-4 w-4" aria-hidden="true" />
             Download Sylor
           </a>
           <a
@@ -43,6 +43,13 @@ export function Hero() {
             className="text-[15px] text-[#141413] underline decoration-[#cbc6ba] transition-colors duration-150 hover:decoration-[#cf5535]"
           >
             Try it in your browser
+          </a>
+          <a
+            href={LINKS.chatPage}
+            className="inline-flex items-center gap-1 text-[15px] text-[#141413] underline decoration-[#cbc6ba] transition-colors duration-150 hover:decoration-[#cf5535]"
+          >
+            See how it thinks
+            <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
           </a>
         </div>
         <p

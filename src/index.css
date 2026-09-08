@@ -44,10 +44,32 @@
   }
 }
 
+/*
+ * Display serif. Georgia is a system face on Windows and macOS, so this needs no
+ * @font-face and adds no network cost. Used for the /chat greeting and each reply's
+ * heading; the body stays Inter (see `body` above). Georgia carries its own metrics, so
+ * it wants gentler tracking than the Inter-tuned h1,h2,h3 rule — callers pair it with
+ * `font-normal` to skip Georgia's heavy bold.
+ */
+.font-display {
+  font-family: Georgia, "Times New Roman", Times, serif;
+  letter-spacing: -0.01em;
+}
+
 /* Keyboard focus only — no decorative outlines on mouse click. */
 :focus-visible {
   outline: 2px solid #cf5535;
   outline-offset: 2px;
+}
+
+/*
+ * The chat composer indicates focus on the whole box (the form's focus-within ring), so the
+ * textarea itself opts out of the global focus-visible outline above — otherwise auto-focusing
+ * it on load draws a hard rectangle inside the rounded input. The class selector outscores the
+ * bare `:focus-visible` rule, so this wins regardless of source order.
+ */
+.composer-input:focus-visible {
+  outline: none;
 }
 
 /* Accessible skip link, hidden until focused. */
@@ -181,6 +203,49 @@
 
 .caret {
   animation: caret-blink 1.1s steps(1, end) infinite;
+}
+
+/*
+ * The /chat demo. `.thinking-dot` marks the step Sylor is "on"; `.chat-in` eases each
+ * freshly mounted line (a thinking step, the answer) in once. Both are one element's own
+ * animation — no observer, no scroll coupling — and the reduced-motion block below
+ * flattens them to instant via the global animation-duration override.
+ */
+@keyframes thinking-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.thinking-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: #cf5535;
+  animation: thinking-pulse 1s ease-in-out infinite;
+}
+
+@keyframes chat-line-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.chat-in {
+  animation: chat-line-in 0.4s cubic-bezier(0.22, 0.61, 0.36, 1) both;
 }
 
 @media (prefers-reduced-motion: reduce) {

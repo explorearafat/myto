@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sylor — universal logo mark. The twelve-ray terracotta sunburst.
+  viewBox 0 0 24 24 · fill #cf5535. Self-contained: use as a favicon, an
+  <img src="sylor-star.svg">, a CSS background, or inline. To recolour,
+  change the fill on the <svg> below. Kept identical to SylorStar.tsx.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#cf5535" role="img" aria-label="Sylor">
+  <title>Sylor</title>
+  <path d="M12 1.4C12.85 6 12.85 8.4 12 11C11.15 8.4 11.15 6 12 1.4Z"/>
+  <path d="M12 4.8C12.6 7.4 12.6 8.9 12 11C11.4 8.9 11.4 7.4 12 4.8Z" transform="rotate(30 12 12)"/>
+  <path d="M12 1.4C12.85 6 12.85 8.4 12 11C11.15 8.4 11.15 6 12 1.4Z" transform="rotate(60 12 12)"/>
+  <path d="M12 4.8C12.6 7.4 12.6 8.9 12 11C11.4 8.9 11.4 7.4 12 4.8Z" transform="rotate(90 12 12)"/>
+  <path d="M12 1.4C12.85 6 12.85 8.4 12 11C11.15 8.4 11.15 6 12 1.4Z" transform="rotate(120 12 12)"/>
+  <path d="M12 4.8C12.6 7.4 12.6 8.9 12 11C11.4 8.9 11.4 7.4 12 4.8Z" transform="rotate(150 12 12)"/>
+  <path d="M12 1.4C12.85 6 12.85 8.4 12 11C11.15 8.4 11.15 6 12 1.4Z" transform="rotate(180 12 12)"/>
+  <path d="M12 4.8C12.6 7.4 12.6 8.9 12 11C11.4 8.9 11.4 7.4 12 4.8Z" transform="rotate(210 12 12)"/>
+  <path d="M12 1.4C12.85 6 12.85 8.4 12 11C11.15 8.4 11.15 6 12 1.4Z" transform="rotate(240 12 12)"/>
+  <path d="M12 4.8C12.6 7.4 12.6 8.9 12 11C11.4 8.9 11.4 7.4 12 4.8Z" transform="rotate(270 12 12)"/>
+  <path d="M12 1.4C12.85 6 12.85 8.4 12 11C11.15 8.4 11.15 6 12 1.4Z" transform="rotate(300 12 12)"/>
+  <path d="M12 4.8C12.6 7.4 12.6 8.9 12 11C11.4 8.9 11.4 7.4 12 4.8Z" transform="rotate(330 12 12)"/>
+</svg>
