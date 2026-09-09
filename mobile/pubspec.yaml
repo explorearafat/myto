@@ -21,15 +21,30 @@ dependencies:
   # Assistant messages are Markdown (code blocks, lists, …), like Claude.
   flutter_markdown: ^0.7.4
 
-  # Sign-in (Google + GitHub) against the same Firebase project as the website.
+  # Sign-in (Google + GitHub) against the same Firebase project as the website. Both use
+  # Firebase's browser (Custom Tab) federated flow via signInWithProvider — so no native
+  # google_sign_in plugin, google-services.json, SHA-1, or release keystore is required.
   firebase_core: ^3.6.0
   firebase_auth: ^5.3.1
-  google_sign_in: ^6.2.1
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
 
+  # Generates the Android launcher icon (mipmaps + adaptive icon) from the PNGs below.
+  flutter_launcher_icons: ^0.14.1
+
 flutter:
   uses-material-design: true
+
+# App launcher icon — the universal Sylor star (#cf5535) on warm paper. Regenerate the source
+# PNGs with `python scripts/build-launcher-icon.py`; CI then runs `dart run flutter_launcher_icons`
+# after `flutter create` to stamp them over the default Flutter icon.
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/icon/sylor_icon.png"
+  adaptive_icon_background: "#FAF9F5"
+  adaptive_icon_foreground: "assets/icon/sylor_icon_foreground.png"
+  min_sdk_android: 23

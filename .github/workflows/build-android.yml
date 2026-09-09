@@ -59,6 +59,12 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Generate the launcher icon
+        # Stamp the Sylor star over the default Flutter icon that `flutter create` emitted, into the
+        # freshly generated android/. Reads the flutter_launcher_icons config + assets/icon/*.png
+        # (both tracked in mobile/). Harmless to re-run; overwrites the mipmaps in place.
+        run: dart run flutter_launcher_icons
+
       - name: Build release APK
         # No release keystore yet, so this is debug-signed (installs via "unknown
         # sources") — the Android counterpart to the self-signed Windows installer.

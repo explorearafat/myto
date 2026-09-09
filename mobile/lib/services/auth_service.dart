@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
-import 'package:google_sign_in/google_sign_in.dart';
 
 /// Sign-in state, backed by the same Firebase project as the website (Google + GitHub).
 ///
@@ -52,14 +51,12 @@ class AuthService extends ChangeNotifier {
   }
 
   Future<void> signInWithGoogle() => _run(() async {
-        final account = await GoogleSignIn().signIn();
-        if (account == null) return; // user cancelled the picker
-        final auth = await account.authentication;
-        final credential = GoogleAuthProvider.credential(
-          accessToken: auth.accessToken,
-          idToken: auth.idToken,
-        );
-        await FirebaseAuth.instance.signInWithCredential(credential);
+        // Browser (Custom Tab) OAuth via Firebase — mirrors [signInWithGithub]. No native Google
+        // SDK, so no google-services.json / SHA-1 / Android OAuth client is required.
+        final provider = GoogleAuthProvider()
+          ..addScope('email')
+          ..addScope('profile');
+        await FirebaseAuth.instance.signInWithProvider(provider);
       });
 
   Future<void> signInWithGithub() => _run(() async {
@@ -76,11 +73,6 @@ class AuthService extends ChangeNotifier {
   Future<void> signOut() async {
     _error = null;
     if (firebaseReady) {
-      try {
-        await GoogleSignIn().signOut();
-      } catch (_) {
-        /* wasn't signed in via Google */
-      }
       await FirebaseAuth.instance.signOut();
     }
     _user = null;
