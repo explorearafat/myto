@@ -1,35 +1,47 @@
 import { FEATURES } from '../data';
-import { Words } from './Words';
 
 export function Features() {
   return (
     <section id="features">
-      <div className="mx-auto max-w-3xl px-6 py-16 sm:py-20">
+      <div className="mx-auto max-w-5xl px-6 py-16 text-center sm:py-24">
+        <p data-reveal className="eyebrow">
+          What it does
+        </p>
         <h2
-          data-reveal="words"
-          className="text-[24px] font-semibold tracking-[-0.02em] text-[#141413] sm:text-[28px]"
+          data-reveal
+          style={{ transitionDelay: '60ms' }}
+          className="mx-auto mt-5 max-w-[24ch] text-[30px] font-semibold tracking-[-0.025em] text-[#141413] sm:text-[42px]"
         >
-          <Words text="What it does" />
+          Six things it does well
         </h2>
-        <div className="mt-8 grid gap-x-10 gap-y-9 sm:grid-cols-2">
+        <div className="mt-14 grid gap-5 text-left sm:grid-cols-2 lg:grid-cols-3">
           {FEATURES.map((f, i) => (
             <div
               key={f.title}
               data-reveal
-              /* Column-pairs share a delay so each row arrives together. */
-              style={{ transitionDelay: `${(i % 2) * 60}ms` }}
+              /* Row-mates share a delay so each row of cards arrives together. */
+              style={{ transitionDelay: `${(i % 3) * 60}ms` }}
+              className="rounded-2xl border border-[#e4e1d8] bg-white p-6 transition-[transform,border-color,box-shadow] duration-200 hover:-translate-y-1 hover:border-[#d8d3c8] hover:shadow-[0_18px_44px_-26px_rgba(20,20,19,0.3)]"
             >
-              <h3 className="text-[16px] font-semibold text-[#141413]">{f.title}</h3>
-              <p className="mt-1.5 text-[15px] leading-relaxed text-[#544f46]">{f.body}</p>
-              <ul className="mt-2.5 space-y-1 text-[14px] text-[#6b675e]">
+              <div className="flex items-center gap-3">
+                <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#faf1ee] text-[14px] font-semibold text-[#cf5535]">
+                  {String(i + 1).padStart(2, '0')}
+                </span>
+                <h3 className="text-[18px] font-semibold text-[#141413]">{f.title}</h3>
+              </div>
+              <p className="mt-4 text-[15px] leading-relaxed text-[#141413]">{f.body}</p>
+              <ul className="mt-4 space-y-2 border-t border-[#eceae2] pt-4 text-[14px] leading-relaxed text-[#544f46]">
                 {f.points.map((p, j) => (
-                  // The bullets fill in one after another, just behind their heading.
+                  // The bullets fill in one after another, just behind their card.
                   <li
                     key={p}
-                    className="reveal-line flex gap-2"
-                    style={{ transitionDelay: `${180 + j * 90}ms` }}
+                    className="reveal-line flex gap-2.5"
+                    style={{ transitionDelay: `${180 + j * 80}ms` }}
                   >
-                    <span className="text-[#cf5535]">–</span>
+                    <span
+                      className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-[#cf5535]"
+                      aria-hidden="true"
+                    />
                     <span>{p}</span>
                   </li>
                 ))}

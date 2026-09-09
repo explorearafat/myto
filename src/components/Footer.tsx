@@ -12,20 +12,20 @@ const FOOTER_LINKS = [
 export function Footer() {
   return (
     <footer className="border-t border-[#e4e1d8]">
-      <div className="mx-auto flex max-w-3xl flex-col gap-3 px-6 py-8 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2">
+      <div className="mx-auto flex max-w-5xl flex-col items-center gap-5 px-6 py-10 sm:flex-row sm:justify-between">
+        <div className="flex items-center gap-2.5">
           <SylorStar size={20} />
-          <span className="text-[14px] font-medium text-[#141413]">Sylor</span>
-          <span className="text-[13px] text-[#6b675e]">© 2026</span>
+          <span className="text-[14px] font-semibold text-[#141413]">Sylor</span>
+          <span className="text-[13px] text-[#9c988e]">© 2026</span>
         </div>
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-[14px]">
+        <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-[14px]">
           {FOOTER_LINKS.map((l) => (
             <a
               key={l.label}
               href={l.href}
               target={l.external ? '_blank' : undefined}
               rel={l.external ? 'noopener noreferrer' : undefined}
-              className="text-[#6b675e] no-underline transition-colors duration-150 hover:text-[#141413]"
+              className="font-medium text-[#6b675e] no-underline transition-colors duration-150 hover:text-[#141413]"
             >
               {l.label}
             </a>

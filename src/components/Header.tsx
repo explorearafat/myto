@@ -5,6 +5,7 @@ import { LINKS } from '../data';
 const NAV = [
   { label: 'Screenshots', hash: '#inside' },
   { label: 'Features', hash: '#features' },
+  { label: 'Inside', hash: '#workspace' },
   { label: 'FAQ', hash: '#faq' },
 ];
 
@@ -16,48 +17,50 @@ interface HeaderProps {
   subpage?: boolean;
 }
 
+/* Shared pill for the quiet text links — rounded to match the CTA's pill shape. */
+const linkCls =
+  'rounded-full px-3 py-1.5 text-[14px] font-medium text-[#544f46] no-underline transition-colors duration-150 hover:bg-[#f0eee6] hover:text-[#141413]';
+
 export function Header({ subpage = false }: HeaderProps) {
   return (
-    <header className="border-b border-[#e4e1d8] bg-[#faf9f5]">
-      <div className="mx-auto flex max-w-3xl items-center justify-between px-6 py-4">
+    <header className="sticky top-0 z-40 bg-[#faf9f5]/70 backdrop-blur-md">
+      <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-3.5">
         <a href={subpage ? '/' : '#top'} className="flex items-center gap-2 no-underline">
-          <SylorStar size={26} />
-          <span className="text-[15px] font-semibold text-[#141413]">Sylor</span>
+          <SylorStar size={22} />
+          <span className="text-[16px] font-semibold tracking-[-0.01em] text-[#141413]">Sylor</span>
         </a>
-        <nav className="flex items-center gap-5 text-[14px]">
+
+        {/* Centre group — the spread nav of the reference, hidden on small screens. */}
+        <nav className="hidden items-center gap-1 md:flex">
           {NAV.map((n) => (
-            <a
-              key={n.hash}
-              href={subpage ? `/${n.hash}` : n.hash}
-              className="hidden text-[#6b675e] no-underline transition-colors duration-150 hover:text-[#141413] sm:inline"
-            >
+            <a key={n.hash} href={subpage ? `/${n.hash}` : n.hash} className={linkCls}>
               {n.label}
             </a>
           ))}
+        </nav>
+
+        <div className="flex items-center gap-1">
           {/* A real path, so it reads the same from the product page and any subpage. */}
-          <a
-            href={LINKS.chatPage}
-            className="text-[#6b675e] no-underline transition-colors duration-150 hover:text-[#141413]"
-          >
+          <a href={LINKS.chatPage} className={linkCls}>
             Chat
           </a>
           <a
             href={LINKS.repo}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-[#6b675e] no-underline transition-colors duration-150 hover:text-[#141413]"
+            className={'hidden sm:inline-block ' + linkCls}
           >
             GitHub
           </a>
           {subpage ? null : (
             <a
               href={LINKS.downloadPage}
-              className="rounded-md bg-[#cf5535] px-3.5 py-1.5 font-medium text-white no-underline transition-colors duration-150 hover:bg-[#b8482c] active:translate-y-px"
+              className="ml-1.5 inline-flex items-center rounded-full bg-[#141413] px-4 py-2 text-[14px] font-medium text-[#faf9f5] no-underline transition-colors duration-150 hover:bg-[#2b2721] active:translate-y-px"
             >
               Download
             </a>
           )}
-        </nav>
+        </div>
       </div>
     </header>
   );

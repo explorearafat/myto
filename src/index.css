@@ -91,6 +91,60 @@
 }
 
 /*
+ * Editorial section kicker — a short terracotta bar followed by an uppercase,
+ * wide-tracked label. Used by the marketing pages only (never /chat). The bar
+ * inherits the text colour so the on-dark variant recolours both at once.
+ * Kept unlayered (like .skip-link / .font-display) so its colour is deliberate.
+ */
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.625rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #b8482c;
+}
+
+.eyebrow::before {
+  content: "";
+  flex: none;
+  width: 1.75rem;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.eyebrow-on-dark {
+  color: #e8836a;
+}
+
+/*
+ * The hero's cinematic wash — a soft warm bloom (terracotta / gold / peach) that
+ * fills the top of the hero and fades down into the paper. Layered radial
+ * gradients, lightly blurred, masked at the bottom. Static: nothing repaints on
+ * scroll. Marketing hero only; never /chat. The warm palette is deliberate —
+ * Sylor's own identity, not the reference page's blue.
+ */
+.hero-aura {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 720px;
+  pointer-events: none;
+  background:
+    radial-gradient(52% 80% at 50% -12%, rgba(207, 85, 53, 0.3), transparent 72%),
+    radial-gradient(44% 66% at 80% -10%, rgba(230, 162, 60, 0.26), transparent 70%),
+    radial-gradient(46% 68% at 18% -10%, rgba(232, 131, 106, 0.3), transparent 72%),
+    radial-gradient(36% 50% at 60% 6%, rgba(180, 72, 44, 0.16), transparent 74%);
+  filter: blur(7px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 38%, transparent 92%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 38%, transparent 92%);
+}
+
+/*
  * Scroll reveals. `.reveal-on` is added to <html> by src/lib/reveal.ts before
  * React renders; without it (no JS, no IntersectionObserver) everything is
  * simply visible. See that file for why the offset lives here and not inline.

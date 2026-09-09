@@ -1,99 +1,92 @@
-import { ArrowRight, Download } from 'lucide-react';
-import { GLANCE, LINKS } from '../data';
-import { Backdrop } from './Backdrop';
-import { Words } from './Words';
+import { LINKS } from '../data';
+import { SylorStar } from './SylorStar';
+
+/*
+ * Honest stand-in for the reference page's "trusted by" logo wall: Sylor has no
+ * customer logos to show, so this states what it actually plugs into instead.
+ */
+const WORKS_WITH = ['Ollama', 'OpenAI-compatible', 'MCP', 'Markdown skills'];
 
 export function Hero() {
   return (
     <section className="relative overflow-hidden">
-      <Backdrop fade="down" bloom />
-      <div className="relative mx-auto max-w-3xl px-6 pt-16 pb-14 sm:pt-24 sm:pb-20">
-        {/* The headline arrives word by word; the lines below it follow as blocks,
-            each ~70ms after the one above, so the hero settles in reading order. */}
+      {/* The cinematic warm wash behind the name — static, nothing repaints on scroll. */}
+      <div aria-hidden="true" className="hero-aura" />
+
+      {/* The mark is the centrepiece: bare on the wash (no tile), the whole lockup
+          centred in the first screen. */}
+      <div className="relative mx-auto flex min-h-[86svh] max-w-5xl flex-col items-center justify-center px-6 py-16 text-center">
+        {/* The terracotta star, sitting straight on the gradient — the universal Sylor mark. */}
+        <div data-reveal className="flex justify-center">
+          <SylorStar className="h-[68px] w-[68px] drop-shadow-[0_5px_18px_rgba(207,85,53,0.32)] sm:h-24 sm:w-24" />
+        </div>
+
+        {/* The wordmark, directly under the mark — bigger, tighter, more deliberate. */}
         <h1
-          data-reveal="words"
-          className="text-[34px] font-semibold leading-[1.1] tracking-[-0.02em] text-[#141413] sm:text-[44px]"
+          data-reveal
+          style={{ transitionDelay: '90ms' }}
+          className="mt-7 text-[72px] font-semibold leading-[0.88] tracking-[-0.055em] text-[#141413] sm:mt-9 sm:text-[112px]"
         >
-          <Words text="Build with your tools still in reach." step={55} />
+          Sylor
         </h1>
         <p
           data-reveal
-          style={{ transitionDelay: '260ms' }}
-          className="mt-5 max-w-[48ch] text-[17px] leading-relaxed text-[#3f3b34] sm:text-[18px]"
+          style={{ transitionDelay: '160ms' }}
+          className="mx-auto mt-6 max-w-[40ch] text-balance text-[19px] leading-relaxed text-[#544f46] sm:text-[22px]"
         >
-          A dependable coding workspace that reads your project, uses the tools you approve, and
-          turns working ideas into working software.
+          A dependable coding agent&mdash;on your own machine.
         </p>
+
+        {/* One prominent black pill, plus a quiet second option. */}
         <div
           data-reveal
-          style={{ transitionDelay: '330ms' }}
-          className="mt-8 flex flex-wrap items-center gap-x-6 gap-y-3"
+          style={{ transitionDelay: '240ms' }}
+          className="mt-9 flex flex-col items-center gap-4"
         >
           <a
             href={LINKS.downloadPage}
-            className="inline-flex items-center gap-2 rounded-md bg-[#cf5535] px-5 py-2.5 text-[15px] font-medium text-white no-underline transition-colors duration-150 hover:bg-[#b8482c] active:translate-y-px"
+            className="inline-flex items-center justify-center rounded-full bg-[#141413] px-7 py-3.5 text-[16px] font-medium text-[#faf9f5] no-underline shadow-[0_2px_12px_-2px_rgba(20,20,19,0.45)] transition-colors duration-150 hover:bg-[#2b2721] active:translate-y-px"
           >
-            <Download className="h-4 w-4" aria-hidden="true" />
-            Download Sylor
+            Download for Windows
           </a>
           <a
             href={LINKS.web}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-[15px] text-[#141413] underline decoration-[#cbc6ba] transition-colors duration-150 hover:decoration-[#cf5535]"
+            className="text-[14px] font-medium text-[#6b675e] no-underline transition-colors duration-150 hover:text-[#141413]"
           >
-            Try it in your browser
-          </a>
-          <a
-            href={LINKS.chatPage}
-            className="inline-flex items-center gap-1 text-[15px] text-[#141413] underline decoration-[#cbc6ba] transition-colors duration-150 hover:decoration-[#cf5535]"
-          >
-            See how it thinks
-            <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+            or try it in your browser &rarr;
           </a>
         </div>
-        <p
-          data-reveal
-          style={{ transitionDelay: '390ms' }}
-          className="mt-5 text-[13px] text-[#6b675e]"
-        >
-          Free for Windows 10 &amp; 11. macOS and Linux coming soon.
-        </p>
 
-        {/* Plain ask, plain answer — what a turn actually looks like. */}
-        <div
-          data-reveal
-          style={{ transitionDelay: '450ms' }}
-          className="mt-11 overflow-hidden rounded-lg border border-[#e4e1d8] bg-white"
-        >
-          <p className="px-4 pt-3.5 text-[12px] text-[#6b675e]">You</p>
-          <p className="px-4 pb-3.5 text-[15px] text-[#141413]">
-            Add a settings page and wire it into the router
-            {/* Drawn, not typed: a block glyph would fall outside the Inter subset
-                and pick up a different font's metrics on every OS. */}
-            <span
-              className="caret ml-1 inline-block h-[1.05em] w-[2px] translate-y-[0.15em] bg-[#cf5535]"
-              aria-hidden="true"
-            />
+        {/* Honest analog of a logo wall. */}
+        <div data-reveal style={{ transitionDelay: '320ms' }} className="mt-16">
+          <p className="text-[12px] font-semibold uppercase tracking-[0.18em] text-[#9c988e]">
+            Works with
           </p>
-          <p className="border-t border-[#e4e1d8] bg-[#faf9f5] px-4 py-3 text-[13px] leading-relaxed text-[#6b675e]">
-            Sylor reads the files it needs, plans the steps, shows you the diff, then runs your
-            build.
-          </p>
+          <div className="mt-5 flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-[15px] font-semibold text-[#8b8578]">
+            {WORKS_WITH.map((name) => (
+              <span key={name}>{name}</span>
+            ))}
+          </div>
         </div>
+      </div>
 
-        <dl
-          data-reveal
-          style={{ transitionDelay: '510ms' }}
-          className="mt-10 grid grid-cols-2 gap-x-8 gap-y-4 border-t border-[#e4e1d8] pt-6 sm:grid-cols-4"
-        >
-          {GLANCE.map((g) => (
-            <div key={g.label}>
-              <dt className="text-[12px] text-[#6b675e]">{g.label}</dt>
-              <dd className="mt-0.5 text-[14px] text-[#141413]">{g.value}</dd>
-            </div>
-          ))}
-        </dl>
+      {/* The big product shot, rising from the bottom of the hero. */}
+      <div
+        data-reveal
+        style={{ transitionDelay: '400ms' }}
+        className="relative mx-auto mt-16 max-w-5xl px-6 pb-16 sm:pb-24"
+      >
+        <img
+          src="/shots/chat.jpg"
+          alt="The Sylor workspace: an assistant reply with an inline diff of a settings file and a build command below it."
+          width={1440}
+          height={900}
+          loading="eager"
+          decoding="async"
+          className="mx-auto w-full rounded-2xl border border-[#141413]/10 bg-white shadow-[0_50px_130px_-45px_rgba(20,20,19,0.55)]"
+        />
       </div>
     </section>
   );
