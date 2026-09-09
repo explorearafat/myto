@@ -67,6 +67,29 @@ function describeAuthError(err: unknown): string {
   }
 }
 
+/**
+ * Reject a hung Firestore call instead of letting the UI spin forever. Reads and writes can stall for
+ * minutes when the Cloud Firestore database is unreachable — e.g. it hasn't been created in the
+ * project yet, or the client is offline — because the SDK keeps retrying rather than failing fast
+ * (a queued write only resolves once the server acknowledges it). This bounds that wait so the gate
+ * can fall back to onboarding, and "Start chatting" can surface an error, instead of hanging.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
@@ -85,10 +108,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       setProfileLoading(true);
       try {
-        const snap = await getDoc(doc(db, 'users', u.uid));
+        const snap = await withTimeout(getDoc(doc(db, 'users', u.uid)), 12000, 'Profile read');
         setProfile(snap.exists() ? (snap.data() as UserProfile) : null);
-      } catch {
-        // Offline, or rules not deployed yet — treat as "no profile" so onboarding can retry.
+      } catch (e) {
+        // Offline, rules not deployed, or the Firestore database isn't created yet — treat as
+        // "no profile" so onboarding shows its form instead of the splash hanging for minutes.
+        console.warn('[sylor] profile read failed — showing onboarding:', e);
         setProfile(null);
       } finally {
         setProfileLoading(false);
@@ -132,7 +157,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         createdAt: profile?.createdAt || now,
         updatedAt: now,
       };
-      await setDoc(doc(db, 'users', u.uid), next, { merge: true });
+      await withTimeout(
+        setDoc(doc(db, 'users', u.uid), next, { merge: true }),
+        15000,
+        'Profile save',
+      );
       setProfile(next);
     },
     [profile?.createdAt],
