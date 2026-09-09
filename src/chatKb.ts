@@ -142,12 +142,12 @@ export const CHAT_KB: ChatAnswer[] = [
     question: 'What does it cost?',
     steps: ['Reading your question', 'Checking pricing', 'Organizing the answer'],
     heading: 'Free to use',
-    lead: 'The app is free and the source is on GitHub.',
+    lead: 'The app itself is free.',
     bullets: [
       'Your only cost is whatever your model provider charges',
       'Nothing at all if the model runs locally',
     ],
-    cta: { label: 'See the source on GitHub', href: LINKS.repo, external: true },
+    cta: { label: 'Open the download page', href: LINKS.downloadPage, external: false },
     related: ['models', 'get-it', 'offline'],
   },
   {

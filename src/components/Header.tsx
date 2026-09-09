@@ -44,14 +44,6 @@ export function Header({ subpage = false }: HeaderProps) {
           <a href={LINKS.chatPage} className={linkCls}>
             Chat
           </a>
-          <a
-            href={LINKS.repo}
-            target="_blank"
-            rel="noopener noreferrer"
-            className={'hidden sm:inline-block ' + linkCls}
-          >
-            GitHub
-          </a>
           {subpage ? null : (
             <a
               href={LINKS.downloadPage}

@@ -4,7 +4,6 @@ import { LINKS } from '../data';
 const FOOTER_LINKS = [
   { label: 'Download', href: LINKS.downloadPage, external: false },
   { label: 'Chat', href: LINKS.chatPage, external: false },
-  { label: 'GitHub', href: LINKS.repo, external: true },
   { label: 'Releases', href: LINKS.releases, external: true },
   { label: 'Try in browser', href: LINKS.web, external: true },
 ];

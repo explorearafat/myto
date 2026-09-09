@@ -1,20 +1,19 @@
 // Single source of truth for the lean marketing page.
 
 export const LINKS = {
-  /** Direct Windows installer (GitHub Releases latest asset). */
-  download: 'https://github.com/explorearafat/sylor/releases/latest/download/Sylor-Setup.exe',
-  /** Native Android APK (GitHub Releases latest asset, built by build-android.yml). Live once the first release with an APK ships. */
-  androidApk: 'https://github.com/explorearafat/sylor/releases/latest/download/sylor.apk',
+  // Sylor is closed-source. The source repo is private, and private-repo release
+  // assets are not anonymously downloadable — so every public download points at
+  // the `sylor-dist` mirror, which holds only the built installers, never source.
+  /** Direct Windows installer (public downloads mirror). */
+  download: 'https://github.com/explorearafat/sylor-dist/releases/latest/download/Sylor-Setup.exe',
+  /** Native Android APK (public downloads mirror). Live once the first release with an APK ships. */
+  androidApk: 'https://github.com/explorearafat/sylor-dist/releases/latest/download/sylor.apk',
   /** The platform chooser — where every Download button on the site points. */
   downloadPage: '/download',
   /** The Sylor chat — a full chat interface, client-side, that answers questions about Sylor. */
   chatPage: '/chat',
-  /** All releases. */
-  releases: 'https://github.com/explorearafat/sylor/releases/latest',
-  /** Source repository. */
-  repo: 'https://github.com/explorearafat/sylor',
-  /** The native mobile app source — clone this to build the Android APK yourself. */
-  mobileSource: 'https://github.com/explorearafat/sylor/tree/main/mobile',
+  /** All published installers (downloads mirror — no source). */
+  releases: 'https://github.com/explorearafat/sylor-dist/releases/latest',
   /** Live web build — try it with zero install. */
   web: 'https://sylorcode.vercel.app',
 };
@@ -239,12 +238,12 @@ export const PLATFORMS: Platform[] = [
   },
   {
     name: 'Android',
-    status: 'Ships next release',
-    ready: false,
+    status: 'Available now',
+    ready: true,
     requires: 'Recent Android phones and tablets',
-    body: 'A native chat app, built with Flutter, now lives in the repo under mobile/ — sign in, pick a model, and stream replies on your phone. CI builds an APK on every release, so the download lands right here with the next tagged build. Want it sooner? Clone the repo and build it with Flutter today.',
-    href: LINKS.mobileSource,
-    cta: 'Get the source',
+    body: 'A native chat app, built with Flutter — sign in, pick a model, and stream replies on your phone. Like the Windows build it is self-signed, so Android asks you to allow the install from your browser or files app the first time.',
+    href: LINKS.androidApk,
+    cta: 'Download the APK',
   },
 ];
 
@@ -264,7 +263,7 @@ export const FAQ: Qa[] = [
   },
   {
     q: 'What does it cost?',
-    a: 'The app is free and the source is on GitHub. Your only cost is whatever your model provider charges — nothing at all if the model runs locally.',
+    a: 'The app is free to use. Your only cost is whatever your model provider charges — nothing at all if the model runs locally.',
   },
   {
     q: 'Which platforms are supported?',

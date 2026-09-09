@@ -40,8 +40,8 @@ export function DownloadPage() {
               style={{ transitionDelay: '140ms' }}
               className="mx-auto mt-5 max-w-[48ch] text-[18px] leading-relaxed text-[#544f46] sm:text-[20px]"
             >
-              One build is ready today. The rest of this page is honest about where the others
-              stand.
+              Windows and Android are ready today. The rest of this page is honest about where the
+              others stand.
             </p>
             <dl
               data-reveal
