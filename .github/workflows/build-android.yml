@@ -1,0 +1,76 @@
+name: Build Android App
+
+# Publish a native Sylor APK whenever you push a version tag (e.g. v0.1.6), or run
+# it manually from the Actions tab. The download page links to
+# /releases/latest/download/sylor.apk, so a new release auto-updates the Android
+# button on sylorcode.vercel.app — the mobile mirror of build-windows.yml.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate the android/ platform folder
+        # mobile/ commits only lib/ + config; the platform folders are gitignored and
+        # regenerated here. `flutter create` overwrites our tracked files (main.dart,
+        # pubspec, analysis_options, .gitignore, README, test), so restore them right
+        # after — the freshly generated, untracked android/ survives the checkout.
+        run: |
+          flutter create --platforms=android --org com.sylor --project-name sylor .
+          git checkout -- .
+
+      - name: Raise Android minSdk for Firebase (best-effort)
+        # firebase_auth needs minSdk >= 23; Flutter still defaults lower. This patches
+        # whichever Gradle DSL `flutter create` emitted, and is a harmless no-op if the
+        # token is already gone or renamed.
+        run: |
+          if [ -f android/app/build.gradle.kts ]; then
+            sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 23/' android/app/build.gradle.kts
+          fi
+          if [ -f android/app/build.gradle ]; then
+            sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 23/' android/app/build.gradle
+          fi
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build release APK
+        # No release keystore yet, so this is debug-signed (installs via "unknown
+        # sources") — the Android counterpart to the self-signed Windows installer.
+        run: flutter build apk --release
+
+      - name: Stage the APK under a stable name
+        run: cp build/app/outputs/flutter-apk/app-release.apk sylor.apk
+
+      - name: Publish APK to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mobile/sylor.apk
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

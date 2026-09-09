@@ -1,0 +1,35 @@
+name: sylor
+description: "Sylor — a local-first AI coding workspace. The mobile chat companion."
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.6.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # Networking — streams the SSE reply from the Oraculum gateway.
+  http: ^1.2.2
+
+  # State + local persistence.
+  provider: ^6.1.2
+  shared_preferences: ^2.3.2
+
+  # Assistant messages are Markdown (code blocks, lists, …), like Claude.
+  flutter_markdown: ^0.7.4
+
+  # Sign-in (Google + GitHub) against the same Firebase project as the website.
+  firebase_core: ^3.6.0
+  firebase_auth: ^5.3.1
+  google_sign_in: ^6.2.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
