@@ -11,3 +11,4 @@ coverage/
 # Sylor app runtime state & generated plan artifacts (machine-local, never committed)
 .sylor/
 /plan.md
+.vercel
