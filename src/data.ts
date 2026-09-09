@@ -12,7 +12,7 @@ export const LINKS = {
   /** Source repository. */
   repo: 'https://github.com/explorearafat/sylor',
   /** Live web build — try it with zero install. */
-  web: 'https://trysylor.vercel.app',
+  web: 'https://sylorcode.vercel.app',
 };
 
 /**

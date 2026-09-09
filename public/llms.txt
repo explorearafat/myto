@@ -11,7 +11,7 @@
 
 ## Product facts
 
-- Platform: Windows 10 and 11 (64-bit) are supported today; macOS and Linux are planned. A browser build is available at https://trysylor.vercel.app.
+- Platform: Windows 10 and 11 (64-bit) are supported today; macOS and Linux are planned. A browser build is available at https://sylorcode.vercel.app.
 - Current release: v0.1.5, published 30 August 2026, a 116 MB Windows installer (Sylor-Setup.exe).
 - Price: the app is free; the only cost is whatever model provider you choose to use.
 - Privacy: Sylor is local-first — it works from your project on your machine, with the integrations you configure.
@@ -48,7 +48,7 @@ The chat (/chat) is a separate document styled like a full chat app — a left s
 - Download (Windows, direct): https://github.com/explorearafat/sylor/releases/latest/download/Sylor-Setup.exe
 - All releases: https://github.com/explorearafat/sylor/releases/latest
 - Source: https://github.com/explorearafat/sylor
-- Try in browser: https://trysylor.vercel.app
+- Try in browser: https://sylorcode.vercel.app
 
 ## Reading guidance
 
