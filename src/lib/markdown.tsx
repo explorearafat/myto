@@ -4,7 +4,9 @@
 // fenced and inline code, bold, italics, links (http/https/mailto/relative only), and unordered
 // and ordered lists, with blank-line paragraph breaks.
 
-import { type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
+import { Check, Copy } from 'lucide-react';
+import { copyToClipboard } from './clipboard';
 
 const SAFE_HREF = /^(https?:\/\/|mailto:|\/)/i;
 
@@ -70,7 +72,7 @@ type Block =
   | { kind: 'h'; level: number; text: string }
   | { kind: 'ul'; items: string[] }
   | { kind: 'ol'; items: string[] }
-  | { kind: 'code'; lines: string[] };
+  | { kind: 'code'; lang?: string; lines: string[] };
 
 function parse(text: string): Block[] {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
@@ -80,11 +82,12 @@ function parse(text: string): Block[] {
     const line = lines[i];
 
     if (/^\s*```/.test(line)) {
+      const lang = line.replace(/^\s*```/, '').trim() || undefined;
       const body: string[] = [];
       i++;
       while (i < lines.length && !/^\s*```/.test(lines[i])) body.push(lines[i++]);
       i++; // closing fence
-      blocks.push({ kind: 'code', lines: body });
+      blocks.push({ kind: 'code', lang, lines: body });
       continue;
     }
 
@@ -137,19 +140,60 @@ function parse(text: string): Block[] {
   return blocks;
 }
 
+/**
+ * A fenced code block, ChatGPT-style: a header strip naming the language with a Copy button on the
+ * right, over the code body. The button copies the raw code and flips to a confirmation for a beat.
+ */
+function CodeBlock({ code, lang }: { code: string; lang?: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = async () => {
+    if (await copyToClipboard(code)) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    }
+  };
+  return (
+    <div className="overflow-hidden rounded-lg border border-[#e4e1d8]">
+      <div className="flex items-center justify-between border-b border-[#e4e1d8] bg-[#f0eee6] py-1.5 pl-3 pr-2">
+        <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-[#9c988e]">
+          {lang || 'code'}
+        </span>
+        <button
+          type="button"
+          onClick={onCopy}
+          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] font-medium transition-colors duration-150 hover:bg-[#e7e3d9] hover:text-[#141413]"
+          aria-label={copied ? 'Copied' : 'Copy code'}
+        >
+          {copied ? (
+            <Check className="h-3.5 w-3.5 text-[#cf5535]" aria-hidden="true" />
+          ) : (
+            <Copy className="h-3.5 w-3.5 text-[#6b675e]" aria-hidden="true" />
+          )}
+          <span className={copied ? 'text-[#cf5535]' : 'text-[#6b675e]'}>
+            {copied ? 'Copied' : 'Copy'}
+          </span>
+        </button>
+      </div>
+      <pre className="overflow-x-auto bg-[#f7f5ef] p-3 font-mono text-[13px] leading-relaxed text-[#141413]">
+        <code>{code}</code>
+      </pre>
+    </div>
+  );
+}
+
 export function Markdown({ text }: { text: string }) {
   const blocks = parse(text);
   return (
     <div className="space-y-3 text-[15px] leading-relaxed text-[#141413]">
       {blocks.map((b, bi) => {
         if (b.kind === 'code') {
+          // Wrapped in a keyed element rather than keying <CodeBlock> directly: this project has no
+          // @types/react, so custom components don't get the implicit `key` prop that intrinsic
+          // elements do.
           return (
-            <pre
-              key={bi}
-              className="overflow-x-auto rounded-lg border border-[#e4e1d8] bg-[#f7f5ef] p-3 font-mono text-[13px] leading-relaxed text-[#141413]"
-            >
-              <code>{b.lines.join('\n')}</code>
-            </pre>
+            <div key={bi}>
+              <CodeBlock code={b.lines.join('\n')} lang={b.lang} />
+            </div>
           );
         }
         if (b.kind === 'h') {

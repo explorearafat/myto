@@ -24,6 +24,7 @@ import {
 import { LINKS } from '../data';
 import { matchAnswer } from '../chatKb';
 import { SylorStar } from './SylorStar';
+import { MessageActions } from './MessageActions';
 import { Markdown } from '../lib/markdown';
 import { streamChat, type ChatWireMessage } from '../lib/chatClient';
 import { ORACULUM_MODELS, DEFAULT_MODEL_ID, modelName } from '../shared/models';
@@ -150,6 +151,20 @@ function kbMarkdown(question: string): string {
   return parts.join('\n\n');
 }
 
+/**
+ * The compact "who's asking" note prepended to each request so replies fit the visitor. It's sent
+ * as a leading user message and never shown in the transcript. Returns null when there's no profile
+ * to describe, so callers can simply skip it.
+ */
+function contextMessage(profile?: UserProfile): ChatWireMessage | null {
+  const summary = profileSummary(profile);
+  if (!summary) return null;
+  return {
+    role: 'user',
+    content: `(Context about who you're talking to — ${summary}. Address them by name and tailor answers to their role. Don't repeat this back.)`,
+  };
+}
+
 /** Live `prefers-reduced-motion`, so the streaming caret can be suppressed. */
 function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(() => {
@@ -182,7 +197,15 @@ function QuotaCard({ resetSeconds }: { resetSeconds?: number }) {
  * One assistant reply. Presentational: it renders whatever the turn currently holds — a "Thinking…"
  * strip, the streamed Markdown with a blinking caret, a done answer, or the quota card.
  */
-function AgentReply({ turn, streaming }: { turn: Turn; streaming: boolean }) {
+function AgentReply({
+  turn,
+  streaming,
+  onRegenerate,
+}: {
+  turn: Turn;
+  streaming: boolean;
+  onRegenerate?: (id: number) => void;
+}) {
   const reduced = usePrefersReducedMotion();
   return (
     <div className="chat-in mt-5 flex gap-3" aria-live="polite">
@@ -206,6 +229,12 @@ function AgentReply({ turn, streaming }: { turn: Turn; streaming: boolean }) {
             ) : null}
             {turn.status === 'done' && !turn.text ? (
               <p className="text-[13px] italic text-[#9c988e]">Stopped.</p>
+            ) : null}
+            {turn.status === 'done' && turn.text ? (
+              <MessageActions
+                text={turn.text}
+                onRegenerate={onRegenerate ? () => onRegenerate(turn.id) : undefined}
+              />
             ) : null}
           </div>
         )}
@@ -343,13 +372,8 @@ export function ChatPage({ profile, onSignOut }: ChatPageProps = {}) {
       // Build the wire history from completed turns, then this new question.
       const messages: ChatWireMessage[] = [];
       // Lead with a compact note about who's asking so replies fit them. Sent, never shown.
-      const summary = profileSummary(profile);
-      if (summary) {
-        messages.push({
-          role: 'user',
-          content: `(Context about who you're talking to — ${summary}. Address them by name and tailor answers to their role. Don't repeat this back.)`,
-        });
-      }
+      const ctx = contextMessage(profile);
+      if (ctx) messages.push(ctx);
       for (const t of turnsRef.current) {
         if (t.status === 'done' && t.text) {
           messages.push({ role: 'user', content: t.question });
@@ -363,6 +387,39 @@ export function ChatPage({ profile, onSignOut }: ChatPageProps = {}) {
       startStream(id, modelId, messages);
     },
     [selectedModelId, startStream, profile],
+  );
+
+  // Re-run one earlier turn: rebuild the wire history from the turns before it (so the model has
+  // the same context it did the first time), reset that turn to a fresh "Thinking…" state, and
+  // stream a new answer in place. Its original question and model are kept.
+  const regenerate = useCallback(
+    (id: number) => {
+      if (streamingRef.current) return;
+      const target = turnsRef.current.find((t) => t.id === id);
+      if (!target) return;
+
+      const messages: ChatWireMessage[] = [];
+      const ctx = contextMessage(profile);
+      if (ctx) messages.push(ctx);
+      for (const t of turnsRef.current) {
+        if (t.id === id) break;
+        if (t.status === 'done' && t.text) {
+          messages.push({ role: 'user', content: t.question });
+          messages.push({ role: 'assistant', content: t.text });
+        }
+      }
+      messages.push({ role: 'user', content: target.question });
+
+      setTurns((prev) =>
+        prev.map((t) =>
+          t.id === id
+            ? { ...t, text: '', status: 'thinking', errorCode: undefined, resetSeconds: undefined }
+            : t,
+        ),
+      );
+      startStream(id, target.modelId, messages);
+    },
+    [profile, startStream],
   );
 
   const stop = useCallback(() => {
@@ -730,7 +787,11 @@ export function ChatPage({ profile, onSignOut }: ChatPageProps = {}) {
                             {t.question}
                           </div>
                         </div>
-                        <AgentReply turn={t} streaming={streamingId === t.id} />
+                        <AgentReply
+                          turn={t}
+                          streaming={streamingId === t.id}
+                          onRegenerate={regenerate}
+                        />
                       </div>
                     ))}
                   </div>
