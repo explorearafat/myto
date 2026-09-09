@@ -5,7 +5,7 @@ import { useSessionStore } from '@renderer/store/useSessionStore'
 import { useProjectStore } from '@renderer/store/useProjectStore'
 import { useChatStore } from '@renderer/store/useChatStore'
 import { ProjectDialog } from '@renderer/components/ProjectDialog'
-import { SylorLogo } from '@renderer/components/SylorLogo'
+import { SylorStar } from '@renderer/components/SylorStar'
 
 /** The two top-level working modes, shown as the sidebar's nav-level toggle (item 1). */
 const WORK_MODES: { value: WorkMode; label: string; title: string; icon: ReactNode }[] = [
@@ -479,7 +479,7 @@ export function ConversationRail() {
     <div className="flex h-full flex-col border-r border-border bg-surface">
       {/* Brand */}
       <div className="flex min-w-0 items-center gap-2 px-3 pb-1 pt-3">
-        <SylorLogo size={22} showBubbles={false} />
+        <SylorStar size={20} />
         <span className="truncate text-[13px] font-semibold tracking-wide text-text">Sylor</span>
       </div>
 

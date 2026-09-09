@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { SylorLogo } from '@renderer/components/SylorLogo'
+import { SylorStar } from '@renderer/components/SylorStar'
 
 /** A single window-control button. Marked no-drag so clicks aren't swallowed by the drag region. */
 function ControlButton({
@@ -56,7 +56,7 @@ export function TitleBar() {
       className="flex h-9 shrink-0 items-center justify-between border-b border-border bg-surface select-none"
     >
       <div className="flex items-center gap-2 px-3">
-        <SylorLogo size={20} showBubbles={false} className="shrink-0" />
+        <SylorStar size={18} className="shrink-0" />
         <span className="text-[13px] font-semibold leading-none tracking-wide text-text">
           Sylor
         </span>

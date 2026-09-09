@@ -277,6 +277,16 @@ h3 {
     visibility: hidden;
   }
 }
+@keyframes sylor-star-bloom {
+  from {
+    opacity: 0;
+    transform: rotate(-40deg);
+  }
+  to {
+    opacity: 1;
+    transform: rotate(0);
+  }
+}
 
 .sylor-splash {
   animation: sylor-splash-out 0.4s ease-in forwards;
@@ -285,22 +295,9 @@ h3 {
 .sylor-splash__mark {
   animation: sylor-pop 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
-.sylor-splash__outline {
-  stroke-dasharray: 300;
-  animation: sylor-draw 1s ease-out both;
-}
-.sylor-splash__body {
-  animation: sylor-fill-in 0.5s ease-out both;
-  animation-delay: 0.7s;
-}
-.sylor-splash__face {
-  animation: sylor-fill-in 0.4s ease-out both;
-  animation-delay: 0.95s;
-}
-.sylor-splash__bubble {
-  transform-box: fill-box;
+.sylor-splash__star {
   transform-origin: center;
-  animation: sylor-bubble-rise 1.4s ease-in-out both;
+  animation: sylor-star-bloom 0.8s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 .sylor-splash__word {
   animation: sylor-word-in 0.5s ease-out both;
@@ -454,10 +451,7 @@ h3 {
 @media (prefers-reduced-motion: reduce) {
   .sylor-splash,
   .sylor-splash__mark,
-  .sylor-splash__outline,
-  .sylor-splash__body,
-  .sylor-splash__face,
-  .sylor-splash__bubble,
+  .sylor-splash__star,
   .sylor-splash__word {
     animation-duration: 0.01ms;
     animation-delay: 0s;
