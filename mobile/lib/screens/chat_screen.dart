@@ -5,14 +5,15 @@ import 'package:provider/provider.dart';
 
 import '../models/chat.dart';
 import '../models/oraculum_model.dart';
+import '../services/auth_service.dart';
 import '../services/chat_client.dart';
 import '../services/conversation_store.dart';
 import '../theme.dart';
 import '../widgets/chat_composer.dart';
+import '../widgets/chat_empty_state.dart';
 import '../widgets/conversation_drawer.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/model_picker.dart';
-import '../widgets/sylor_star.dart';
 
 /// The main chat surface: a message list that streams the reply in, the model chooser in the
 /// app bar, the history drawer, and the composer. This is where the gateway is actually driven.
@@ -27,6 +28,9 @@ class _ChatScreenState extends State<ChatScreen> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final ChatClient _client = ChatClient();
   final ScrollController _scroll = ScrollController();
+  // Owned here so a conversation starter can prefill the field and the composer can clear it.
+  final TextEditingController _composer = TextEditingController();
+  final FocusNode _composerFocus = FocusNode();
   StreamSubscription<ChatEvent>? _sub;
   bool _streaming = false;
   ChatMessage? _pending; // the assistant message currently being filled
@@ -36,6 +40,8 @@ class _ChatScreenState extends State<ChatScreen> {
     _sub?.cancel();
     _client.abort();
     _scroll.dispose();
+    _composer.dispose();
+    _composerFocus.dispose();
     super.dispose();
   }
 
@@ -76,6 +82,13 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// Drop a starter prompt into the composer so the person can tweak it, then send.
+  void _useStarter(String prompt) {
+    _composer.text = prompt;
+    _composer.selection = TextSelection.collapsed(offset: prompt.length);
+    _composerFocus.requestFocus();
+  }
+
   void _finish() {
     if (!_streaming) return;
     _sub?.cancel();
@@ -112,6 +125,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _newChat() {
     if (_streaming) _stop();
     _store.newChat();
+    _composer.clear();
     _scaffoldKey.currentState?.closeDrawer();
     setState(() {});
   }
@@ -171,6 +185,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     final palette = Theme.of(context).palette;
     final store = context.watch<ConversationStore>();
+    final auth = context.watch<AuthService>();
     final messages = store.active.messages;
 
     return Scaffold(
@@ -206,49 +221,49 @@ class _ChatScreenState extends State<ChatScreen> {
         children: [
           Expanded(
             child: messages.isEmpty
-                ? _emptyState(palette)
+                ? ChatEmptyState(onStarter: _useStarter, firstName: _firstName(auth))
                 : ListView.builder(
                     controller: _scroll,
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
                     itemCount: messages.length,
                     itemBuilder: (context, i) {
                       final m = messages[i];
-                      return MessageBubble(
-                        message: m,
-                        streaming: _streaming && identical(m, _pending),
+                      // Keyed by the message object so the entrance animation runs once, when the
+                      // bubble first appears — not again on every streaming rebuild.
+                      return TweenAnimationBuilder<double>(
+                        key: ObjectKey(m),
+                        tween: Tween(begin: 0, end: 1),
+                        duration: const Duration(milliseconds: 280),
+                        curve: Curves.easeOutCubic,
+                        builder: (context, t, child) => Opacity(
+                          opacity: t.clamp(0.0, 1.0),
+                          child: Transform.translate(offset: Offset(0, (1 - t) * 10), child: child),
+                        ),
+                        child: MessageBubble(
+                          message: m,
+                          streaming: _streaming && identical(m, _pending),
+                        ),
                       );
                     },
                   ),
           ),
-          ChatComposer(onSend: _send, onStop: _stop, streaming: _streaming),
+          ChatComposer(
+            controller: _composer,
+            focusNode: _composerFocus,
+            onSend: _send,
+            onStop: _stop,
+            streaming: _streaming,
+          ),
         ],
       ),
     );
   }
 
-  Widget _emptyState(SylorPalette palette) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(28),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SylorStar(size: 52, color: palette.accent),
-            const SizedBox(height: 18),
-            Text(
-              'How can I help today?',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: palette.text, fontSize: 20, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Ask anything. Sylor streams answers in real time.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: palette.muted, fontSize: 14, height: 1.4),
-            ),
-          ],
-        ),
-      ),
-    );
+  /// The signed-in person's first name for the greeting, or null for guests.
+  String? _firstName(AuthService auth) {
+    if (auth.user == null) return null;
+    final name = auth.displayName.trim();
+    if (name.isEmpty || name == 'Guest') return null;
+    return name.split(RegExp(r'\s+')).first;
   }
 }

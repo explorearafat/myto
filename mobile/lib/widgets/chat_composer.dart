@@ -1,17 +1,23 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../theme.dart';
 
 /// The bottom input row: a rounded multiline field with a send button that turns into a stop
-/// button while a reply is streaming.
+/// button while a reply is streaming. The controller and focus node are owned by the screen so
+/// conversation starters can prefill the field.
 class ChatComposer extends StatefulWidget {
   const ChatComposer({
     super.key,
+    required this.controller,
+    required this.focusNode,
     required this.onSend,
     required this.onStop,
     required this.streaming,
   });
 
+  final TextEditingController controller;
+  final FocusNode focusNode;
   final void Function(String text) onSend;
   final VoidCallback onStop;
   final bool streaming;
@@ -21,32 +27,34 @@ class ChatComposer extends StatefulWidget {
 }
 
 class _ChatComposerState extends State<ChatComposer> {
-  final TextEditingController _controller = TextEditingController();
-  final FocusNode _focus = FocusNode();
   bool _hasText = false;
 
   @override
   void initState() {
     super.initState();
-    _controller.addListener(() {
-      final has = _controller.text.trim().isNotEmpty;
-      if (has != _hasText) setState(() => _hasText = has);
-    });
+    _hasText = widget.controller.text.trim().isNotEmpty;
+    widget.controller.addListener(_onChanged);
   }
 
   @override
   void dispose() {
-    _controller.dispose();
-    _focus.dispose();
+    // The controller and focus node are owned by the screen, so we only detach our listener.
+    widget.controller.removeListener(_onChanged);
     super.dispose();
   }
 
+  void _onChanged() {
+    final has = widget.controller.text.trim().isNotEmpty;
+    if (has != _hasText) setState(() => _hasText = has);
+  }
+
   void _submit() {
-    final text = _controller.text.trim();
+    final text = widget.controller.text.trim();
     if (text.isEmpty || widget.streaming) return;
+    HapticFeedback.lightImpact();
     widget.onSend(text);
-    _controller.clear();
-    _focus.requestFocus();
+    widget.controller.clear();
+    widget.focusNode.requestFocus();
   }
 
   @override
@@ -69,8 +77,8 @@ class _ChatComposerState extends State<ChatComposer> {
             children: [
               Expanded(
                 child: TextField(
-                  controller: _controller,
-                  focusNode: _focus,
+                  controller: widget.controller,
+                  focusNode: widget.focusNode,
                   minLines: 1,
                   maxLines: 6,
                   textInputAction: TextInputAction.newline,
@@ -87,7 +95,12 @@ class _ChatComposerState extends State<ChatComposer> {
                 ),
               ),
               const SizedBox(width: 6),
-              _button(palette, canSend),
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 180),
+                transitionBuilder: (child, animation) =>
+                    ScaleTransition(scale: animation, child: FadeTransition(opacity: animation, child: child)),
+                child: _button(palette, canSend),
+              ),
             ],
           ),
         ),
@@ -97,9 +110,17 @@ class _ChatComposerState extends State<ChatComposer> {
 
   Widget _button(SylorPalette palette, bool canSend) {
     if (widget.streaming) {
-      return _circle(palette.accent, Icons.stop_rounded, Colors.white, widget.onStop, 'Stop');
+      return _circle(
+        const ValueKey('stop'),
+        palette.accent,
+        Icons.stop_rounded,
+        Colors.white,
+        widget.onStop,
+        'Stop',
+      );
     }
     return _circle(
+      ValueKey(canSend ? 'send' : 'idle'),
       canSend ? palette.accent : palette.surface2,
       Icons.arrow_upward_rounded,
       canSend ? Colors.white : palette.muted,
@@ -108,8 +129,9 @@ class _ChatComposerState extends State<ChatComposer> {
     );
   }
 
-  Widget _circle(Color bg, IconData icon, Color fg, VoidCallback? onTap, String tooltip) {
+  Widget _circle(Key key, Color bg, IconData icon, Color fg, VoidCallback? onTap, String tooltip) {
     return Padding(
+      key: key,
       padding: const EdgeInsets.only(bottom: 2),
       child: Material(
         color: bg,

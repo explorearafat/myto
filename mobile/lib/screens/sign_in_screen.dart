@@ -23,11 +23,19 @@ class SignInScreen extends StatelessWidget {
             constraints: const BoxConstraints(maxWidth: 420),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 28),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  SylorStar(size: 64, color: palette.accent),
-                  const SizedBox(height: 22),
+              child: TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0, end: 1),
+                duration: const Duration(milliseconds: 450),
+                curve: Curves.easeOutCubic,
+                builder: (context, t, child) => Opacity(
+                  opacity: t.clamp(0.0, 1.0),
+                  child: Transform.translate(offset: Offset(0, (1 - t) * 14), child: child),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const SylorStarAura(auraSize: 132, starSize: 64),
+                    const SizedBox(height: 18),
                   Text(
                     'Sylor',
                     style: TextStyle(
@@ -76,6 +84,7 @@ class SignInScreen extends StatelessWidget {
                       ),
                     ),
                 ],
+                ),
               ),
             ),
           ),
