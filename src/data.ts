@@ -3,6 +3,8 @@
 export const LINKS = {
   /** Direct Windows installer (GitHub Releases latest asset). */
   download: 'https://github.com/explorearafat/sylor/releases/latest/download/Sylor-Setup.exe',
+  /** Native Android APK (GitHub Releases latest asset, built by build-android.yml). Live once the first release with an APK ships. */
+  androidApk: 'https://github.com/explorearafat/sylor/releases/latest/download/sylor.apk',
   /** The platform chooser — where every Download button on the site points. */
   downloadPage: '/download',
   /** The Sylor chat — a full chat interface, client-side, that answers questions about Sylor. */
@@ -11,6 +13,8 @@ export const LINKS = {
   releases: 'https://github.com/explorearafat/sylor/releases/latest',
   /** Source repository. */
   repo: 'https://github.com/explorearafat/sylor',
+  /** The native mobile app source — clone this to build the Android APK yourself. */
+  mobileSource: 'https://github.com/explorearafat/sylor/tree/main/mobile',
   /** Live web build — try it with zero install. */
   web: 'https://sylorcode.vercel.app',
 };
@@ -235,12 +239,12 @@ export const PLATFORMS: Platform[] = [
   },
   {
     name: 'Android',
-    status: 'Browser only',
+    status: 'Ships next release',
     ready: false,
-    requires: 'Any current mobile browser',
-    body: 'There is no native app, and none is planned — Sylor works from a real project folder on a real filesystem. The browser build does open on a phone if you want to look around.',
-    href: LINKS.web,
-    cta: 'Open the browser build',
+    requires: 'Recent Android phones and tablets',
+    body: 'A native chat app, built with Flutter, now lives in the repo under mobile/ — sign in, pick a model, and stream replies on your phone. CI builds an APK on every release, so the download lands right here with the next tagged build. Want it sooner? Clone the repo and build it with Flutter today.',
+    href: LINKS.mobileSource,
+    cta: 'Get the source',
   },
 ];
 

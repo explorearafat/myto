@@ -94,38 +94,40 @@ export function DownloadPage() {
                 >
                   {p.body}
                 </p>
-                {p.href ? (
+                {p.href && p.ready ? (
                   <a
                     href={p.href}
-                    target={p.href.startsWith('http') && !p.ready ? '_blank' : undefined}
-                    rel={p.href.startsWith('http') && !p.ready ? 'noopener noreferrer' : undefined}
-                    className={
-                      'reveal-line mt-5 inline-flex items-center gap-2 rounded-full text-[15px] font-medium no-underline transition-colors duration-150 ' +
-                      (p.ready
-                        ? 'bg-[#141413] px-6 py-2.5 text-[#faf9f5] hover:bg-[#2b2721] active:translate-y-px'
-                        : 'border border-[#141413]/20 px-6 py-2.5 text-[#141413] hover:border-[#141413]/50')
-                    }
+                    className="reveal-line mt-5 inline-flex items-center gap-2 rounded-full bg-[#141413] px-6 py-2.5 text-[15px] font-medium text-[#faf9f5] no-underline transition-colors duration-150 hover:bg-[#2b2721] active:translate-y-px"
                     style={{ transitionDelay: '220ms' }}
                   >
-                    {p.ready ? <Download className="h-4 w-4" aria-hidden="true" /> : null}
+                    <Download className="h-4 w-4" aria-hidden="true" />
                     {p.cta}
                   </a>
                 ) : (
-                  <p
-                    className="reveal-line mt-5 text-[13px] text-[#6b675e]"
-                    style={{ transitionDelay: '220ms' }}
-                  >
-                    Nothing to download yet.{' '}
-                    <a
-                      href={LINKS.releases}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="font-medium text-[#141413] underline decoration-[#cbc6ba] underline-offset-2 transition-colors duration-150 hover:decoration-[#cf5535]"
-                    >
-                      Watch the releases page
-                    </a>{' '}
-                    to catch the {p.name} build when it lands.
-                  </p>
+                  <div className="reveal-line mt-5" style={{ transitionDelay: '220ms' }}>
+                    {p.href ? (
+                      <a
+                        href={p.href}
+                        target={p.href.startsWith('http') ? '_blank' : undefined}
+                        rel={p.href.startsWith('http') ? 'noopener noreferrer' : undefined}
+                        className="inline-flex items-center gap-2 rounded-full border border-[#141413]/20 px-6 py-2.5 text-[15px] font-medium text-[#141413] no-underline transition-colors duration-150 hover:border-[#141413]/50"
+                      >
+                        {p.cta}
+                      </a>
+                    ) : null}
+                    <p className={(p.href ? 'mt-3 ' : '') + 'text-[13px] text-[#6b675e]'}>
+                      {p.href ? null : 'Nothing to download yet. '}
+                      <a
+                        href={LINKS.releases}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-medium text-[#141413] underline decoration-[#cbc6ba] underline-offset-2 transition-colors duration-150 hover:decoration-[#cf5535]"
+                      >
+                        Watch the releases page
+                      </a>{' '}
+                      to catch the {p.name} build when it lands.
+                    </p>
+                  </div>
                 )}
               </div>
             ))}
