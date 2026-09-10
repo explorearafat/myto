@@ -14,6 +14,7 @@ import { registerCommandsIpc } from './commands-ipc'
 import { registerPluginsIpc } from './plugins-ipc'
 import { registerWorkspaceIpc } from './workspace-ipc'
 import { registerMemoryIpc } from './memory-ipc'
+import { registerAuthIpc } from './auth-ipc'
 import { registerCheckpointIpc } from './checkpoint-ipc'
 import { registerGraphIpc } from './graph-ipc'
 import { closeChrome, registerChromeIpc } from './chrome-ipc'
@@ -131,6 +132,7 @@ app.whenReady().then(() => {
   registerPluginsIpc()
   registerWorkspaceIpc()
   registerMemoryIpc()
+  registerAuthIpc()
   // Restorable snapshots the engine takes before it changes anything, and the
   // one-click way back (see checkpoint-ipc.ts).
   registerCheckpointIpc()

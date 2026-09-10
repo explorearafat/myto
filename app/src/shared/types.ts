@@ -2115,6 +2115,21 @@ export interface MemoryApi {
   remember: (note: string) => Promise<boolean>
 }
 
+/** Result of a browser-mediated sign-in: the relayed Google ID token, or why it failed. */
+export type AuthHandoffResult =
+  | { ok: true; idToken: string }
+  | { ok: false; error: string }
+
+/**
+ * Browser-mediated Google sign-in. Google blocks its OAuth screen inside embedded
+ * webviews, so the app opens the system browser to sylorcode.vercel.app/authentication,
+ * receives the Google ID token back on a loopback listener, and the renderer completes
+ * Firebase sign-in with signInWithCredential. No server secret is involved.
+ */
+export interface AuthApi {
+  signInWithGoogle: () => Promise<AuthHandoffResult>
+}
+
 /**
  * Checkpoints: the undo the agent's own writes never had.
  *
@@ -2394,6 +2409,8 @@ export interface SylorApi {
   workspace: WorkspaceApi
   /** Long-term memory: the global cross-project user profile. */
   memory: MemoryApi
+  /** Browser-mediated Google sign-in (opens the system browser to the website). */
+  auth: AuthApi
   /** Restorable snapshots taken before the agent changes anything. */
   checkpoints: CheckpointsApi
   /** What imports what, for the canvas graph (built in main from the project index). */

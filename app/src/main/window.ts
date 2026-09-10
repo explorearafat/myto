@@ -10,9 +10,10 @@ function installContentSecurityPolicy(isDev: boolean): void {
   const policy = isDev
     ? "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
       "style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; " +
-      "worker-src 'self' blob:; connect-src 'self' ws: http://localhost:*"
+      "worker-src 'self' blob:; connect-src 'self' ws: http://localhost:* https://*.googleapis.com"
     : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-      "font-src 'self' data:; img-src 'self' data:; worker-src 'self' blob:; connect-src 'self'"
+      "font-src 'self' data:; img-src 'self' data:; worker-src 'self' blob:; " +
+      "connect-src 'self' https://*.googleapis.com"
 
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({

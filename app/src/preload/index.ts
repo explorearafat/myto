@@ -210,6 +210,9 @@ const api: SylorApi = {
     get: () => ipcRenderer.invoke(IpcChannel.MemoryGet),
     remember: (note) => ipcRenderer.invoke(IpcChannel.MemoryRemember, note)
   },
+  auth: {
+    signInWithGoogle: () => ipcRenderer.invoke(IpcChannel.AuthSignInWithGoogle)
+  },
   checkpoints: {
     list: () => ipcRenderer.invoke(IpcChannel.CheckpointsList),
     restore: (id) => ipcRenderer.invoke(IpcChannel.CheckpointsRestore, id)

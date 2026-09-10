@@ -210,6 +210,9 @@ const sylorMock: SylorApi = {
     get: vi.fn().mockResolvedValue(''),
     remember: vi.fn().mockResolvedValue(true)
   },
+  auth: {
+    signInWithGoogle: vi.fn().mockResolvedValue({ ok: false, error: '' })
+  },
   checkpoints: {
     // No project on disk under vitest: an empty timeline, and a restore that
     // truthfully reports it found nothing rather than claiming success.

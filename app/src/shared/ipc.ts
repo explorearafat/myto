@@ -192,6 +192,11 @@ export const IpcChannel = {
   /** Renderer → main (invoke): append one durable fact; resolves true when newly saved. */
   MemoryRemember: 'memory:remember',
 
+  // Browser-mediated Google sign-in: the renderer asks main to open the system browser
+  // to the website, which relays the Google ID token back via a loopback listener.
+  /** Renderer → main (invoke): run the browser sign-in; resolves the relayed token or a failure. */
+  AuthSignInWithGoogle: 'auth:sign-in-google',
+
   // Checkpoints (the undo the agent's writes never had): snapshots the engine takes
   // before it changes anything, restorable from the canvas timeline.
   /** Renderer → main (invoke): every checkpoint for the active project, newest first. */

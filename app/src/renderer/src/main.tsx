@@ -10,6 +10,7 @@ import './styles/globals.css'
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
+import { AuthGate } from './components/AuthGate'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { StatusWidget } from './components/StatusWidget'
 
@@ -26,6 +27,6 @@ const isWidget = window.location.hash.startsWith('#/widget')
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <ErrorBoundary>{isWidget ? <StatusWidget /> : <App />}</ErrorBoundary>
+    <ErrorBoundary>{isWidget ? <StatusWidget /> : <AuthGate><App /></AuthGate>}</ErrorBoundary>
   </React.StrictMode>
 )

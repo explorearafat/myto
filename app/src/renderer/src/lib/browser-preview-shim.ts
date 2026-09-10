@@ -310,6 +310,9 @@ function installShim(): void {
       get: () => Promise.resolve(''),
       remember: () => Promise.resolve(false)
     },
+    auth: {
+      signInWithGoogle: () => Promise.resolve({ ok: false as const, error: '' })
+    },
     // Nothing has been built in a browser tab, so there is nothing to go back to.
     checkpoints: {
       list: () => Promise.resolve([]),
