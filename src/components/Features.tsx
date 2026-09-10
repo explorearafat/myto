@@ -1,51 +1,88 @@
-import { FEATURES } from '../data';
+import {
+  Layers,
+  FolderTree,
+  Terminal,
+  ShieldCheck,
+  Blocks,
+  BadgeCheck,
+  type LucideIcon,
+} from 'lucide-react';
+
+interface Feature {
+  Icon: LucideIcon;
+  title: string;
+  body: string;
+}
+
+/* Six things Sylor genuinely does — no filler, no metrics. */
+const FEATURES: Feature[] = [
+  {
+    Icon: Layers,
+    title: 'Multi-model support',
+    body: 'Local via Ollama or any OpenAI-compatible endpoint. Switch models per task and set reasoning effort per turn.',
+  },
+  {
+    Icon: FolderTree,
+    title: 'Whole-project context',
+    body: 'Sylor reads across your codebase and carries notes forward in SYLOR.md, so it never relearns the same thing twice.',
+  },
+  {
+    Icon: Terminal,
+    title: 'A real terminal',
+    body: 'A full shell in the workspace. Sylor runs builds, tests, and dev servers, then reads the output like you would.',
+  },
+  {
+    Icon: ShieldCheck,
+    title: 'Diff-first & permissioned',
+    body: 'Every edit is a diff you approve. Commands, network access, and destructive steps ask first — or run autonomously if you say so.',
+  },
+  {
+    Icon: Blocks,
+    title: 'MCP & Markdown skills',
+    body: 'Add MCP servers and reusable skills. Each connector states what it can reach and stays off until you switch it on.',
+  },
+  {
+    Icon: BadgeCheck,
+    title: 'It verifies its work',
+    body: 'Runs your build and tests, opens the dev server to inspect the page it changed, and re-checks until the change passes.',
+  },
+];
 
 export function Features() {
   return (
-    <section id="features">
-      <div className="mx-auto max-w-5xl px-6 py-16 text-center sm:py-24">
-        <p data-reveal className="eyebrow">
-          What it does
-        </p>
-        <h2
-          data-reveal
-          style={{ transitionDelay: '60ms' }}
-          className="mx-auto mt-5 max-w-[24ch] text-[30px] font-semibold tracking-[-0.025em] text-[#141413] sm:text-[42px]"
-        >
-          Six things it does well
-        </h2>
-        <div className="mt-14 grid gap-5 text-left sm:grid-cols-2 lg:grid-cols-3">
+    <section id="features" className="border-b border-[#e9e6dd]">
+      <div className="mx-auto max-w-6xl px-6 py-20 sm:py-24">
+        <div className="text-center">
+          <h2
+            data-reveal
+            className="font-display font-normal text-[32px] tracking-[-0.02em] text-[#141413] sm:text-[40px]"
+          >
+            Key features
+          </h2>
+          <p
+            data-reveal
+            style={{ transitionDelay: '70ms' }}
+            className="mx-auto mt-4 max-w-[48ch] text-[17px] leading-relaxed text-[#6b675e]"
+          >
+            A full coding workspace — not a chat box bolted onto an editor.
+          </p>
+        </div>
+
+        <div className="mt-14 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {FEATURES.map((f, i) => (
             <div
               key={f.title}
               data-reveal
-              /* Row-mates share a delay so each row of cards arrives together. */
               style={{ transitionDelay: `${(i % 3) * 60}ms` }}
               className="rounded-2xl border border-[#e4e1d8] bg-white p-6 transition-[transform,border-color,box-shadow] duration-200 hover:-translate-y-1 hover:border-[#d8d3c8] hover:shadow-[0_18px_44px_-26px_rgba(20,20,19,0.3)]"
             >
-              <div className="flex items-center gap-3">
-                <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#faf1ee] text-[14px] font-semibold text-[#cf5535]">
-                  {String(i + 1).padStart(2, '0')}
-                </span>
-                <h3 className="text-[18px] font-semibold text-[#141413]">{f.title}</h3>
+              <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-[#eadfd9] bg-[#faf1ee] text-[#cf5535]">
+                <f.Icon className="h-5 w-5" strokeWidth={1.75} aria-hidden="true" />
               </div>
-              <p className="mt-4 text-[15px] leading-relaxed text-[#141413]">{f.body}</p>
-              <ul className="mt-4 space-y-2 border-t border-[#eceae2] pt-4 text-[14px] leading-relaxed text-[#544f46]">
-                {f.points.map((p, j) => (
-                  // The bullets fill in one after another, just behind their card.
-                  <li
-                    key={p}
-                    className="reveal-line flex gap-2.5"
-                    style={{ transitionDelay: `${180 + j * 80}ms` }}
-                  >
-                    <span
-                      className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-[#cf5535]"
-                      aria-hidden="true"
-                    />
-                    <span>{p}</span>
-                  </li>
-                ))}
-              </ul>
+              <h3 className="mt-5 font-display font-normal text-[20px] tracking-[-0.01em] text-[#141413]">
+                {f.title}
+              </h3>
+              <p className="mt-2.5 text-[15px] leading-relaxed text-[#544f46]">{f.body}</p>
             </div>
           ))}
         </div>

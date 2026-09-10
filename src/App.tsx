@@ -1,11 +1,13 @@
 import { Header } from './components/Header';
 import { Hero } from './components/Hero';
-import { Showcase } from './components/Showcase';
+import { Models } from './components/Models';
+import { HowItWorks } from './components/HowItWorks';
 import { Features } from './components/Features';
-import { Workspace } from './components/Workspace';
-import { Faq } from './components/Faq';
-import { Install } from './components/Install';
+import { Pricing } from './components/Pricing';
+import { Docs } from './components/Docs';
+import { Download } from './components/Download';
 import { Footer } from './components/Footer';
+import { ScrollCanvas } from './components/ScrollCanvas';
 import { useReveals } from './lib/reveal';
 
 export default function App() {
@@ -14,19 +16,25 @@ export default function App() {
 
   return (
     <div id="top" className="flex min-h-screen flex-col">
+      {/* Scroll-scrubbed warm backdrop, pinned behind everything (z-0). */}
+      <ScrollCanvas />
       <a className="skip-link" href="#content">
         Skip to content
       </a>
       <Header />
-      <main id="content" className="flex-1">
+      {/* Content rides above the canvas; sections stay transparent so it shows through. */}
+      <main id="content" className="relative z-10 flex-1">
         <Hero />
-        <Showcase />
+        <Models />
+        <HowItWorks />
         <Features />
-        <Workspace />
-        <Faq />
-        <Install />
+        <Pricing />
+        <Docs />
+        <Download />
       </main>
-      <Footer />
+      <div className="relative z-10">
+        <Footer />
+      </div>
     </div>
   );
 }

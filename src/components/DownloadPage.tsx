@@ -31,7 +31,7 @@ export function DownloadPage() {
             <h1
               data-reveal
               style={{ transitionDelay: '60ms' }}
-              className="mx-auto mt-5 text-[44px] font-semibold leading-[1.0] tracking-[-0.04em] text-[#141413] sm:text-[64px]"
+              className="mx-auto mt-5 font-display font-normal text-[44px] leading-[1.0] tracking-[-0.02em] text-[#141413] sm:text-[64px]"
             >
               Get Sylor
             </h1>
@@ -155,7 +155,7 @@ export function DownloadPage() {
           </div>
         </section>
       </main>
-      <Footer />
+      <Footer subpage />
     </div>
   );
 }

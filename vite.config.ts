@@ -9,7 +9,7 @@ import {defineConfig, loadEnv, type Plugin} from 'vite';
  * hosts resolve the directory index for both, so rewrite each here to keep dev
  * and production identical.
  */
-const SUBPAGES = ['/download', '/chat'];
+const SUBPAGES = ['/download', '/chat', '/authentication'];
 
 function extraPages(): Plugin {
   return {
@@ -114,6 +114,7 @@ export default defineConfig(({ mode }) => {
           main: path.resolve(__dirname, 'index.html'),
           download: path.resolve(__dirname, 'download/index.html'),
           chat: path.resolve(__dirname, 'chat/index.html'),
+          authentication: path.resolve(__dirname, 'authentication/index.html'),
         },
       },
     },

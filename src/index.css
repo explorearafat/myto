@@ -46,10 +46,10 @@
 
 /*
  * Display serif. Georgia is a system face on Windows and macOS, so this needs no
- * @font-face and adds no network cost. Used for the /chat greeting and each reply's
- * heading; the body stays Inter (see `body` above). Georgia carries its own metrics, so
- * it wants gentler tracking than the Inter-tuned h1,h2,h3 rule — callers pair it with
- * `font-normal` to skip Georgia's heavy bold.
+ * @font-face and adds no network cost. Used across the marketing pages' headings and
+ * the /chat greeting; the body stays Inter (see `body` above). Georgia carries its own
+ * metrics, so it wants gentler tracking than the Inter-tuned h1,h2,h3 rule — callers pair
+ * it with `font-normal` to skip Georgia's heavy synthesized bold.
  */
 .font-display {
   font-family: Georgia, "Times New Roman", Times, serif;
