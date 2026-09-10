@@ -5,9 +5,9 @@ import '../services/auth_service.dart';
 import '../theme.dart';
 import '../widgets/sylor_star.dart';
 
-/// The gate shown when nobody is signed in: Google + GitHub via Firebase, plus a
-/// "Continue without signing in" escape hatch so the app is usable immediately — and before
-/// Firebase is even configured.
+/// The gate shown when nobody is signed in. Sign-in is required to use Sylor, so this offers a
+/// single "Continue with Google" action. It runs in a real browser (see [AuthService]) because
+/// Google blocks its OAuth screen inside app webviews.
 class SignInScreen extends StatelessWidget {
   const SignInScreen({super.key});
 
@@ -60,15 +60,7 @@ class SignInScreen extends StatelessWidget {
                     palette: palette,
                     filled: true,
                   ),
-                  const SizedBox(height: 12),
-                  _providerButton(
-                    label: 'Continue with GitHub',
-                    icon: Icons.code_rounded,
-                    onTap: auth.busy ? null : auth.signInWithGithub,
-                    palette: palette,
-                    filled: false,
-                  ),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 18),
                   if (auth.busy)
                     SizedBox(
                       width: 20,
@@ -76,12 +68,10 @@ class SignInScreen extends StatelessWidget {
                       child: CircularProgressIndicator(strokeWidth: 2, color: palette.accent),
                     )
                   else
-                    TextButton(
-                      onPressed: auth.continueAsGuest,
-                      child: Text(
-                        'Continue without signing in',
-                        style: TextStyle(color: palette.muted, fontSize: 14),
-                      ),
+                    Text(
+                      'A browser will open to finish signing in.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: palette.muted, fontSize: 13, height: 1.4),
                     ),
                 ],
                 ),

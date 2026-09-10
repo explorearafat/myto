@@ -21,11 +21,14 @@ dependencies:
   # Assistant messages are Markdown (code blocks, lists, …), like Claude.
   flutter_markdown: ^0.7.4
 
-  # Sign-in (Google + GitHub) against the same Firebase project as the website. Both use
-  # Firebase's browser (Custom Tab) federated flow via signInWithProvider — so no native
+  # Sign-in against the same Firebase project as the website. Google blocks OAuth inside app
+  # webviews, so we don't sign in on-device: flutter_web_auth_2 opens a real browser (Custom
+  # Tab) at sylorcode.vercel.app/authentication, which runs Google sign-in and relays the OIDC
+  # ID token back to sylor://auth-callback; we finish with signInWithCredential. No native
   # google_sign_in plugin, google-services.json, SHA-1, or release keystore is required.
   firebase_core: ^3.6.0
   firebase_auth: ^5.3.1
+  flutter_web_auth_2: ^5.1.0
 
 dev_dependencies:
   flutter_test:
