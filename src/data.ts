@@ -27,7 +27,7 @@ export const LINKS = {
 export const RELEASE = {
   version: 'v0.2.1',
   date: '11 September 2026',
-  size: '116 MB',
+  size: '131 MB',
 };
 
 export interface Platform {
