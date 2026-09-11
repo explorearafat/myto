@@ -21,17 +21,35 @@ import type { AuthHandoffResult } from '../shared/types'
 const AUTH_PAGE = 'https://sylorcode.vercel.app/authentication'
 const TIMEOUT_MS = 3 * 60_000
 
+// The Sylor star (twelve-ray terracotta sunburst) as an inline SVG — matches the renderer's
+// SylorStar.tsx geometry so the browser handoff page shows the real mark, not a text glyph.
+const LONG_RAY = 'M12 1.4C12.85 6 12.85 8.4 12 11C11.15 8.4 11.15 6 12 1.4Z'
+const SHORT_RAY = 'M12 4.8C12.6 7.4 12.6 8.9 12 11C11.4 8.9 11.4 7.4 12 4.8Z'
+
+function starSvg(size: number): string {
+  const rays = Array.from(
+    { length: 12 },
+    (_, i) =>
+      `<path d="${i % 2 === 0 ? LONG_RAY : SHORT_RAY}" transform="rotate(${i * 30} 12 12)"/>`
+  ).join('')
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="${size}" height="${size}" ` +
+    `fill="#cf5535" role="img" aria-label="Sylor">${rays}</svg>`
+  )
+}
+
 function page(title: string, body: string): string {
   return (
     '<!doctype html><html><head><meta charset="utf-8"><title>' +
     title +
     '</title><style>html{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#faf9f5;' +
     'color:#141413}body{display:grid;place-items:center;min-height:100vh;margin:0}' +
-    '.c{max-width:22rem;text-align:center;padding:2rem}.s{font-size:2rem;line-height:1;' +
-    'display:inline-grid;place-items:center;width:3rem;height:3rem;border-radius:.9rem;' +
-    'background:#141413;color:#faf9f5;margin-bottom:1rem}h1{font-size:1.25rem;margin:.25rem 0}' +
+    '.c{max-width:22rem;text-align:center;padding:2rem}.s{display:inline-grid;place-items:center;' +
+    'margin-bottom:1rem}h1{font-size:1.25rem;margin:.25rem 0}' +
     'p{color:rgba(20,20,19,.6);font-size:.9rem}</style></head><body><div class="c">' +
-    '<div class="s">✻</div><h1>' +
+    '<div class="s">' +
+    starSvg(44) +
+    '</div><h1>' +
     title +
     '</h1><p>' +
     body +

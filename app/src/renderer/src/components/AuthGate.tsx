@@ -6,6 +6,7 @@ import {
   type User
 } from 'firebase/auth'
 import { auth } from '../lib/firebase'
+import { SylorStar } from './SylorStar'
 
 /*
  * Required sign-in gate for the desktop app.
@@ -59,8 +60,8 @@ export function AuthGate({ children }: { children: ReactNode }): React.JSX.Eleme
   return (
     <div className="grid min-h-screen place-items-center bg-[#faf9f5] px-6 text-[#141413]">
       <div className="w-full max-w-sm text-center">
-        <div className="mx-auto mb-6 grid h-14 w-14 place-items-center rounded-2xl bg-[#141413] text-3xl leading-none text-[#faf9f5]">
-          ✻
+        <div className="mx-auto mb-6 flex justify-center">
+          <SylorStar size={40} />
         </div>
         <h1 className="mb-2 text-2xl font-semibold">Sign in to Sylor</h1>
         <p className="mb-8 text-sm text-[#141413]/60">

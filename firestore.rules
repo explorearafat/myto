@@ -3,12 +3,19 @@ rules_version = '2';
 // Firestore security rules for Sylor. Deploy these in the Firebase console
 // (Firestore Database → Rules → paste → Publish) or with `firebase deploy --only firestore:rules`.
 //
-// Each signed-in user can read and write ONLY their own profile document at users/{uid}. Nobody can
-// read anyone else's, and nothing else in the database is accessible from the client.
+// Each signed-in user can read and write ONLY their own data under users/{uid} — their profile
+// document and their devices/{deviceId} sign-in history. Nobody can read anyone else's, and nothing
+// else in the database is accessible from the client. Rules v2 does NOT cascade to subcollections,
+// so the devices match is spelled out explicitly.
 service cloud.firestore {
   match /databases/{database}/documents {
     match /users/{uid} {
       allow read, write: if request.auth != null && request.auth.uid == uid;
+
+      // Device sign-in history written by the /authentication page (see src/lib/devices.ts).
+      match /devices/{deviceId} {
+        allow read, write: if request.auth != null && request.auth.uid == uid;
+      }
     }
   }
 }
