@@ -22,10 +22,12 @@ vi.mock('./pty', () => ({
 import {
   buildBwrapArgv,
   buildSeatbeltProfile,
+  buildWindowsConfineArgv,
   sandboxAvailable,
   sandboxModeFor,
   __resetSandboxProbes,
   __setBwrapProbe,
+  __setWindowsHelperProbe,
   type SandboxMode
 } from './sandbox'
 
@@ -118,6 +120,39 @@ describe('buildBwrapArgv', () => {
   })
 })
 
+describe('buildWindowsConfineArgv', () => {
+  const HELPER = 'C:\\Program Files\\Sylor\\resources\\sylor-confine.exe'
+  const ROOT = 'C:\\Users\\me\\project'
+  const CMD = 'npm run build'
+
+  it('passes workspace + mode and base64-encodes the command (no nested quoting)', () => {
+    const argv = buildWindowsConfineArgv(HELPER, ROOT, 'workspace-write', CMD)
+    expect(argv).toEqual([
+      HELPER,
+      '--workspace',
+      ROOT,
+      '--mode',
+      'workspace-write',
+      '--command-b64',
+      Buffer.from(CMD, 'utf8').toString('base64')
+    ])
+    // The raw command never rides as a bare argv token — only as its base64 encoding.
+    expect(argv).not.toContain(CMD)
+  })
+
+  it('carries the read-only sandbox mode through for plan runs', () => {
+    const argv = buildWindowsConfineArgv(HELPER, ROOT, 'read-only', CMD)
+    expect(argv[argv.indexOf('--mode') + 1]).toBe('read-only')
+  })
+
+  it('round-trips a command with quotes and newlines through base64 unchanged', () => {
+    const tricky = `echo "a b" && echo 'c'\nrm -rf x`
+    const argv = buildWindowsConfineArgv(HELPER, ROOT, 'workspace-write', tricky)
+    const b64 = argv[argv.indexOf('--command-b64') + 1]
+    expect(Buffer.from(b64, 'base64').toString('utf8')).toBe(tricky)
+  })
+})
+
 describe('sandboxAvailable', () => {
   it('is always true on macOS (sandbox-exec ships with the OS)', () => {
     setPlatform('darwin')
@@ -126,11 +161,34 @@ describe('sandboxAvailable', () => {
     expect(sandboxAvailable()).toBe(true)
   })
 
-  it('is false on Windows — no OS confinement without a native addon (the honest fail-safe)', () => {
+  it('is false on Windows until the native confine helper ships (the honest fail-safe)', () => {
     setPlatform('win32')
-    // Windows never consults the bwrap probe; even a "present" probe can't make it true.
+    // Neither a "present" bwrap probe nor an absent helper can conjure a sandbox on Windows.
     __setBwrapProbe(() => true)
+    __setWindowsHelperProbe(() => undefined)
     expect(sandboxAvailable()).toBe(false)
+  })
+
+  it('on Windows, becomes available once the native confine helper is bundled', () => {
+    setPlatform('win32')
+    __setWindowsHelperProbe(() => 'C:\\Sylor\\resources\\sylor-confine.exe')
+    expect(sandboxAvailable()).toBe(true)
+
+    // Helper removed → back to the honest fail-safe.
+    __setWindowsHelperProbe(() => undefined)
+    expect(sandboxAvailable()).toBe(false)
+  })
+
+  it('memoizes the Windows helper probe — a second call does not re-run the check', () => {
+    setPlatform('win32')
+    let calls = 0
+    __setWindowsHelperProbe(() => {
+      calls += 1
+      return 'C:\\Sylor\\resources\\sylor-confine.exe'
+    })
+    expect(sandboxAvailable()).toBe(true)
+    expect(sandboxAvailable()).toBe(true)
+    expect(calls).toBe(1)
   })
 
   it('on Linux, tracks whether bwrap is installed', () => {

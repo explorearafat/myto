@@ -19,19 +19,25 @@
  * Per-platform mechanism (matching the proven references — Codex/Claude Code):
  *  - **macOS:** `sandbox-exec` (Seatbelt) with a generated profile. Real confinement.
  *  - **Linux:** `bwrap` (bubblewrap) when present. Real confinement.
- *  - **Windows (primary platform):** robust confinement needs a Job Object + restricted
- *    token / AppContainer, which requires a native addon (a Phase 2 spike — see the
- *    design proposal, Principle 7 Risks). Until that lands, Windows uses the design's
- *    documented **fail-safe fallback**: the command still runs, but confinement rests
- *    on the command classifier + approval prompts (destructive always asks, even
- *    hands-free), NOT on the OS. {@link sandboxAvailable} returns `false` so the UI can
- *    say so honestly — we never claim a sandbox we don't have.
+ *  - **Windows (primary platform):** robust confinement needs an AppContainer / restricted
+ *    token, which a vanilla-Node spawn cannot set up — it needs a small native helper
+ *    binary (`sylor-confine.exe`) bundled with the app. The integration seam for that
+ *    helper is wired and unit-tested here ({@link buildWindowsConfineArgv} + the win32
+ *    branch of {@link spawnSandboxedCommand}), but the helper binary itself is not yet
+ *    built, so {@link sandboxAvailable} finds nothing and the branch takes the design's
+ *    documented **fail-safe fallback**: the command still runs, confinement resting on
+ *    the command classifier + approval prompts (destructive always asks, even hands-free),
+ *    NOT on the OS. {@link sandboxAvailable} stays `false` until the helper ships, so the
+ *    UI says so honestly — we never claim a sandbox we don't have. See the design proposal
+ *    (Principle 7 · Windows confinement spike) for the helper CLI contract.
  *
  * The profile/argv builders are pure and unit-tested; the spawn functions compose them
  * with {@link spawnCommandPty} (which sets `cwd` to the project root and inherits env).
  */
 
 import { execFileSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import type { IPty } from '@lydell/node-pty'
 import { spawnCommandPty } from './pty'
 import type { PermissionMode } from '../../shared/types'
@@ -69,8 +75,10 @@ export function spawnSandboxedCommand(
       return spawnMacOSSandboxed(command, workspaceRoot, sandboxMode, cols, rows, extraEnv)
     case 'linux':
       return spawnLinuxSandboxed(command, workspaceRoot, sandboxMode, cols, rows, extraEnv)
+    case 'win32':
+      return spawnWindowsSandboxed(command, workspaceRoot, sandboxMode, cols, rows, extraEnv)
     default:
-      // Windows and anything else: no OS confinement available (needs a native addon).
+      // Any other platform: no OS confinement available.
       // Fail-safe: run with classifier + prompt gating only, and say so once.
       warnUnsandboxed(command, sandboxMode, workspaceRoot)
       return spawnCommandPty(command, cols, rows, extraEnv)
@@ -141,6 +149,36 @@ export function buildBwrapArgv(workspaceRoot: string, mode: SandboxMode, command
 }
 
 /**
+ * Builds the argument vector for the Windows confinement helper (`sylor-confine.exe`).
+ * The helper takes the workspace root + sandbox mode and the command to run, sets up the
+ * AppContainer / restricted-token confinement natively, then executes the command inside
+ * it. The command is passed base64-encoded (`--command-b64`) precisely so that NO shell or
+ * PowerShell quoting of the *inner* command is ever required — the base64 alphabet is
+ * entirely shell-safe, sidestepping the nested-quoting hazard the POSIX spawners handle
+ * with {@link singleQuote}. Pure: the argv is testable without the helper existing or
+ * spawning anything.
+ *
+ * Helper CLI contract (for the native implementation, once built):
+ *   sylor-confine.exe --workspace <dir> --mode <read-only|workspace-write> --command-b64 <b64>
+ */
+export function buildWindowsConfineArgv(
+  helperPath: string,
+  workspaceRoot: string,
+  mode: SandboxMode,
+  command: string
+): string[] {
+  return [
+    helperPath,
+    '--workspace',
+    workspaceRoot,
+    '--mode',
+    mode,
+    '--command-b64',
+    Buffer.from(command, 'utf8').toString('base64')
+  ]
+}
+
+/**
  * Whether OS-level sandboxing is actually enforced on this platform. The UI reads this
  * to tell the user honestly when confinement rests on classification + prompts (Windows,
  * today) rather than the OS. macOS always has `sandbox-exec`; Linux needs `bwrap`.
@@ -148,6 +186,9 @@ export function buildBwrapArgv(workspaceRoot: string, mode: SandboxMode, command
 export function sandboxAvailable(): boolean {
   if (process.platform === 'darwin') return true
   if (process.platform === 'linux') return bwrapAvailable()
+  // Windows enforces only once the native confinement helper is bundled; until then the
+  // probe finds nothing and we report false rather than claim a sandbox we don't have.
+  if (process.platform === 'win32') return windowsConfineHelperPath() !== undefined
   return false
 }
 
@@ -185,11 +226,48 @@ function spawnLinuxSandboxed(
   return spawnCommandPty(wrapped, cols, rows, extraEnv)
 }
 
+function spawnWindowsSandboxed(
+  command: string,
+  workspaceRoot: string,
+  mode: SandboxMode,
+  cols: number,
+  rows: number,
+  extraEnv?: Record<string, string | undefined>
+): IPty {
+  const helperPath = windowsConfineHelperPath()
+  if (!helperPath) {
+    // Helper not bundled yet → honest fail-safe (classifier + prompts, no OS confinement).
+    warnUnsandboxed(command, mode, workspaceRoot)
+    return spawnCommandPty(command, cols, rows, extraEnv)
+  }
+  // The win32 pty runs `powershell.exe -Command <command>`, so invoke the helper as a
+  // PowerShell call (`& '<exe>' '<arg>' ...`). Only the paths need quoting; the inner
+  // command rides along as base64 in the argv, so there is no nested-quoting hazard.
+  const argv = buildWindowsConfineArgv(helperPath, workspaceRoot, mode, command)
+  const wrapped = powershellCall(argv)
+  return spawnCommandPty(wrapped, cols, rows, extraEnv)
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────────────
 
 /** POSIX single-quote a string for safe interpolation into a `sh -c` command line. */
 function singleQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`
+}
+
+/**
+ * PowerShell single-quote (literal string, no variable/backtick expansion); an embedded
+ * single quote is doubled per PowerShell's rules. Used to quote the helper path + its
+ * fixed args when composing the `& '<exe>' ...` call line for the win32 pty.
+ */
+function powershellSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, "''")}'`
+}
+
+/** Compose a PowerShell call line for the confinement helper: `& 'exe' 'arg' 'arg' …`. */
+function powershellCall(argv: string[]): string {
+  const [exe, ...rest] = argv
+  return ['&', powershellSingleQuote(exe), ...rest.map(powershellSingleQuote)].join(' ')
 }
 
 /** Cached bwrap probe — `execFileSync` per command would be wasteful. */
@@ -211,6 +289,34 @@ function defaultBwrapProbe(): boolean {
 function bwrapAvailable(): boolean {
   if (bwrapProbe === undefined) bwrapProbe = bwrapProbeFn()
   return bwrapProbe
+}
+
+/**
+ * Cached Windows confinement-helper path. `undefined` = not yet probed, `null` = probed
+ * and absent, a string = the resolved helper path. The helper is bundled by
+ * electron-builder (extraResources) next to {@link process.resourcesPath}, or built
+ * locally under `./resources` in dev. It does not exist yet, so this resolves to `null`
+ * today and {@link sandboxAvailable} stays honest.
+ */
+let windowsHelperPath: string | null | undefined
+/** Injectable ({@link __setWindowsHelperProbe}) for the same reason as the bwrap probe. */
+let windowsHelperProbeFn: () => string | undefined = defaultWindowsHelperProbe
+function defaultWindowsHelperProbe(): string | undefined {
+  const candidates: string[] = []
+  if (process.resourcesPath) candidates.push(join(process.resourcesPath, 'sylor-confine.exe'))
+  candidates.push(join(process.cwd(), 'resources', 'sylor-confine.exe'))
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate)) return candidate
+    } catch {
+      // Unreadable candidate → treat as absent and keep looking.
+    }
+  }
+  return undefined
+}
+function windowsConfineHelperPath(): string | undefined {
+  if (windowsHelperPath === undefined) windowsHelperPath = windowsHelperProbeFn() ?? null
+  return windowsHelperPath ?? undefined
 }
 
 /** So a killed/absent sandbox is surfaced once, not silently — honesty over a false claim. */
@@ -236,9 +342,20 @@ export function __setBwrapProbe(fn: () => boolean): void {
   bwrapProbe = undefined
 }
 
-/** Test-only: reset the memoized probe AND restore the real bwrap check. */
+/**
+ * Test-only: override the Windows confinement-helper probe (and clear its memo) so a suite
+ * can drive both the "helper bundled" and "helper absent" branches without a real binary.
+ */
+export function __setWindowsHelperProbe(fn: () => string | undefined): void {
+  windowsHelperProbeFn = fn
+  windowsHelperPath = undefined
+}
+
+/** Test-only: reset the memoized probes AND restore the real bwrap / helper checks. */
 export function __resetSandboxProbes(): void {
   bwrapProbe = undefined
   bwrapProbeFn = defaultBwrapProbe
+  windowsHelperPath = undefined
+  windowsHelperProbeFn = defaultWindowsHelperProbe
   warnedUnsandboxed = false
 }

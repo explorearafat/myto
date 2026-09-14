@@ -625,6 +625,31 @@ escape attempt that fails. Command classification unit-tested against a corpus.
 
 **Verification:** `typecheck:node` ✓, `typecheck:web` ✓, `eslint` ✓ (changed files clean), full suite **2036/2036** ✓ (+88 tests: `sandbox.test.ts` 12, `commandClassifier.test.ts` 40+, plus the new Plan-mode + classification rows in `permission.test.ts`). *Not yet covered by an automated test:* a real OS escape attempt actually failing (needs macOS/Linux or the Windows native-confinement spike) — that stays a manual/integration check, called out above.
 
+### Windows confinement spike (2026-09-14) — closing deviation #2's uncertainty
+
+The one open item above was deviation #2: Windows, the primary platform, had **no** OS-level confinement, only a documented fail-safe. This spike settles *how* it will get one and lands the **tested integration seam** for it now, without shipping a confinement we can't yet stand behind.
+
+**Findings.**
+- **There is no vanilla-Node path to real Windows confinement.** Unlike macOS (`sandbox-exec`) and Linux (`bwrap`), Windows has no ship-with-the-OS launcher that a Node `spawn` can wrap. The realistic mechanisms — **AppContainer** (capability-based, the gold standard since Win8), a **restricted/lowbox token**, Job Objects (resource limits only — *no* filesystem confinement on their own), Low Integrity Level — all require native Win32 calls (`CreateProcessAsUser` / `CreateAppContainerProfile` / `UpdateProcThreadAttribute`). So confinement needs a small **native helper binary** bundled with the app.
+- **The helper fits the existing external-launcher architecture exactly.** `sandbox.ts` already wraps the command with an out-of-process confiner on every platform (macOS→`sandbox-exec`, Linux→`bwrap`). Windows is symmetric: wrap with **`sylor-confine.exe`**. No architectural change — just a third branch.
+- **The native-toolchain cost is already paid.** `@lydell/node-pty` is a native N-API addon already built and bundled by electron-builder (its prebuilds ship in `win-unpacked/resources/…`), so adding one more small native binary to `extraResources` is a known, low-risk pipeline step — not new ground.
+- **A container/WSL fallback is *not* needed as the primary answer** (it was floated in Risks). AppContainer gives per-process filesystem confinement natively, at far lower UX cost than requiring WSL; WSL/container stays a distant backstop only if AppContainer proves insufficient for some command class.
+
+**What landed now (the seam, tested — not the confinement):**
+- `buildWindowsConfineArgv(helperPath, workspaceRoot, mode, command)` — a **pure, unit-tested** argv builder. The inner command is passed **base64** (`--command-b64`) so no PowerShell/`cmd` quoting of it is ever needed (the win32 pty runs `powershell.exe -Command <command>`); round-trip through quotes/newlines is tested.
+- A `win32` branch in `spawnSandboxedCommand` that invokes the helper via a PowerShell call line **iff** the helper binary is present, and otherwise takes the **unchanged** honest fail-safe (classifier + prompts + one-time warning).
+- `sandboxAvailable()` on win32 returns whether the helper is bundled, via an injectable, memoized probe (`windowsConfineHelperPath`, mirroring the `bwrap` probe). **The helper does not exist yet, so this stays `false` today** and Windows behaviour is byte-for-byte what it was — *zero regression*, and no false claim of a sandbox.
+
+**Helper CLI contract (for the native implementation):**
+```
+sylor-confine.exe --workspace <dir> --mode <read-only|workspace-write> --command-b64 <base64>
+```
+It creates/opens a per-app AppContainer profile, grants read broadly + write only under `<dir>` (+ temp) in `workspace-write` (read-only denies write and network), base64-decodes the command, and runs it inside the container — the same read-open / write-confined shape as the Seatbelt profile and the bwrap bind set.
+
+**Still owed before Windows confinement is real (the implementation phase, not this spike):** build `sylor-confine.exe` (a ~single-file native helper) and add it to electron-builder `extraResources`; then the one manual/integration check that stays outstanding on *every* platform — a real `rm`/`del` outside-root escape attempt that the OS actually blocks — becomes runnable on Windows too. Until that binary ships, `sandboxAvailable()` is honest that Windows confinement is prompt-gated, not OS-enforced.
+
+**Seam verification:** `typecheck:node` ✓, `typecheck:web` ✓, `eslint .` ✓ (0 errors), full suite **2041/2041** ✓ (+5: three `buildWindowsConfineArgv` cases + Windows helper-present / memoization availability cases in `sandbox.test.ts`, now 17). No production behaviour changes on any platform today — the seam is dormant until the helper binary exists.
+
 ---
 
 ## Cross-cutting: modules touched (map for Phase 2)
@@ -678,7 +703,7 @@ redundant tool calls, and whether the output passes its own acceptance criteria*
 
 | Risk | Likelihood | Mitigation |
 |------|-----------|------------|
-| Windows OS sandbox (no seccomp/Landlock) is hard to do robustly | High | Spike first; if native Job-Object/AppContainer confinement is insufficient, fall back to WSL/container or to *fail-safe* (commands force-ask + classify + deny-list), stated honestly |
+| Windows OS sandbox (no seccomp/Landlock) is hard to do robustly | High → **resolved (approach)** | **Spike done 2026-09-14:** AppContainer via a bundled native `sylor-confine.exe` helper is the answer (symmetric with the mac/linux launchers; native toolchain already paid by node-pty). Tested integration seam landed; `sandboxAvailable()` stays honest `false` on Windows until the helper binary ships. WSL/container demoted to a distant backstop, not the plan. |
 | Pinning the plan block grows every request | Low | Bounded (~2k), *replaces* prior copy; measured against the context meter |
 | Cross-worktree cache serves stale content | Low | sha-verified: a mismatch simply misses the cache |
 | Backoff/token-bucket interacts with the streaming replay veto | Medium | Keep `canRetry` veto intact; bucket sits *before* the call, veto *after* stream start |
@@ -716,6 +741,9 @@ These are genuine forks I want your call on before Phase 2 (they change the secu
    by default, gated.*
 4. **Windows sandbox depth.** Is a WSL/container fallback acceptable if native
    Job-Object/AppContainer confinement proves insufficient in the Phase 2 spike?
+   *(Spike done 2026-09-14: AppContainer via a bundled `sylor-confine.exe` helper is the
+   plan; WSL/container is only a distant backstop. The seam is wired + tested; building the
+   native helper binary is the remaining implementation step.)*
 
 ---
 
