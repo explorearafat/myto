@@ -5,18 +5,25 @@ import type {
   PermissionMode,
   ToolKind
 } from '../../shared/types'
+import { classifyCommand } from './commandClassifier'
 
-/** Whether a proposal is auto-approved by the mode or must be asked. */
-export type PermissionOutcome = 'auto' | 'ask'
+/** Whether a proposal is auto-approved by the mode, must be asked, or is blocked. */
+export type PermissionOutcome = 'auto' | 'ask' | 'block'
 
 /**
- * The permission matrix. Governs whether a given tool op runs without asking:
+ * The permission matrix (Principle 7). Governs whether a given tool op runs without asking:
  *
  * | mode         | read | write_file | run_command | mcp_call | web_fetch/search |
  * |--------------|------|------------|-------------|----------|------------------|
+ * | `plan`       | auto | block      | block       | block    | block            |
  * | `ask`        | auto | ask        | ask         | ask      | ask              |
  * | `auto-edit`  | auto | auto       | ask         | ask      | ask              |
  * | `autonomous` | auto | auto       | auto        | auto     | auto             |
+ *
+ * `plan` is read-only exploration: mutation is *not permitted* (the "Plan first"
+ * checkpoint generalised into a standing mode). A plan-mode turn can read, search,
+ * and propose, but not write or execute. The mode lifts once the plan is approved
+ * (engine orchestration checkpoint).
  *
  * `read` is auto in every mode — it changes nothing, and gating it would make the
  * agent unusable: understanding a single change can take a dozen file reads, and a
@@ -25,28 +32,38 @@ export type PermissionOutcome = 'auto' | 'ask'
  * the user can see exactly what Sylor consulted.
  *
  * `web_fetch` and `web_search` reach the network, so they are gated exactly like
- * write_file's command siblings: asked in `ask`/`auto-edit`, auto only in
- * hands-free `autonomous`. This is what keeps the offline-first posture honest —
- * nothing leaves the machine without an explicit decision unless the user opted
- * into hands-free. (No kind-specific branch is needed below: anything that isn't
- * `read` or `write_file` follows the same network-egress path.)
+ * write_file's command siblings: blocked in `plan`, asked in `ask`/`auto-edit`, auto
+ * only in hands-free `autonomous`. This is what keeps the offline-first posture
+ * honest — nothing leaves the machine without an explicit decision unless the user
+ * opted into hands-free.
  *
  * `autonomous` is an explicit, opt-in, hands-free posture (requirement D): it
- * auto-approves everything so a build runs without prompts. Even an `auto`
- * outcome still surfaces a (flagged) tool-request + tool-result to the UI, and
- * every write/command stays sandbox-scoped — silent or unsandboxed side effects
- * are never allowed. `ask` and `auto-edit` still never auto-run commands.
+ * auto-approves everything so a build runs without prompts. Even an `auto` outcome
+ * still surfaces a (flagged) tool-request + tool-result to the UI, and every
+ * write/command stays sandbox-scoped — silent or unsandboxed side effects are never
+ * allowed. `plan` and `ask` never auto-run commands.
  *
  * `diagnostics` is gated as a command, not as a read, and that is deliberate: it
- * writes nothing, but it spawns a process from the project's own `node_modules`
- * and an ESLint config/plugin is executable JavaScript. Auto-approving it would
- * mean opening an unfamiliar repo could run that repo's code without a decision.
- * It therefore takes the same default path as `run_command` (no branch needed).
+ * writes nothing, but it spawns a process from the project's own `node_modules` and
+ * an ESLint config/plugin is executable JavaScript. Auto-approving it would mean
+ * opening an unfamiliar repo could run that repo's code without a decision. It
+ * therefore takes the same default path as `run_command` (no branch needed).
+ */
+/**
+ * Decides whether a tool proposal is auto-approved, requires user approval, or is
+ * blocked. For `run_command` and `diagnostics`, uses command classification
+ * (Principle 7 #2) to apply granular gating: read-only commands are auto in more
+ * modes; destructive commands always ask.
+ *
+ * @param commandLine - The full command string (only for `run_command`/`diagnostics` kinds)
+ * @param workspaceRoot - The workspace root for path-based classification
  */
 export function decideAuto(
   mode: PermissionMode,
   kind: ToolKind,
-  fullAccess = false
+  fullAccess = false,
+  commandLine?: string,
+  workspaceRoot?: string
 ): PermissionOutcome {
   // Looking is never a side effect — no mode asks about it. `preview_inspect`
   // rides here too: it only observes/drives the user's OWN local preview (no
@@ -55,11 +72,46 @@ export function decideAuto(
   // real risk — typing into a credential field — is refused in the executor, not
   // by asking. Every action is still shown as a tool card.
   if (kind === 'read' || kind === 'preview_inspect') return 'auto'
+
+  // Command classification (Principle 7 #2): for run_command (and diagnostics, when a
+  // command line is available), classify the command line and gate by risk class ×
+  // mode. Done BEFORE the plan-mode block so read-only observation (`ls`, `git log`,
+  // `grep`) is allowed while planning — exploration is exactly what Plan mode is for —
+  // while mutating/destructive commands are still blocked.
+  if ((kind === 'run_command' || kind === 'diagnostics') && commandLine && workspaceRoot) {
+    const cmdClass = classifyCommand(commandLine, workspaceRoot)
+
+    // Destructive commands always ask, even under fullAccess or autonomous — mirroring
+    // the browse delete-always-asks rule. In Plan mode they are refused outright.
+    if (cmdClass === 'destructive') return mode === 'plan' ? 'block' : 'ask'
+
+    // Read-only commands observe without changing anything, so they ride the read
+    // path: auto while planning, auto hands-free / full-access, else ask (running a
+    // command still spawns a process, so the milder modes surface it once).
+    if (cmdClass === 'read-only') {
+      if (mode === 'plan') return 'auto'
+      return mode === 'autonomous' || fullAccess ? 'auto' : 'ask'
+    }
+
+    // Mutating commands change state: blocked in Plan mode, else fall through to the
+    // normal mode-based gating below.
+    if (mode === 'plan') return 'block'
+  }
+
+  // Plan mode (Principle 7 #1): read-only exploration. Every remaining mutation —
+  // writes, mcp calls, network, and any command not classified read-only above — is
+  // *not permitted*. This is the "Plan first" checkpoint generalised into a standing
+  // mode; it lifts when the user switches modes. fullAccess does NOT override it:
+  // confinement to read-only is the whole point of the mode the user chose.
+  if (mode === 'plan') return 'block'
+
   // Full-PC access (opt-in): every side effect on the user's own machine —
   // write, command, mcp, web — is auto-approved regardless of mode. It is still
   // surfaced as a (flagged) tool card, exactly like `autonomous`; the only thing
   // waived is the prompt. Browse keeps its own gate (see `decideBrowse`), so this
-  // never touches payment/send/delete.
+  // never touches payment/send/delete. Principle 7: fullAccess waives prompts but
+  // NOT confinement — the sandbox is still enforced. Destructive commands are
+  // already gated above, so this never auto-approves rm -rf.
   if (fullAccess) return 'auto'
   switch (mode) {
     case 'autonomous':

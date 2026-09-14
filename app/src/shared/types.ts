@@ -12,7 +12,7 @@ export type EnvStatus = 'local' | 'remote'
  *    Sylor never acts invisibly.
  * Enforced by the workflow engine's permission matrix (see `decideAuto`).
  */
-export type PermissionMode = 'ask' | 'auto-edit' | 'autonomous'
+export type PermissionMode = 'plan' | 'ask' | 'auto-edit' | 'autonomous'
 
 /**
  * Top-level working mode, chosen in the composer (Claude-Code-style):
@@ -1212,6 +1212,30 @@ export interface Finding {
   detail: string
   /** Files this finding touched or refers to (optional). */
   files?: string[]
+  /**
+   * Concrete code excerpts the producing agent actually read, handed to
+   * downstream agents so they build on the exact text instead of re-reading it
+   * (Principle 3 — no rediscovery). Bounded and optional; absent for agents that
+   * read nothing (e.g. a pure builder).
+   */
+  evidence?: Evidence[]
+}
+
+/**
+ * A bounded, concrete excerpt one agent read — passed across the handoff so a
+ * downstream agent builds on it rather than re-issuing the same `read_file`. The
+ * `sha` lets a consumer trust the excerpt is the file's current content; the
+ * `range` anchors it to real lines so the reader can cite it without re-reading.
+ */
+export interface Evidence {
+  /** Project-relative path, as the reader referred to it. */
+  path: string
+  /** 1-based inclusive line range the excerpt covers, when known. */
+  range?: [number, number]
+  /** Short content hash of what the reader saw — the freshness anchor. */
+  sha: string
+  /** The bounded excerpt itself. */
+  excerpt: string
 }
 
 /** The kinds of typed agent-to-agent / agent-to-orchestrator control signals. */

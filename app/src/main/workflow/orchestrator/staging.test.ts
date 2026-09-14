@@ -141,6 +141,39 @@ describe('resolvePhase', () => {
     expect(phase.spec.n).toBe(3)
     expect(phase.spec.name).toBe('Verification')
   })
+
+  // Principle 1 — an explicit smaller scope this turn shrinks the roadmap tier,
+  // shrink-only and never below medium (see phaseCeilingComplexity).
+  it('shrinks a fresh complex route to a medium roadmap when told to keep it minimal', () => {
+    const { port } = fakeMemory()
+    const phase = resolvePhase(port.readState(), 'complex', { minimal: true })
+    expect(phase.total).toBe(5)
+    expect(phase.complexity).toBe('medium')
+  })
+
+  it('shrinks a fresh complex route on an explicit small step budget', () => {
+    const { port } = fakeMemory()
+    expect(resolvePhase(port.readState(), 'complex', { maxSteps: 5 }).complexity).toBe('medium')
+    expect(resolvePhase(port.readState(), 'complex', { maxPhases: 2 }).complexity).toBe('medium')
+  })
+
+  it('does not renumber a build already past its first phase', () => {
+    // The user says "keep it minimal" on a nine-phase build midway through: the tier
+    // is not lowered underneath them (that would relabel the phases they're following);
+    // the scope is still honoured at the task level and quoted into the plan.
+    const { port } = fakeMemory({}, { phase: 4, complexity: 'complex', fresh: false })
+    const phase = resolvePhase(port.readState(), 'complex', { minimal: true })
+    expect(phase.total).toBe(9)
+    expect(phase.complexity).toBe('complex')
+    expect(phase.spec.n).toBe(4)
+  })
+
+  it('never inflates a simple route — a minimal scope leaves single-node work alone', () => {
+    const { port } = fakeMemory()
+    const phase = resolvePhase(port.readState(), 'simple', { minimal: true })
+    expect(phase.complexity).toBe('simple')
+    expect(phase.total).toBe(3)
+  })
 })
 
 // ── AUDIT ────────────────────────────────────────────────────────────────────
@@ -546,6 +579,27 @@ describe('authorPhasePlan', () => {
     expect(system.content).not.toContain('"performance"')
     expect(user.content).toContain('Phase 1 of 5 — Foundation')
     expect(user.content).toContain('- t1 (builder): do t1')
+  })
+
+  it('threads an explicit user scope into the plan and the architect brief', async () => {
+    const scribe = fakeScribe('{}')
+    const out = await authorPhasePlan({
+      ...args,
+      phase: ctx('complex', 2),
+      constraints: { minimal: true, maxSteps: 3, verbatim: 'keep it minimal; in at most 3 steps' },
+      scribe: scribe.fn
+    })
+    // The plan visibly binds to the user's words…
+    const section = out.split('## Constraints\n\n')[1].split('\n##')[0]
+    expect(section).toContain('**Explicit user scope:**')
+    expect(section).toContain('keep it minimal')
+    // …the ceremonial sections are gone (minimal wins over the complex tier)…
+    expect(out).not.toContain('## Architecture strategy')
+    expect(out).not.toContain('## Risks')
+    // …and the architect is briefed with the lean set, and the scope, only.
+    const system = scribe.calls[0][0].content
+    expect(system).not.toContain('"archStrategy"')
+    expect(scribe.calls[0][1].content).toContain('## Explicit scope (honour exactly)')
   })
 
   it('falls back to the skeleton when the answer is not usable JSON', async () => {

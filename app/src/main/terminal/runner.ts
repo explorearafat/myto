@@ -1,6 +1,8 @@
 import type { IPty } from '@lydell/node-pty'
 import { stripAnsi } from '../../shared/ansi'
 import { ptyAvailable, ptyLoadError, spawnCommandPty } from './pty'
+import { spawnSandboxedCommand } from './sandbox'
+import type { PermissionMode } from '../../shared/types'
 
 /** Cap on captured output fed back to the model / UI (keeps things token-light). */
 const MAX_OUTPUT = 32_000
@@ -39,6 +41,16 @@ export interface RunCommandOptions {
    * caller `signal`, so either an abort or a timeout stops the command.
    */
   timeoutMs?: number
+  /**
+   * Run the command inside the OS-level sandbox (Principle 7 #3), confined to
+   * `workspaceRoot` with confinement derived from `mode` (plan → read-only, else
+   * workspace-write). Only the agent's own `run_command` passes this — hooks and the
+   * preview-install path deliberately run unconfined (they are the user's own
+   * plumbing and legitimately reach outside the workspace / the network). Where the
+   * OS can't enforce it (Windows, today) this degrades to an ordinary spawn; the
+   * command classifier + approval prompts are the fail-safe.
+   */
+  sandbox?: { workspaceRoot: string; mode: PermissionMode }
 }
 
 /**
@@ -82,7 +94,16 @@ export function runCommand(
 
     let term: IPty
     try {
-      term = spawnCommandPty(command, undefined, undefined, options?.env)
+      term = options?.sandbox
+        ? spawnSandboxedCommand(
+            command,
+            options.sandbox.workspaceRoot,
+            options.sandbox.mode,
+            undefined,
+            undefined,
+            options?.env
+          )
+        : spawnCommandPty(command, undefined, undefined, options?.env)
     } catch (err) {
       if (timer) clearTimeout(timer)
       const message = err instanceof Error ? err.message : String(err)

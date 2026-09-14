@@ -49,6 +49,18 @@ export interface PlanOptions {
   /** Cancels the planner completion when the run is stopped. */
   signal?: AbortSignal
   /**
+   * A hard ceiling on the number of tasks, from an explicit user scope ("in at
+   * most 5 steps"). Clamped into `[1, MAX_TASKS]`; absent → the default ceiling.
+   */
+  maxTasks?: number
+  /**
+   * The user's explicit scope rendered as an imperative line (see
+   * `describeConstraints`), injected into the planner prompt so a numeric or
+   * "keep it minimal" budget is honoured while the graph is authored. Empty
+   * string / undefined → no scope stated.
+   */
+  constraintsNote?: string
+  /**
    * Reports that planning fell back to the one-node plan, and why. The fallback
    * is a real loss of fidelity — a multi-domain request becomes a single
    * generalist node — so it must not happen invisibly.
@@ -81,20 +93,33 @@ export async function buildPlan(
     return finish(complexity, [singleNode(request)], false, opts)
   }
 
+  const cap = clampCap(opts.maxTasks)
   const raw = await requestPlan(
     request,
     complexity,
     settings,
+    cap,
     opts.overview,
     opts.signal,
-    opts.onDegraded
+    opts.onDegraded,
+    opts.constraintsNote
   )
   // A provider/parse failure yields no tasks → single-node fallback.
-  const tasks = raw ? normalizeTasks(raw) : []
+  const tasks = raw ? normalizeTasks(raw, cap) : []
   if (tasks.length === 0) {
     return finish(complexity, [singleNode(request)], true, opts)
   }
   return finish(complexity, tasks, true, opts)
+}
+
+/**
+ * Clamps a requested task ceiling into `[1, MAX_TASKS]`. An explicit user scope
+ * can only *lower* the ceiling, never raise it above the runaway-model guard; a
+ * missing or non-finite value leaves the default in place.
+ */
+function clampCap(maxTasks?: number): number {
+  if (maxTasks === undefined || !Number.isFinite(maxTasks)) return MAX_TASKS
+  return Math.max(1, Math.min(MAX_TASKS, Math.floor(maxTasks)))
 }
 
 /** Renders + persists the plan and packages the result. */
@@ -129,9 +154,11 @@ async function requestPlan(
   request: string,
   complexity: Complexity,
   settings: ProviderSettings,
+  cap: number,
   overview?: string,
   signal?: AbortSignal,
-  onDegraded?: (reason: string) => void
+  onDegraded?: (reason: string) => void,
+  constraintsNote?: string
 ): Promise<RawTask[] | null> {
   const provider = providerFromSettings(settings)
 
@@ -152,14 +179,21 @@ async function requestPlan(
     'a domain specialist (frontend, backend, database, security, devops, docs, …) ONLY when the ' +
     'work genuinely spans that domain. Do NOT add a review or verify task — a mandatory reviewer ' +
     'gate already runs automatically after the plan.\n' +
-    `Prefer the fewest tasks that cover the work; at most ${MAX_TASKS}. Do not invent work the user did not ask for. ` +
+    `Prefer the fewest tasks that cover the work; at most ${cap}. Do not invent work the user did not ask for. ` +
     `This request was routed as ${complexity.toUpperCase()} complexity — size the plan accordingly ` +
     '(a medium request is the core loop, ~2–4 tasks; a complex one may fan out across several ' +
     'domain specialists before converging).'
 
+  // An explicit user scope ("in at most 5 steps", "keep it minimal") is a hard
+  // budget, not a hint — restate it after the sizing guidance so it wins, and
+  // re-pin the numeric ceiling in the model's own terms.
+  const scoped = constraintsNote?.trim()
+    ? `${system}\n\nHARD CONSTRAINTS — the user stated explicit scope; obey it exactly and do not exceed it:\n${constraintsNote.trim()}\nProduce no more than ${cap} tasks in total.`
+    : system
+
   const user = overview ? `${request}\n\n## Project context\n${overview}` : request
   const messages: ChatMessage[] = [
-    { role: 'system', content: system },
+    { role: 'system', content: scoped },
     { role: 'user', content: user }
   ]
 
@@ -205,13 +239,14 @@ function extractJson(raw: string): string | null {
  * `builder`, keeps only `dependsOn` references that resolve (and never self),
  * caps the count, serializes overlapping writers, and finally validates the
  * whole graph (cycles/dups). Returns `[]` — signalling the single-node fallback
- * — if nothing survives or the graph is invalid.
+ * — if nothing survives or the graph is invalid. `cap` is the honoured task
+ * ceiling (default {@link MAX_TASKS}, lowered by an explicit user scope).
  */
-function normalizeTasks(raw: RawTask[]): TaskNode[] {
+function normalizeTasks(raw: RawTask[], cap: number): TaskNode[] {
   const seen = new Set<string>()
   // Build nodes first (ids finalized), remembering each one's raw deps.
   const built: { node: TaskNode; rawDeps: string[] }[] = []
-  for (let i = 0; i < raw.length && built.length < MAX_TASKS; i++) {
+  for (let i = 0; i < raw.length && built.length < cap; i++) {
     const t = raw[i]
     if (!t || typeof t.description !== 'string' || !t.description.trim()) continue
 

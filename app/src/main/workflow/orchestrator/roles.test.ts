@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_REPORT_WORDS,
   allRoles,
+  effortForRole,
   getRole,
   hasRole,
   registerRole,
@@ -153,5 +154,50 @@ describe('reportWordBudget (handoff caps)', () => {
   it('gives the explorer a larger finding detail cap than the tight default', () => {
     expect(getRole('explorer')!.detailChars).toBeGreaterThan(600)
     expect(getRole('editor')!.detailChars).toBeUndefined()
+  })
+})
+
+describe('effortForRole (Principle 5 — role reasoning bands)', () => {
+  it('bands only the mechanical and the deep roles; the rest run at base', () => {
+    expect(getRole('reviewer')!.defaultEffort).toBe('low')
+    expect(getRole('test-runner')!.defaultEffort).toBe('low')
+    expect(getRole('project-analyst')!.defaultEffort).toBe('high')
+    // The everyday builder and the directive-less lead carry no band.
+    expect(getRole('builder')!.defaultEffort).toBeUndefined()
+    expect(getRole('lead')!.defaultEffort).toBeUndefined()
+  })
+
+  it('caps a cheap role at its band, never raising it (reviewer/test-runner → low)', () => {
+    // Even when the turn was forced to max, a review/test step stays low.
+    expect(effortForRole('max', 'reviewer')).toBe('low')
+    expect(effortForRole('high', 'reviewer')).toBe('low')
+    expect(effortForRole('medium', 'test-runner')).toBe('low')
+    // Base already at/below the cap → unchanged (the cap never raises).
+    expect(effortForRole('low', 'reviewer')).toBe('low')
+  })
+
+  it('floors a deep role at its band, never lowering it (analyst → ≥ high)', () => {
+    expect(effortForRole('low', 'project-analyst')).toBe('high')
+    expect(effortForRole('medium', 'project-analyst')).toBe('high')
+    // Base already above the floor → unchanged (the floor never lowers).
+    expect(effortForRole('max', 'project-analyst')).toBe('max')
+  })
+
+  it('runs an un-banded role at exactly the base tier', () => {
+    for (const base of ['low', 'medium', 'high', 'max'] as const) {
+      expect(effortForRole(base, 'builder')).toBe(base)
+      expect(effortForRole(base, 'lead')).toBe(base)
+    }
+  })
+
+  it('preserves the invariant: a complex turn can still reach max for its hard steps', () => {
+    // A complex turn's base is `max`; an un-banded specialist keeps it.
+    expect(effortForRole('max', 'frontend')).toBe('max')
+    expect(effortForRole('max', 'backend')).toBe('max')
+    expect(effortForRole('max', 'builder')).toBe('max')
+  })
+
+  it('runs an unknown role (builder fallback, no band) at the base tier', () => {
+    expect(effortForRole('high', 'does-not-exist')).toBe('high')
   })
 })

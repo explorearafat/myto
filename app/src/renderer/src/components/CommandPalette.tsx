@@ -107,6 +107,7 @@ function capGroups(actions: Action[]): Action[] {
 }
 
 const MODE_LABEL: Record<PermissionMode, string> = {
+  plan: 'Plan mode — read-only, explore and propose a plan',
   ask: 'Ask before every edit and command',
   'auto-edit': 'Auto-apply edits, ask before commands',
   autonomous: 'Hands-free — auto-run edits, commands and tools'

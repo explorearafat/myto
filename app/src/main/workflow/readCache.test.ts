@@ -4,13 +4,17 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { contextManager } from '@main/context/manager'
 import {
+  EVIDENCE_EXCERPT_MAX,
   hasCompleteRead,
   readCacheKey,
+  readEvidence,
+  recordEvidence,
   servedFromReadCache,
   updateReadCache
 } from '@main/workflow/readCache'
 import type { ReadCacheEntry } from '@main/workflow/readCache'
 import type {
+  Evidence,
   ReadProposal,
   ReadResult,
   RunCommandProposal,
@@ -230,5 +234,108 @@ describe('hasCompleteRead', () => {
     writeFileSync(join(root, 'm.ts'), 'x\n'.repeat(20))
     updateReadCache(cache, readProp('m.ts', 5, 5), readOk('m.ts'))
     expect(hasCompleteRead(cache, 'm.ts')).toBe(false)
+  })
+})
+
+/**
+ * Evidence capture (Principle 3): turning a real read into the bounded record a
+ * downstream agent inherits so it builds on the exact text instead of re-reading.
+ * Pure over (proposal, result) — no disk or contextManager needed.
+ */
+function readBody(path: string, output: string, offset?: number): ReadResult {
+  return { id: readProp(path, offset).id, kind: 'read', ok: true, output, truncated: false, summary: '' }
+}
+
+describe('readEvidence', () => {
+  it('anchors a whole-file read at line 1 and spans every line it saw', () => {
+    const ev = readEvidence(readProp('a.ts'), readBody('a.ts', 'one\ntwo\nthree'))
+    expect(ev).not.toBeNull()
+    expect(ev?.path).toBe('a.ts')
+    expect(ev?.range).toEqual([1, 3])
+    expect(ev?.excerpt).toBe('one\ntwo\nthree')
+  })
+
+  it('anchors a windowed read at its offset', () => {
+    const ev = readEvidence(readProp('a.ts', 40, 10), readBody('a.ts', 'x\ny\nz', 40))
+    expect(ev?.range).toEqual([40, 42])
+  })
+
+  it('gives identical content the same sha and different content a different one', () => {
+    const a = readEvidence(readProp('a.ts'), readBody('a.ts', 'same body'))
+    const b = readEvidence(readProp('b.ts'), readBody('b.ts', 'same body'))
+    const c = readEvidence(readProp('c.ts'), readBody('c.ts', 'other body'))
+    expect(a?.sha).toBe(b?.sha)
+    expect(a?.sha).not.toBe(c?.sha)
+  })
+
+  it('clamps the excerpt to EVIDENCE_EXCERPT_MAX but keeps the full seen span', () => {
+    const body = 'L\n'.repeat(2_000) // ~4 000 chars, 2 000 lines
+    const ev = readEvidence(readProp('big.ts'), readBody('big.ts', body))
+    expect(ev?.excerpt.length).toBeLessThanOrEqual(EVIDENCE_EXCERPT_MAX + 1) // +1 for the ellipsis
+    expect(ev?.excerpt.endsWith('…')).toBe(true)
+    // The range still reflects every line the reader saw, before the excerpt was cut.
+    expect(ev?.range).toEqual([1, 2_001])
+  })
+
+  it('returns null for anything that is not a usable text read', () => {
+    // a non-read op
+    expect(readEvidence(writeProp('a.ts', 'x'), writeOk('a.ts'))).toBeNull()
+    // a listing that rode the read rails
+    const listing = readProp('.')
+    listing.op = 'list_files'
+    expect(readEvidence(listing, readBody('.', 'a.ts\nb.ts'))).toBeNull()
+    // a failed read
+    expect(
+      readEvidence(readProp('a.ts'), {
+        id: 'x',
+        kind: 'read',
+        ok: false,
+        output: '',
+        truncated: false,
+        summary: '',
+        error: 'nope'
+      })
+    ).toBeNull()
+    // a media (image) read
+    expect(
+      readEvidence(readProp('pic.png'), {
+        id: 'x',
+        kind: 'read',
+        ok: true,
+        output: '(image)',
+        truncated: false,
+        summary: 'image',
+        media: { kind: 'image', mediaType: 'image/png', dataBase64: 'AAAA' }
+      })
+    ).toBeNull()
+    // an empty / whitespace-only file
+    expect(readEvidence(readProp('empty.ts'), readBody('empty.ts', '   \n  '))).toBeNull()
+  })
+})
+
+describe('recordEvidence', () => {
+  const mk = (path: string, range: [number, number], sha: string): Evidence => ({
+    path,
+    range,
+    sha,
+    excerpt: `${path}@${sha}`
+  })
+
+  it('keeps one record per path+range, newest wins', () => {
+    const ledger: Evidence[] = []
+    recordEvidence(ledger, mk('a.ts', [1, 10], 'aaa'))
+    recordEvidence(ledger, mk('a.ts', [1, 10], 'bbb')) // same span, re-read
+    recordEvidence(ledger, mk('a.ts', [20, 30], 'ccc')) // different span, kept
+    expect(ledger).toHaveLength(2)
+    expect(ledger[0].sha).toBe('bbb')
+    expect(ledger[0].excerpt).toBe('a.ts@bbb')
+  })
+
+  it('caps the ledger, dropping the oldest first', () => {
+    const ledger: Evidence[] = []
+    for (let i = 1; i <= 20; i++) recordEvidence(ledger, mk('f.ts', [i, i], `s${i}`))
+    expect(ledger).toHaveLength(16) // MAX_EVIDENCE_PER_NODE
+    expect(ledger[0].range).toEqual([5, 5]) // 1..4 dropped as oldest
+    expect(ledger[ledger.length - 1].range).toEqual([20, 20])
   })
 })

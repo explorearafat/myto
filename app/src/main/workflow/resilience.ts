@@ -43,35 +43,58 @@
  */
 
 /**
- * Minimum gap between two outbound model requests. Deliberately modest: enough
- * to keep a burst of parallel specialists from hitting a per-second quota, small
- * enough that a normal think → act → think loop doesn't feel throttled.
+ * Token-bucket rate limit for outbound model requests (Principle 6 #3). Specified
+ * as an approximate requests-per-minute budget; the bucket refills at this rate
+ * and each request consumes one token. A burst of parallel specialists (up to 3)
+ * can fire immediately if tokens are available; when empty, callers queue and
+ * trickle as tokens refill. Conservative default (30/min = one every 2s) keeps a
+ * sustained workload under typical quotas without pre-emptive waits.
  */
-export const MIN_REQUEST_GAP_MS = 1_200
+export const DEFAULT_REQUESTS_PER_MINUTE = 30
 
 /**
- * The gap actually enforced by {@link pace}. Defaults to {@link MIN_REQUEST_GAP_MS}
- * in production, but starts at 0 under Vitest (which sets `process.env.VITEST`):
- * the suite fires many provider calls back-to-back under the default 5s per-test
- * timeout, and real 1.2s gaps would turn that into timeouts. Retry/backoff logic
- * is unaffected — only the inter-request spacing is zeroed. {@link __setRequestGap}
- * lets a test opt back into real pacing to exercise it directly.
+ * The bucket's capacity (max tokens). Set to the per-minute budget so a cold
+ * start can fire {@link DEFAULT_REQUESTS_PER_MINUTE} requests immediately, then
+ * the refill rate takes over. Prevents a long idle from banking tokens that would
+ * let a burst exceed the stated rate.
  */
-let requestGapMs = typeof process !== 'undefined' && process.env?.VITEST ? 0 : MIN_REQUEST_GAP_MS
+const BUCKET_CAPACITY = DEFAULT_REQUESTS_PER_MINUTE
 
-/** Test seam: override the inter-request gap (0 disables pacing entirely). */
-export function __setRequestGap(ms: number): void {
-  requestGapMs = ms
+/**
+ * Current pacing budget (requests per minute). Defaults to
+ * {@link DEFAULT_REQUESTS_PER_MINUTE} in production, but starts at Infinity under
+ * Vitest (which sets `process.env.VITEST`): the suite fires many provider calls
+ * back-to-back under the default 5s per-test timeout, and real rate-limiting
+ * would turn that into timeouts. Retry/backoff logic is unaffected — only the
+ * bucket is disabled. {@link __setRequestsPerMinute} lets a test opt back into
+ * real pacing to exercise it directly.
+ */
+let requestsPerMinute =
+  typeof process !== 'undefined' && process.env?.VITEST ? Infinity : DEFAULT_REQUESTS_PER_MINUTE
+
+/** Test seam: override the pacing budget (Infinity disables pacing entirely). */
+export function __setRequestsPerMinute(rpm: number): void {
+  requestsPerMinute = rpm
+  // Reset the bucket so the new rate takes effect immediately.
+  bucketTokens = Math.min(BUCKET_CAPACITY, rpm)
+  lastRefillAt = Date.now()
 }
 
 /** How many times a *transient* (rejected) model request is re-attempted. */
 export const MAX_RETRY_ATTEMPTS = 10
 
 /**
- * Wait between retry attempts. One minute is long enough for a per-minute token
- * or request quota to roll over, which is the failure this exists for.
+ * Base delay for exponential backoff (Principle 6). First retry waits ~1s (with
+ * jitter), second ~2s, third ~4s, etc., capped at {@link RETRY_DELAY_CAP_MS}.
+ * Full jitter breaks lockstep and makes early attempts fast.
  */
-export const RETRY_DELAY_MS = 60_000
+export const RETRY_DELAY_BASE_MS = 1_000
+
+/**
+ * Cap for exponential backoff. One minute is long enough for a per-minute quota
+ * to roll over; longer waits buy nothing and only delay the eventual failure.
+ */
+export const RETRY_DELAY_CAP_MS = 60_000
 
 /**
  * How many times a *timed-out* request is attempted in total. Two, not ten: the
@@ -87,15 +110,19 @@ export const MAX_TIMEOUT_RETRY_ATTEMPTS = 2
  */
 export const TIMEOUT_RETRY_DELAY_MS = 2_000
 
-/** Timestamp (ms) the last outbound request was released by {@link pace}. */
-let lastRequestAt = 0
+/** Current tokens in the bucket. Refilled at {@link requestsPerMinute}, consumed by {@link pace}. */
+let bucketTokens = BUCKET_CAPACITY
 
-/** Serializes {@link pace} callers so the gap is enforced across concurrent agents. */
+/** Timestamp (ms) the bucket was last refilled. */
+let lastRefillAt = Date.now()
+
+/** Serializes {@link pace} callers so requests stay ordered and the bucket is drained fairly. */
 let paceChain: Promise<void> = Promise.resolve()
 
-/** Test seam: forget the pacing history so a suite starts from a clean gate. */
+/** Test seam: forget the pacing state so a suite starts from a clean bucket. */
 export function __resetPacing(): void {
-  lastRequestAt = 0
+  bucketTokens = BUCKET_CAPACITY
+  lastRefillAt = Date.now()
   paceChain = Promise.resolve()
 }
 
@@ -124,15 +151,38 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Waits until it is this caller's turn to issue a request AND at least
- * {@link MIN_REQUEST_GAP_MS} has passed since the previous one was released.
- * Callers are served in arrival order.
+ * Token-bucket rate limiter (Principle 6 #3). Waits until a token is available,
+ * then consumes one and releases the caller to issue their request. Callers are
+ * served in arrival order; the bucket refills at {@link requestsPerMinute} so
+ * sustained load is shaped *before* a 429 happens. Independent jitter in
+ * {@link withRetry} breaks lockstep across the 3 parallel lanes (Principle 6 #4).
  */
 export function pace(signal?: AbortSignal): Promise<void> {
   const turn = paceChain.then(async () => {
-    const wait = lastRequestAt + requestGapMs - Date.now()
-    if (wait > 0) await sleep(wait, signal)
-    lastRequestAt = Date.now()
+    // Refill tokens based on time elapsed since the last refill.
+    const now = Date.now()
+    const elapsed = now - lastRefillAt
+    if (elapsed > 0 && requestsPerMinute < Infinity) {
+      const refill = (elapsed / 60_000) * requestsPerMinute
+      bucketTokens = Math.min(BUCKET_CAPACITY, bucketTokens + refill)
+      lastRefillAt = now
+    }
+
+    // Wait until a token is available. When the bucket is empty, the wait is
+    // `60000 / requestsPerMinute` ms (the refill period for one token).
+    while (bucketTokens < 1 && requestsPerMinute < Infinity) {
+      const waitMs = (60_000 / requestsPerMinute) * (1 - bucketTokens)
+      await sleep(waitMs, signal)
+      // Refill again after the wait (time has passed).
+      const now = Date.now()
+      const elapsed = now - lastRefillAt
+      const refill = (elapsed / 60_000) * requestsPerMinute
+      bucketTokens = Math.min(BUCKET_CAPACITY, bucketTokens + refill)
+      lastRefillAt = now
+    }
+
+    // Consume one token and release the caller.
+    bucketTokens = Math.max(0, bucketTokens - 1)
   })
   // The chain must survive a rejected turn (an aborted wait), or every later
   // caller would inherit that rejection and never get a slot.
@@ -227,8 +277,10 @@ export interface RetryOptions {
   canRetry?: () => boolean
   /** Override the transient attempt budget (tests). */
   attempts?: number
-  /** Override the transient inter-attempt wait (tests). */
-  delayMs?: number
+  /** Override the transient backoff base (tests). Defaults to {@link RETRY_DELAY_BASE_MS}. */
+  delayBaseMs?: number
+  /** Override the transient backoff cap (tests). Defaults to {@link RETRY_DELAY_CAP_MS}. */
+  delayCapMs?: number
   /** Override the timeout attempt budget (tests). */
   timeoutAttempts?: number
   /** Override the timeout inter-attempt wait (tests). */
@@ -240,6 +292,10 @@ export interface RetryOptions {
  * the budget for that failure kind is exhausted / the failure is permanent / a
  * retry was vetoed — so the caller's existing error handling still reports
  * something accurate.
+ *
+ * Principle 6: exponential backoff with full jitter (base 1s → 2 → 4 → 8 … cap
+ * 60s, then `random(0, computed)`), honour `Retry-After`, and independent jitter
+ * per call (breaking lockstep for the 3 parallel lanes).
  */
 export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions = {}): Promise<T> {
   const {
@@ -247,7 +303,8 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
     onRetry,
     canRetry,
     attempts = MAX_RETRY_ATTEMPTS,
-    delayMs = RETRY_DELAY_MS,
+    delayBaseMs = RETRY_DELAY_BASE_MS,
+    delayCapMs = RETRY_DELAY_CAP_MS,
     timeoutAttempts = MAX_TIMEOUT_RETRY_ATTEMPTS,
     timeoutDelayMs = TIMEOUT_RETRY_DELAY_MS
   } = options
@@ -266,8 +323,25 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
       // unchanged request against the same clock is not a strategy.
       const isTimeout = kind === 'timeout'
       const max = isTimeout ? Math.min(attempts, Math.max(1, timeoutAttempts)) : attempts
-      const wait = isTimeout ? timeoutDelayMs : delayMs
       if (attempt >= max) throw err
+
+      // Honour `Retry-After` if the server told us when to retry (Principle 6 #2).
+      // Otherwise use exponential backoff with full jitter (Principle 6 #1).
+      const retryAfter = extractRetryAfter(err)
+      let wait: number
+      if (retryAfter !== null) {
+        // Server said when to retry: wait exactly that (capped), no jitter.
+        wait = Math.min(retryAfter, delayCapMs)
+      } else if (isTimeout) {
+        // Timeout: short fixed delay, no backoff (replaying won't help).
+        wait = timeoutDelayMs
+      } else {
+        // Transient: exponential backoff with full jitter. `min(cap, base * 2^(attempt-1))`
+        // then `random(0, computed)`. Attempt 1 → ~500ms avg, 2 → ~1s, 3 → ~2s, etc.
+        const exponential = Math.min(delayCapMs, delayBaseMs * Math.pow(2, attempt - 1))
+        wait = Math.floor(Math.random() * exponential)
+      }
+
       onRetry?.({
         attempt,
         max,
@@ -280,4 +354,15 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
   }
   // Unreachable (the loop either returns or throws), but keeps the type honest.
   throw lastError
+}
+
+/**
+ * Extract `Retry-After` from an error that was thrown at the provider/gateway
+ * boundary. Returns milliseconds to wait, or `null` if no header was found.
+ * Principle 6 #2: the server knows when its quota rolls over; use that.
+ */
+function extractRetryAfter(err: unknown): number | null {
+  // The error carries `retryAfterMs` when the provider layer read the header.
+  const ms = (err as { retryAfterMs?: number } | null)?.retryAfterMs
+  return typeof ms === 'number' && ms > 0 ? ms : null
 }

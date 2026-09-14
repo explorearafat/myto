@@ -8,6 +8,11 @@ import type {
 } from '../../context/projectState'
 import { isAbort } from '../resilience'
 import {
+  describeConstraints,
+  phaseCeilingComplexity,
+  type PlanConstraints
+} from './constraints'
+import {
   authoredSectionIds,
   phaseFor,
   phaseRoadmap,
@@ -107,11 +112,27 @@ export interface PhaseContext {
  * actually asked for: nothing has been delivered against it, so there is no
  * numbering for the user to lose. It can only shrink — a bigger route mid-phase is
  * this turn being ambitious, not the project having grown.
+ *
+ * **Explicit scope shrinks the route first.** When the user states a smaller scope
+ * this turn ("keep it minimal", "in at most 5 steps"), {@link phaseCeilingComplexity}
+ * caps the routed tier before anything else — shrink-only, and never below medium.
+ * It feeds the very same recorded-wins / first-phase-resizable logic, so it can
+ * right-size a fresh or barely-started roadmap without ever renumbering a build
+ * that's already underway; the precise task count is enforced separately by the
+ * planner's cap, and the words are quoted into the plan regardless.
  */
-export function resolvePhase(state: ProjectState, routed: Complexity): PhaseContext {
+export function resolvePhase(
+  state: ProjectState,
+  routed: Complexity,
+  constraints?: PlanConstraints
+): PhaseContext {
+  const ceiling = constraints ? phaseCeilingComplexity(constraints) : undefined
+  const effectiveRouted =
+    ceiling !== undefined && RANK[ceiling] < RANK[routed] ? ceiling : routed
   const recorded = state.complexity
-  const resizable = recorded !== undefined && state.phase <= 1 && RANK[routed] < RANK[recorded]
-  const complexity = resizable ? routed : (recorded ?? routed)
+  const resizable =
+    recorded !== undefined && state.phase <= 1 && RANK[effectiveRouted] < RANK[recorded]
+  const complexity = resizable ? effectiveRouted : (recorded ?? effectiveRouted)
   const road = phaseRoadmap(complexity)
   // `state.phase` is the phase in progress; 0 means none has started yet.
   const spec = state.phase > 0 ? (road[state.phase - 1] ?? road[road.length - 1]) : phaseFor(complexity, 0)
@@ -557,6 +578,8 @@ export async function authorPhasePlan(args: {
   verifyCommands?: readonly string[]
   scribe?: ScribeFn
   signal: AbortSignal
+  /** Explicit user scope for this turn — sizes the section set and is quoted in. */
+  constraints?: PlanConstraints
   /**
    * Reports that the plan came out as the bare skeleton — every judgement section
    * an explicit "to be determined" — and why. A hollow plan reads like a finished
@@ -564,7 +587,10 @@ export async function authorPhasePlan(args: {
    */
   onDegraded?: (reason: string) => void
 }): Promise<string> {
-  const { phase, request, tasks, memoryDigest, verifyCommands, scribe, signal, onDegraded } = args
+  const { phase, request, tasks, memoryDigest, verifyCommands, constraints, scribe, signal, onDegraded } =
+    args
+  const minimal = !!constraints?.minimal
+  const explicitConstraints = constraints ? describeConstraints(constraints) : ''
   const render = (sections?: Partial<Record<PlanSectionId, string>>): string =>
     renderPhasePlan({
       phase: phase.spec,
@@ -573,22 +599,25 @@ export async function authorPhasePlan(args: {
       request,
       tasks,
       sections,
-      verifyCommands
+      verifyCommands,
+      minimal,
+      explicitConstraints
     })
 
   if (!scribe) return render()
 
-  const ids = authoredSectionIds(phase.complexity)
+  const ids = authoredSectionIds(phase.complexity, minimal)
   const system =
     "You are Sylor's TECHNICAL ARCHITECT, writing the plan for ONE phase of a build. The plan " +
     'must be detailed enough that another capable agent could execute this phase without ' +
     'exploring the project first. Be specific: name real files, real components, real states. ' +
     'Never plan work outside this phase.\n\n' +
-    `Reply with ONLY a JSON object whose keys are these section ids:\n${planSectionBrief(phase.complexity)}\n\n` +
+    `Reply with ONLY a JSON object whose keys are these section ids:\n${planSectionBrief(phase.complexity, minimal)}\n\n` +
     'Every value is a markdown string (bullet lists are fine). Omit a key you genuinely have ' +
     'nothing real to say about — an omitted section is marked as undetermined, which is better ' +
     'than an invented one. Under "protect", name working files this phase must not touch.'
   const user =
+    (explicitConstraints ? `## Explicit scope (honour exactly)\n${explicitConstraints}\n\n` : '') +
     `## Request\n${request.trim()}\n\n` +
     `## This phase\nPhase ${phase.spec.n} of ${phase.total} — ${phase.spec.name}\nObjective: ${phase.spec.objective}\n\n` +
     `## Tasks already planned for this phase\n${

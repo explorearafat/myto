@@ -28,7 +28,7 @@ export type ParsedArgs =
   | { kind: 'help' }
   | { kind: 'error'; message: string }
 
-const PERMISSION_MODES: readonly PermissionMode[] = ['ask', 'auto-edit', 'autonomous']
+const PERMISSION_MODES: readonly PermissionMode[] = ['plan', 'ask', 'auto-edit', 'autonomous']
 const WORK_MODES: readonly WorkMode[] = ['cowork', 'code']
 const EFFORTS: readonly ReasoningEffort[] = ['low', 'medium', 'high', 'max']
 
@@ -42,7 +42,7 @@ Usage:
 
 Flags:
   -p, --print <prompt>       The prompt to run (or pass on stdin / as positional)
-      --permission-mode <m>  ask | auto-edit | autonomous  (default: auto-edit)
+      --permission-mode <m>  plan | ask | auto-edit | autonomous  (default: auto-edit)
       --mode <m>             cowork | code                 (default: code)
       --effort <e>           low | medium | high | max      (default: medium)
   -C, --cwd, --root <dir>    Workspace root to operate on  (default: cwd)

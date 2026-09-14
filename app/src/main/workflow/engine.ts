@@ -4,6 +4,7 @@ import type {
   ChatMessage,
   CompletionOptions,
   ContextUsage,
+  Evidence,
   HookEvent,
   IntentKind,
   McpCategory,
@@ -95,7 +96,7 @@ import { ToolStreamParser, parseToolBlock, type ParsedTool } from './toolStream'
 import { ReasoningStripper, stripReasoningTags } from './reasoning'
 import { isAbort, withRetry, type RetryNotice } from './resilience'
 import { writingProgress } from './writingProgress'
-import { resolveRole, roleDirective, roleIds, reportWordBudget } from './orchestrator/roles'
+import { effortForRole, resolveRole, roleDirective, roleIds, reportWordBudget } from './orchestrator/roles'
 import {
   allowsTool,
   scopeMcpTools,
@@ -113,11 +114,14 @@ import {
 } from './orchestrator/orchestrator'
 import type { MemoryPort } from './orchestrator/staging'
 import { classifyComplexity } from './orchestrator/complexity'
+import { effectiveTurnEffort } from './orchestrator/constraints'
 import { createWorktree, finalizeWorktree, type WorktreeHandle } from './worktree'
 import { createCheckpoint } from '../checkpoint/checkpoints'
 import { runHooks, type HookCommandRunner } from './hooks'
 import {
   hasCompleteRead,
+  readEvidence,
+  recordEvidence,
   servedFromReadCache,
   updateReadCache,
   type ReadCacheEntry
@@ -854,6 +858,27 @@ function askDirective(): string {
 }
 
 /**
+ * Plan-mode directive (Principle 7 #1). When the run's permission mode is `plan`, the
+ * turn is read-only exploration: the permission gate blocks every mutation OUTRIGHT, so
+ * without this the model would propose writes/commands that are refused one after
+ * another and thrash. Instead, tell it up front what Plan mode is for — explore, then
+ * present a plan in prose — so it never reaches for a blocked tool. Empty for every
+ * other mode (this is prompt discipline, not a second gate; the gate is `decideAuto`).
+ */
+function planDirective(mode: PermissionMode): string {
+  if (mode !== 'plan') return ''
+  return (
+    '\n\n## Plan mode (read-only)\n' +
+    'This run is in **Plan mode**: you may read files, search, and browse to understand the ' +
+    'task, but you must NOT change anything — file writes, edits, and commands are refused while ' +
+    'this mode is on. Do your investigation, then present a concise, concrete plan in prose ' +
+    '(the files you would touch and what each change does). Do not emit write_file, edit_file, or ' +
+    'run_command blocks — they will be blocked. The user reviews your plan and switches out of ' +
+    'Plan mode when they want you to build it.'
+  )
+}
+
+/**
  * The directive teaching the `flag_followup` block — how to report an out-of-scope
  * issue WITHOUT doing it (Claude-Desktop's `spawn_task`). This closes the gap where
  * an agent has exactly two bad options on spotting an unrelated problem: fix it and
@@ -1420,15 +1445,17 @@ export async function runWorkflow(
 
     // Project creation must not be starved of thinking budget. When the turn is a
     // build the model sized as `complex` — a whole product, or a change across the
-    // codebase — force the `max` tier regardless of the composer setting. That
-    // lifts both levers at once: extended-thinking budget (via effortDirective +
-    // the gateway) and the output cap (via completionOptions → MAX_OUTPUT_TOKENS),
-    // so a whole scaffold reasons hard and generates to completion instead of
-    // being cut short. Smaller turns keep the requested effort so everyday edits
-    // stay fast.
+    // codebase — the effort is forced to the `max` tier regardless of the composer
+    // setting. That lifts both levers at once: extended-thinking budget (via
+    // effortDirective + the gateway) and the output cap (via completionOptions →
+    // MAX_OUTPUT_TOKENS), so a whole scaffold reasons hard and generates to
+    // completion instead of being cut short. Smaller turns keep the requested effort
+    // so everyday edits stay fast. The one exception is an explicit smaller-scope
+    // request ("keep it minimal"): the SAME constraint clamp the orchestrator applies
+    // to the roadmap also lowers the effort here (effectiveTurnEffort), so the tier
+    // and the roadmap are sized from one set of inputs and can never disagree.
     const requestedEffort = effort ?? 'medium'
-    const effectiveEffort: ReasoningEffort =
-      turnComplexity === 'complex' ? 'max' : requestedEffort
+    const effectiveEffort = effectiveTurnEffort(turnComplexity, requestedEffort, lastUser)
 
     const outbound = buildMessages(
       messages,
@@ -1437,7 +1464,8 @@ export async function runWorkflow(
       effectiveEffort,
       intent.kind,
       mcpTools,
-      enabledSkills
+      enabledSkills,
+      permissionMode
     )
 
     // The context meter's opening reading (§Phase 4), taken once the turn's array is
@@ -1527,7 +1555,8 @@ export async function runWorkflow(
       const complete = async (
         msgs: ChatMessage[],
         settled: string,
-        working?: string
+        working?: string,
+        effortOverride?: ReasoningEffort
       ): Promise<string> => {
         const retry = retryReporter(runId, emit)
         const progress = working ? writingProgress({ runId, label: working, emit }) : null
@@ -1537,7 +1566,7 @@ export async function runWorkflow(
               provider.getCompletion(
                 settings.modelId,
                 msgs,
-                completionOptions(effectiveEffort),
+                completionOptions(effortOverride ?? effectiveEffort),
                 controller.signal,
                 progress?.onProgress
               ),
@@ -1604,7 +1633,16 @@ export async function runWorkflow(
                 }
               }
             : {}),
-          judge: (msgs) => complete(msgs, 'Reviewing…', 'Reviewing the work…'),
+          // The review verdict is the reviewer role acting, so it runs at the reviewer
+          // band (low) — the same tier a node-based reviewer gets via effortForRole —
+          // never the turn's forced max. Principle 5, applied to the non-node path.
+          judge: (msgs) =>
+            complete(
+              msgs,
+              'Reviewing…',
+              'Reviewing the work…',
+              effortForRole(effectiveEffort, 'reviewer')
+            ),
           // Staged execution (§12–§27): the run becomes one phase of a roadmap that
           // persists in the project's own agent-memory folder.
           memory: projectMemoryPort(),
@@ -1730,6 +1768,12 @@ interface AgentLoopArgs {
    * so the orchestrator knows exactly what a task node changed.
    */
   filesWritten?: string[]
+  /**
+   * Collector the loop records each read file's excerpt into (path + line-range +
+   * content-sha + bounded text), so a downstream scoped agent inherits the exact
+   * text this node read and builds on it instead of re-reading (Principle 3).
+   */
+  evidence?: Evidence[]
 }
 
 /**
@@ -1953,8 +1997,31 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
   // only the per-step growth after it (see {@link compactHistory}).
   const baseLen = outbound.length
 
+  // The lead's pristine system prompt, captured before the per-step plan anchor is
+  // appended to it. Non-null only for the LEAD on an edit turn (a subagent runs its
+  // own scoped prompt; a non-edit turn has no plan). Each step re-derives
+  // `outbound[0]` as `${leadSystem}\n\n${renderPlanAnchor()}` — outbound[0] is always
+  // in the compaction head, so the live plan is pinned there and can never be folded
+  // away, closing the lead's plan-drift gap (see {@link renderPlanAnchor}).
+  const leadSystem =
+    agentId == null && intentKind === 'edit' && outbound[0]?.role === 'system'
+      ? outbound[0].content
+      : null
+
   for (let step = 0; step < maxSteps; step++) {
     if (signal.aborted) return report
+
+    // Re-anchor the live plan into the lead's pinned system message BEFORE the fold
+    // below, so the authoritative checklist both survives compaction and reflects the
+    // boxes just ticked. Inert (leaves the base prompt untouched) when there is no
+    // plan yet, and skipped entirely for subagents / non-edit turns.
+    if (leadSystem != null) {
+      const anchor = renderPlanAnchor()
+      outbound[0] = {
+        role: 'system',
+        content: anchor ? `${leadSystem}\n\n${anchor}` : leadSystem
+      }
+    }
 
     // Before streaming, fold the old middle of a long history into a short note so
     // it can't overflow the model's context mid-build (§17). The note is written by
@@ -2034,7 +2101,10 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
               }
             },
             stepCtl.signal,
-            completionOptions(args.spawnContext.effort)
+            // Principle 5: each step runs at the tier the ACTING role warrants, not a
+            // flat turn-wide tier. The lead (no band) runs at the turn's base; a
+            // reviewer/test-runner step is capped low; the analyst is floored high.
+            completionOptions(effortForRole(args.spawnContext.effort, args.role))
           )
         },
         {
@@ -2437,7 +2507,8 @@ async function runAgentLoop(args: AgentLoopArgs): Promise<string> {
           agentId,
           capabilities: args.capabilities,
           toolAllowlist: args.toolAllowlist,
-          filesWritten: args.filesWritten
+          filesWritten: args.filesWritten,
+          evidence: args.evidence
         })
 
         if (!result) return report // aborted while awaiting a decision
@@ -2996,12 +3067,13 @@ async function summarizeFoldedWithModel(
  *
  * `opts.context` is the orchestrator's scoped shared-context digest (what this
  * agent's upstream dependencies already established); `opts.filesWritten`
- * collects the paths it actually changed.
+ * collects the paths it actually changed; `opts.evidence` collects the excerpts
+ * it read, so a downstream agent inherits them (Principle 3).
  */
 async function runSubagent(
   spawn: Extract<ParsedTool, { tool: 'spawn_agent' }>,
   parent: AgentLoopArgs,
-  opts: { context?: string; filesWritten?: string[] } = {}
+  opts: { context?: string; filesWritten?: string[]; evidence?: Evidence[] } = {}
 ): Promise<{ report: string; ok: boolean; agentId: string }> {
   const agentId = nextAgentId()
   const { role, task } = spawn
@@ -3058,6 +3130,7 @@ async function runSubagent(
         allowSpawn: false,
         capabilities: resolveRole(role).capabilities,
         filesWritten: opts.filesWritten,
+        evidence: opts.evidence,
         emit: stampEmit(parent.emit, agentId)
       })
     report = worktree ? await contextManager.runWithRoot(worktree.dir, runLoop) : await runLoop()
@@ -3112,7 +3185,9 @@ async function runSubagent(
  *    capability-filtered tools/MCP/skills, and only the slice of shared context
  *    its upstream dependencies produced.
  *
- * Either way, the paths it actually wrote come back in `filesChanged`.
+ * Either way, the paths it actually wrote come back in `filesChanged`, and the
+ * excerpts it read come back in `evidence` for the orchestrator to hand
+ * downstream (Principle 3).
  */
 async function executeNode(
   node: TaskNode,
@@ -3120,23 +3195,25 @@ async function executeNode(
   leadArgs: AgentLoopArgs
 ): Promise<NodeRunResult> {
   const filesWritten: string[] = []
+  const evidence: Evidence[] = []
 
   if (opts.asLead) {
-    const report = await runAgentLoop({ ...leadArgs, filesWritten })
+    const report = await runAgentLoop({ ...leadArgs, filesWritten, evidence })
     return {
       agentId: 'lead',
       report,
       ok: !leadArgs.handle.controller.signal.aborted,
-      filesChanged: filesWritten
+      filesChanged: filesWritten,
+      evidence
     }
   }
 
   const { report, ok, agentId } = await runSubagent(
     { tool: 'spawn_agent', role: node.role, task: nodeBrief(node) },
     leadArgs,
-    { context: opts.context, filesWritten }
+    { context: opts.context, filesWritten, evidence }
   )
-  return { agentId, report, ok, filesChanged: filesWritten }
+  return { agentId, report, ok, filesChanged: filesWritten, evidence }
 }
 
 /** The brief a specialist receives for its node: the task plus any file hints. */
@@ -3341,6 +3418,35 @@ function readPlanMd(): string {
 }
 
 /**
+ * The lead's live plan anchor: the current `plan.md`, framed so the model treats it
+ * as the authoritative checklist that outranks any folded recap of its own. Empty
+ * when there is no plan yet (a non-edit turn, or before the orchestrator has written
+ * one), so the caller adds nothing.
+ *
+ * This is the seam that closes the lead's compaction gap (audit §C/§D). Every
+ * *subagent* already gets the plan pinned into its system prompt (see
+ * {@link buildSubagentSystem}), but the LEAD never did — so a long build that
+ * tripped a mid-run fold drifted onto its own model-written recap and plan fidelity
+ * could slip. {@link runAgentLoop} pins this into the lead's system message (always
+ * in the compaction head) and refreshes it from disk every step, so the plan both
+ * survives folds AND reflects the boxes the model just ticked. Reuses
+ * {@link readPlanMd} (same 8 000-char clamp), so lead, subagents, and the
+ * continue-nudge all read ONE source and can't disagree.
+ */
+function renderPlanAnchor(): string {
+  const plan = readPlanMd()
+  if (!plan) return ''
+  return (
+    '## Current plan & progress (live — re-read every step, survives compaction)\n' +
+    plan +
+    '\n\nThis is the authoritative plan and the source of truth for what is done: trust its ' +
+    '`- [ ]` / `- [x]` boxes over any earlier summary of your own. Keep implementing the next ' +
+    'unchecked item and mark it `- [x]` as you finish; give your final summary only once every ' +
+    'box is checked.'
+  )
+}
+
+/**
  * Assembles a subagent's system prompt: the same base protocol + shell / MCP /
  * skills framing the lead received — but **capability-scoped**, so a role only
  * ever sees the MCP servers and skills its capabilities unlock (a docs writer
@@ -3433,6 +3539,11 @@ interface ExecContext {
   toolAllowlist?: readonly ToolKind[]
   /** Collector for successfully written project-relative paths. */
   filesWritten?: string[]
+  /**
+   * Collector for the excerpts this agent reads (path + range + sha + text), so a
+   * downstream scoped agent inherits the exact text instead of re-reading it.
+   */
+  evidence?: Evidence[]
 }
 
 /**
@@ -3734,10 +3845,11 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
     return failed.result
   }
 
-  // The permission decision. Everything but `browse` keys off the tool kind and the
-  // run's mode. A browse keys off the RISK CLASS the step was classified as, and is
-  // the only tool that can be refused OUTRIGHT instead of merely asked about —
-  // which is exactly why it needs its own gate: `decideAuto` has no `block`.
+  // The permission decision. Everything but `browse` keys off the tool kind, the
+  // run's mode, and — for a command — its classified risk. A browse keys off the RISK
+  // CLASS the step was classified as, against the user's browser policy rather than
+  // the run mode. Both gates can now refuse OUTRIGHT: `decideAuto` blocks mutation in
+  // Plan mode, `decideBrowse` blocks payment (and honours an explicit policy block).
   let outcome: PermissionOutcome
   if (proposal.kind === 'browse') {
     const risk = proposal.risk ?? 'read'
@@ -3762,7 +3874,31 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
     }
     outcome = verdict
   } else {
-    outcome = decideAuto(permissionMode, proposal.kind, fullAccessEnabled())
+    // For a command, hand its text + the workspace root to the classifier so the
+    // gate can be granular (read-only auto in more modes; destructive always asks).
+    // Other kinds pass no command line and take the plain mode-based path.
+    const commandLine = proposal.kind === 'run_command' ? proposal.command : undefined
+    outcome = decideAuto(
+      permissionMode,
+      proposal.kind,
+      fullAccessEnabled(),
+      commandLine,
+      contextManager.getRoot()
+    )
+    // Plan mode (Principle 7 #1) refuses mutation OUTRIGHT — read-only exploration is
+    // a standing posture, not a prompt. Surface the refusal like the browse block so
+    // the user sees what was declined and the model is told, in its own terms, to
+    // finish exploring and propose a plan instead of trying to write.
+    if (outcome === 'block') {
+      emit({ type: 'tool-request', runId, proposal, auto: false })
+      const result = rejectedResult(
+        proposal,
+        'Refused: this run is in Plan mode (read-only). Finish exploring and propose a ' +
+          'plan — switch out of Plan mode to make changes.'
+      )
+      emit({ type: 'tool-result', runId, result })
+      return result
+    }
     // A standing approval granted earlier in this run answers for this op, so a
     // long build stops re-asking about the same class of work. The key is
     // re-derived here rather than trusted from the renderer, so only what
@@ -3921,8 +4057,15 @@ async function executeTool(tool: ExecutableTool, ctx: ExecContext): Promise<Tool
   // end of the file), a write evicts every cached window of that path, and a command
   // clears the cache outright since it could have touched anything. The dedup
   // short-circuit above is the only reader of that state.
-  const result = await applyTool(proposal, onTerminal, signal)
+  const result = await applyTool(proposal, onTerminal, signal, permissionMode)
   updateReadCache(handle.readCache, proposal, result)
+  // Capture the exact excerpt a read surfaced, so a downstream scoped agent inherits
+  // the concrete text this node saw and builds on it instead of re-reading (Principle
+  // 3). Only usable text reads become evidence; `readEvidence` returns null otherwise.
+  if (ctx.evidence) {
+    const ev = readEvidence(proposal, result)
+    if (ev) recordEvidence(ctx.evidence, ev)
+  }
   // Record what actually landed on disk, so the orchestrator can attribute files
   // to the task node that changed them (and decide whether to verify at all).
   if (
@@ -4241,7 +4384,8 @@ function rejectedResult(proposal: ToolProposal, reason = 'Skipped by user'): Too
 async function applyTool(
   proposal: ToolProposal,
   onTerminal: TerminalSink,
-  signal: AbortSignal
+  signal: AbortSignal,
+  permissionMode: PermissionMode
 ): Promise<ToolResult> {
   if (proposal.kind === 'write_file') {
     try {
@@ -4548,7 +4692,15 @@ async function applyTool(
     return { id: proposal.id, kind: 'run_command', exitCode: 1, output: message, truncated: false }
   }
 
-  const { exitCode, output, truncated } = await runCommand(proposal.command, onTerminal, signal)
+  // Run the command inside the OS-level sandbox (Principle 7 #3): confined to the
+  // project root, confinement derived from the run's mode. This is the layer BENEATH
+  // the approval prompt — a wrongly-approved `rm -rf ~` still cannot escape the
+  // workspace where the OS enforces it. On platforms without OS confinement (Windows,
+  // today) it degrades to an ordinary spawn and the classifier + prompt are the
+  // fail-safe (see terminal/sandbox.ts).
+  const { exitCode, output, truncated } = await runCommand(proposal.command, onTerminal, signal, {
+    sandbox: { workspaceRoot: contextManager.getRoot(), mode: permissionMode }
+  })
   return { id: proposal.id, kind: 'run_command', exitCode, output, truncated }
 }
 
@@ -4977,7 +5129,8 @@ function buildMessages(
   effort: ReasoningEffort,
   intentKind: IntentKind,
   mcpTools: McpToolInfo[],
-  skills: SkillInfo[]
+  skills: SkillInfo[],
+  permissionMode: PermissionMode
 ): ChatMessage[] {
   let system =
     SYSTEM_PROMPT +
@@ -4987,6 +5140,7 @@ function buildMessages(
     spawnDirective() +
     todosDirective() +
     askDirective() +
+    planDirective(permissionMode) +
     followupDirective() +
     effortDirective(effort) +
     intentDirective(intentKind)

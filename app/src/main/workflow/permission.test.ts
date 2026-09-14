@@ -9,16 +9,28 @@ import { DEFAULT_BROWSER_PERMISSIONS } from '@shared/defaults'
 import { decideAuto, decideBrowse } from '@main/workflow/permission'
 
 /**
- * The full permission matrix. `auto` = runs without asking (but still surfaced
- * to the UI); `ask` = pauses for an explicit user decision.
+ * The full permission matrix (Principle 7). `auto` = runs without asking (but still
+ * surfaced to the UI); `ask` = pauses for an explicit user decision; `block` = refused
+ * outright (Plan mode's read-only confinement).
  *
  * | mode         | read | write_file | run_command | mcp_call | web_fetch/search |
  * |--------------|------|------------|-------------|----------|------------------|
+ * | `plan`       | auto | block      | block       | block    | block            |
  * | `ask`        | auto | ask        | ask         | ask      | ask              |
  * | `auto-edit`  | auto | auto       | ask         | ask      | ask              |
  * | `autonomous` | auto | auto       | auto        | auto     | auto             |
+ *
+ * These rows call `decideAuto(mode, kind)` with no command line, so `run_command`
+ * takes the plain mode path (the classifier only kicks in when a command line and
+ * workspace root are supplied — covered separately below).
  */
-const cases: Array<[PermissionMode, ToolKind, 'auto' | 'ask']> = [
+const cases: Array<[PermissionMode, ToolKind, 'auto' | 'ask' | 'block']> = [
+  ['plan', 'read', 'auto'],
+  ['plan', 'write_file', 'block'],
+  ['plan', 'run_command', 'block'],
+  ['plan', 'mcp_call', 'block'],
+  ['plan', 'web_fetch', 'block'],
+  ['plan', 'web_search', 'block'],
   ['ask', 'read', 'auto'],
   ['ask', 'write_file', 'ask'],
   ['ask', 'run_command', 'ask'],
@@ -39,6 +51,8 @@ const cases: Array<[PermissionMode, ToolKind, 'auto' | 'ask']> = [
   ['autonomous', 'web_search', 'auto']
 ]
 
+const ALL_MODES: PermissionMode[] = ['plan', 'ask', 'auto-edit', 'autonomous']
+
 describe('decideAuto (permission matrix)', () => {
   it.each(cases)('mode=%s kind=%s → %s', (mode, kind, expected) => {
     expect(decideAuto(mode, kind)).toBe(expected)
@@ -46,21 +60,31 @@ describe('decideAuto (permission matrix)', () => {
 
   it('never asks about a read, even in the strictest mode', () => {
     // Looking changes nothing, and a dozen approval prompts to understand one
-    // file would make the agent unusable.
-    const modes: PermissionMode[] = ['ask', 'auto-edit', 'autonomous']
-    expect(modes.map((m) => decideAuto(m, 'read'))).toEqual(['auto', 'auto', 'auto'])
+    // file would make the agent unusable. True in Plan mode too — read is the
+    // whole point of Plan mode.
+    expect(ALL_MODES.map((m) => decideAuto(m, 'read'))).toEqual(['auto', 'auto', 'auto', 'auto'])
   })
 
-  it('auto-approves every side effect in every mode when full access is on', () => {
+  it('auto-approves every side effect when full access is on — except in Plan mode', () => {
     // The opt-in full-PC switch waives the prompt for writes, commands, mcp, and
     // web — in `ask` and `auto-edit` too, not just `autonomous`.
-    const modes: PermissionMode[] = ['ask', 'auto-edit', 'autonomous']
+    const execModes: PermissionMode[] = ['ask', 'auto-edit', 'autonomous']
     const kinds: ToolKind[] = ['write_file', 'run_command', 'mcp_call', 'web_fetch', 'web_search']
-    for (const mode of modes) {
+    for (const mode of execModes) {
       for (const kind of kinds) {
         expect(decideAuto(mode, kind, true)).toBe('auto')
       }
     }
+  })
+
+  it('Plan mode blocks every mutation even with full access on', () => {
+    // fullAccess waives PROMPTS, not the read-only confinement the user chose by
+    // selecting Plan mode. Reads still ride through; everything else is refused.
+    const kinds: ToolKind[] = ['write_file', 'run_command', 'mcp_call', 'web_fetch', 'web_search']
+    for (const kind of kinds) {
+      expect(decideAuto('plan', kind, true)).toBe('block')
+    }
+    expect(decideAuto('plan', 'read', true)).toBe('auto')
   })
 
   it('leaves the matrix unchanged when full access is off (explicit false)', () => {
@@ -68,6 +92,60 @@ describe('decideAuto (permission matrix)', () => {
     for (const [mode, kind, expected] of cases) {
       expect(decideAuto(mode, kind, false)).toBe(expected)
     }
+  })
+})
+
+/**
+ * Command classification (Principle 7 #2). When a command line and workspace root
+ * are supplied, `decideAuto` gates run_command by the command's RISK CLASS × mode:
+ *
+ *  - destructive → always `ask` (even autonomous / fullAccess), `block` in Plan
+ *  - read-only   → `auto` while planning / hands-free / full-access, else `ask`
+ *  - mutating    → follows the plain mode path (blocked in Plan)
+ */
+describe('decideAuto (command classification)', () => {
+  const ROOT = '/work/project'
+
+  it('always asks before a destructive command, even hands-free or with full access', () => {
+    // Mirrors the browse delete-always-asks rule: rm -rf is never auto.
+    expect(decideAuto('ask', 'run_command', false, 'rm -rf build', ROOT)).toBe('ask')
+    expect(decideAuto('auto-edit', 'run_command', false, 'rm -rf build', ROOT)).toBe('ask')
+    expect(decideAuto('autonomous', 'run_command', false, 'rm -rf build', ROOT)).toBe('ask')
+    expect(decideAuto('autonomous', 'run_command', true, 'rm -rf build', ROOT)).toBe('ask')
+  })
+
+  it('refuses even a destructive command in Plan mode', () => {
+    expect(decideAuto('plan', 'run_command', false, 'rm -rf build', ROOT)).toBe('block')
+  })
+
+  it('auto-approves a read-only command while planning, hands-free, or with full access', () => {
+    // Observation changes nothing, so it rides the read path.
+    expect(decideAuto('plan', 'run_command', false, 'git log --oneline', ROOT)).toBe('auto')
+    expect(decideAuto('autonomous', 'run_command', false, 'ls -la', ROOT)).toBe('auto')
+    expect(decideAuto('ask', 'run_command', true, 'cat package.json', ROOT)).toBe('auto')
+  })
+
+  it('still surfaces a read-only command once in the milder interactive modes', () => {
+    // Running a command spawns a process, so ask/auto-edit ask the first time.
+    expect(decideAuto('ask', 'run_command', false, 'ls -la', ROOT)).toBe('ask')
+    expect(decideAuto('auto-edit', 'run_command', false, 'git status', ROOT)).toBe('ask')
+  })
+
+  it('gates a mutating command by the plain mode path', () => {
+    // npm install changes state but is not destructive: blocked in Plan, asked in
+    // ask/auto-edit, auto only hands-free or with full access.
+    expect(decideAuto('plan', 'run_command', false, 'npm install', ROOT)).toBe('block')
+    expect(decideAuto('ask', 'run_command', false, 'npm install', ROOT)).toBe('ask')
+    expect(decideAuto('auto-edit', 'run_command', false, 'npm install', ROOT)).toBe('ask')
+    expect(decideAuto('autonomous', 'run_command', false, 'npm install', ROOT)).toBe('auto')
+    expect(decideAuto('ask', 'run_command', true, 'npm install', ROOT)).toBe('auto')
+  })
+
+  it('classifies diagnostics the same way when a command line is available', () => {
+    // diagnostics normally arrives without a command line (plain mode path), but if
+    // one is supplied it is classified like any command.
+    expect(decideAuto('autonomous', 'diagnostics', false, 'tsc --noEmit', ROOT)).toBe('auto')
+    expect(decideAuto('plan', 'diagnostics', false, 'tsc --noEmit', ROOT)).toBe('auto')
   })
 })
 

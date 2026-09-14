@@ -170,6 +170,44 @@ describe('buildPlan — degradation is reported, not hidden', () => {
   })
 })
 
+describe('buildPlan — explicit task cap (Principle 1)', () => {
+  const many = (n: number): unknown =>
+    plan(
+      Array.from({ length: n }, (_, i) => ({ id: `t${i + 1}`, role: 'builder', description: `task ${i + 1}` }))
+    )
+
+  it('honours a maxTasks below the default ceiling', async () => {
+    getCompletion.mockResolvedValue(many(12))
+    const res = await buildPlan('do lots', 'complex', settings, { maxTasks: 3 })
+    expect(res.tasks).toHaveLength(3)
+  })
+
+  it('tells the planner the exact ceiling in its prompt', async () => {
+    getCompletion.mockResolvedValue(many(2))
+    await buildPlan('do it', 'medium', settings, { maxTasks: 3 })
+    const system = getCompletion.mock.calls[0][1][0].content as string
+    expect(system).toContain('at most 3')
+  })
+
+  it('cannot be used to raise the ceiling above the runaway guard', async () => {
+    getCompletion.mockResolvedValue(many(12))
+    const res = await buildPlan('do lots', 'complex', settings, { maxTasks: 50 })
+    expect(res.tasks.length).toBeLessThanOrEqual(8)
+  })
+
+  it('restates the user scope to the planner as a hard constraint', async () => {
+    getCompletion.mockResolvedValue(many(2))
+    await buildPlan('do it', 'medium', settings, {
+      maxTasks: 4,
+      constraintsNote: 'Explicit scope set by the user — honour it exactly: use at most 4 tasks.'
+    })
+    const system = getCompletion.mock.calls[0][1][0].content as string
+    expect(system).toContain('HARD CONSTRAINTS')
+    expect(system).toContain('use at most 4 tasks')
+    expect(system).toContain('no more than 4 tasks in total')
+  })
+})
+
 describe('plan persistence + rendering', () => {
   it('hands the rendered markdown to the writePlan callback', async () => {
     const writePlan = vi.fn()

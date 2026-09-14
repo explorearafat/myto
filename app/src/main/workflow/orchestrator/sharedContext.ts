@@ -43,6 +43,12 @@ export interface Artifact {
 const MAX_DETAIL = 600
 /** Overall digest cap (chars) fed into any single agent prompt. */
 const MAX_DIGEST = 6_000
+/**
+ * Sub-budget (chars) the Evidence section may occupy inside a digest — bounded
+ * well under {@link MAX_DIGEST} so the exact excerpts a downstream agent inherits
+ * never crowd out the plan and findings that frame them.
+ */
+const MAX_EVIDENCE_DIGEST = 3_500
 
 /** Truncates `text` to `max` chars with an ellipsis marker. */
 function clamp(text: string, max: number): string {
@@ -102,12 +108,14 @@ export class SharedContext {
    */
   summarizeForAgent(node: { id: string; role: AgentRole; dependsOn: string[] }): string {
     const scope = resolveRole(node.role).contextScope
-    if (scope === 'full') return this.render(this.findings, { plan: true, execution: true })
+    if (scope === 'full')
+      return this.render(this.findings, { plan: true, execution: true, evidence: true })
     if (scope === 'minimal') return this.render([], { plan: true, execution: true })
-    // scoped: only the findings of this node's (transitive) upstream deps.
+    // scoped: only the findings of this node's (transitive) upstream deps — plus the
+    // exact excerpts those deps read, so this node builds on them without re-reading.
     const upstream = this.upstreamTaskIds(node)
     const relevant = this.findings.filter((f) => upstream.has(f.taskId))
-    return this.render(relevant, { plan: true, execution: false })
+    return this.render(relevant, { plan: true, execution: false, evidence: true })
   }
 
   /** The transitive set of task ids `node` depends on. */
@@ -125,7 +133,10 @@ export class SharedContext {
   }
 
   /** Renders a bounded markdown digest from the given findings + options. */
-  private render(findings: Finding[], opts: { plan: boolean; execution: boolean }): string {
+  private render(
+    findings: Finding[],
+    opts: { plan: boolean; execution: boolean; evidence?: boolean }
+  ): string {
     const parts: string[] = []
     if (opts.plan && this.plan.trim()) {
       parts.push(`### Plan\n${this.plan.trim()}`)
@@ -133,6 +144,10 @@ export class SharedContext {
     if (findings.length) {
       const lines = findings.map((f) => `- (${f.role}) ${f.detail}${f.files?.length ? ` [${f.files.join(', ')}]` : ''}`)
       parts.push(`### Findings so far\n${lines.join('\n')}`)
+    }
+    if (opts.evidence) {
+      const evidence = this.renderEvidence(findings)
+      if (evidence) parts.push(evidence)
     }
     if (this.decisions.length && (opts.execution || findings.length)) {
       parts.push(`### Decisions\n${this.decisions.map((d) => `- (${d.by}) ${d.detail}`).join('\n')}`)
@@ -145,6 +160,38 @@ export class SharedContext {
       }
     }
     return clamp(parts.join('\n\n'), MAX_DIGEST)
+  }
+
+  /**
+   * Renders the "exact excerpts already read" block (Principle 3): the concrete
+   * text upstream agents surfaced, deduped by path + line range (first finding
+   * wins), each fenced under a `path lines A–B (role, sha …)` header so a scoped
+   * agent can trust it as current and build on it verbatim instead of re-reading.
+   * Bounded by {@link MAX_EVIDENCE_DIGEST}; returns '' when there is no evidence.
+   */
+  private renderEvidence(findings: Finding[]): string {
+    const seen = new Set<string>()
+    const blocks: string[] = []
+    let used = 0
+    for (const f of findings) {
+      for (const ev of f.evidence ?? []) {
+        const range = ev.range ? `${ev.range[0]}–${ev.range[1]}` : 'whole file'
+        const key = `${ev.path}#${range}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        const block = `\`${ev.path}\` lines ${range} (${f.role}, sha ${ev.sha})\n\`\`\`\n${ev.excerpt}\n\`\`\``
+        if (used + block.length > MAX_EVIDENCE_DIGEST) return this.evidenceSection(blocks)
+        blocks.push(block)
+        used += block.length
+      }
+    }
+    return this.evidenceSection(blocks)
+  }
+
+  /** Wraps rendered evidence blocks in their section header, or '' if none. */
+  private evidenceSection(blocks: string[]): string {
+    if (!blocks.length) return ''
+    return `### Evidence — exact excerpts already read (build on these; do not re-read these files)\n${blocks.join('\n\n')}`
   }
 
   /** A compact per-task state line (from the graph), for full/minimal scopes. */

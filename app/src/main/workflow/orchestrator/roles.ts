@@ -21,7 +21,7 @@
  * safe to import from both the engine and `toolStream.ts` (spawn-role
  * validation).
  */
-import type { AgentRole } from '../../../shared/types'
+import type { AgentRole, ReasoningEffort } from '../../../shared/types'
 import type { Capability } from './capabilities'
 
 /**
@@ -65,6 +65,16 @@ export interface AgentRoleDef {
    * clipped; every other role keeps the tight default.
    */
   detailChars?: number
+  /**
+   * The role's reasoning band (Principle 5): the effort tier this role runs at,
+   * resolved against the turn's base tier by {@link effortForRole}. A band BELOW
+   * `medium` (reviewer, test-runner) is a ceiling — mechanical work never pays the
+   * turn's high/max tier. A band ABOVE `medium` (the analyst) is a floor — deep
+   * work still thinks hard on an everyday turn. Omit to run at the base tier (the
+   * builder, the lead, and every specialist whose cost tracks the turn). The band
+   * only moves a single role's calls; it never re-sizes the turn.
+   */
+  defaultEffort?: ReasoningEffort
 }
 
 const ROLES = new Map<string, AgentRoleDef>()
@@ -140,7 +150,10 @@ define({
   // roll-up (what each node did), not the full finding firehose — this is the
   // digest `summarizeForAgent` builds for the REVIEW stage.
   contextScope: 'minimal',
-  reportWords: 200
+  reportWords: 200,
+  // Static read-and-judge is mechanical: cap it at `low` so a review never pays
+  // the turn's high/max thinking budget, even inside a complex build.
+  defaultEffort: 'low'
 })
 
 // ── Core execution roles (the everyday explore → edit → test → review loop) ──
@@ -167,9 +180,11 @@ define({
   systemDirective:
     'You are the EDITOR subagent. You make the code change and nothing else: read_file to ' +
     'confirm context, then edit_file / write_file to apply it, in small think → act → think ' +
-    'steps. You CANNOT run commands — do not attempt to build or test. Prefer the snippets the ' +
-    'explorer gave you over re-reading whole files. Finish in under 150 words: what you ' +
-    'changed, which files, and anything still open.',
+    'steps. You CANNOT run commands — do not attempt to build or test. The explorer’s exact ' +
+    'excerpts for the files you need are in your context under “Evidence” — hash-verified and ' +
+    'current. Build on them directly; do NOT re-read a file whose relevant lines are already ' +
+    'there. read_file only for a range the Evidence does not cover. Finish in under 150 words: ' +
+    'what you changed, which files, and anything still open.',
   capabilities: ['filesystem', 'skills'],
   contextScope: 'scoped',
   reportWords: 150
@@ -186,7 +201,9 @@ define({
   // Runs commands but cannot edit: no filesystem.
   capabilities: ['terminal', 'testing', 'code-exec'],
   contextScope: 'minimal',
-  reportWords: 120
+  reportWords: 120,
+  // Running checks and reading their output is mechanical: cap it at `low`.
+  defaultEffort: 'low'
 })
 
 // ── Specialist roles (new) ────────────────────────────────────────────────
@@ -200,7 +217,10 @@ define({
     'constraints or risks. Do NOT write code or run commands — you produce findings only. ' +
     'Finish with a concise, structured summary the planner and specialists can build on.',
   capabilities: ['web', 'skills'],
-  contextScope: 'full'
+  contextScope: 'full',
+  // Studying the whole project and surfacing risks is deep work: floor it at
+  // `high` so the analysis is thorough even on an everyday turn.
+  defaultEffort: 'high'
 })
 
 define({
@@ -411,6 +431,41 @@ export function getRole(id: string): AgentRoleDef | undefined {
  */
 export function resolveRole(id: AgentRole): AgentRoleDef {
   return ROLES.get(id) ?? (ROLES.get(FALLBACK_ROLE) as AgentRoleDef)
+}
+
+/**
+ * Effort tiers in ascending cost order, so a role's band can be compared to the
+ * turn's base tier and clamped in one direction. Mirrors {@link ReasoningEffort}.
+ */
+const EFFORT_ORDER: readonly ReasoningEffort[] = ['low', 'medium', 'high', 'max']
+const effortRank = (e: ReasoningEffort): number => EFFORT_ORDER.indexOf(e)
+
+/**
+ * The reasoning tier a role should actually run at (Principle 5), given the
+ * turn's `base` tier and the role's own band (`defaultEffort`).
+ *
+ * The band moves effort in exactly ONE direction, never both:
+ *  - a band **below** `medium` (reviewer, test-runner) is a CEILING — the role
+ *    runs at `min(base, band)`, so mechanical work never pays a complex turn's
+ *    high/max thinking budget;
+ *  - a band **above** `medium` (the analyst) is a FLOOR — the role runs at
+ *    `max(base, band)`, so deep work still thinks hard on an everyday turn;
+ *  - no band (the builder, the lead, most specialists) → run at `base` unchanged.
+ *
+ * This preserves the turn-level invariant: a complex turn can still reach `max`
+ * for its hard steps (the base is untouched for un-banded roles) — the band only
+ * pulls a single role's own calls toward its nature. Pure: no I/O, no engine
+ * imports, so it is unit-testable in isolation.
+ */
+export function effortForRole(base: ReasoningEffort, role: AgentRole): ReasoningEffort {
+  const band = resolveRole(role).defaultEffort
+  if (!band) return base
+  const b = effortRank(base)
+  const d = effortRank(band)
+  const mid = effortRank('medium')
+  if (d < mid) return EFFORT_ORDER[Math.min(b, d)] // cheap role → cap at its band
+  if (d > mid) return EFFORT_ORDER[Math.max(b, d)] // deep role → floor at its band
+  return base
 }
 
 /**

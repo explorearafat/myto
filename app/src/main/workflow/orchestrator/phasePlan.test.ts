@@ -93,6 +93,20 @@ describe('authoredSectionIds and planSectionBrief', () => {
     expect(brief).not.toContain('"responsive"')
     expect(brief.split('\n')).toHaveLength(authoredSectionIds('medium').length)
   })
+
+  it('collapses to a lean, actionable set when the request is minimal', () => {
+    // "keep it minimal" overrides the tier: only the sections that carry real work
+    // for a small change, and never more than even the SMALL plan would render.
+    const lean = authoredSectionIds('complex', true)
+    expect(lean).toContain('why')
+    expect(lean).toContain('protect')
+    expect(lean).toContain('completion')
+    expect(lean).not.toContain('archStrategy')
+    expect(lean).not.toContain('uxStrategy')
+    expect(lean).not.toContain('risks')
+    expect(lean.length).toBeLessThan(authoredSectionIds('simple').length + 1)
+    expect(lean.length).toBeLessThan(authoredSectionIds('complex').length)
+  })
 })
 
 describe('renderPhasePlan', () => {
@@ -276,5 +290,50 @@ describe('renderPhasePlan', () => {
     expect(out.endsWith('\n')).toBe(true)
     expect(out.endsWith('\n\n')).toBe(false)
     expect(out).not.toMatch(/\n{3}/)
+  })
+})
+
+describe('renderPhasePlan — explicit scope (Principle 1)', () => {
+  const base = {
+    phase: { n: 1, name: 'Foundation', objective: 'Put the change in place.' },
+    totalPhases: 5,
+    complexity: 'medium' as const,
+    request: 'add a logout button',
+    tasks: [task('t1'), task('t2')]
+  }
+
+  it('drops the ceremonial sections when minimal, keeping the actionable ones', () => {
+    const out = renderPhasePlan({ ...base, minimal: true })
+    expect(out).not.toContain('## Architecture strategy')
+    expect(out).not.toContain('## UI/UX strategy')
+    expect(out).not.toContain('## Risks')
+    expect(out).not.toContain('## Rollback and recovery')
+    expect(out).not.toContain('## Next phase prediction')
+    // The spine that actually drives and verifies the work stays.
+    expect(out).toContain('## Files that must NOT be modified')
+    expect(out).toContain('## Detailed tasks')
+    expect(out).toContain('## Verification checklist')
+    expect(out).toContain('## Completion criteria')
+    expect(out.length).toBeLessThan(renderPhasePlan(base).length)
+  })
+
+  it('leads the Constraints section with the user’s explicit scope', () => {
+    const out = renderPhasePlan({
+      ...base,
+      explicitConstraints: 'Explicit scope set by the user — honour it exactly: use at most 3 tasks.'
+    })
+    const section = out.split('## Constraints\n\n')[1].split('\n##')[0]
+    expect(section).toContain('**Explicit user scope:** Explicit scope set by the user')
+    expect(section).toContain('use at most 3 tasks')
+  })
+
+  it('keeps the explicit scope above an authored constraints body', () => {
+    const out = renderPhasePlan({
+      ...base,
+      explicitConstraints: 'use at most 3 tasks',
+      sections: { constraints: '- Must stay offline-first.' }
+    })
+    const section = out.split('## Constraints\n\n')[1].split('\n##')[0]
+    expect(section.indexOf('Explicit user scope')).toBeLessThan(section.indexOf('offline-first'))
   })
 })

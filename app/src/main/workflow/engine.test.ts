@@ -517,6 +517,35 @@ describe('compactHistory (mid-run context compaction, §17)', () => {
     expect(out).toHaveLength(5)
   })
 
+  it('keeps the lead plan anchor in the head across a fold (Principle 2 / divergence #3)', () => {
+    // The lead pins the live plan into its system message (outbound[0], inside the
+    // baseLen head). Divergence #3 was that the plan was NOT re-read after a fold, so
+    // fidelity drifted on long runs. Because the anchor rides the head, a fold must
+    // keep it verbatim — the plan stays in front of the model no matter how much of
+    // the middle is folded away.
+    const anchored = m(
+      'system',
+      'SYSTEM PROMPT\n\n## Current plan & progress\n- [ ] wire the /logout route'
+    )
+    const head = [anchored, m('user', 'the original request')]
+    const appended = [
+      wrote('a.ts'),
+      m('user', 'a.ts applied'),
+      wrote('b.ts'),
+      m('user', 'b.ts applied'),
+      ran('npm test'),
+      m('user', '1 passed'),
+      wrote('c.ts'),
+      m('user', 'c.ts applied')
+    ]
+    const out = compactHistory([...head, ...appended], head.length, 200, 10)
+    // The system message carrying the plan anchor is kept verbatim, by reference…
+    expect(out[0]).toBe(anchored)
+    // …so the current plan is still in front of the model after the fold.
+    expect(out[0].content).toContain('## Current plan & progress')
+    expect(out[0].content).toContain('- [ ] wire the /logout route')
+  })
+
   it('names the real files and commands from the folded turns in the note', () => {
     const head = [m('system', 'S'), m('user', 'req')]
     const appended = [
@@ -2393,6 +2422,59 @@ describe('runWorkflow tool execution', () => {
 
     // The nudged write was actually applied to disk (via the mocked writer).
     expect(writeProjectFile).toHaveBeenCalledWith('src/new.ts', 'export const x = 1')
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('pins the live plan into the lead system prompt and re-reads it each step (Principle 2)', async () => {
+    // Divergence #3: every subagent gets the plan pinned into its system prompt
+    // (buildSubagentSystem), but the LEAD never did — so a long build that tripped a
+    // mid-run fold drifted onto its own model-written recap and plan fidelity slipped.
+    // The lead now carries the plan in its system MESSAGE (outbound[0], always in the
+    // compaction head, so it can never be folded away) and RE-READS it every step, so
+    // it both survives folds and reflects the boxes just ticked. All-checked plans are
+    // used so the continue-nudge (which keys on an unchecked `- [ ]`) stays out of the
+    // way and the turn is exactly two lead steps.
+    let planBody = '- [x] PLAN-ALPHA scaffold done'
+    readProjectFile.mockImplementation((rel: string) => {
+      if (/plan\.md$/.test(rel)) return `# Plan\n\n${planBody}`
+      throw new Error('ENOENT')
+    })
+
+    let step1System = ''
+    let step2System = ''
+    streamCompletion
+      .mockImplementationOnce(async (_model, msgs, onChunk) => {
+        step1System = (msgs as ChatMessage[])[0].content
+        // The model ticks progress between steps; the next step must reflect the new plan.
+        planBody = '- [x] PLAN-BETA feature done'
+        onChunk({ delta: 'Working.\n' + WRITE_BLOCK } as Omit<CompletionChunk, 'streamId'>)
+      })
+      .mockImplementationOnce(async (_model, msgs, onChunk) => {
+        step2System = (msgs as ChatMessage[])[0].content
+        onChunk({ delta: 'Done.' } as Omit<CompletionChunk, 'streamId'>)
+      })
+
+    const { events, emit } = collector()
+    await runWorkflow(req('plan-anchor', { permissionMode: 'auto-edit' }), emit, noTerminal)
+
+    // Exactly the two lead completions — the plan is handed over, not re-derived.
+    expect(streamCompletion).toHaveBeenCalledTimes(2)
+
+    // Step 1: the lead's OWN system prompt (the checklist directive is lead-only —
+    // buildSubagentSystem omits it — so its presence proves this is the lead) carries
+    // the plan anchor with the current plan appended AFTER the base, never replacing it.
+    expect(step1System).toContain('## Keeping a task checklist')
+    expect(step1System).toContain('## Current plan & progress')
+    expect(step1System).toContain('PLAN-ALPHA')
+    expect(step1System.indexOf('## Keeping a task checklist')).toBeLessThan(
+      step1System.indexOf('## Current plan & progress')
+    )
+
+    // Step 2: the anchor was RE-READ (shows the updated plan) and REPLACED, not
+    // accumulated — the stale copy is gone — while the base prompt still stands.
+    expect(step2System).toContain('## Keeping a task checklist')
+    expect(step2System).toContain('PLAN-BETA')
+    expect(step2System).not.toContain('PLAN-ALPHA')
     expect(events.at(-1)?.type).toBe('done')
   })
 })

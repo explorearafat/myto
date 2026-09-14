@@ -318,14 +318,45 @@ const PLAN_SECTIONS: readonly SectionSpec[] = [
 /** Complexity as an ordered scale, so sizes can be compared, not just matched. */
 export const RANK: Record<Complexity, number> = { simple: 0, medium: 1, complex: 2 }
 
-/** The sections a plan at this complexity carries, in render order. */
-function sectionsFor(complexity: Complexity): readonly SectionSpec[] {
+/**
+ * The lean section set for an explicitly *minimal* request ("keep it minimal",
+ * "don't over-engineer"). Only the sections that carry real, actionable substance
+ * for a small change — the "why", the concrete requirements and constraints, the
+ * files to read / create / modify / protect, the approach, the derived task
+ * list/order/checklist, and how you know it's done. Everything ceremonial
+ * (architecture essay, UX/data strategy, risks, rollback, next-phase prediction,
+ * responsive/interaction/security/performance sections) is dropped. This is a
+ * subset of even the SMALL plan, so `minimal` always yields the leanest document
+ * regardless of the routed tier.
+ */
+const LEAN_SECTION_IDS: ReadonlySet<PlanSectionId> = new Set<PlanSectionId>([
+  'why',
+  'requirements',
+  'constraints',
+  'inspect',
+  'create',
+  'modify',
+  'protect',
+  'implStrategy',
+  'order',
+  'tasks',
+  'checklist',
+  'completion'
+])
+
+/**
+ * The sections a plan carries, in render order. Normally scaled to `complexity`;
+ * when `minimal` is set the {@link LEAN_SECTION_IDS} set wins outright (a stated
+ * "keep it minimal" overrides the tier's default section count).
+ */
+function sectionsFor(complexity: Complexity, minimal = false): readonly SectionSpec[] {
+  if (minimal) return PLAN_SECTIONS.filter((s) => LEAN_SECTION_IDS.has(s.id))
   return PLAN_SECTIONS.filter((s) => RANK[s.min] <= RANK[complexity])
 }
 
 /** The section ids the MODEL is asked to author (everything not derived). */
-export function authoredSectionIds(complexity: Complexity): PlanSectionId[] {
-  return sectionsFor(complexity)
+export function authoredSectionIds(complexity: Complexity, minimal = false): PlanSectionId[] {
+  return sectionsFor(complexity, minimal)
     .filter((s) => !s.derived)
     .map((s) => s.id)
 }
@@ -335,8 +366,8 @@ export function authoredSectionIds(complexity: Complexity): PlanSectionId[] {
  * authored section. Generated from the same registry the renderer uses, so the two
  * can never drift apart.
  */
-export function planSectionBrief(complexity: Complexity): string {
-  return sectionsFor(complexity)
+export function planSectionBrief(complexity: Complexity, minimal = false): string {
+  return sectionsFor(complexity, minimal)
     .filter((s) => !s.derived)
     .map((s) => `- "${s.id}" — ${s.heading}: ${s.hint}`)
     .join('\n')
@@ -356,6 +387,13 @@ export interface PhasePlanInput {
   sections?: Partial<Record<PlanSectionId, string>>
   /** The commands that will actually be run to verify the phase (§34). */
   verifyCommands?: readonly string[]
+  /** Render the lean section set (an explicit "keep it minimal" scope). */
+  minimal?: boolean
+  /**
+   * The user's explicit scope as one imperative line (`describeConstraints`),
+   * surfaced at the top of the Constraints section so the plan visibly honours it.
+   */
+  explicitConstraints?: string
 }
 
 /** Dependency-respecting waves: each wave can run in parallel, waves are ordered. */
@@ -444,6 +482,13 @@ function bodyFor(spec: SectionSpec, input: PhasePlanInput): string {
     if (spec.id === 'tasks') return renderTasks(input.tasks)
     if (spec.id === 'checklist') return renderChecklist(input)
   }
+  // An explicit user scope leads the Constraints section, above whatever the model
+  // authored, so the plan visibly binds to the user's own words.
+  if (spec.id === 'constraints' && input.explicitConstraints?.trim()) {
+    const lead = `**Explicit user scope:** ${input.explicitConstraints.trim()}`
+    const authored = input.sections?.constraints?.trim()
+    return authored ? `${lead}\n\n${authored}` : lead
+  }
   const authored = input.sections?.[spec.id]?.trim()
   if (authored) return authored
 
@@ -490,7 +535,7 @@ export function renderPhasePlan(input: PhasePlanInput): string {
     quoteRequest(input.request),
     ''
   ]
-  for (const spec of sectionsFor(complexity)) {
+  for (const spec of sectionsFor(complexity, !!input.minimal)) {
     out.push(`## ${spec.heading}`, '', bodyFor(spec, input), '')
   }
   return `${out.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()}\n`

@@ -154,7 +154,14 @@ export class OllamaProvider implements Provider {
       })
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => '')
-        throw new Error(`HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 160)}` : ''}`)
+        const err = new Error(`HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 160)}` : ''}`)
+        // Surface Retry-After so withRetry can honour it (Principle 6 #2).
+        const retryAfter = res.headers.get('retry-after')
+        if (retryAfter) {
+          const ms = parseRetryAfter(retryAfter)
+          if (ms !== null) Object.assign(err, { retryAfterMs: ms })
+        }
+        throw err
       }
       guard.touch()
       await readNdjson(
@@ -182,6 +189,26 @@ export class OllamaProvider implements Provider {
     }
   }
 }
+/**
+ * Parse a `Retry-After` header value into milliseconds. Handles both delta-seconds
+ * (an integer) and HTTP-date (RFC 7231 § 7.1.1.1). Returns `null` if unparseable.
+ */
+function parseRetryAfter(value: string): number | null {
+  const trimmed = value.trim()
+  // Delta-seconds: an integer (e.g. "120" = 2 minutes from now).
+  if (/^\d+$/.test(trimmed)) {
+    const seconds = Number(trimmed)
+    return seconds > 0 ? seconds * 1000 : null
+  }
+  // HTTP-date: parse as a timestamp and compute the delta.
+  const timestamp = Date.parse(trimmed)
+  if (!isNaN(timestamp)) {
+    const delta = timestamp - Date.now()
+    return delta > 0 ? delta : null
+  }
+  return null
+}
+
 async function readNdjson(
   body: ReadableStream<Uint8Array>,
   onLine: (line: string) => void,

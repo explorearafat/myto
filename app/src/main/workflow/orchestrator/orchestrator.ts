@@ -45,6 +45,7 @@
 import type {
   ChatMessage,
   Complexity,
+  Evidence,
   Finding,
   ProviderSettings,
   RunProgress,
@@ -53,6 +54,7 @@ import type {
 } from '../../../shared/types'
 import type { ProjectState } from '../../context/projectState'
 import { classifyComplexity } from './complexity'
+import { describeConstraints, extractConstraints } from './constraints'
 import { buildPlan } from './planner'
 import { SharedContext } from './sharedContext'
 import { TaskGraph, runScheduler, type NodeOutcome } from './taskGraph'
@@ -113,6 +115,12 @@ export interface NodeRunResult {
   ok: boolean
   /** Project-relative paths this node actually wrote (from applied tool results). */
   filesChanged: string[]
+  /**
+   * The excerpts this node read (path + line-range + content-sha + bounded text).
+   * Carried onto the node's {@link Finding} so a downstream scoped agent inherits
+   * the exact text and builds on it instead of re-reading (Principle 3).
+   */
+  evidence?: Evidence[]
 }
 
 /** Options handed to {@link OrchestratorDeps.executeNode} for one dispatch. */
@@ -276,11 +284,19 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
     deps.complexity ?? (await classifyComplexity(request, settings, signal, { overview }))
   if (signal.aborted) return aborted(complexity)
 
+  // The explicit scope the user stated in words ("in at most 5 steps", "keep it
+  // minimal", "only touch …"). Deterministic and free — read once here and threaded
+  // into the roadmap tier, the task cap and the plan document so a stated budget is
+  // honoured rather than merely hoped for (Principle 1).
+  const constraints = extractConstraints(request)
+
   // ── PHASE ───────────────────────────────────────────────────────────────
   // Where does the work stand? Read, never re-audit (§1/§9). The roadmap is sized
-  // by the complexity RECORDED for this project, so it can't resize between turns.
+  // by the complexity RECORDED for this project, so it can't resize between turns —
+  // except that an explicit smaller scope this turn can shrink a fresh/first-phase
+  // roadmap (see resolvePhase), which is how "keep it minimal" avoids the ceremony.
   const memory = deps.memory
-  const phase = memory ? resolvePhase(memory.readState(), complexity) : null
+  const phase = memory ? resolvePhase(memory.readState(), complexity, constraints) : null
   // A one-off edit to a project with no roadmap gets none of the staged machinery:
   // no audit, no spec, no plan document. Everything else is a phase of a build.
   const stageable = !!memory && !!phase && (phase.complexity !== 'simple' || !phase.fresh)
@@ -353,7 +369,7 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
   // no information the user doesn't already see, and writing it would add a
   // surprise file to every small edit.
   let planMarkdown = ''
-  const plan = await buildPlan(request, complexity, settings, {
+  const plan = await buildPlan(request, phase?.complexity ?? complexity, settings, {
     // The phase brief scopes the planner to THIS phase; project memory tells it
     // what already exists so it doesn't plan work that is already done — and the
     // planning brief hands it the specification written moments ago, so the split
@@ -366,6 +382,10 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
       planMarkdown = markdown
     },
     signal,
+    // An explicit "in at most N steps" hard-caps the task count, and the whole
+    // stated scope is restated to the planner as a budget it must not exceed.
+    maxTasks: constraints.maxSteps,
+    constraintsNote: describeConstraints(constraints),
     // Falling back to one generalist node is a real loss of fidelity, so it is
     // reported rather than hidden — otherwise a failed planner call looks
     // identical to a request that genuinely needed only one task.
@@ -429,6 +449,7 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<Orchestra
       tasks: plan.tasks,
       memoryDigest: memoryDigest(memory),
       verifyCommands: deps.verifyCommands,
+      constraints,
       scribe: deps.scribe,
       signal,
       // A skeleton plan.md still gets written (the task list and checklist in it
@@ -719,7 +740,8 @@ async function execute(
         taskId: node.id,
         role: node.role,
         detail: run.report.trim(),
-        files: run.filesChanged.length ? run.filesChanged : undefined
+        files: run.filesChanged.length ? run.filesChanged : undefined,
+        evidence: run.evidence?.length ? run.evidence : undefined
       }
       shared.addFinding(record)
       emit({

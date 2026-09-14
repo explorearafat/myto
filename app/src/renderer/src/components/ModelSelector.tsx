@@ -248,14 +248,17 @@ export function EffortSelector({ openUp = false }: { openUp?: boolean } = {}) {
 /**
  * Permission modes shown in the composer selector, safest first.
  *
- * `ask` confirms every edit and command. `auto-edit` auto-applies file edits but
- * still asks before running commands. `autonomous` is the opt-in hands-free
+ * `plan` is read-only exploration — Sylor reads, searches and browses to understand
+ * the task and proposes a plan, but every edit and command is refused until you leave
+ * plan mode. `ask` confirms every edit and command. `auto-edit` auto-applies file
+ * edits but still asks before running commands. `autonomous` is the opt-in hands-free
  * posture (requirement D): it auto-approves edits, commands, AND MCP calls so a
  * build can run end-to-end — but every action is still surfaced as a card and
  * sandboxed to the workspace root, and the mode is non-persistent (it resets to
  * `ask` on relaunch, so it can never be left on by accident).
  */
 const MODE_OPTIONS: { value: PermissionMode; label: string; hint: string; warn?: boolean }[] = [
+  { value: 'plan', label: 'Plan', hint: 'Read-only: explore & propose a plan, no changes' },
   { value: 'ask', label: 'Ask', hint: 'Approve every edit & command' },
   { value: 'auto-edit', label: 'Auto-edit', hint: 'Auto-apply edits; ask to run commands' },
   {

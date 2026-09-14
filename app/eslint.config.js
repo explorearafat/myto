@@ -27,7 +27,7 @@ export default tseslint.config(
   },
   // Main + preload (node) files
   {
-    files: ['src/main/**/*.ts', 'src/preload/**/*.ts', 'electron.vite.config.ts'],
+    files: ['src/main/**/*.ts', 'src/preload/**/*.ts', 'electron.vite.config.ts', 'scripts/**/*.{js,mjs,ts}'],
     languageOptions: {
       globals: { ...globals.node }
     }

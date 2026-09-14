@@ -1,4 +1,5 @@
-import type { ReadResult, ToolProposal, ToolResult } from '../../shared/types'
+import { createHash } from 'node:crypto'
+import type { Evidence, ReadResult, ToolProposal, ToolResult } from '../../shared/types'
 import { contextManager } from '../context/manager'
 
 /**
@@ -187,3 +188,57 @@ export function updateReadCache(
     cache.clear()
   }
 }
+
+/**
+ * Longest excerpt a single {@link Evidence} record carries. Bounded so one big
+ * file the explorer read can't dominate a downstream agent's prompt; the
+ * blackboard applies a second, section-wide cap on top of this (see
+ * `sharedContext.render`).
+ */
+export const EVIDENCE_EXCERPT_MAX = 1_200
+
+/**
+ * Turns a successful `read_file` into a bounded {@link Evidence} record — the
+ * concrete excerpt a downstream agent inherits so it builds on the exact text
+ * instead of re-reading (Principle 3). Returns null for anything that isn't a
+ * usable text read (a listing/search, a media read, a failure, an empty file),
+ * so only real file contents ever become evidence.
+ *
+ * The `range` is anchored to real 1-based lines: a windowed read starts at its
+ * `offset`, a whole-file read at line 1. It reflects the full span the reader
+ * SAW (before the excerpt itself is clipped for size), so a consumer can cite
+ * "lines 40–120" even when only the first 1 200 chars are shown. The `sha` is a
+ * short hash of that full seen content — the anchor that lets the excerpt be
+ * trusted as current.
+ */
+export function readEvidence(proposal: ToolProposal, result: ToolResult): Evidence | null {
+  if (proposal.kind !== 'read' || proposal.op !== 'read_file') return null
+  if (result.kind !== 'read' || !result.ok || result.media) return null
+  const content = (result as ReadResult).output ?? ''
+  if (!content.trim()) return null
+  const start = proposal.offset && proposal.offset > 0 ? proposal.offset : 1
+  const lines = content.split('\n').length
+  const sha = createHash('sha256').update(content).digest('hex').slice(0, 12)
+  const excerpt =
+    content.length > EVIDENCE_EXCERPT_MAX ? `${content.slice(0, EVIDENCE_EXCERPT_MAX)}…` : content
+  return { path: proposal.path, range: [start, start + lines - 1], sha, excerpt }
+}
+
+/**
+ * Appends `ev` to a node's evidence ledger, de-duplicated by path + line range so
+ * a file read twice (or re-read after a windowed peek at the same span) is kept
+ * once, newest wins. Caps the ledger at {@link MAX_EVIDENCE_PER_NODE} records so a
+ * long exploration can't grow it without bound — the freshest excerpts are the
+ * ones a downstream agent needs.
+ */
+export function recordEvidence(ledger: Evidence[], ev: Evidence): void {
+  const sameRange = (a?: [number, number], b?: [number, number]): boolean =>
+    a === b || (!!a && !!b && a[0] === b[0] && a[1] === b[1])
+  const at = ledger.findIndex((e) => e.path === ev.path && sameRange(e.range, ev.range))
+  if (at >= 0) ledger[at] = ev
+  else ledger.push(ev)
+  if (ledger.length > MAX_EVIDENCE_PER_NODE) ledger.splice(0, ledger.length - MAX_EVIDENCE_PER_NODE)
+}
+
+/** Most evidence records one node hands downstream (oldest dropped past this). */
+const MAX_EVIDENCE_PER_NODE = 16
