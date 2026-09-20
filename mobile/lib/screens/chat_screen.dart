@@ -15,8 +15,6 @@ import '../widgets/conversation_drawer.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/model_picker.dart';
 
-/// The main chat surface: a message list that streams the reply in, the model chooser in the
-/// app bar, the history drawer, and the composer. This is where the gateway is actually driven.
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
 
@@ -28,13 +26,11 @@ class _ChatScreenState extends State<ChatScreen> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final ChatClient _client = ChatClient();
   final ScrollController _scroll = ScrollController();
-  // Owned here so a conversation starter can prefill the field and the composer can clear it.
   final TextEditingController _composer = TextEditingController();
   final FocusNode _composerFocus = FocusNode();
   StreamSubscription<ChatEvent>? _sub;
   bool _streaming = false;
-  ChatMessage? _pending; // the assistant message currently being filled
-
+  ChatMessage? _pending;
   @override
   void dispose() {
     _sub?.cancel();
@@ -58,8 +54,6 @@ class _ChatScreenState extends State<ChatScreen> {
       _pending = assistant;
     });
     _scrollToBottom();
-
-    // Send the full history (minus the just-added empty assistant turn) to the gateway.
     final history = store.active.messages
         .where((m) => !identical(m, assistant))
         .map((m) => m.toWire())
@@ -82,7 +76,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  /// Drop a starter prompt into the composer so the person can tweak it, then send.
   void _useStarter(String prompt) {
     _composer.text = prompt;
     _composer.selection = TextSelection.collapsed(offset: prompt.length);
@@ -152,7 +145,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _scrollToBottomIfNear() {
     if (!_scroll.hasClients) return;
     final pos = _scroll.position;
-    if (pos.maxScrollExtent - pos.pixels >= 260) return; // person scrolled up — leave them be
+    if (pos.maxScrollExtent - pos.pixels >= 260) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
     });
@@ -228,8 +221,6 @@ class _ChatScreenState extends State<ChatScreen> {
                     itemCount: messages.length,
                     itemBuilder: (context, i) {
                       final m = messages[i];
-                      // Keyed by the message object so the entrance animation runs once, when the
-                      // bubble first appears — not again on every streaming rebuild.
                       return TweenAnimationBuilder<double>(
                         key: ObjectKey(m),
                         tween: Tween(begin: 0, end: 1),
@@ -258,8 +249,6 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
     );
   }
-
-  /// The signed-in person's first name for the greeting, or null for guests.
   String? _firstName(AuthService auth) {
     if (auth.user == null) return null;
     final name = auth.displayName.trim();

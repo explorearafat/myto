@@ -3,21 +3,10 @@ import { app } from 'electron'
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { IpcChannel } from '../shared/ipc'
-import type {
-  PersistedMessage,
-  PersistedSession,
-  PersistedToolOp,
-  SessionSummary,
-  UsageStats
-} from '../shared/types'
-import { computeUsageStats, emptyUsageStats } from '../shared/usage'
-import { contextManager } from './context/manager'
+import type { PersistedMessage, PersistedSession, SessionSummary } from '../shared/types'
 import { getSettings } from './settings'
-import { readUsageFacts } from './db/stats'
 import {
   appendMessage,
-  appendTerminalChunk,
-  appendToolOp,
   createSession,
   deleteSession,
   getActiveSession,
@@ -28,21 +17,18 @@ import {
   resetMessageForRegenerate,
   searchSessions,
   setActiveSession,
-  setMessageFeedback,
-  updateMessage
+  setMessageFeedback
 } from './db/sessions'
 
 /**
- * Wires the Phase 5 session-persistence IPC. Query-style ops use handle/invoke;
- * high-frequency appends use on/send (fire-and-forget, no round-trip) — the same
- * split as terminal vs providers. Reads (list/search/most-recent) are GLOBAL —
- * history is one flat, cross-folder list so switching workspaces never hides
- * chats; only a new session is stamped with the active project root via
- * {@link contextManager}. Every append is defensively wrapped so a DB fault
- * degrades to a log line instead of breaking the live chat or terminal.
+ * Wires the session-persistence IPC. Query-style ops use handle/invoke;
+ * high-frequency appends use on/send (fire-and-forget, no round-trip) so the live
+ * chat never blocks. Reads (list/search/most-recent) are GLOBAL — history is one
+ * flat, cross-folder list so switching projects never hides chats. Every append is
+ * defensively wrapped so a DB fault degrades to a log line instead of breaking the
+ * live chat.
  *
- * Loading or creating a session also marks it {@link setActiveSession active} so
- * the terminal choke point knows where to append pty output.
+ * Loading or creating a session also marks it {@link setActiveSession active}.
  */
 export function registerSessionIpc(): void {
   ipcMain.handle(IpcChannel.SessionsList, (_event, projectId?: string | null): SessionSummary[] => {
@@ -50,12 +36,7 @@ export function registerSessionIpc(): void {
   })
 
   ipcMain.handle(IpcChannel.SessionsCreate, (_event, projectId?: string | null): SessionSummary => {
-    const summary = createSession(
-      contextManager.getRoot(),
-      'New session',
-      Date.now(),
-      projectId ?? null
-    )
+    const summary = createSession('', 'New session', Date.now(), projectId ?? null)
     setActiveSession(summary.id)
     return summary
   })
@@ -94,31 +75,11 @@ export function registerSessionIpc(): void {
     }
   )
 
-  // Activity dashboard. Read-only and best-effort: the zero state is a welcome
-  // screen, so a DB fault degrades to an all-zero snapshot rather than rejecting
-  // the invoke and blanking the panel.
-  ipcMain.handle(IpcChannel.SessionsUsageStats, (): UsageStats => {
-    const now = Date.now()
-    try {
-      return computeUsageStats(readUsageFacts(), now)
-    } catch (err) {
-      console.error('[sylor] usage stats read failed:', err)
-      return emptyUsageStats(now)
-    }
-  })
-
   // Fire-and-forget appends. Wrapped so a DB error never propagates to the UI.
   ipcMain.on(
     IpcChannel.SessionsAppendMessage,
     (_event, sessionId: string, msg: PersistedMessage) => {
       safe(() => appendMessage(sessionId, stampModel(msg), Date.now()))
-    }
-  )
-
-  ipcMain.on(
-    IpcChannel.SessionsUpdateMessage,
-    (_event, _sessionId: string, id: string, content: string, error?: string) => {
-      safe(() => updateMessage(id, content, error, Date.now()))
     }
   )
 
@@ -137,14 +98,6 @@ export function registerSessionIpc(): void {
 
   ipcMain.on(IpcChannel.SessionsResetMessage, (_event, _sessionId: string, id: string) => {
     safe(() => resetMessageForRegenerate(id))
-  })
-
-  ipcMain.on(IpcChannel.SessionsAppendToolOp, (_event, sessionId: string, op: PersistedToolOp) => {
-    safe(() => appendToolOp(sessionId, op, Date.now()))
-  })
-
-  ipcMain.on(IpcChannel.SessionsAppendTerminal, (_event, sessionId: string, data: string) => {
-    safe(() => appendTerminalChunk(sessionId, data))
   })
 }
 

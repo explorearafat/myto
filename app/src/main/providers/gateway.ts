@@ -71,7 +71,7 @@ interface ChatCompletionResponse {
   error?: { message?: string }
 }
 interface ChatCompletionStreamChunk {
-  choices?: Array<{ delta?: { content?: string } }>
+  choices?: Array<{ delta?: { content?: string; reasoning?: string } }>
   error?: { message?: string }
 }
 export class GatewayProvider implements Provider {
@@ -253,6 +253,12 @@ export class GatewayProvider implements Provider {
           return
         }
         if (parsed.error?.message) throw new Error(parsed.error.message)
+        // Reasoning models stream their chain-of-thought in `delta.reasoning` while
+        // `delta.content` stays empty — often for tens of seconds. Forward it
+        // out-of-band (empty delta) so the funnel can show a live "thinking"
+        // caption; it must never join the reply text.
+        const reasoning = parsed.choices?.[0]?.delta?.reasoning
+        if (reasoning) onChunk({ delta: '', done: false, reasoning })
         const delta = parsed.choices?.[0]?.delta?.content ?? ''
         if (delta) onChunk({ delta, done: false })
       },

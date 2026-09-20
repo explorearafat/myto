@@ -7,12 +7,16 @@ function installContentSecurityPolicy(isDev: boolean): void {
   if (cspInstalled) return
   cspInstalled = true
 
+  // `img-src` also allows https://*.googleusercontent.com so the signed-in user's
+  // Google profile photo (shown in the conversation rail footer) can load; every
+  // other remote origin stays blocked. The renderer still falls back to an initials
+  // avatar if the image is unavailable.
   const policy = isDev
     ? "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
-      "style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; " +
+      "style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: https://*.googleusercontent.com; " +
       "worker-src 'self' blob:; connect-src 'self' ws: http://localhost:* https://*.googleapis.com"
     : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-      "font-src 'self' data:; img-src 'self' data:; worker-src 'self' blob:; " +
+      "font-src 'self' data:; img-src 'self' data: https://*.googleusercontent.com; worker-src 'self' blob:; " +
       "connect-src 'self' https://*.googleapis.com"
 
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {

@@ -2,22 +2,18 @@ import type {
   Attachment,
   PersistedMessage,
   PersistedSession,
-  PersistedToolOp,
-  SessionSummary,
-  ToolProposal,
-  ToolResult
+  SessionSummary
 } from '../../shared/types'
 import { getDb } from './db'
 
 /**
  * Typed CRUD over the session tables (Phase 5). The main process is the single
  * writer, so per-session `seq` ordering is derived with `MAX(seq)+1` at append
- * time without a race. JSON (de)serialization of tool proposals/results lives
- * here — the shared types are the contract; the DB stores their `_json` columns.
+ * time without a race.
  *
  * Every function is defensively usable from fire-and-forget IPC: they throw only
  * on genuine programmer error, and the callers wrap append writes so a DB fault
- * never breaks the live chat or terminal.
+ * never breaks the live chat.
  */
 
 let idCounter = 0
@@ -29,25 +25,24 @@ function nextSessionId(now: number): string {
 }
 
 /**
- * The session terminal output is currently logged to. Set by the IPC layer on
- * load/create so the terminal choke point (`emitData`) knows where to append
- * without threading the id through every pty callback. Null before any session
- * is open (log nothing).
+ * The session currently open in the window. Set by the IPC layer on load/create
+ * so the delete handler knows whether it's removing the active chat. Null before
+ * any session is open.
  */
 let activeSessionId: string | null = null
 
-/** Mark the session that live terminal output should be appended to. */
+/** Mark the session currently open in the window. */
 export function setActiveSession(id: string | null): void {
   activeSessionId = id
 }
 
-/** The session terminal output is being logged to, or null. */
+/** The session currently open in the window, or null. */
 export function getActiveSession(): string | null {
   return activeSessionId
 }
 
-/** Next append position within a session for the given table. */
-function nextSeq(table: 'messages' | 'tool_ops' | 'terminal_logs', sessionId: string): number {
+/** Next append position within a session for the messages table. */
+function nextSeq(table: 'messages', sessionId: string): number {
   const row = getDb()
     .prepare(`SELECT MAX(seq) AS maxSeq FROM ${table} WHERE session_id = ?`)
     .get(sessionId) as { maxSeq: number | null } | undefined
@@ -230,9 +225,9 @@ export function touch(id: string, now: number): void {
 }
 
 /**
- * Load a session's full contents for rehydration: metadata, then messages,
- * tools, and terminal chunks each in `seq` order. Returns null if the id is
- * unknown (e.g. deleted in another window between list and open).
+ * Load a session's full contents for rehydration: metadata, then messages in
+ * `seq` order, then the attachments bound to sent messages. Returns null if the
+ * id is unknown (e.g. deleted in another window between list and open).
  */
 export function loadSession(id: string): PersistedSession | null {
   const s = getDb()
@@ -272,46 +267,6 @@ export function loadSession(id: string): PersistedSession | null {
     ...(m.flagged === 1 ? { flagged: true } : {})
   }))
 
-  const toolRows = getDb()
-    .prepare(
-      `SELECT id, after_msg_id, run_id, auto, decision, proposal_json, result_json, content_offset,
-              agent_id, agent_role, started_at, ended_at
-       FROM tool_ops WHERE session_id = ? ORDER BY seq`
-    )
-    .all(id) as Array<{
-    id: string
-    after_msg_id: string
-    run_id: string
-    auto: number
-    decision: string | null
-    proposal_json: string
-    result_json: string | null
-    content_offset: number | null
-    agent_id: string | null
-    agent_role: string | null
-    started_at: number | null
-    ended_at: number | null
-  }>
-  const tools: PersistedToolOp[] = toolRows.map((t) => ({
-    id: t.id,
-    afterMessageId: t.after_msg_id,
-    runId: t.run_id,
-    auto: t.auto === 1,
-    ...(t.decision != null ? { decision: t.decision as PersistedToolOp['decision'] } : {}),
-    proposal: JSON.parse(t.proposal_json) as ToolProposal,
-    ...(t.result_json != null ? { result: JSON.parse(t.result_json) as ToolResult } : {}),
-    ...(t.content_offset != null ? { contentOffset: t.content_offset } : {}),
-    ...(t.agent_id != null ? { agentId: t.agent_id } : {}),
-    ...(t.agent_role != null ? { agentRole: t.agent_role as PersistedToolOp['agentRole'] } : {}),
-    ...(t.started_at != null ? { startedAt: t.started_at } : {}),
-    ...(t.ended_at != null ? { endedAt: t.ended_at } : {})
-  }))
-
-  const terminalRows = getDb()
-    .prepare(`SELECT data FROM terminal_logs WHERE session_id = ? ORDER BY seq`)
-    .all(id) as Array<{ data: string }>
-  const terminal = terminalRows.map((r) => r.data)
-
   // Only attachments bound to a sent message are history; pending rows (no
   // message_id yet) belong to an in-flight compose and are not rehydrated.
   const attachmentRows = getDb()
@@ -349,7 +304,7 @@ export function loadSession(id: string): PersistedSession | null {
     updatedAt: s.updated_at,
     messageCount: messages.length
   }
-  return { session, messages, tools, terminal, attachments }
+  return { session, messages, attachments }
 }
 
 /**
@@ -380,18 +335,6 @@ export function appendMessage(sessionId: string, msg: PersistedMessage, now: num
   touch(sessionId, now)
 }
 
-/** Finalize a streamed assistant turn's content/error (no seq change). */
-export function updateMessage(id: string, content: string, error: string | undefined, now: number): void {
-  const row = getDb().prepare(`SELECT session_id FROM messages WHERE id = ?`).get(id) as
-    | { session_id: string }
-    | undefined
-  if (!row) return
-  getDb()
-    .prepare(`UPDATE messages SET content = ?, error = ? WHERE id = ?`)
-    .run(content, error ?? null, id)
-  touch(row.session_id, now)
-}
-
 /**
  * Set a message's local feedback (like/dislike) and report flag (Phase 5 message
  * actions). Both are local-only markers — never transmitted. A no-op if the id is
@@ -410,61 +353,15 @@ export function setMessageFeedback(
 
 /**
  * Reset an assistant message so a Rewrite/regenerate re-run streams into a clean
- * slot (the same id, overwritten on completion): delete the tool ops anchored
- * beneath it and blank its content/error/feedback/flag. Purely local — nothing
- * leaves the machine. Called before the regenerated run starts so a reload shows
- * only the new result, not the discarded one plus its stale tool cards.
+ * slot (the same id, overwritten on completion): blank its
+ * content/error/feedback/flag. Purely local — nothing leaves the machine. Called
+ * before the regenerated run starts so a reload shows only the new result, not
+ * the discarded one.
  */
 export function resetMessageForRegenerate(messageId: string): void {
-  const db = getDb()
-  db.prepare(`DELETE FROM tool_ops WHERE after_msg_id = ?`).run(messageId)
-  db.prepare(
-    `UPDATE messages SET content = '', error = NULL, feedback = NULL, flagged = 0 WHERE id = ?`
-  ).run(messageId)
-}
-
-/** Append (or replace, by id) a completed tool operation and bump the session. */
-export function appendToolOp(sessionId: string, op: PersistedToolOp, now: number): void {
   getDb()
     .prepare(
-      `INSERT INTO tool_ops
-         (id, session_id, seq, after_msg_id, run_id, auto, decision, proposal_json, result_json,
-          content_offset, agent_id, agent_role, started_at, ended_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         decision = excluded.decision,
-         result_json = excluded.result_json,
-         ended_at = excluded.ended_at`
+      `UPDATE messages SET content = '', error = NULL, feedback = NULL, flagged = 0 WHERE id = ?`
     )
-    .run(
-      op.id,
-      sessionId,
-      nextSeq('tool_ops', sessionId),
-      op.afterMessageId,
-      op.runId,
-      op.auto ? 1 : 0,
-      op.decision ?? null,
-      JSON.stringify(op.proposal),
-      op.result != null ? JSON.stringify(op.result) : null,
-      // content_offset anchors this card at the point in the assistant's prose
-      // where it was proposed (think → act → think). Set once at first insert;
-      // not in the ON CONFLICT UPDATE (the result arrives later but the anchor
-      // never moves). Nullable — older rows / non-anchored ops stay NULL.
-      op.contentOffset ?? null,
-      // Who did it (absent = the lead) and when. Like the anchor, the attribution
-      // and the start time are fixed at first insert; only `ended_at` can arrive
-      // later, alongside the result it belongs to.
-      op.agentId ?? null,
-      op.agentRole ?? null,
-      op.startedAt ?? null,
-      op.endedAt ?? null
-    )
-  touch(sessionId, now)
-}
-
-/** Append a raw terminal output chunk (ANSI preserved). Does not touch(). */
-export function appendTerminalChunk(sessionId: string, data: string): void {
-  getDb()
-    .prepare(`INSERT INTO terminal_logs (session_id, seq, data) VALUES (?, ?, ?)`)
-    .run(sessionId, nextSeq('terminal_logs', sessionId), data)
+    .run(messageId)
 }

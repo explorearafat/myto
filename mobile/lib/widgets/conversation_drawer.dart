@@ -7,7 +7,7 @@ import '../services/conversation_store.dart';
 import '../theme.dart';
 import 'sylor_star.dart';
 
-/// The left drawer: a new-chat button, the saved conversation list, and the account footer.
+
 class ConversationDrawer extends StatelessWidget {
   const ConversationDrawer({super.key, required this.onSelect, required this.onNewChat});
 

@@ -1,9 +1,6 @@
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
-
-/// Three softly-pulsing dots shown while the assistant reply is still empty (before the first
-/// token lands), matching the "thinking…" feel of the desktop app.
 class TypingIndicator extends StatefulWidget {
   const TypingIndicator({super.key});
 

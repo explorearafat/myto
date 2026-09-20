@@ -7,8 +7,6 @@ import 'services/auth_service.dart';
 import 'services/conversation_store.dart';
 import 'theme.dart';
 
-/// The app root: wires the two long-lived services into the widget tree, applies Sylor's
-/// light/dark themes (following the system setting), and gates on sign-in.
 class SylorApp extends StatelessWidget {
   const SylorApp({super.key, required this.auth, required this.store});
 

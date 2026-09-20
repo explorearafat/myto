@@ -3,9 +3,6 @@ import 'package:flutter/services.dart';
 
 import '../theme.dart';
 
-/// The bottom input row: a rounded multiline field with a send button that turns into a stop
-/// button while a reply is streaming. The controller and focus node are owned by the screen so
-/// conversation starters can prefill the field.
 class ChatComposer extends StatefulWidget {
   const ChatComposer({
     super.key,
@@ -38,7 +35,6 @@ class _ChatComposerState extends State<ChatComposer> {
 
   @override
   void dispose() {
-    // The controller and focus node are owned by the screen, so we only detach our listener.
     widget.controller.removeListener(_onChanged);
     super.dispose();
   }

@@ -1,17 +1,10 @@
 import 'package:flutter/material.dart';
-
-/// Sylor's palette and themes. The light theme is the "warm paper" look shared with the
-/// desktop app and the website; the dark theme is its counterpart. The universal terracotta
-/// star colour (#cf5535) is the accent on both. Kept intentionally close to the web/app so
-/// Sylor looks like one product across surfaces.
 class SylorColors {
   const SylorColors._();
 
-  /// The universal Sylor mark colour. Slightly lifted in dark mode for contrast.
   static const Color terracotta = Color(0xFFCF5535);
   static const Color terracottaBright = Color(0xFFE0704F);
 
-  // Light — warm paper.
   static const Color lightBg = Color(0xFFFAF9F5);
   static const Color lightSurface = Color(0xFFFFFFFF);
   static const Color lightSurface2 = Color(0xFFF1ECE3);
@@ -19,7 +12,6 @@ class SylorColors {
   static const Color lightMuted = Color(0xFF6B665E);
   static const Color lightBorder = Color(0xFFE9E1D4);
 
-  // Dark.
   static const Color darkBg = Color(0xFF1A1917);
   static const Color darkSurface = Color(0xFF232120);
   static const Color darkSurface2 = Color(0xFF2C2A27);
@@ -113,8 +105,6 @@ ThemeData _build({
   );
 }
 
-/// Semantic colours the widgets read via `Theme.of(context).palette`, so a bubble or the
-/// composer doesn't have to reach for raw constants and stays correct in light and dark.
 class SylorPalette extends ThemeExtension<SylorPalette> {
   const SylorPalette({
     required this.bg,

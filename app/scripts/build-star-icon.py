@@ -1,15 +1,3 @@
-# Regenerate the Windows app icon (resources/icon.ico + icon.png) as the universal
-# Sylor mark: the twelve-ray terracotta star on a warm "paper" tile. The star geometry
-# is a faithful raster of SylorStar.tsx / public sylor-star.svg (same 24x24 viewBox,
-# same long/short ray Beziers, same #cf5535), so the desktop icon matches the mark
-# used everywhere else. Pure Pillow — no ImageMagick/sharp/cairo. Re-run after any
-# change to the star geometry or the tile palette:
-#
-#     python scripts/build-star-icon.py
-#
-# It renders each size at SS x supersample and downsamples with LANCZOS so the thin
-# rays stay clean down to 16px, then packs PNG-compressed entries into the .ico.
-
 import io
 import math
 import struct
@@ -21,16 +9,13 @@ REPO = Path(__file__).resolve().parent.parent
 RES = REPO / "resources"
 
 ICO_SIZES = [16, 32, 48, 64, 128, 256]
-SS = 8  # supersample factor for anti-aliasing
+SS = 8
 
-# Warm-paper tile (top -> bottom gradient), a faint warm border, and the terracotta star.
 TILE_TOP = (253, 251, 248)
 TILE_BOT = (241, 233, 220)
 BORDER = (233, 221, 202)
-STAR = (207, 85, 53)  # #cf5535
+STAR = (207, 85, 53)
 
-# The two ray outlines, each as two cubic Beziers [P0,P1,P2,P3, P0',P1',P2',P3'], lifted
-# verbatim from SylorStar.tsx (LONG_RAY / SHORT_RAY) in the 24x24 space about centre (12,12).
 LONG = [(12, 1.4), (12.85, 6), (12.85, 8.4), (12, 11), (12, 11), (11.15, 8.4), (11.15, 6), (12, 1.4)]
 SHORT = [(12, 4.8), (12.6, 7.4), (12.6, 8.9), (12, 11), (12, 11), (11.4, 8.9), (11.4, 7.4), (12, 4.8)]
 
@@ -69,7 +54,6 @@ def render(size):
     s = size * SS
     radius = int(s * 0.20)
 
-    # Rounded-square tile filled with a subtle vertical warm gradient.
     mask = Image.new("L", (s, s), 0)
     ImageDraw.Draw(mask).rounded_rectangle([0, 0, s - 1, s - 1], radius=radius, fill=255)
     column = Image.new("RGB", (1, s))
@@ -88,7 +72,6 @@ def render(size):
     )
     img = Image.alpha_composite(img, border)
 
-    # The star, scaled so its diameter is ~66% of the tile and centred.
     rays = star_rays()
     r0 = max(math.hypot(x - 12, y - 12) for r in rays for (x, y) in r)
     scale = (0.66 / 2 * s) / r0

@@ -6,8 +6,6 @@ import { tmpdir } from 'node:os'
 import { __setDbPathForTest, closeDb, getDb, SCHEMA_VERSION } from '@main/db/db'
 import {
   appendMessage,
-  appendTerminalChunk,
-  appendToolOp,
   createSession,
   deleteSession,
   INTERRUPTED_NOTE,
@@ -18,10 +16,8 @@ import {
   renameSession,
   resetMessageForRegenerate,
   searchSessions,
-  setMessageFeedback,
-  updateMessage
+  setMessageFeedback
 } from '@main/db/sessions'
-import type { PersistedToolOp } from '@shared/types'
 import { createProject } from '@main/db/projects'
 
 /**
@@ -62,11 +58,11 @@ describe('migration', () => {
     expect(row.foreign_keys).toBe(1)
   })
 
-  it('upgrades a v4 database to v5 without data loss (adds feedback + flagged)', () => {
+  it('upgrades a v4 database to the current version without data loss (adds feedback + flagged)', () => {
     // Build a full v4 DB by hand: every table as it stood at v4 (messages has no
     // feedback/flagged columns yet), with one chat + one message, marked
     // user_version 4. Starting AT v4 means migrate() runs the `< 5` step (this
-    // test's focus) and every later step (currently `< 6`), so the v2/v3/v4
+    // test's focus — feedback/flagged) and every later step, so the earlier
     // tables must already be present (they wouldn't be recreated).
     const path = join(dir, `v4-${tick()}.db`)
     closeDb()
@@ -139,147 +135,10 @@ describe('migration', () => {
     expect(after?.messages[0].flagged).toBe(true)
   })
 
-  it('round-trips a tool op content_offset (v6), and leaves it unset when absent', () => {
-    // content_offset (schema v6) anchors a tool card at the point in the
-    // assistant's prose where it was proposed, so a reload rebuilds the same
-    // think → act → think interleaving. Assert both the write path (appendToolOp)
-    // and the read path (loadSession): an op saved WITH an offset reads it back,
-    // one saved WITHOUT stays undefined (older/non-anchored ops).
-    const s = createSession(ROOT, 'Offsets', tick())
-    appendMessage(s.id, { id: 'm-1', role: 'assistant', content: 'Creating two files.' }, tick())
-    appendToolOp(
-      s.id,
-      {
-        id: 'op-anchored',
-        afterMessageId: 'm-1',
-        runId: 'run-1',
-        auto: true,
-        proposal: { kind: 'run_command', id: 'op-anchored', command: 'ls' },
-        contentOffset: 12
-      } as PersistedToolOp,
-      tick()
-    )
-    appendToolOp(
-      s.id,
-      {
-        id: 'op-plain',
-        afterMessageId: 'm-1',
-        runId: 'run-1',
-        auto: true,
-        proposal: { kind: 'run_command', id: 'op-plain', command: 'pwd' }
-      } as PersistedToolOp,
-      tick()
-    )
-
-    const loaded = loadSession(s.id)
-    const anchored = loaded?.tools.find((t) => t.id === 'op-anchored')
-    const plain = loaded?.tools.find((t) => t.id === 'op-plain')
-    expect(anchored?.contentOffset).toBe(12)
-    expect(plain?.contentOffset).toBeUndefined()
-  })
-
-  it('round-trips subagent attribution and op timing (v9), leaving old rows blank', () => {
-    // The run log is only honest across a reload if the durable op log carries WHO
-    // did each op and WHEN. `agent_id`/`agent_role` were declared on the type (and
-    // documented as surviving a reload) long before the INSERT actually wrote them,
-    // so reopening a conversation silently lost every subagent's attribution.
-    // `started_at`/`ended_at` are what a restored duration is computed from.
-    const s = createSession(ROOT, 'Attribution', tick())
-    appendMessage(s.id, { id: 'm-1', role: 'assistant', content: 'Delegating.' }, tick())
-    appendToolOp(
-      s.id,
-      {
-        id: 'op-agent',
-        afterMessageId: 'm-1',
-        runId: 'run-9',
-        auto: true,
-        proposal: { kind: 'run_command', id: 'op-agent', command: 'npm test' },
-        agentId: 'ag-7',
-        agentRole: 'reviewer',
-        startedAt: 1_700_000_000_000,
-        endedAt: 1_700_000_004_200
-      } as PersistedToolOp,
-      tick()
-    )
-    // An op with no attribution and no clock — every row written before v9 looks
-    // like this, and it must come back blank rather than defaulted to zero/lead.
-    appendToolOp(
-      s.id,
-      {
-        id: 'op-lead',
-        afterMessageId: 'm-1',
-        runId: 'run-9',
-        auto: true,
-        proposal: { kind: 'run_command', id: 'op-lead', command: 'ls' }
-      } as PersistedToolOp,
-      tick()
-    )
-
-    // Reopen from scratch (close + reopen the file) — the point is durability, not
-    // that the in-process handle remembers.
-    closeDb()
-    const loaded = loadSession(s.id)
-    const byAgent = loaded?.tools.find((t) => t.id === 'op-agent')
-    const byLead = loaded?.tools.find((t) => t.id === 'op-lead')
-    expect(byAgent).toMatchObject({
-      agentId: 'ag-7',
-      agentRole: 'reviewer',
-      startedAt: 1_700_000_000_000,
-      endedAt: 1_700_000_004_200
-    })
-    expect(byLead?.agentId).toBeUndefined()
-    expect(byLead?.agentRole).toBeUndefined()
-    expect(byLead?.startedAt).toBeUndefined()
-    expect(byLead?.endedAt).toBeUndefined()
-  })
-
-  it('lets a later result stamp ended_at on an op already saved without one', () => {
-    // Ops are written twice: once when proposed (no result, no end) and again when
-    // the result lands. The second write is an ON CONFLICT update, so `ended_at`
-    // has to be in that update list — otherwise every restored op is missing its
-    // end and shows no duration despite having been timed.
-    const s = createSession(ROOT, 'Late end', tick())
-    appendMessage(s.id, { id: 'm-1', role: 'assistant', content: 'Running.' }, tick())
-    const proposed = {
-      id: 'op-late',
-      afterMessageId: 'm-1',
-      runId: 'run-9',
-      auto: true,
-      proposal: { kind: 'run_command', id: 'op-late', command: 'npm run build' },
-      startedAt: 500
-    } as PersistedToolOp
-    appendToolOp(s.id, proposed, tick())
-    appendToolOp(
-      s.id,
-      {
-        ...proposed,
-        result: { kind: 'run_command', id: 'op-late', exitCode: 0, output: 'ok', truncated: false },
-        endedAt: 2_500
-      } as PersistedToolOp,
-      tick()
-    )
-
-    const ops = loadSession(s.id)?.tools.filter((t) => t.id === 'op-late') ?? []
-    expect(ops).toHaveLength(1) // replaced, not duplicated
-    expect(ops[0]).toMatchObject({ startedAt: 500, endedAt: 2_500 })
-  })
-
   it('persists, clears, and round-trips feedback + flagged; reset blanks a message', () => {
     const s = createSession(ROOT, 'Feedback', tick())
     appendMessage(s.id, { id: 'm-a', role: 'user', content: 'q' }, tick())
     appendMessage(s.id, { id: 'm-b', role: 'assistant', content: 'a' }, tick())
-    appendToolOp(
-      s.id,
-      {
-        id: 'op-b',
-        afterMessageId: 'm-b',
-        runId: 'run-1',
-        auto: true,
-        proposal: { kind: 'run_command', id: 'op-b', command: 'ls' },
-        result: { kind: 'run_command', id: 'op-b', exitCode: 0, output: 'ok', truncated: false }
-      } as PersistedToolOp,
-      tick()
-    )
 
     // Set both markers, then read them back.
     setMessageFeedback('m-b', 'dislike', true)
@@ -295,7 +154,7 @@ describe('migration', () => {
     expect(mb?.feedback).toBeUndefined()
     expect(mb?.flagged).toBeUndefined()
 
-    // Reset for regenerate: blanks content and removes the anchored tool op.
+    // Reset for regenerate: blanks content and clears the markers.
     setMessageFeedback('m-b', 'like', true)
     resetMessageForRegenerate('m-b')
     loaded = loadSession(s.id)
@@ -303,7 +162,6 @@ describe('migration', () => {
     expect(mb?.content).toBe('')
     expect(mb?.feedback).toBeUndefined()
     expect(mb?.flagged).toBeUndefined()
-    expect(loaded?.tools.find((t) => t.afterMessageId === 'm-b')).toBeUndefined()
     // The user turn is untouched.
     expect(loaded?.messages.find((m) => m.id === 'm-a')?.content).toBe('q')
   })
@@ -398,59 +256,15 @@ describe('reconcileInterruptedRuns', () => {
 })
 
 describe('append + load round-trips', () => {
-  it('stores messages, tools, and terminal chunks in seq order', () => {
+  it('stores messages in seq order with their session count', () => {
     const s = createSession(ROOT, 'Work', tick())
     appendMessage(s.id, { id: 'msg-1', role: 'user', content: 'hello' }, tick())
     appendMessage(s.id, { id: 'msg-2', role: 'assistant', content: 'hi there' }, tick())
 
-    const op: PersistedToolOp = {
-      id: 'tool-1',
-      afterMessageId: 'msg-2',
-      runId: 'run-1',
-      auto: false,
-      decision: 'approve',
-      proposal: {
-        id: 'tool-1',
-        kind: 'write_file',
-        path: 'src/a.ts',
-        oldContent: 'old',
-        newContent: 'new',
-        exists: true
-      },
-      result: { id: 'tool-1', kind: 'write_file', ok: true }
-    }
-    appendToolOp(s.id, op, tick())
-
-    appendTerminalChunk(s.id, '$ ls\r\n')
-    appendTerminalChunk(s.id, 'a.ts b.ts\r\n')
-
     const loaded = loadSession(s.id)!
     expect(loaded.messages.map((m) => m.id)).toEqual(['msg-1', 'msg-2'])
     expect(loaded.messages[0]).toMatchObject({ role: 'user', content: 'hello' })
-    expect(loaded.terminal).toEqual(['$ ls\r\n', 'a.ts b.ts\r\n'])
     expect(loaded.session.messageCount).toBe(2)
-
-    // Tool proposal/result survive JSON round-trip with types intact.
-    expect(loaded.tools).toHaveLength(1)
-    const t = loaded.tools[0]
-    expect(t.auto).toBe(false)
-    expect(t.decision).toBe('approve')
-    expect(t.proposal.kind).toBe('write_file')
-    if (t.proposal.kind === 'write_file') expect(t.proposal.newContent).toBe('new')
-    expect(t.result?.kind).toBe('write_file')
-    if (t.result?.kind === 'write_file') expect(t.result.ok).toBe(true)
-  })
-
-  it('updateMessage finalizes streamed content and error', () => {
-    const s = createSession(ROOT, 'Stream', tick())
-    appendMessage(s.id, { id: 'msg-1', role: 'assistant', content: '' }, tick())
-    updateMessage('msg-1', 'final answer', undefined, tick())
-    expect(loadSession(s.id)!.messages[0].content).toBe('final answer')
-
-    updateMessage('msg-1', 'partial', 'network died', tick())
-    const m = loadSession(s.id)!.messages[0]
-    expect(m.content).toBe('partial')
-    expect(m.error).toBe('network died')
   })
 
   it('appendMessage on a duplicate id replaces content without adding a row', () => {
@@ -525,7 +339,6 @@ describe('delete cascade', () => {
 
     const gone = createSession(ROOT, 'Gone', tick())
     appendMessage(gone.id, { id: 'g-msg', role: 'user', content: 'bye' }, tick())
-    appendTerminalChunk(gone.id, 'output')
 
     deleteSession(gone.id)
 

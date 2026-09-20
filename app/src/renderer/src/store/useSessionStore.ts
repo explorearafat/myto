@@ -2,7 +2,6 @@ import { create } from 'zustand'
 import type { StoreApi } from 'zustand'
 import type { ChatMessage, SessionSummary } from '@shared/types'
 import { useChatStore } from './useChatStore'
-import { useAppStore } from './useAppStore'
 
 /** The placeholder title new sessions are created with (see main/session-ipc.ts). */
 const DEFAULT_SESSION_TITLE = 'New session'
@@ -112,18 +111,6 @@ async function loadInto(
     // Deleted out from under us — fall back to a fresh landing page.
     await get().newDraft()
     return false
-  }
-  // Restore THIS conversation's own folder as the active workspace root before
-  // the switch completes, so the next send (and the project scan) targets the
-  // folder the chat was created in — not whichever folder the user last opened.
-  // The IPC is non-dialog and non-persisting: the DEFAULT folder for brand-new
-  // chats / next launch is deliberately left untouched (only an explicit folder
-  // pick changes that). A deleted/moved folder is a no-op in the handler, so a
-  // stale conversation still opens on the current root instead of crashing.
-  const root = loaded.session.projectRoot
-  if (root && root !== useAppStore.getState().workspaceRoot) {
-    const info = await window.sylor.workspace.setRoot(root)
-    useAppStore.getState().setWorkspace(info)
   }
   useChatStore.getState().applyLoaded(loaded)
   set({ activeSessionId: loaded.session.id })

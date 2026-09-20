@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { SylorStar } from '@renderer/components/SylorStar'
 
 /** A single window-control button. Marked no-drag so clicks aren't swallowed by the drag region. */
 function ControlButton({
@@ -23,7 +22,7 @@ function ControlButton({
         'flex h-full w-11 items-center justify-center text-muted transition-colors ' +
         (variant === 'danger'
           ? 'hover:bg-red-600/80 hover:text-white'
-          : 'hover:bg-white/5 hover:text-text')
+          : 'hover:bg-surface-2 hover:text-text')
       }
     >
       {children}
@@ -32,8 +31,10 @@ function ControlButton({
 }
 
 /**
- * Custom, draggable title bar for the frameless window. The root is the drag region;
- * the brand and window controls opt out of dragging so they remain interactive.
+ * A seamless, draggable title strip for the frameless window. It carries no brand
+ * or border — it blends into the paper background so the app reads as one flat
+ * sheet (Claude-desktop style), with the wordmark living in the sidebar instead.
+ * Only the window controls opt out of dragging so they stay clickable.
  */
 export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false)
@@ -53,15 +54,8 @@ export function TitleBar() {
   return (
     <div
       style={{ WebkitAppRegion: 'drag' }}
-      className="flex h-9 shrink-0 items-center justify-between border-b border-border bg-surface select-none"
+      className="flex h-8 shrink-0 items-center justify-end bg-bg select-none"
     >
-      <div className="flex items-center gap-2 px-3">
-        <SylorStar size={18} className="shrink-0" />
-        <span className="text-[13px] font-semibold leading-none tracking-wide text-text">
-          Sylor
-        </span>
-      </div>
-
       <div className="flex h-full items-stretch">
         <ControlButton label="Minimize" onClick={() => window.sylor.window.minimize()}>
           <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
@@ -80,7 +74,7 @@ export function TitleBar() {
                 y="2.5"
                 width="7"
                 height="7"
-                fill="var(--color-surface)"
+                fill="var(--color-bg)"
                 stroke="currentColor"
               />
             </svg>

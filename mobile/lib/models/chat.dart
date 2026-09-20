@@ -2,8 +2,6 @@ import 'oraculum_model.dart';
 
 enum Role { user, assistant }
 
-/// A single turn in a conversation. `content` is mutable so the assistant message can grow
-/// token-by-token as the reply streams in.
 class ChatMessage {
   ChatMessage({required this.role, required this.content, DateTime? at})
       : at = at ?? DateTime.now();
@@ -14,7 +12,6 @@ class ChatMessage {
 
   bool get isUser => role == Role.user;
 
-  /// The wire shape the gateway expects: `{role, content}` with only user/assistant roles.
   Map<String, String> toWire() => {
         'role': role == Role.assistant ? 'assistant' : 'user',
         'content': content,
@@ -35,7 +32,6 @@ class ChatMessage {
       );
 }
 
-/// A saved conversation: an ordered list of messages plus the model that answered.
 class Conversation {
   Conversation({
     required this.id,
@@ -61,7 +57,6 @@ class Conversation {
         modelId: modelId ?? kDefaultModelId,
       );
 
-  /// Derive a short title from the first user message (used the first time a chat is saved).
   void deriveTitleFromMessages() {
     ChatMessage? firstUser;
     for (final m in messages) {

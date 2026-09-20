@@ -1,11 +1,14 @@
 {
-  "name": "react-example",
+  "name": "sylor",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
-    "build": "vite build",
+    "build": "npm run build:electron && node scripts/copy-electron-build.js && vite build",
+    "build:web": "vite build",
+    "build:electron": "npm --prefix app run dist:win",
+    "install:app": "npm --prefix app install",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
@@ -21,12 +24,17 @@
     "vite": "^6.2.3"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^22.14.0",
+    "@vitest/ui": "^5.0.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
+    "jsdom": "^30.0.1",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.3"
+    "vite": "^6.2.3",
+    "vitest": "^5.0.0"
   }
 }

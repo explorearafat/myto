@@ -4,17 +4,13 @@ import 'package:flutter/services.dart';
 import '../theme.dart';
 import 'sylor_star.dart';
 
-/// The screen shown before the first message: a soft aura behind the star, a time-of-day
-/// greeting (with the person's first name when signed in), and a grid of tappable conversation
-/// starters. Tapping a starter prefills the composer via [onStarter] so the person can tweak it
-/// before sending — the "guided" part of the app's feel.
+
 class ChatEmptyState extends StatelessWidget {
   const ChatEmptyState({super.key, required this.onStarter, this.firstName});
 
-  /// Called with a ready-to-edit prompt when a starter card is tapped.
   final void Function(String prompt) onStarter;
 
-  /// The signed-in person's first name, or null for guests (greeting omits the name then).
+  
   final String? firstName;
 
   static const List<_Starter> _starters = [
@@ -153,7 +149,6 @@ class ChatEmptyState extends StatelessWidget {
   }
 }
 
-/// The star sitting inside a soft terracotta radial glow lives in [SylorStarAura] (sylor_star.dart).
 
 class _Starter {
   const _Starter({required this.icon, required this.label, required this.prompt});

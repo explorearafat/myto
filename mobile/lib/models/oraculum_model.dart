@@ -1,18 +1,10 @@
-/// The two models a Sylor user can pick, mirrored from the website's shared/models.ts.
-///
-/// These are *facade* identities: server-side, both route across the same pool of real
-/// upstream models with failover — the names are branding only. This is the single client
-/// source of truth for the picker and for the id we send to the gateway.
 class OraculumModel {
   const OraculumModel({required this.id, required this.name, required this.blurb});
 
-  /// The id sent to the gateway and validated there.
   final String id;
 
-  /// Display name shown in the picker and app bar.
   final String name;
 
-  /// One-line description under the name.
   final String blurb;
 }
 
@@ -29,10 +21,8 @@ const List<OraculumModel> kOraculumModels = <OraculumModel>[
   ),
 ];
 
-/// The default selection (first option), matching the website.
 const String kDefaultModelId = 'sylor-oraculum-aeon200B';
 
-/// The display name for a facade id, falling back to a neutral label.
 String oraculumModelName(String id) {
   for (final m in kOraculumModels) {
     if (m.id == id) return m.name;

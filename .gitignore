@@ -12,3 +12,8 @@ coverage/
 .sylor/
 /plan.md
 .vercel
+
+# The Windows installer staged here by scripts/copy-electron-build.js — 133 MB and
+# reproducible from npm run build, so committing it bloats history for everyone.
+# dist/ (line 3) already covers the published copy; this covers the staging copy.
+/public/electron/

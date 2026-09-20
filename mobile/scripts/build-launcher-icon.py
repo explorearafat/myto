@@ -1,16 +1,3 @@
-# Generate the Android launcher icon for the Sylor mobile app as the universal Sylor mark:
-# the twelve-ray terracotta star on warm "paper". The star geometry is a faithful raster of
-# SylorStar.tsx / public/sylor-star.svg / mobile sylor_star.dart (same 24x24 viewBox, same
-# long/short ray Beziers, same #cf5535), so the app icon matches the mark used everywhere else.
-# Pure Pillow — no ImageMagick/sharp/cairo. Re-run after any change to the star geometry:
-#
-#     python scripts/build-launcher-icon.py
-#
-# It writes two 1024x1024 PNGs consumed by flutter_launcher_icons (see pubspec.yaml):
-#   assets/icon/sylor_icon.png            full-bleed warm tile + star  (legacy square icon)
-#   assets/icon/sylor_icon_foreground.png transparent, star only       (Android 8+ adaptive fg)
-# The adaptive background is a solid warm-paper colour set in pubspec.yaml.
-
 import math
 from pathlib import Path
 
@@ -20,16 +7,11 @@ MOBILE = Path(__file__).resolve().parent.parent
 OUT = MOBILE / "assets" / "icon"
 
 SIZE = 1024
-SS = 4  # supersample factor for anti-aliasing (SIZE*SS is the working canvas)
-
-# Warm-paper tile (top -> bottom gradient) and the terracotta star. Matches theme.dart /
-# build-star-icon.py so the mobile icon is the same warm paper + #cf5535 star as the desktop one.
+SS = 4
 TILE_TOP = (253, 251, 248)
 TILE_BOT = (241, 233, 220)
-STAR = (207, 85, 53)  # #cf5535
+STAR = (207, 85, 53)
 
-# The two ray outlines, each as two cubic Beziers [P0,P1,P2,P3, P0',P1',P2',P3'], lifted verbatim
-# from SylorStar.tsx (LONG_RAY / SHORT_RAY) in the 24x24 space about centre (12,12).
 LONG = [(12, 1.4), (12.85, 6), (12.85, 8.4), (12, 11), (12, 11), (11.15, 8.4), (11.15, 6), (12, 1.4)]
 SHORT = [(12, 4.8), (12.6, 7.4), (12.6, 8.9), (12, 11), (12, 11), (11.4, 8.9), (11.4, 7.4), (12, 4.8)]
 
@@ -88,8 +70,6 @@ def warm_tile(s):
 
 def render_full():
     s = SIZE * SS
-    # Full-bleed (no rounded corners) so any launcher mask — circle, squircle, rounded — crops
-    # cleanly. Star at 56% leaves a comfortable margin under aggressive circular masks.
     img = warm_tile(s)
     img = draw_star(img, 0.56)
     return img.resize((SIZE, SIZE), Image.LANCZOS)
@@ -97,7 +77,6 @@ def render_full():
 
 def render_foreground():
     s = SIZE * SS
-    # Transparent; star kept within the adaptive-icon safe zone (inner 66%), so ~0.50 diameter.
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     img = draw_star(img, 0.50)
     return img.resize((SIZE, SIZE), Image.LANCZOS)

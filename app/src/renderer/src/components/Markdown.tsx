@@ -183,6 +183,55 @@ const components: Components = {
   }
 }
 
+/**
+ * Body-only code components: the highlighted `<pre>` with no language label or
+ * copy header. Used by {@link CodeBody} so a FileCard (which draws its own header
+ * with the logo, path, type badge and its own copy/download) doesn't render the
+ * duplicate chrome the full `pre` override above adds.
+ */
+const bodyComponents: Components = {
+  pre({ children }) {
+    return (
+      <pre className="overflow-x-auto px-3 py-2.5 font-mono text-[12px] leading-relaxed">
+        <BlockContext.Provider value={true}>{children}</BlockContext.Provider>
+      </pre>
+    )
+  },
+  code: CodeToken
+}
+
+/**
+ * The shortest backtick fence that can wrap `code` without a run of backticks
+ * inside it closing the block early (CommonMark: a fence must be longer than any
+ * backtick run it contains). Lets a generated Markdown file that itself contains
+ * ``` code fences still highlight as one block.
+ */
+function fenceFor(code: string): string {
+  let max = 0
+  for (const run of code.matchAll(/`+/g)) max = Math.max(max, run[0].length)
+  return '`'.repeat(Math.max(3, max + 1))
+}
+
+/**
+ * Render a single code string as a highlighted block body — same rehype-highlight
+ * pipeline as {@link Markdown}, but without the header chrome. `lang` is a
+ * highlight.js language hint (e.g. `python`, `html`); an unknown or empty value
+ * degrades to an unhighlighted block (ignoreMissing) rather than throwing.
+ */
+export function CodeBody({ code, lang }: { code: string; lang?: string }): ReactNode {
+  const fence = fenceFor(code)
+  const fenced = `${fence}${lang ?? ''}\n${code}\n${fence}`
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}
+      components={bodyComponents}
+    >
+      {fenced}
+    </ReactMarkdown>
+  )
+}
+
 /** Render Markdown `content` with the shared component overrides + GFM + highlight. */
 export function Markdown({ content }: { content: string }): ReactNode {
   return (

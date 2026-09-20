@@ -57,6 +57,13 @@ export function AuthGate({ children }: { children: ReactNode }): React.JSX.Eleme
   if (!ready) return null
   if (user) return <>{children}</>
 
+  // The browser-preview shim (DEV-only, never present in the packaged app — see
+  // browser-preview-shim.ts) can't run Google's loopback sign-in, so the gate
+  // would block the very screenshots the shim exists to enable. When it's active,
+  // treat the app as signed-in chrome and render straight through.
+  if (window.__sylorPreviewShim) return <>{children}</>
+
+
   return (
     <div className="grid min-h-screen place-items-center bg-[#faf9f5] px-6 text-[#141413]">
       <div className="w-full max-w-sm text-center">

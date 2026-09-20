@@ -5,18 +5,15 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import '../models/chat.dart';
 import '../theme.dart';
 import 'sylor_star.dart';
+import 'tool_card.dart';
 import 'typing_indicator.dart';
 
-/// One rendered turn. The person's messages sit in a rounded terracotta-tinted bubble on the
-/// right; Sylor's replies stream as Markdown on the left beside the star, like the desktop app.
-/// While a reply streams the star breathes and a caret trails the text; once it's done a quiet
-/// Copy affordance appears.
+
 class MessageBubble extends StatelessWidget {
   const MessageBubble({super.key, required this.message, this.streaming = false});
 
   final ChatMessage message;
 
-  /// True for the assistant message currently receiving tokens (shows typing dots when empty).
   final bool streaming;
 
   @override
@@ -68,11 +65,7 @@ class MessageBubble extends StatelessWidget {
                 if (showDots)
                   const Padding(padding: EdgeInsets.only(top: 3), child: TypingIndicator())
                 else
-                  MarkdownBody(
-                    data: empty ? '…' : message.content,
-                    selectable: true,
-                    styleSheet: _markdownStyle(palette),
-                  ),
+                  _content(context, palette),
                 if (!empty && streaming)
                   Padding(
                     padding: const EdgeInsets.only(top: 4),
@@ -88,6 +81,35 @@ class MessageBubble extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+
+  /// The assistant body: plain Markdown, or — when the reply carries tool blocks — an interleaved
+  /// column of Markdown prose and tool cards (the gateway writes the tool round-trips inline).
+  Widget _content(BuildContext context, SylorPalette palette) {
+    final text = message.content;
+    if (text.trim().isEmpty) {
+      return MarkdownBody(data: '…', selectable: true, styleSheet: _markdownStyle(palette));
+    }
+    if (!hasToolBlocks(text)) {
+      return MarkdownBody(data: text, selectable: true, styleSheet: _markdownStyle(palette));
+    }
+    final segments = parseChatSegments(text);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (var k = 0; k < segments.length; k++)
+          Padding(
+            padding: EdgeInsets.only(bottom: k == segments.length - 1 ? 0 : 10),
+            child: segments[k] is ToolSegment
+                ? ToolCard(segment: segments[k] as ToolSegment, palette: palette)
+                : MarkdownBody(
+                    data: (segments[k] as ProseSegment).text,
+                    selectable: true,
+                    styleSheet: _markdownStyle(palette),
+                  ),
+          ),
+      ],
     );
   }
 
@@ -123,8 +145,6 @@ class MessageBubble extends StatelessWidget {
   }
 }
 
-/// A thin terracotta bar that blinks at the end of a streaming reply, so the text looks like
-/// it's being typed in real time.
 class _StreamCaret extends StatefulWidget {
   const _StreamCaret({required this.color});
 
@@ -164,8 +184,6 @@ class _StreamCaretState extends State<_StreamCaret> with SingleTickerProviderSta
   }
 }
 
-/// A quiet "Copy" affordance under a finished reply — copies the whole message, buzzes lightly,
-/// and confirms with a snackbar. Text stays selectable too, for copying just part of a reply.
 class _CopyButton extends StatelessWidget {
   const _CopyButton({required this.text, required this.palette});
 

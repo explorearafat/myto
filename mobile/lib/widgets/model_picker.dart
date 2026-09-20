@@ -4,9 +4,7 @@ import '../models/oraculum_model.dart';
 import '../theme.dart';
 import 'sylor_star.dart';
 
-/// Shows the Oraculum model chooser as a bottom sheet and resolves to the chosen id (or null
-/// if dismissed). Both options route across the same real model pool server-side — this is a
-/// branding-only choice, mirrored from the website.
+
 Future<String?> showModelPicker(BuildContext context, {required String selectedId}) {
   final palette = Theme.of(context).palette;
   return showModalBottomSheet<String>(

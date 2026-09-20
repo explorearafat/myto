@@ -22,6 +22,10 @@
 
   --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'JetBrains Mono Variable', ui-monospace, monospace;
+  /* Georgia is a system serif (no webfont to ship), paired with Inter as the
+   * editorial accent the rail uses for New chat, its nav items, and the signed-in
+   * name. Exposing it here makes a `font-serif` utility, same as font-sans/mono. */
+  --font-serif: Georgia, 'Times New Roman', serif;
 }
 
 /* Dark theme: override the color tokens; typography is shared. A warm, neutral
@@ -354,6 +358,16 @@ h3 {
 }
 
 /*
+ * Cross-fade for the live status caption. When the model's <status> changes the
+ * StatusLine remounts (it's keyed on the caption text), so the new phrase fades
+ * up over the old instead of snapping in. Reuses the step-in keyframes (fade +
+ * 3px rise); runs once per caption. Reduced-motion drops it to an instant swap.
+ */
+.sylor-status-in {
+  animation: sylor-step-in 0.24s ease-out;
+}
+
+/*
  * Entrance for a newly-appended activity row / the intent lead-in: a quick fade
  * with a subtle upward slide so each step registers as it arrives without
  * jumping the layout (requirement #9). Runs once on mount — rows have stable
@@ -472,6 +486,9 @@ h3 {
   .sylor-step-in {
     animation: none;
   }
+  .sylor-status-in {
+    animation: none;
+  }
   .sylor-view-in,
   .sylor-tab-in,
   .sylor-drawer-in,
@@ -484,4 +501,373 @@ h3 {
   .sylor-press:active {
     transform: none;
   }
+}
+
+/* ============================================================
+   Prompt DNA — the visual prompt builder canvas.
+   All colors flow from the theme tokens, so dark mode is free.
+   ============================================================ */
+
+.prompt-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 2px 8px;
+}
+
+.prompt-builder__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.prompt-builder__title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-serif);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.prompt-builder__template-btn {
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--color-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.prompt-builder__template-btn:hover {
+  background: var(--color-surface-2);
+  color: var(--color-text);
+}
+
+/* Template picker */
+.prompt-builder__templates {
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: var(--color-surface);
+  padding: 10px;
+}
+
+.prompt-builder__templates-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-muted);
+  margin-bottom: 8px;
+}
+
+.prompt-builder__templates-header button {
+  border: none;
+  background: none;
+  font-size: 16px;
+  color: var(--color-muted);
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.prompt-builder__templates-header button:hover {
+  color: var(--color-text);
+}
+
+.prompt-builder__templates-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.prompt-template-card {
+  text-align: left;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg);
+  padding: 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.prompt-template-card:hover {
+  border-color: var(--color-primary);
+  background: var(--color-surface);
+}
+
+.prompt-template-card__name {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--color-text);
+  margin-bottom: 3px;
+}
+
+.prompt-template-card__desc {
+  font-size: 11px;
+  color: var(--color-muted);
+  line-height: 1.4;
+  margin-bottom: 5px;
+}
+
+.prompt-template-card__blocks {
+  font-size: 10px;
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+/* Canvas */
+.prompt-builder__canvas {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.prompt-builder__empty {
+  padding: 20px 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--color-muted);
+}
+
+/* Add-block row */
+.prompt-builder__add-btn {
+  align-self: flex-start;
+  border: 1px dashed var(--color-border);
+  border-radius: 10px;
+  background: none;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  color: var(--color-muted);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.prompt-builder__add-btn:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.prompt-builder__add-menu {
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: var(--color-surface);
+  padding: 10px;
+}
+
+.prompt-builder__add-menu-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-muted);
+  margin-bottom: 8px;
+}
+
+.prompt-builder__add-menu-header button {
+  border: none;
+  background: none;
+  font-size: 16px;
+  color: var(--color-muted);
+  cursor: pointer;
+}
+
+.prompt-builder__add-menu-header button:hover {
+  color: var(--color-text);
+}
+
+.prompt-builder__add-menu-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.prompt-block-type-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg);
+  padding: 9px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.prompt-block-type-card:hover {
+  border-color: var(--color-primary);
+  background: var(--color-surface);
+}
+
+.prompt-block-type-card__icon {
+  font-size: 14px;
+}
+
+.prompt-block-type-card__label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.prompt-block-type-card__desc {
+  font-size: 10.5px;
+  color: var(--color-muted);
+  line-height: 1.35;
+}
+
+/* Footer */
+.prompt-builder__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.prompt-builder__status {
+  font-size: 11.5px;
+  color: var(--color-muted);
+}
+
+.prompt-builder__compile-btn {
+  border: none;
+  border-radius: 999px;
+  background: var(--color-primary);
+  padding: 6px 16px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-bg);
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.prompt-builder__compile-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.prompt-builder__compile-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ---- Single block ---- */
+
+.prompt-block {
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: var(--color-surface);
+  padding: 10px 12px 8px;
+  transition: border-color 0.15s, opacity 0.2s;
+}
+
+.prompt-block--disabled {
+  opacity: 0.55;
+}
+
+.prompt-block__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.prompt-block__drag {
+  display: flex;
+  align-items: center;
+  color: var(--color-muted);
+  cursor: grab;
+  touch-action: none;
+}
+
+.prompt-block__drag:active {
+  cursor: grabbing;
+}
+
+.prompt-block__icon {
+  font-size: 13px;
+}
+
+.prompt-block__label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-primary);
+  flex: 1;
+}
+
+.prompt-block__delete {
+  border: none;
+  background: none;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--color-muted);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 6px;
+}
+
+.prompt-block__delete:hover {
+  color: var(--color-text);
+  background: var(--color-surface-2);
+}
+
+.prompt-block__textarea {
+  width: 100%;
+  border: none;
+  background: transparent;
+  resize: vertical;
+  min-height: 56px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text);
+  outline: none;
+}
+
+.prompt-block__textarea::placeholder {
+  color: var(--color-muted);
+  opacity: 0.7;
+}
+
+.prompt-block__textarea:disabled {
+  cursor: not-allowed;
+}
+
+.prompt-block__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.prompt-block__toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--color-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.prompt-block__toggle input {
+  accent-color: var(--color-primary);
+  margin: 0;
+}
+
+.prompt-block__count {
+  font-size: 11px;
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
 }

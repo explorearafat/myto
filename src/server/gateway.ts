@@ -7,11 +7,25 @@
 import { isOraculumModel, DEFAULT_MODEL_ID } from '../shared/models';
 import { resolveIdentity } from './userId';
 import { checkBudget, charge } from './ratelimit';
+import {
+  createToolCallParser,
+  runTool,
+  toolResultBlock,
+  toolsEnabled,
+  toolsSystemPrompt,
+  type ToolCall,
+  type ToolCallParser,
+} from './tools';
 
 export interface WireMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
 }
+
+// Hard ceiling on model turns per reply. Each turn is a full upstream generation plus (usually) one
+// tool fetch, and this runs on Edge with a wall-clock budget, so keep it small: up to two tool
+// calls then a forced final answer. Also guarantees the agentic loop always terminates.
+const MAX_TOOL_TURNS = 3;
 
 // The upstream models are branded away behind the two Oraculum ids; both facades draw on this
 // same pool, tried in order with key rotation until one answers.
@@ -132,69 +146,150 @@ async function openUpstream(messages: WireMessage[]): Promise<Response | null> {
   return null;
 }
 
-// Re-emit the upstream reply as our own SSE protocol while metering tokens. Charging happens
-// before we close, so the Edge function isn't torn down mid-charge.
-function buildClientStream(
+// Consume one upstream reply, forwarding visible text as `token` events. When `parser` is set it
+// also watches for a tool-call fence, holding that block back and returning the parsed call so the
+// loop can run it (the block itself is written to the reply by the loop, not here). Returns the
+// visible text, the call (if any), and the turn's token usage. Does NOT send `done`.
+async function readTurn(
   upstream: Response,
+  send: (obj: unknown) => void,
+  parser: ToolCallParser | null,
+): Promise<{ visible: string; call: ToolCall | null; usage: number }> {
+  let visible = '';
+  let usage = 0;
+  let call: ToolCall | null = null;
+
+  const emit = (text: string): void => {
+    if (!text || call) return; // once a call is found, ignore the tail
+    if (parser) {
+      const r = parser.push(text);
+      if (r.text) {
+        visible += r.text;
+        send({ t: 'token', v: r.text });
+      }
+      if (r.call && !call) call = r.call;
+    } else {
+      visible += text;
+      send({ t: 'token', v: text });
+    }
+  };
+
+  const ct = upstream.headers.get('content-type') || '';
+  if (!ct.includes('text/event-stream')) {
+    // Buffered fallback: the whole JSON body, emitted as one token.
+    const data = (await upstream.json().catch(() => null)) as {
+      choices?: { message?: { content?: string } }[];
+      usage?: { total_tokens?: number };
+    } | null;
+    emit(data?.choices?.[0]?.message?.content ?? '');
+    usage = Number(data?.usage?.total_tokens) || 0;
+  } else {
+    const reader = upstream.body!.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith('data:')) continue;
+        const d = line.slice(5).trim();
+        if (d === '[DONE]') continue;
+        try {
+          const j = JSON.parse(d) as {
+            choices?: { delta?: { content?: string } }[];
+            usage?: { total_tokens?: number };
+          };
+          const delta = j?.choices?.[0]?.delta?.content;
+          if (typeof delta === 'string' && delta) emit(delta);
+          const u = j?.usage?.total_tokens;
+          if (typeof u === 'number') usage = u;
+        } catch {
+          // Partial JSON across chunks — the remainder stays buffered for the next read.
+        }
+      }
+      if (call) {
+        // A complete tool call arrived — stop this turn early and hand back to the loop.
+        try {
+          await reader.cancel();
+        } catch {
+          /* ignore */
+        }
+        break;
+      }
+    }
+  }
+
+  if (parser && !call) {
+    const tail = parser.flush();
+    if (tail) {
+      visible += tail;
+      send({ t: 'token', v: tail });
+    }
+  }
+  return { visible, call, usage };
+}
+
+// The bounded agentic loop, run inside the streamed Response. Each turn opens an upstream, streams
+// its visible text, and — while tools are on and we haven't hit the last turn — runs any tool the
+// model calls, writing the call + result blocks into the reply so both clients render a card, then
+// re-prompts. Charging happens once, before close. Tool blocks ride the existing `token` protocol,
+// so the client SSE contract is unchanged.
+function buildAgentStream(
+  base: WireMessage[],
   uid: string,
   inputChars: number,
+  toolsOn: boolean,
 ): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
+  const abort = new AbortController();
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const send = (obj: unknown) => controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
-      let outChars = 0;
-      let usage = 0;
+      const messages: WireMessage[] = [...base];
+      let totalUsage = 0;
+      let totalOut = 0;
+      let errored = false;
       try {
-        const ct = upstream.headers.get('content-type') || '';
-        if (!ct.includes('text/event-stream')) {
-          // Buffered fallback: the whole JSON body, emitted as one token.
-          const data = (await upstream.json().catch(() => null)) as {
-            choices?: { message?: { content?: string } }[];
-            usage?: { total_tokens?: number };
-          } | null;
-          const text = data?.choices?.[0]?.message?.content ?? '';
-          if (text) {
-            send({ t: 'token', v: text });
-            outChars += text.length;
+        for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+          const isLast = turn === MAX_TOOL_TURNS - 1;
+          if (toolsOn && isLast) {
+            messages.push({
+              role: 'system',
+              content: 'Answer the user now using what you already have. Do not call any more tools.',
+            });
           }
-          usage = Number(data?.usage?.total_tokens) || 0;
-        } else {
-          const reader = upstream.body!.getReader();
-          const dec = new TextDecoder();
-          let buf = '';
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buf += dec.decode(value, { stream: true });
-            let nl: number;
-            while ((nl = buf.indexOf('\n')) >= 0) {
-              const line = buf.slice(0, nl).trim();
-              buf = buf.slice(nl + 1);
-              if (!line.startsWith('data:')) continue;
-              const data = line.slice(5).trim();
-              if (data === '[DONE]') continue;
-              try {
-                const j = JSON.parse(data) as {
-                  choices?: { delta?: { content?: string } }[];
-                  usage?: { total_tokens?: number };
-                };
-                const delta = j?.choices?.[0]?.delta?.content;
-                if (typeof delta === 'string' && delta) {
-                  send({ t: 'token', v: delta });
-                  outChars += delta.length;
-                }
-                const u = j?.usage?.total_tokens;
-                if (typeof u === 'number') usage = u;
-              } catch {
-                // Partial JSON across chunks — the remainder stays buffered for the next read.
-              }
-            }
+          const upstream = await openUpstream(messages);
+          if (!upstream) {
+            send({ t: 'error', code: 'upstream' });
+            errored = true;
+            break;
           }
+          const parser = toolsOn && !isLast ? createToolCallParser() : null;
+          const { visible, call, usage } = await readTurn(upstream, send, parser);
+          totalUsage += usage;
+          totalOut += visible.length;
+          if (!call) break; // the model wrote its final answer
+
+          const name = call.name ?? 'tool';
+          send({ t: 'token', v: `\n${call.block}\n` });
+          const result = await runTool(call, abort.signal);
+          send({ t: 'token', v: toolResultBlock(name, result) });
+          messages.push({
+            role: 'assistant',
+            content: (visible.trimEnd() ? `${visible.trimEnd()}\n` : '') + call.block,
+          });
+          messages.push({
+            role: 'user',
+            content: `Tool result for ${name}:\n${result}\n\nUse this to answer the user's request, or call another tool if you still need more. Do not repeat an identical call.`,
+          });
         }
-        const billed = usage > 0 ? usage : Math.ceil((inputChars + outChars) / 4);
+        const billed = totalUsage > 0 ? totalUsage : Math.ceil((inputChars + totalOut) / 4);
         await charge(uid, billed);
-        send({ t: 'done', usage: billed });
+        if (!errored) send({ t: 'done', usage: billed });
         controller.close();
       } catch {
         try {
@@ -206,11 +301,7 @@ function buildClientStream(
       }
     },
     cancel() {
-      try {
-        upstream.body?.cancel();
-      } catch {
-        /* ignore */
-      }
+      abort.abort();
     },
   });
 }
@@ -243,12 +334,19 @@ export async function handleChat(req: Request): Promise<Response> {
     );
   }
 
-  const messages: WireMessage[] = [{ role: 'system', content: PERSONA }, ...history];
-  const upstream = await openUpstream(messages);
-  if (!upstream) return json(502, { error: 'upstream' }, cookieHeader);
+  // No keys configured is a hard 502 (a misconfig, not a transient upstream blip). With keys, the
+  // agentic loop runs inside the stream; a network failure mid-loop surfaces as an in-stream error.
+  if (env().keys.length === 0) return json(502, { error: 'upstream' }, cookieHeader);
+
+  const toolsOn = toolsEnabled();
+  const messages: WireMessage[] = [
+    { role: 'system', content: PERSONA },
+    ...(toolsOn ? [{ role: 'system' as const, content: toolsSystemPrompt() }] : []),
+    ...history,
+  ];
 
   const inputChars = messages.reduce((n, m) => n + m.content.length, 0);
-  const stream = buildClientStream(upstream, uid, inputChars);
+  const stream = buildAgentStream(messages, uid, inputChars, toolsOn);
 
   return new Response(stream, {
     status: 200,

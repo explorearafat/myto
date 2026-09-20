@@ -5,9 +5,6 @@ import '../services/auth_service.dart';
 import '../theme.dart';
 import '../widgets/sylor_star.dart';
 
-/// The gate shown when nobody is signed in. Sign-in is required to use Sylor, so this offers a
-/// single "Continue with Google" action. It runs in a real browser (see [AuthService]) because
-/// Google blocks its OAuth screen inside app webviews.
 class SignInScreen extends StatelessWidget {
   const SignInScreen({super.key});
 

@@ -26,6 +26,8 @@ import { matchAnswer } from '../chatKb';
 import { SylorStar } from './SylorStar';
 import { MessageActions } from './MessageActions';
 import { Markdown } from '../lib/markdown';
+import { ToolCard } from './ToolCard';
+import { parseToolBlocks, hasToolBlocks } from '../lib/toolBlocks';
 import { streamChat, type ChatWireMessage } from '../lib/chatClient';
 import { ORACULUM_MODELS, DEFAULT_MODEL_ID, modelName } from '../shared/models';
 import { profileSummary, type UserProfile } from '../shared/profile';
@@ -220,7 +222,25 @@ function AgentReply({
           <QuotaCard resetSeconds={turn.resetSeconds} />
         ) : (
           <div>
-            {turn.text ? <Markdown text={turn.text} /> : null}
+            {turn.text ? (
+              hasToolBlocks(turn.text) ? (
+                <div className="space-y-3">
+                  {parseToolBlocks(turn.text).map((seg, si) =>
+                    seg.kind === 'tool' ? (
+                      <div key={si}>
+                        <ToolCard tool={seg} />
+                      </div>
+                    ) : (
+                      <div key={si}>
+                        <Markdown text={seg.text} />
+                      </div>
+                    ),
+                  )}
+                </div>
+              ) : (
+                <Markdown text={turn.text} />
+              )
+            ) : null}
             {streaming && !reduced ? (
               <span
                 className="caret ml-0.5 inline-block h-[1.05em] w-[2px] translate-y-[0.15em] bg-[#cf5535] align-middle"
