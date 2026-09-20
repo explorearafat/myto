@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import type { ToolSegment } from '../lib/fileBlocks'
+import { basename, type ToolSegment } from '../lib/fileBlocks'
 import { CodeBody } from './Markdown'
 
 /**
@@ -15,19 +15,39 @@ import { CodeBody } from './Markdown'
  * re-renders the same card.
  */
 
-/** Human label for a tool name (falls back to the raw name). */
-function toolLabel(name: string | null): string {
-  switch (name) {
+/**
+ * A friendly, present-tense headline for a tool round-trip — what Sylor is doing,
+ * with the target when there is one (e.g. "Creating ai-news.pdf", "Running python
+ * code"). This is the ONLY thing shown by default; the file's contents / diff stay
+ * behind the collapsed body, so the transcript reads as activity, not a data dump.
+ */
+function toolHeadline(tool: ToolSegment): string {
+  const input = tool.input && typeof tool.input === 'object' ? (tool.input as Record<string, unknown>) : {}
+  const path = typeof input.path === 'string' ? input.path : ''
+  const name = basename(path)
+  switch (tool.name) {
+    case 'write_file':
+      return name ? `Creating ${name}` : 'Creating file'
+    case 'edit_file':
+      return name ? `Editing ${name}` : 'Editing file'
+    case 'read_file':
+      return name ? `Reading ${name}` : 'Reading file'
+    case 'delete_file':
+      return name ? `Deleting ${name}` : 'Deleting file'
+    case 'list_dir':
+      return path && path !== '.' ? `Listing ${path}` : 'Listing folder'
+    case 'run_code': {
+      const lang = typeof input.language === 'string' ? input.language : ''
+      return lang ? `Running ${lang} code` : 'Running code'
+    }
     case 'web_search':
       return 'Web search'
     case 'web_fetch':
       return 'Fetch page'
     case 'wiki_search':
       return 'Wikipedia'
-    case 'run_code':
-      return 'Run code'
     default:
-      return name ?? 'Tool'
+      return tool.name ?? 'Tool'
   }
 }
 
@@ -59,6 +79,21 @@ function ToolGlyph({ name }: { name: string | null }): ReactNode {
       </svg>
     )
   }
+  if (name === 'list_dir') {
+    return (
+      <svg {...common}>
+        <path d="M1.75 4.5A1 1 0 0 1 2.75 3.5h3l1.5 1.5h5.25a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1v-8Z" {...stroke} />
+      </svg>
+    )
+  }
+  if (name === 'write_file' || name === 'edit_file' || name === 'read_file' || name === 'delete_file') {
+    return (
+      <svg {...common}>
+        <path d="M9 1.75H4a1 1 0 0 0-1 1v10.5a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5.75L9 1.75Z" {...stroke} />
+        <path d="M9 1.75V5.75h4" {...stroke} />
+      </svg>
+    )
+  }
   return (
     <svg {...common}>
       <path
@@ -69,6 +104,27 @@ function ToolGlyph({ name }: { name: string | null }): ReactNode {
       />
     </svg>
   )
+}
+
+/** The Cowork filesystem tools — rendered as quiet, borderless activity lines. */
+const FS_TOOLS = new Set(['write_file', 'edit_file', 'read_file', 'list_dir', 'delete_file'])
+
+/**
+ * Lines added / removed for a file-authoring call, computed from the call input
+ * (never the content itself). write_file counts the whole body as additions;
+ * edit_file counts the new vs old snippet. Null for anything that isn't a diff.
+ */
+function diffCounts(tool: ToolSegment): { add: number; del: number } | null {
+  const input = tool.input && typeof tool.input === 'object' ? (tool.input as Record<string, unknown>) : null
+  if (!input) return null
+  const lines = (s: string): number => (s === '' ? 0 : s.split('\n').length)
+  if (tool.name === 'write_file' && typeof input.content === 'string') {
+    return { add: lines(input.content), del: 0 }
+  }
+  if (tool.name === 'edit_file' && typeof input.old === 'string' && typeof input.new === 'string') {
+    return { add: lines(input.new), del: lines(input.old) }
+  }
+  return null
 }
 
 /** Pretty-print the call input; a raw string (malformed JSON) passes through as-is. */
@@ -82,15 +138,48 @@ function formatInput(input: unknown): string {
   }
 }
 
-export function ToolCard({ tool }: { tool: ToolSegment }): ReactNode {
+export function ToolCard({ tool, cowork = false }: { tool: ToolSegment; cowork?: boolean }): ReactNode {
   const [expanded, setExpanded] = useState(false)
 
   const running = tool.result === null
   const phase = running ? (tool.complete ? 'Running…' : 'Preparing…') : tool.complete ? null : 'Running…'
+
+  // Cowork filesystem tools render as a quiet, borderless one-liner — no expand,
+  // no content dump. Code writes just show +added / -removed on the right; the
+  // richer bordered/expandable card below is reserved for the normal chat tools.
+  if (FS_TOOLS.has(tool.name ?? '')) {
+    const counts = diffCounts(tool)
+    return (
+      <div className="my-1.5 flex items-center gap-2 text-[12px]">
+        <span className="shrink-0 text-muted">
+          <ToolGlyph name={tool.name} />
+        </span>
+        <span className="truncate font-medium text-text">{toolHeadline(tool)}</span>
+        {phase && <span className="sylor-thinking shrink-0 text-[10px] font-medium">{phase}</span>}
+        <span className="flex-1" />
+        {counts && (
+          <span className="shrink-0 font-mono text-[11px]">
+            <span className="text-green-500">+{counts.add}</span>{' '}
+            <span className="text-red-500">-{counts.del}</span>
+          </span>
+        )}
+      </div>
+    )
+  }
+
   const inputText = formatInput(tool.input)
 
+  // In a Cowork turn there is no card border/background — just a quiet expandable
+  // row (the user still taps to see run_code output / web results). The bordered
+  // card is reserved for the normal chat section.
   return (
-    <div className="my-3 overflow-hidden rounded-lg border border-border/70 bg-surface/40">
+    <div
+      className={
+        cowork
+          ? 'my-2 overflow-hidden'
+          : 'my-3 overflow-hidden rounded-lg border border-border/70 bg-surface/40'
+      }
+    >
       <button
         type="button"
         aria-expanded={expanded}
@@ -100,7 +189,7 @@ export function ToolCard({ tool }: { tool: ToolSegment }): ReactNode {
         <span className="text-muted">
           <ToolGlyph name={tool.name} />
         </span>
-        <span className="truncate text-[12px] font-medium text-text">{toolLabel(tool.name)}</span>
+        <span className="truncate text-[12px] font-medium text-text">{toolHeadline(tool)}</span>
         {phase ? (
           <span className="sylor-thinking shrink-0 text-[10px] font-medium">{phase}</span>
         ) : (

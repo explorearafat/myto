@@ -8,8 +8,13 @@ const settingsWith = (codeExecution: boolean): ProviderSettings => ({
   tools: { ...DEFAULT_PROVIDER_SETTINGS.tools, codeExecution }
 })
 
-const ctxOff = { signal: new AbortController().signal, settings: settingsWith(false) }
-const ctxOn = { signal: new AbortController().signal, settings: settingsWith(true) }
+const gateWith = (codeExecution: boolean) => ({
+  settings: settingsWith(codeExecution),
+  mode: 'chat' as const,
+  workspaceDir: null
+})
+const ctxOff = { ...gateWith(false), signal: new AbortController().signal }
+const ctxOn = { ...gateWith(true), signal: new AbortController().signal }
 
 describe('resolveInterpreter', () => {
   it('maps known languages, case-insensitively', () => {
@@ -42,8 +47,8 @@ describe('formatRunResult', () => {
 
 describe('runCodeTool gate', () => {
   it('is not available while code execution is off', () => {
-    expect(runCodeTool.available(settingsWith(false))).toBe(false)
-    expect(runCodeTool.available(settingsWith(true))).toBe(true)
+    expect(runCodeTool.available(gateWith(false))).toBe(false)
+    expect(runCodeTool.available(gateWith(true))).toBe(true)
   })
   it('refuses to run while disabled, without spawning', async () => {
     const out = await runCodeTool.run({ language: 'javascript', code: 'console.log(1)' }, ctxOff)

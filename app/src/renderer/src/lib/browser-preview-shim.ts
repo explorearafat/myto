@@ -75,7 +75,8 @@ function installShim(): void {
       streamCompletion: (_request, onChunk) => {
         onChunk({ streamId: 'preview', delta: '', done: true })
         return Promise.resolve(() => {})
-      }
+      },
+      decideApproval: () => {}
     },
     sessions: {
       list: (projectId) =>
@@ -191,6 +192,10 @@ function installShim(): void {
     },
     files: {
       save: () => Promise.resolve({ ok: false as const, canceled: true as const })
+    },
+    cowork: {
+      // The browser preview has no native folder dialog; report "cancelled".
+      pickWorkspace: () => Promise.resolve(null)
     }
   }
 

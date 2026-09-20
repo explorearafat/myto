@@ -20,7 +20,12 @@ import {
 } from './web'
 import { DEFAULT_PROVIDER_SETTINGS } from '../../shared/defaults'
 
-const ctx = { signal: new AbortController().signal, settings: DEFAULT_PROVIDER_SETTINGS }
+const ctx = {
+  signal: new AbortController().signal,
+  settings: DEFAULT_PROVIDER_SETTINGS,
+  mode: 'chat' as const,
+  workspaceDir: null
+}
 
 /** Build a minimal Response-like object for httpFetch to resolve with. */
 function fakeResponse(body: string, init?: { ok?: boolean; status?: number; contentType?: string }): Response {

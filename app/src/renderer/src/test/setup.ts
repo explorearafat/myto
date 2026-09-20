@@ -30,7 +30,8 @@ const sylorMock: SylorApi = {
     streamCompletion: vi.fn((_request, onChunk) => {
       onChunk({ streamId: 'test', delta: '', done: true })
       return Promise.resolve(() => {})
-    })
+    }),
+    decideApproval: vi.fn()
   },
   sessions: {
     // Query ops resolve sane empty defaults so boot() has no session and falls
@@ -112,6 +113,9 @@ const sylorMock: SylorApi = {
   },
   files: {
     save: vi.fn().mockResolvedValue({ ok: false, canceled: true })
+  },
+  cowork: {
+    pickWorkspace: vi.fn().mockResolvedValue(null)
   }
 }
 

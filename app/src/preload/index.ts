@@ -50,7 +50,9 @@ const api: SylorApi = {
         ipcRenderer.send(IpcChannel.ProvidersStreamCancel, streamId)
         cleanup()
       }
-    }
+    },
+    decideApproval: (approvalId, decision) =>
+      ipcRenderer.send(IpcChannel.ProvidersApprovalDecision, approvalId, decision)
   },
   sessions: {
     list: (projectId) => ipcRenderer.invoke(IpcChannel.SessionsList, projectId),
@@ -95,6 +97,9 @@ const api: SylorApi = {
   },
   files: {
     save: (name, content) => ipcRenderer.invoke(IpcChannel.FilesSave, name, content)
+  },
+  cowork: {
+    pickWorkspace: () => ipcRenderer.invoke(IpcChannel.CoworkPickWorkspace)
   }
 }
 

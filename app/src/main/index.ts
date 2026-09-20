@@ -8,6 +8,7 @@ import { registerProjectIpc } from './project-ipc'
 import { registerAttachmentIpc } from './attachment-ipc'
 import { registerAuthIpc } from './auth-ipc'
 import { registerFileIpc } from './file-ipc'
+import { registerCoworkIpc } from './cowork-ipc'
 import { closeDb, setDbPath } from './db/db'
 import { reconcileInterruptedRuns } from './db/sessions'
 import { setUserDataDir } from './settings'
@@ -90,6 +91,7 @@ app.whenReady().then(() => {
   registerAttachmentIpc()
   registerAuthIpc()
   registerFileIpc()
+  registerCoworkIpc()
 
   createWindow()
 

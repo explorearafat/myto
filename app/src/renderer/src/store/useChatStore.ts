@@ -1,5 +1,13 @@
 import { create } from 'zustand'
-import type { Attachment, ChatImage, ChatMessage, PersistedSession } from '@shared/types'
+import type {
+  ApprovalDecision,
+  ApprovalRequest,
+  Attachment,
+  ChatImage,
+  ChatMessage,
+  ChatMode,
+  PersistedSession
+} from '@shared/types'
 import type { PromptBlock } from '@shared/types/prompt-builder'
 import { takeReveal } from '../lib/reveal'
 
@@ -47,6 +55,13 @@ export interface ChatMessageUI {
    * the in-flight assistant turn, never persisted or transmitted.
    */
   status?: string
+  /**
+   * A pending Cowork approval prompt for a side-effecting tool. Set while the
+   * main-process loop is blocked awaiting the user's decision; the assistant turn
+   * renders an approval card. Cleared once the user answers (see decideApproval) or
+   * the run ends. Transient — never persisted.
+   */
+  pendingApproval?: ApprovalRequest
 }
 
 /**
@@ -83,6 +98,12 @@ interface LiveRun {
    * to a background run re-attaches to its live caption, not a stale one.
    */
   status?: string
+  /**
+   * A pending approval prompt for this run, or undefined when none is open. Held
+   * here (like `status`/`content`) so switching back to a background run that is
+   * waiting on the user re-attaches to the live prompt.
+   */
+  pendingApproval?: ApprovalRequest
   /** Cancels the main-process stream and detaches its chunk listener. */
   disposer: () => void
   /** Un-flushed delta text, drained by the flush timer. */
@@ -137,6 +158,13 @@ export interface ChatState {
   composerMode: 'text' | 'builder'
   /** Visual prompt blocks when in builder mode. */
   promptBlocks: PromptBlock[]
+  /**
+   * Whether the composer's Chat/Cowork toggle is on Cowork. When true, a sent turn
+   * runs in `cowork` mode: the main process advertises the filesystem tools (scoped
+   * to the chosen working folder), prepends the agentic system prompt, and raises
+   * the tool-use budget. A plain UI toggle — it never persists on a message.
+   */
+  coworkMode: boolean
 
   /**
    * Send a user turn and start a streaming reply. No-op while already running or
@@ -185,6 +213,13 @@ export interface ChatState {
   setComposerMode: (mode: 'text' | 'builder') => void
   /** Update the visual prompt blocks (builder mode). */
   setPromptBlocks: (blocks: PromptBlock[]) => void
+  /** Turn the Chat/Cowork toggle on (Cowork) or off (Chat). */
+  setCoworkMode: (on: boolean) => void
+  /**
+   * Answer a pending Cowork approval prompt. Sends the decision to the main process
+   * (which resumes the blocked tool loop) and clears the prompt from the UI.
+   */
+  decideApproval: (approvalId: string, decision: ApprovalDecision) => void
 }
 
 /**
@@ -316,7 +351,8 @@ function projectLiveRun(
       content: run.content,
       pending: true,
       error: undefined,
-      status: run.status
+      status: run.status,
+      pendingApproval: run.pendingApproval
     }
   } else {
     messages.push({
@@ -324,7 +360,8 @@ function projectLiveRun(
       role: 'assistant',
       content: run.content,
       pending: true,
-      status: run.status
+      status: run.status,
+      pendingApproval: run.pendingApproval
     })
   }
 
@@ -370,7 +407,8 @@ export const useChatStore = create<ChatState>((set, get) => {
   const startRun = (
     ownerSessionId: string | null,
     assistantId: string,
-    history: ChatMessage[]
+    history: ChatMessage[],
+    mode: ChatMode
   ): void => {
     const runId = nextRunId()
 
@@ -455,6 +493,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       if (run.settled) return
       flush(true)
       run.settled = true
+      run.pendingApproval = undefined
       run.disposer() // detach the listener (a post-completion cancel is a no-op)
       if (ownerSessionId) liveRuns.delete(ownerSessionId)
       syncLiveSessions()
@@ -468,7 +507,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       if (isVisible()) {
         set((state) => ({
           messages: state.messages.map((m) =>
-            m.id === assistantId ? { ...m, pending: false } : m
+            m.id === assistantId ? { ...m, pending: false, pendingApproval: undefined } : m
           ),
           running: false,
           runId: null,
@@ -482,6 +521,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       if (run.settled) return
       flush(true)
       run.settled = true
+      run.pendingApproval = undefined
       run.disposer()
       if (ownerSessionId) liveRuns.delete(ownerSessionId)
       syncLiveSessions()
@@ -499,7 +539,13 @@ export const useChatStore = create<ChatState>((set, get) => {
         set((state) => ({
           messages: state.messages.map((m) =>
             m.id === assistantId
-              ? { ...m, pending: false, error: message, content: m.content || '_Request failed._' }
+              ? {
+                  ...m,
+                  pending: false,
+                  pendingApproval: undefined,
+                  error: message,
+                  content: m.content || '_Request failed._'
+                }
               : m
           ),
           running: false,
@@ -523,17 +569,35 @@ export const useChatStore = create<ChatState>((set, get) => {
       }
     }
 
+    /**
+     * Set or clear this run's pending approval prompt. Held on the run (survives a
+     * session switch) and mirrored onto the on-screen assistant turn when visible.
+     */
+    const setApproval = (approval: ApprovalRequest | undefined): void => {
+      run.pendingApproval = approval
+      if (isVisible()) {
+        set((state) => ({
+          messages: state.messages.map((m) =>
+            m.id === assistantId ? { ...m, pendingApproval: approval } : m
+          )
+        }))
+      }
+    }
+
     const onChunk = (chunk: {
       delta: string
       done: boolean
       error?: string
       status?: string
+      approval?: ApprovalRequest
     }): void => {
       // `!== undefined`, not truthiness: an empty-string status is a deliberate
       // signal to clear the caption (the main process sends it when a reasoning
       // model's derived "thinking" snippet gives way to real reply text) and hand
       // the line back to the renderer's own "Writing"/"Thinking" fallback.
       if (chunk.status !== undefined) setStatus(chunk.status)
+      // A side-effecting Cowork tool is awaiting the user's OK — raise the prompt.
+      if (chunk.approval) setApproval(chunk.approval)
       if (chunk.delta) {
         run.buffer += chunk.delta
         scheduleFlush()
@@ -547,7 +611,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     // Kick off the stream. `streamCompletion` is async and resolves its disposer on
     // a later microtask; store it on the run, or invoke it at once if the run has
     // already settled (a cancel/completion beat the resolution — see LiveRun.settled).
-    void window.sylor.providers.streamCompletion({ messages: history }, onChunk).then((dispose) => {
+    void window.sylor.providers.streamCompletion({ messages: history, mode }, onChunk).then((dispose) => {
       if (run.settled) dispose()
       else run.disposer = dispose
     })
@@ -594,10 +658,15 @@ export const useChatStore = create<ChatState>((set, get) => {
     liveSessionIds: [],
     composerMode: 'text',
     promptBlocks: [],
+    coworkMode: false,
 
     send: (text, attachments = []) => {
       const trimmed = text.trim()
       if ((!trimmed && attachments.length === 0) || get().running) return
+
+      // Capture the mode at send time so a later toggle can't change how this
+      // in-flight turn runs.
+      const mode: ChatMode = get().coworkMode ? 'cowork' : 'chat'
 
       const userMsg: ChatMessageUI = { id: nextId(), role: 'user', content: trimmed }
       const assistantId = nextId()
@@ -663,14 +732,16 @@ export const useChatStore = create<ChatState>((set, get) => {
           content: userContentForModel,
           ...(images.length > 0 ? { images } : {})
         }
-        startRun(owner, assistantId, [...historyBase, userTurn])
+        startRun(owner, assistantId, [...historyBase, userTurn], mode)
       })
     },
 
     cancel: () => {
       disposeRun(get().sessionId)
       set((state) => ({
-        messages: state.messages.map((m) => (m.pending ? { ...m, pending: false } : m)),
+        messages: state.messages.map((m) =>
+          m.pending ? { ...m, pending: false, pendingApproval: undefined } : m
+        ),
         running: false,
         runId: null,
         disposer: null
@@ -696,7 +767,9 @@ export const useChatStore = create<ChatState>((set, get) => {
       // If that run was the one on screen, clear the transient view state too.
       if (get().sessionId === sessionId) {
         set((state) => ({
-          messages: state.messages.map((m) => (m.pending ? { ...m, pending: false } : m)),
+          messages: state.messages.map((m) =>
+          m.pending ? { ...m, pending: false, pendingApproval: undefined } : m
+        ),
           running: false,
           runId: null,
           disposer: null
@@ -765,7 +838,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       // Clear the persisted copy so a reload shows only the regenerated result.
       if (sessionId) window.sylor.sessions.resetMessage(sessionId, messageId)
 
-      startRun(sessionId, messageId, history)
+      startRun(sessionId, messageId, history, get().coworkMode ? 'cowork' : 'chat')
     },
 
     applyLoaded: (loaded) => {
@@ -795,6 +868,28 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     setComposerMode: (mode) => set({ composerMode: mode }),
 
-    setPromptBlocks: (blocks) => set({ promptBlocks: blocks })
+    setPromptBlocks: (blocks) => set({ promptBlocks: blocks }),
+
+    setCoworkMode: (on) => set({ coworkMode: on }),
+
+    decideApproval: (approvalId, decision) => {
+      // Tell the main process (resumes the blocked tool loop).
+      window.sylor.providers.decideApproval(approvalId, decision)
+      // Clear the prompt from whichever run holds it + the on-screen message.
+      let assistantId: string | null = null
+      for (const run of liveRuns.values()) {
+        if (run.pendingApproval?.approvalId === approvalId) {
+          run.pendingApproval = undefined
+          assistantId = run.assistantId
+        }
+      }
+      set((state) => ({
+        messages: state.messages.map((m) =>
+          m.pendingApproval?.approvalId === approvalId || (assistantId && m.id === assistantId)
+            ? { ...m, pendingApproval: undefined }
+            : m
+        )
+      }))
+    }
   }
 })

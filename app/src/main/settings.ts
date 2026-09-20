@@ -13,7 +13,13 @@ import {
 import { dirname, join } from 'node:path'
 import * as electron from 'electron'
 import { DEFAULT_PROVIDER_SETTINGS } from '../shared/defaults'
-import type { AuthSchema, ProviderKind, ProviderSettings, Theme } from '../shared/types'
+import type {
+  AuthSchema,
+  CoworkPermissionMode,
+  ProviderKind,
+  ProviderSettings,
+  Theme
+} from '../shared/types'
 
 /**
  * Injected userData directory (mirrors {@link setDbPath} in db.ts). The Electron
@@ -111,6 +117,7 @@ function readJsonFile<T>(path: string): T | undefined {
 const VALID_PROVIDERS: ProviderKind[] = ['ollama', 'gateway']
 const VALID_SCHEMAS: AuthSchema[] = ['none', 'bearer', 'header']
 const VALID_THEMES: Theme[] = ['light', 'dark']
+const VALID_PERMISSION_MODES: CoworkPermissionMode[] = ['ask', 'autoApprove', 'bypass']
 
 /**
  * Merges a raw (possibly partial or stale) settings object onto the defaults,
@@ -125,6 +132,7 @@ export function normalise(raw: unknown): ProviderSettings {
   const gateway = (o.gateway ?? {}) as Partial<ProviderSettings['gateway']>
   const ui = (o.ui ?? {}) as Partial<ProviderSettings['ui']>
   const tools = (o.tools ?? {}) as Partial<ProviderSettings['tools']>
+  const cowork = (o.cowork ?? {}) as Partial<ProviderSettings['cowork']>
 
   const activeProvider =
     o.activeProvider && VALID_PROVIDERS.includes(o.activeProvider)
@@ -159,6 +167,13 @@ export function normalise(raw: unknown): ProviderSettings {
       enabled: typeof tools.enabled === 'boolean' ? tools.enabled : d.tools.enabled,
       codeExecution:
         typeof tools.codeExecution === 'boolean' ? tools.codeExecution : d.tools.codeExecution
+    },
+    cowork: {
+      workspaceDir:
+        typeof cowork.workspaceDir === 'string' ? cowork.workspaceDir : d.cowork.workspaceDir,
+      permissionMode: VALID_PERMISSION_MODES.includes(cowork.permissionMode as CoworkPermissionMode)
+        ? (cowork.permissionMode as CoworkPermissionMode)
+        : d.cowork.permissionMode
     }
   }
 }

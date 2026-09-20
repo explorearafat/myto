@@ -11,7 +11,7 @@ import { ModelSelector } from './ModelSelector'
 import { PromptBuilder } from './PromptBuilder'
 import { SylorStar } from './SylorStar'
 import { SylorLogo } from './SylorLogo'
-import type { Attachment } from '@shared/types'
+import type { ApprovalRequest, CoworkPermissionMode, Attachment } from '@shared/types'
 
 /** Human-readable byte size for an attachment chip (e.g. "12.4 KB"). */
 function formatBytes(bytes: number): string {
@@ -418,12 +418,86 @@ function StatusLine({ caption }: { caption: string }) {
   )
 }
 
+/**
+ * The mid-reply permission prompt (Cowork). Shown when the model wants to run a
+ * side-effecting tool and the permission tier is set to ask. Answering resumes the
+ * blocked main-process loop (allow / allow for the rest of the task / deny).
+ */
+function ApprovalPrompt({ approval }: { approval: ApprovalRequest }) {
+  const decideApproval = useChatStore((s) => s.decideApproval)
+  const isExec = approval.sideEffect === 'exec'
+  return (
+    <div className="my-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2.5">
+      <div className="mb-2 flex items-start gap-2 text-[12.5px] leading-snug text-text">
+        <svg
+          width="15"
+          height="15"
+          viewBox="0 0 16 16"
+          fill="none"
+          aria-hidden="true"
+          className="mt-0.5 shrink-0 text-amber-500"
+        >
+          <path
+            d="M8 1.5l5 2v4c0 3-2.2 4.8-5 5.5C5.2 12.3 3 10.5 3 7.5v-4l5-2Z"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinejoin="round"
+          />
+        </svg>
+        <span>
+          Sylor wants to {isExec ? 'run code' : 'modify a file'} with{' '}
+          <strong>{approval.toolName}</strong>
+          {approval.detail ? (
+            <>
+              {' '}
+              <code className="rounded bg-surface-2 px-1 py-0.5 text-[11px]">{approval.detail}</code>
+            </>
+          ) : null}
+          . Allow it?
+        </span>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        <button
+          type="button"
+          onClick={() => decideApproval(approval.approvalId, 'allow')}
+          className="rounded-md bg-primary px-2.5 py-1 text-[12px] font-medium text-bg transition-opacity hover:opacity-90"
+        >
+          Allow once
+        </button>
+        <button
+          type="button"
+          onClick={() => decideApproval(approval.approvalId, 'allow_always')}
+          className="rounded-md border border-border bg-surface px-2.5 py-1 text-[12px] font-medium text-text transition-colors hover:bg-surface-2"
+        >
+          Allow for this task
+        </button>
+        <button
+          type="button"
+          onClick={() => decideApproval(approval.approvalId, 'deny')}
+          className="rounded-md border border-border bg-surface px-2.5 py-1 text-[12px] font-medium text-muted transition-colors hover:bg-surface-2 hover:text-text"
+        >
+          Deny
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** Filesystem tools only exist in Cowork, so their presence marks a Cowork turn. */
+const FS_TOOL_NAMES = new Set(['write_file', 'edit_file', 'read_file', 'list_dir', 'delete_file'])
+
 function AssistantMessage({ message }: { message: ChatMessageUI }) {
   const displayContent = message.content.trimEnd()
   // Split the reply into prose and generated-file blocks so files render as
   // downloadable cards while everything else stays ordinary Markdown. A reply with
   // no file blocks yields a single prose segment — identical to rendering it whole.
   const segments = useMemo(() => parseFileBlocks(displayContent), [displayContent])
+  // A turn that touched the filesystem is a Cowork turn: its tool cards render
+  // borderless (the bordered/expandable style is reserved for the normal chat).
+  const coworkTurn = useMemo(
+    () => segments.some((s) => s.kind === 'tool' && FS_TOOL_NAMES.has(s.name ?? '')),
+    [segments]
+  )
   return (
     <div className="min-w-0 pl-4">
       {message.error && (
@@ -438,11 +512,13 @@ function AssistantMessage({ message }: { message: ChatMessageUI }) {
         seg.kind === 'file' ? (
           <FileCard key={`f${i}`} file={seg} />
         ) : seg.kind === 'tool' ? (
-          <ToolCard key={`t${i}`} tool={seg} />
+          <ToolCard key={`t${i}`} tool={seg} cowork={coworkTurn} />
         ) : (
           <Markdown key={`p${i}`} content={seg.text} />
         )
       )}
+
+      {message.pendingApproval && <ApprovalPrompt approval={message.pendingApproval} />}
 
       {!message.pending && (displayContent.length > 0 || message.error != null) && (
         <MessageActions message={message} />
@@ -638,6 +714,95 @@ function InertPill({ label, title }: { label: string; title: string }) {
   )
 }
 
+/** Labels + one-line descriptions for the three Cowork permission tiers. */
+const PERMISSION_MODES: { value: CoworkPermissionMode; label: string; hint: string }[] = [
+  { value: 'ask', label: 'Ask each time', hint: 'Confirm before every file write or code run' },
+  { value: 'autoApprove', label: 'Auto-approve edits', hint: 'File edits run automatically; code still asks' },
+  { value: 'bypass', label: 'Bypass permissions', hint: 'Everything runs with no prompt' }
+]
+
+/**
+ * The Cowork permission-tier selector (Claude-Code style): a small popover to
+ * choose Ask / Auto-approve / Bypass. Shown only in Cowork mode; the choice
+ * persists in settings and governs whether side-effecting tools prompt.
+ */
+function CoworkPermissionMenu() {
+  const mode = useAppStore((s) => s.settings.cowork.permissionMode)
+  const setMode = useAppStore((s) => s.setCoworkPermissionMode)
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const current = PERMISSION_MODES.find((m) => m.value === mode) ?? PERMISSION_MODES[0]
+
+  // Close on any outside click while open.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent): void => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  const danger = mode === 'bypass'
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title="Cowork permissions"
+        className={
+          'flex items-center gap-1 rounded-[40%] border px-2.5 py-1 text-[12px] font-medium transition-colors ' +
+          (danger
+            ? 'border-red-500/50 bg-red-500/10 text-red-400 hover:bg-red-500/15'
+            : 'border-border bg-surface text-text/80 hover:bg-surface-2')
+        }
+      >
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path
+            d="M8 1.5l5 2v4c0 3-2.2 4.8-5 5.5C5.2 12.3 3 10.5 3 7.5v-4l5-2Z"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinejoin="round"
+          />
+        </svg>
+        {current.label}
+        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="text-muted">
+          <path d="M3 4.5L6 7.5l3-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute bottom-full right-0 z-20 mb-1.5 w-60 rounded-xl border border-border bg-surface p-1 shadow-lg">
+          {PERMISSION_MODES.map((m) => (
+            <button
+              key={m.value}
+              type="button"
+              onClick={() => {
+                void setMode(m.value)
+                setOpen(false)
+              }}
+              className={
+                'flex w-full flex-col items-start gap-0.5 rounded-lg px-2.5 py-1.5 text-left transition-colors hover:bg-surface-2 ' +
+                (m.value === mode ? 'bg-surface-2' : '')
+              }
+            >
+              <span
+                className={
+                  'text-[12.5px] font-medium ' +
+                  (m.value === 'bypass' ? 'text-red-400' : 'text-text')
+                }
+              >
+                {m.label}
+                {m.value === mode ? ' ✓' : ''}
+              </span>
+              <span className="text-[11px] text-muted">{m.hint}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ChatPanel() {
   const messages = useChatStore((s) => s.messages)
   const attachments = useChatStore((s) => s.attachments)
@@ -649,6 +814,12 @@ export function ChatPanel() {
   const promptBlocks = useChatStore((s) => s.promptBlocks)
   const setComposerMode = useChatStore((s) => s.setComposerMode)
   const setPromptBlocks = useChatStore((s) => s.setPromptBlocks)
+  const coworkMode = useChatStore((s) => s.coworkMode)
+  const setCoworkMode = useChatStore((s) => s.setCoworkMode)
+
+  // Cowork's working folder (persisted in settings) + the picker that arms it.
+  const workspaceDir = useAppStore((s) => s.settings.cowork.workspaceDir)
+  const pickCoworkWorkspace = useAppStore((s) => s.pickCoworkWorkspace)
 
   // A model must be configured on the account before chat can send. The store's
   // modelId mirrors the account's Firestore config (and is cached in settings.json
@@ -794,12 +965,23 @@ export function ChatPanel() {
   const canAttach = sessionId != null
   const isEmpty = messages.length === 0
 
+  // The working folder's leaf name, for the Cowork chip (Windows or POSIX path).
+  const folderLabel = workspaceDir.split(/[\\/]/).filter(Boolean).pop() ?? ''
+
+  // Switch to Cowork; if no folder is chosen yet, open the picker straight away so
+  // the file tools have somewhere to work.
+  const enableCowork = (): void => {
+    setCoworkMode(true)
+    if (!workspaceDir.trim()) void pickCoworkWorkspace()
+  }
+
   /**
    * The composer card — reused by the landing hero and the pinned bottom bar. A
    * big rounded field with a control row beneath it: attach + Chat/Cowork on the
-   * left; model, reasoning effort, mic and send on the right. Cowork, the effort
-   * pill and the mic/voice controls are inert chrome that mirrors the reference
-   * app; attach, the model picker and send are wired up.
+   * left; model, reasoning effort, mic and send on the right. The Chat/Cowork
+   * toggle is live — Cowork switches the turn into agentic mode over the chosen
+   * working folder. The effort pill and the mic/voice controls remain inert chrome
+   * that mirrors the reference app; attach, the model picker and send are wired up.
    */
   const renderComposer = (placeholder: string): ReactNode => (
     <div
@@ -833,6 +1015,37 @@ export function ChatPanel() {
         }
       >
         <input ref={fileInputRef} type="file" multiple onChange={onFilesPicked} className="hidden" />
+
+        {/* Cowork context row, above the input: working folder on the left,
+            permission tier on the right. */}
+        {coworkMode && (
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => void pickCoworkWorkspace()}
+              title={workspaceDir || 'Choose a working folder for Cowork'}
+              className={
+                'flex items-center gap-1.5 rounded-[40%] border px-2.5 py-1 text-[12px] transition-colors ' +
+                (folderLabel
+                  ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15'
+                  : 'border-amber-500/50 bg-amber-500/10 text-amber-500 hover:bg-amber-500/15')
+              }
+            >
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path
+                  d="M1.5 4.5A1.5 1.5 0 0 1 3 3h3l1.5 1.5H13A1.5 1.5 0 0 1 14.5 6v6A1.5 1.5 0 0 1 13 13.5H3A1.5 1.5 0 0 1 1.5 12V4.5Z"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <span className="max-w-[160px] truncate">{folderLabel || 'Choose folder'}</span>
+            </button>
+
+            <CoworkPermissionMenu />
+          </div>
+        )}
+
         {composerMode === 'builder' ? (
           <PromptBuilder
             blocks={promptBlocks}
@@ -850,7 +1063,13 @@ export function ChatPanel() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={dragging ? 'Drop files to attach…' : placeholder}
+            placeholder={
+              dragging
+                ? 'Drop files to attach…'
+                : coworkMode
+                  ? 'Give Cowork a goal to work on in your folder…'
+                  : placeholder
+            }
             className="block max-h-40 min-h-6 w-full resize-none bg-transparent px-1 py-0.5 text-[14px] leading-6 text-text placeholder:text-muted focus:outline-none"
           />
         )}
@@ -887,15 +1106,32 @@ export function ChatPanel() {
               </svg>
             </button>
 
-            {/* Chat / Cowork — Chat is the only mode this build ships; Cowork is inert. */}
+            {/* Chat / Cowork mode toggle. Cowork gives the model filesystem tools
+                scoped to the chosen working folder + a larger agentic budget. */}
             <div className="flex items-center rounded-full border border-border bg-surface p-0.5 text-[12px]">
-              <span className="rounded-full bg-surface-2 px-2.5 py-1 font-medium text-text">Chat</span>
-              <span
-                title="Cowork (not available in this build)"
-                className="cursor-default rounded-full px-2.5 py-1 text-muted/70"
+              <button
+                type="button"
+                onClick={() => setCoworkMode(false)}
+                aria-pressed={!coworkMode}
+                className={
+                  'rounded-full px-2.5 py-1 font-medium transition-colors ' +
+                  (!coworkMode ? 'bg-surface-2 text-text' : 'text-muted hover:text-text')
+                }
+              >
+                Chat
+              </button>
+              <button
+                type="button"
+                onClick={enableCowork}
+                aria-pressed={coworkMode}
+                title="Cowork — work across a folder on your computer"
+                className={
+                  'rounded-full px-2.5 py-1 font-medium transition-colors ' +
+                  (coworkMode ? 'bg-surface-2 text-text' : 'text-muted hover:text-text')
+                }
               >
                 Cowork
-              </span>
+              </button>
             </div>
           </div>
 

@@ -32,5 +32,13 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
     // on the user's machine is a separate, explicit opt-in (Settings › Tools).
     enabled: true,
     codeExecution: false
+  },
+  cowork: {
+    // No working folder until the user picks one; Cowork's filesystem tools stay
+    // dormant while this is empty (see main/tools/fs.ts).
+    workspaceDir: '',
+    // Ask before every side-effecting tool by default — the safe tier. The user
+    // can raise it to auto-approve edits or bypass permissions from the composer.
+    permissionMode: 'ask'
   }
 }

@@ -83,7 +83,15 @@ export const IpcChannel = {
 
   // File download (file cards): save a single generated file to disk via native Save As.
   /** Renderer → main (invoke): open a Save As dialog and write a generated file. */
-  FilesSave: 'files:save'
+  FilesSave: 'files:save',
+
+  // Cowork (agentic mode): pick the working folder the filesystem tools are scoped to.
+  /** Renderer → main (invoke): open a folder picker; resolves the chosen path or null. */
+  CoworkPickWorkspace: 'cowork:pick-workspace',
+
+  // Cowork permission prompts: the renderer's answer to a mid-stream approval request.
+  /** Renderer → main (send): answer an ApprovalRequest by id (allow / allow_always / deny). */
+  ProvidersApprovalDecision: 'providers:approval-decision'
 } as const
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel]

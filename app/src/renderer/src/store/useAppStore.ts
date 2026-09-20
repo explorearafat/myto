@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type {
+  CoworkPermissionMode,
   EnvStatus,
   ModelInfo,
   ProviderKind,
@@ -72,6 +73,14 @@ export interface AppState {
   setTheme: (theme: Theme) => Promise<void>
   /** Patch the tool settings (enable/disable tools, code execution) and persist. */
   setTools: (patch: Partial<ToolSettings>) => Promise<void>
+  /**
+   * Open the native folder picker and, if the user chooses a folder, persist it as
+   * Cowork's working folder (settings.cowork.workspaceDir). Returns the chosen path
+   * or null when the user cancelled. This is what arms Cowork's filesystem tools.
+   */
+  pickCoworkWorkspace: () => Promise<string | null>
+  /** Set Cowork's permission tier (ask / autoApprove / bypass) and persist it. */
+  setCoworkPermissionMode: (mode: CoworkPermissionMode) => Promise<void>
 
   /** Load persisted settings from the main process (called once on boot). */
   loadSettings: () => Promise<void>
@@ -141,6 +150,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   setTools: async (patch) => {
     const { settings } = get()
     await get().saveSettings({ ...settings, tools: { ...settings.tools, ...patch } })
+  },
+
+  pickCoworkWorkspace: async () => {
+    const dir = await window.sylor.cowork.pickWorkspace()
+    if (!dir) return null
+    const { settings } = get()
+    await get().saveSettings({ ...settings, cowork: { ...settings.cowork, workspaceDir: dir } })
+    return dir
+  },
+
+  setCoworkPermissionMode: async (mode) => {
+    const { settings } = get()
+    await get().saveSettings({ ...settings, cowork: { ...settings.cowork, permissionMode: mode } })
   },
 
   loadSettings: async () => {

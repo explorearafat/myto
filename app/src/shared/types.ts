@@ -78,6 +78,18 @@ export type SettingsTab = 'appearance' | 'model'
  */
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'max'
 
+/**
+ * Which way a chat turn runs:
+ *  - `chat`   → the ordinary assistant: answers, may call the read-only web tools.
+ *  - `cowork` → the agentic mode (Claude-Cowork style). The model works toward a
+ *               goal across a chosen working folder, with filesystem tools on top
+ *               of the web/code tools and a larger tool-use budget so it can plan,
+ *               read, and write over several steps. See {@link CoworkSettings}.
+ * Threaded per-turn from the composer into the streaming request; never persisted
+ * on a message (the transcript is mode-agnostic).
+ */
+export type ChatMode = 'chat' | 'cowork'
+
 /** UI preferences persisted alongside the provider config. */
 export interface UiSettings {
   /** Active color theme; applied via `<html data-theme>`. */
@@ -99,6 +111,55 @@ export interface ToolSettings {
   codeExecution: boolean
 }
 
+/**
+ * Cowork (agentic mode) preferences. The one setting that matters is the working
+ * folder: every filesystem tool the model can call in Cowork is sandboxed under
+ * this directory, and the tools are only advertised at all once it is set. Empty
+ * string means "no folder chosen yet" — Cowork then falls back to the same
+ * read-only tools Chat has, and the composer nudges the user to pick a folder.
+ */
+export interface CoworkSettings {
+  /** Absolute path of the folder Cowork works in. Empty until the user picks one. */
+  workspaceDir: string
+  /** How side-effecting tools (writes / code) are permissioned in Cowork. */
+  permissionMode: CoworkPermissionMode
+}
+
+/**
+ * How Cowork asks before a tool that changes something runs, mirroring Claude
+ * Code's permission modes:
+ *  - `ask`         → confirm every side-effecting tool before it runs (default).
+ *  - `autoApprove` → file writes/edits run without asking; running code still asks
+ *                    (the "accept edits" tier — auto for edits, gated for commands).
+ *  - `bypass`      → nothing asks; every tool runs (the "bypass permissions" tier).
+ * Read-only tools (list_dir, read_file, the web tools) never ask, in any mode.
+ */
+export type CoworkPermissionMode = 'ask' | 'autoApprove' | 'bypass'
+
+/** What a tool changes, used to decide whether it needs approval. Absent = read-only. */
+export type ToolSideEffect = 'write' | 'exec'
+
+/** The user's answer to an approval prompt. */
+export type ApprovalDecision = 'allow' | 'allow_always' | 'deny'
+
+/**
+ * A request, surfaced mid-stream, for the user to approve a side-effecting tool
+ * before it runs. Carried on a {@link CompletionChunk} so it rides the same stream
+ * as the reply; the renderer shows a prompt and answers with
+ * {@link ProvidersApi.decideApproval}. `allow_always` grants that side-effect kind
+ * for the rest of the run.
+ */
+export interface ApprovalRequest {
+  /** Correlates the prompt with the decision sent back. */
+  approvalId: string
+  /** The tool awaiting approval (e.g. 'write_file'). */
+  toolName: string
+  /** What it will do — drives the prompt's wording. */
+  sideEffect: ToolSideEffect
+  /** A short human detail, e.g. the target path or 'python code'. May be empty. */
+  detail: string
+}
+
 /** The full, persisted provider configuration. */
 export interface ProviderSettings {
   /** The provider used for completions. */
@@ -113,6 +174,8 @@ export interface ProviderSettings {
   ui: UiSettings
   /** Tool-use preferences (web tools + code execution). */
   tools: ToolSettings
+  /** Cowork (agentic mode) preferences — chiefly the working folder. */
+  cowork: CoworkSettings
 }
 
 /** A model advertised by a provider's list endpoint. */
@@ -170,6 +233,13 @@ export interface CompletionRequest {
   /** Model id; defaults to the configured `modelId` when omitted. */
   modelId?: string
   messages: ChatMessage[]
+  /**
+   * How this turn runs — `chat` (default) or `cowork`. In `cowork` the main
+   * process advertises the filesystem tools, prepends the agentic system prompt,
+   * and raises the tool-use budget. Omitted is treated as `chat` so every existing
+   * caller keeps its exact behaviour.
+   */
+  mode?: ChatMode
 }
 
 /** Result of a non-streaming completion. */
@@ -208,6 +278,13 @@ export interface CompletionChunk {
    * to the renderer (it is converted to `status` at the funnel — see status.ts).
    */
   reasoning?: string
+  /**
+   * A pending approval request for a side-effecting Cowork tool. Present only on
+   * the chunk that raises the prompt (empty `delta`); the renderer shows a card and
+   * replies via {@link ProvidersApi.decideApproval}, while the main-process loop is
+   * blocked awaiting that decision. Absent on ordinary chunks.
+   */
+  approval?: ApprovalRequest
 }
 
 /**
@@ -259,6 +336,12 @@ export interface ProvidersApi {
     request: CompletionRequest,
     onChunk: (chunk: CompletionChunk) => void
   ) => Promise<() => void>
+  /**
+   * Answer an {@link ApprovalRequest} raised mid-stream (Cowork side-effect tools).
+   * Fire-and-forget: the main-process loop is blocked awaiting this and resumes
+   * (runs or refuses the tool) as soon as the decision arrives.
+   */
+  decideApproval: (approvalId: string, decision: ApprovalDecision) => void
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +489,18 @@ export interface FilesApi {
   save: (name: string, content: string) => Promise<FileSaveResult>
 }
 
+/**
+ * Cowork (agentic mode) surface. Today it is just the working-folder picker: the
+ * renderer asks the main process to open a native "choose folder" dialog and gets
+ * back the absolute path the user picked (or null when they cancel). The path is
+ * then persisted into {@link CoworkSettings.workspaceDir} through the ordinary
+ * settings save, which is what actually scopes the filesystem tools.
+ */
+export interface CoworkApi {
+  /** Open a native folder picker; resolves the chosen absolute path, or null if cancelled. */
+  pickWorkspace: () => Promise<string | null>
+}
+
 /** The full `window.sylor` API surface exposed by the preload script. */
 export interface SylorApi {
   window: WindowApi
@@ -429,6 +524,8 @@ export interface SylorApi {
   auth: AuthApi
   /** Save a generated file card to disk (native Save As). */
   files: FilesApi
+  /** Cowork (agentic mode): the working-folder picker. */
+  cowork: CoworkApi
 }
 
 // ---------------------------------------------------------------------------

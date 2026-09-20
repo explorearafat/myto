@@ -1,7 +1,10 @@
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { IpcChannel } from '../shared/ipc'
 import type {
+  ApprovalDecision,
+  ApprovalRequest,
   ChatMessage,
+  ChatMode,
   CompletionRequest,
   CompletionResult,
   GatewayConfig,
@@ -9,7 +12,8 @@ import type {
   OllamaConfig,
   ProviderKind,
   ProviderSettings,
-  TestConnectionResult
+  TestConnectionResult,
+  ToolSideEffect
 } from '../shared/types'
 import { createProvider, providerFromSettings } from './providers'
 import { toErrorMessage } from './providers/http'
@@ -17,10 +21,12 @@ import { getSettings, saveSettings } from './settings'
 import {
   createStatusStripper,
   reasoningCaption,
+  COWORK_SYSTEM_PROMPT,
   FILE_PROTOCOL_SYSTEM_PROMPT,
   STATUS_SYSTEM_PROMPT
 } from './status'
-import { runTool, toolsSystemPrompt } from './tools/registry'
+import { runTool, toolsSystemPrompt, TOOLS, type ToolGate } from './tools/registry'
+import { approvalDetail, requiresApproval } from './tools/approvals'
 import { createToolCallParser, toolResultBlock, type ToolCall } from './tools/toolParser'
 
 /**
@@ -41,8 +47,24 @@ const REASONING_CAPTION_MS = 300
  */
 const MAX_TOOL_TURNS = 6
 
+/**
+ * The tool-round ceiling in Cowork mode. Agentic work over a folder — explore,
+ * read several files, write, verify — legitimately needs more round-trips than a
+ * chat answer, so Cowork gets a larger budget while still guaranteeing the loop
+ * terminates (the final turn withholds tools, exactly as in Chat).
+ */
+const MAX_TOOL_TURNS_COWORK = 16
+
 /** Tracks in-flight streams so the renderer can cancel them by id. */
 const activeStreams = new Map<string, AbortController>()
+
+/**
+ * Approval prompts awaiting the user's answer, keyed by approvalId. When a Cowork
+ * tool needs permission, the streaming loop parks a resolver here and blocks; the
+ * renderer's decision (or a stream cancel) settles it. See {@link requiresApproval}.
+ */
+const pendingApprovals = new Map<string, (decision: ApprovalDecision) => void>()
+let approvalCounter = 0
 
 /**
  * Registers all Phase 2 provider IPC handlers: settings read/write, model
@@ -98,16 +120,55 @@ export function registerProviderIpc(): void {
         done: boolean
         error?: string
         status?: string
+        approval?: ApprovalRequest
       }): void => {
         if (!sender.isDestroyed()) {
           sender.send(IpcChannel.ProvidersStreamChunk, { streamId, ...chunk })
         }
       }
 
+      /**
+       * Raise an approval prompt for a side-effecting Cowork tool and wait for the
+       * user's answer. Resolves to their decision, or 'deny' if the stream is
+       * cancelled while waiting so a Stop never leaves the loop parked forever.
+       */
+      const requestApproval = (
+        toolName: string,
+        sideEffect: ToolSideEffect,
+        detail: string
+      ): Promise<ApprovalDecision> =>
+        new Promise<ApprovalDecision>((resolve) => {
+          if (controller.signal.aborted) {
+            resolve('deny')
+            return
+          }
+          const approvalId = `appr-${streamId}-${++approvalCounter}`
+          const onAbort = (): void => settle('deny')
+          const settle = (decision: ApprovalDecision): void => {
+            controller.signal.removeEventListener('abort', onAbort)
+            pendingApprovals.delete(approvalId)
+            resolve(decision)
+          }
+          pendingApprovals.set(approvalId, settle)
+          controller.signal.addEventListener('abort', onAbort, { once: true })
+          send({ delta: '', done: false, approval: { approvalId, toolName, sideEffect, detail } })
+        })
+
+      /** Side-effect kinds the user granted for the rest of this run ("Always allow"). */
+      const grantedAlways = new Set<ToolSideEffect>()
+
       try {
         const { provider, modelId, messages } = resolveRequest(request)
         const settings = getSettings()
-        const toolsPrompt = toolsSystemPrompt(settings)
+        const mode: ChatMode = request.mode ?? 'chat'
+        // In Cowork, the filesystem tools are scoped to this folder; null when none
+        // is set, which keeps those tools dormant (see tools/fs.ts + registry.ts).
+        const workspaceDir = settings.cowork.workspaceDir.trim() || null
+        const gate: ToolGate = { settings, mode, workspaceDir }
+        const toolsPrompt = toolsSystemPrompt(gate)
+        const maxToolTurns = mode === 'cowork' ? MAX_TOOL_TURNS_COWORK : MAX_TOOL_TURNS
+        // Permission tier for side-effecting tools; only consulted in Cowork.
+        const permissionMode = settings.cowork.permissionMode
 
         /**
          * Stream one model turn into the reply. Forwards <status> captions and
@@ -233,7 +294,11 @@ export function registerProviderIpc(): void {
         // path (auto-titles) never receives them.
         const baseSystem: ChatMessage[] = [
           { role: 'system', content: STATUS_SYSTEM_PROMPT },
-          { role: 'system', content: FILE_PROTOCOL_SYSTEM_PROMPT }
+          { role: 'system', content: FILE_PROTOCOL_SYSTEM_PROMPT },
+          // Cowork turns the assistant into a goal-driven agent over the folder.
+          ...(mode === 'cowork'
+            ? [{ role: 'system' as const, content: COWORK_SYSTEM_PROMPT }]
+            : [])
         ]
 
         // Tools off (or none available): the original single-shot behaviour, so a
@@ -253,7 +318,7 @@ export function registerProviderIpc(): void {
           ...messages
         ]
 
-        for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+        for (let turn = 0; turn < maxToolTurns; turn++) {
           const { visible, call, error } = await runTurn(history, true)
           if (controller.signal.aborted) return
           if (error) {
@@ -270,7 +335,31 @@ export function registerProviderIpc(): void {
           // then stream the result block onto the same card.
           const toolName = call.name ?? 'tool'
           send({ delta: `\n${call.block}\n`, done: false, status: `Running ${toolName}` })
-          const result = await runTool(call, { signal: controller.signal, settings })
+
+          // Permission gate: side-effecting tools in Cowork may need the user's OK,
+          // unless already granted "always" for this run.
+          const sideEffect = call.name ? TOOLS[call.name]?.sideEffect : undefined
+          let result: string
+          if (
+            mode === 'cowork' &&
+            requiresApproval(permissionMode, sideEffect) &&
+            !(sideEffect && grantedAlways.has(sideEffect))
+          ) {
+            send({ delta: '', done: false, status: `Waiting for your approval` })
+            const decision = await requestApproval(
+              toolName,
+              sideEffect as ToolSideEffect,
+              approvalDetail(call)
+            )
+            if (controller.signal.aborted) return
+            if (decision === 'allow_always' && sideEffect) grantedAlways.add(sideEffect)
+            result =
+              decision === 'deny'
+                ? `The user denied permission to run "${toolName}". Do not retry it; continue without it, or tell the user what you would need to proceed.`
+                : await runTool(call, { ...gate, signal: controller.signal })
+          } else {
+            result = await runTool(call, { ...gate, signal: controller.signal })
+          }
           if (controller.signal.aborted) return
           send({ delta: toolResultBlock(toolName, result), done: false })
 
@@ -309,6 +398,14 @@ export function registerProviderIpc(): void {
     activeStreams.get(streamId)?.abort()
     activeStreams.delete(streamId)
   })
+
+  ipcMain.on(
+    IpcChannel.ProvidersApprovalDecision,
+    (_event, approvalId: string, decision: ApprovalDecision) => {
+      // Settling removes the entry; a stray/duplicate decision is a harmless no-op.
+      pendingApprovals.get(approvalId)?.(decision)
+    }
+  )
 }
 
 /** Resolves a request against saved settings, filling provider/model defaults. */

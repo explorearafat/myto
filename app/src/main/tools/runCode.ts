@@ -15,8 +15,15 @@ import type { ToolDef } from './registry'
  * from `PATH`; a missing interpreter degrades to a readable message, never a throw.
  */
 
-/** Longest a snippet may run before it is killed. */
+/** Longest a snippet may run before it is killed (Chat / default). */
 const RUN_TIMEOUT_MS = 15_000
+/**
+ * A longer ceiling in Cowork, where run_code is how the agent actually produces
+ * deliverables (render a multi-page PDF, build/convert files, install a package
+ * and use it) — work that legitimately needs more than the 15s a quick chat
+ * snippet gets.
+ */
+const COWORK_RUN_TIMEOUT_MS = 60_000
 /** Largest captured stream, in characters (each of stdout/stderr). */
 const OUTPUT_CAP = 10_000
 
@@ -60,7 +67,9 @@ export interface RunResult {
 export async function executeCode(
   spec: InterpreterSpec,
   code: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  cwd?: string,
+  timeoutMs: number = RUN_TIMEOUT_MS
 ): Promise<RunResult> {
   return new Promise<RunResult>((resolve) => {
     let stdout = ''
@@ -70,13 +79,16 @@ export async function executeCode(
 
     const child = spawn(spec.cmd, [spec.flag, code], {
       env: spec.electronNode ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : process.env,
+      // In Cowork the snippet runs inside the working folder, so files it writes
+      // (a generated PDF, image, spreadsheet…) land there via a relative path.
+      ...(cwd ? { cwd } : {}),
       windowsHide: true
     })
 
     const timer = setTimeout(() => {
       timedOut = true
       child.kill()
-    }, RUN_TIMEOUT_MS)
+    }, timeoutMs)
 
     const onAbort = (): void => {
       child.kill()
@@ -110,14 +122,18 @@ export async function executeCode(
 }
 
 /** Render a {@link RunResult} as the plain text the model reads back. */
-export function formatRunResult(language: string, r: RunResult): string {
+export function formatRunResult(
+  language: string,
+  r: RunResult,
+  timeoutMs: number = RUN_TIMEOUT_MS
+): string {
   if (r.spawnError) {
     return `Could not run ${language}: ${r.spawnError}. Is the interpreter installed and on PATH?`
   }
   const parts: string[] = []
   if (r.stdout.trim()) parts.push(`stdout:\n${r.stdout.trimEnd()}`)
   if (r.stderr.trim()) parts.push(`stderr:\n${r.stderr.trimEnd()}`)
-  if (r.timedOut) parts.push(`(killed after ${RUN_TIMEOUT_MS / 1000}s timeout)`)
+  if (r.timedOut) parts.push(`(killed after ${timeoutMs / 1000}s timeout)`)
   parts.push(`exit code: ${r.exitCode ?? 'n/a'}`)
   return parts.join('\n\n')
 }
@@ -134,12 +150,16 @@ export const runCodeTool: ToolDef = {
   name: 'run_code',
   description: 'Execute a snippet of python, JavaScript (node), or bash on this machine and return its output.',
   usage: '{"language": "python", "code": "print(2 + 2)"}',
-  available: (s) => s.tools.codeExecution,
+  sideEffect: 'exec',
+  // Available when the user opted into code execution, OR in Cowork mode — where
+  // running code is how the agent produces generated artifacts (a PDF, an image),
+  // and the permission system (approvals.ts) gates each run rather than a toggle.
+  available: (gate) => gate.settings.tools.codeExecution || gate.mode === 'cowork',
   async run(input, ctx) {
-    // Belt-and-braces: the registry hides this tool while the setting is off, but
-    // never trust that a call couldn't arrive anyway (stale prompt, replayed turn).
-    if (!ctx.settings.tools.codeExecution) {
-      return 'run_code is disabled. The user can turn it on in Settings › Tools › “Run code on this machine”.'
+    // Belt-and-braces: allowed when the toggle is on or we're in Cowork; never
+    // trust that a call couldn't arrive anyway (stale prompt, replayed turn).
+    if (!ctx.settings.tools.codeExecution && ctx.mode !== 'cowork') {
+      return 'run_code is disabled. The user can turn it on in Settings › Tools › “Run code on this machine”, or use Cowork mode.'
     }
     const { language, code } = readCodeInput(input)
     if (!language || !code) {
@@ -147,6 +167,11 @@ export const runCodeTool: ToolDef = {
     }
     const spec = resolveInterpreter(language)
     if (!spec) return `run_code does not support "${language}". Use python, javascript, or bash.`
-    return formatRunResult(language, await executeCode(spec, code, ctx.signal))
+    // In Cowork, run inside the working folder so generated files land there, and
+    // give the snippet a longer ceiling — it's producing real deliverables.
+    const inCowork = ctx.mode === 'cowork'
+    const cwd = inCowork && ctx.workspaceDir ? ctx.workspaceDir : undefined
+    const timeoutMs = inCowork ? COWORK_RUN_TIMEOUT_MS : RUN_TIMEOUT_MS
+    return formatRunResult(language, await executeCode(spec, code, ctx.signal, cwd, timeoutMs), timeoutMs)
   }
 }
