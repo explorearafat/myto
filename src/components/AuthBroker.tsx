@@ -13,6 +13,7 @@ import { auth, googleProvider } from '../lib/firebase';
 import { getDeviceId, listDevices, recordDeviceSignIn } from '../lib/devices';
 import { absoluteDate, relativeTime, type DevicePlatform, type DeviceSession } from '../shared/device';
 import { SylorStar } from './SylorStar';
+import { ByokPanel } from './ByokPanel';
 
 /*
  * The browser-mediated sign-in broker — the page a native app opens to sign in — and the account's
@@ -505,6 +506,19 @@ export function AuthBroker() {
         <p className="mt-5 text-center text-[12px] leading-relaxed text-[#9c988e]">
           Only sign-ins made through this page are listed — not every session on every device.
         </p>
+
+        <div className="mt-10 border-t border-[#e4e1d8] pt-8">
+          <div className="mb-5 text-center">
+            <h2 className="font-display text-[22px] font-normal leading-tight text-[#141413]">
+              Your models
+            </h2>
+            <p className="mx-auto mt-2 max-w-[46ch] text-[14px] leading-relaxed text-[#6b675e]">
+              Add your own provider and models. These power chat in Sylor’s web app, desktop app, and
+              mobile app — everywhere you’re signed in.
+            </p>
+          </div>
+          <ByokPanel uid={authUser.uid} />
+        </div>
       </Shell>
     );
   }

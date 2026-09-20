@@ -6,7 +6,13 @@
 // browser via signInWithCredential (a plain REST call, no popup).
 
 import { initializeApp } from 'firebase/app'
-import { getAuth } from 'firebase/auth'
+import {
+  browserLocalPersistence,
+  getAuth,
+  indexedDBLocalPersistence,
+  setPersistence
+} from 'firebase/auth'
+import { getFirestore } from 'firebase/firestore'
 
 const firebaseConfig = {
   apiKey: 'AIzaSyCLUPgeIy_gp9M5hkjHxbj1ohMoGQ4HpRQ',
@@ -20,3 +26,10 @@ const firebaseConfig = {
 
 export const app = initializeApp(firebaseConfig)
 export const auth = getAuth(app)
+export const db = getFirestore(app)
+
+// Persist the session so the desktop app signs in once, not on every relaunch. IndexedDB is the
+// most durable in the Electron renderer; fall back to localStorage if it's unavailable.
+void setPersistence(auth, indexedDBLocalPersistence).catch(() =>
+  setPersistence(auth, browserLocalPersistence).catch(() => {})
+)

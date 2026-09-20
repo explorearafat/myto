@@ -16,6 +16,13 @@ service cloud.firestore {
       match /devices/{deviceId} {
         allow read, write: if request.auth != null && request.auth.uid == uid;
       }
+
+      // Bring-your-own-key chat config (base URL, API key, models) written by the /authentication
+      // page and read by all three clients (see src/shared/byok.ts). Contains the user's own secret
+      // API key, so it stays strictly owner-only, like everything else under users/{uid}.
+      match /config/{docId} {
+        allow read, write: if request.auth != null && request.auth.uid == uid;
+      }
     }
   }
 }

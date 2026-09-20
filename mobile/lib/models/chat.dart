@@ -1,5 +1,3 @@
-import 'oraculum_model.dart';
-
 enum Role { user, assistant }
 
 class ChatMessage {
@@ -54,7 +52,8 @@ class Conversation {
   factory Conversation.create({String? modelId}) => Conversation(
         id: DateTime.now().microsecondsSinceEpoch.toRadixString(36),
         title: 'New chat',
-        modelId: modelId ?? kDefaultModelId,
+        // Empty until the account's models load; the send path resolves it to a real model id.
+        modelId: modelId ?? '',
       );
 
   void deriveTitleFromMessages() {
@@ -83,7 +82,7 @@ class Conversation {
   factory Conversation.fromJson(Map<String, dynamic> json) => Conversation(
         id: (json['id'] as String?) ?? DateTime.now().microsecondsSinceEpoch.toRadixString(36),
         title: (json['title'] as String?) ?? 'New chat',
-        modelId: (json['modelId'] as String?) ?? kDefaultModelId,
+        modelId: (json['modelId'] as String?) ?? '',
         createdAt: DateTime.fromMillisecondsSinceEpoch((json['createdAt'] as num?)?.toInt() ?? 0),
         updatedAt: DateTime.fromMillisecondsSinceEpoch((json['updatedAt'] as num?)?.toInt() ?? 0),
         messages: ((json['messages'] as List?) ?? const [])

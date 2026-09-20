@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../theme.dart';
 
-/// Tool-call rendering for the mobile transcript. The Oraculum gateway runs the tool loop and
+/// Tool-call rendering for the mobile transcript. The chat gateway runs the tool loop and
 /// writes each round-trip into the reply as two fenced blocks — a ```sylor:tool call and a
 /// ```sylor:tool_result <name> result (see src/server/tools.ts). This file splits an assistant
 /// message into those segments and renders each tool round-trip as a collapsible card, matching

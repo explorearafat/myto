@@ -42,6 +42,10 @@ class ChatClient {
   Stream<ChatEvent> send({
     required String model,
     required List<Map<String, String>> messages,
+    required String baseUrl,
+    required String apiKey,
+    required String authSchema,
+    required String authHeaderName,
   }) async* {
     _aborted = false;
     final client = http.Client();
@@ -51,7 +55,15 @@ class ChatClient {
       final request = http.Request('POST', Uri.parse(kGatewayUrl));
       request.headers['content-type'] = 'application/json';
       request.headers['accept'] = 'text/event-stream';
-      request.body = jsonEncode({'model': model, 'messages': messages});
+      // Bring-your-own-key: the gateway is a proxy, so we hand it the user's own endpoint + key.
+      request.body = jsonEncode({
+        'model': model,
+        'messages': messages,
+        'baseUrl': baseUrl,
+        'apiKey': apiKey,
+        'authSchema': authSchema,
+        'authHeaderName': authHeaderName,
+      });
 
       final http.StreamedResponse response;
       try {

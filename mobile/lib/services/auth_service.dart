@@ -40,6 +40,11 @@ class AuthService extends ChangeNotifier {
   /// Past the sign-in gate once there's a Firebase user.
   bool get isAuthed => _user != null;
 
+  /// False until the first auth state has resolved after launch. The gate shows a splash while this
+  /// is false so a persisted session never flashes the sign-in screen on a cold start.
+  bool _resolved = false;
+  bool get resolved => _resolved;
+
   String get displayName {
     final name = _user?.displayName?.trim();
     if (name != null && name.isNotEmpty) return name;
@@ -51,11 +56,17 @@ class AuthService extends ChangeNotifier {
 
   StreamSubscription<User?>? _sub;
 
-  /// Begin listening to auth changes. No-op when Firebase failed to initialise.
+  /// Begin listening to auth changes. When Firebase failed to initialise there's nothing to restore,
+  /// so we resolve immediately (the gate falls through to the sign-in screen).
   void start() {
-    if (!firebaseReady) return;
+    if (!firebaseReady) {
+      _resolved = true;
+      notifyListeners();
+      return;
+    }
     _sub = FirebaseAuth.instance.authStateChanges().listen((u) {
       _user = u;
+      _resolved = true;
       notifyListeners();
     });
   }

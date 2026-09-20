@@ -1,12 +1,18 @@
 // The chat gateway: a runtime-agnostic Web handler (Request -> Response) so the exact same code
-// runs as a Vercel Edge function (api/chat.ts) and inside the Vite dev middleware. It holds the
-// upstream keys (server-only, from env), enforces the per-user quota, fails a request over across
-// a pool of (model, key) combinations, and streams the reply back to the browser as a tiny SSE
-// protocol: `data: {"t":"token","v":"…"}`, then `{"t":"done","usage":N}`, or `{"t":"error",…}`.
+// runs as a Vercel Edge function (api/chat.ts) and inside the Vite dev middleware. It is a thin,
+// credential-passing PROXY: the browser and the mobile app can't call an arbitrary OpenAI-compatible
+// endpoint directly (browser CORS; and keeping one place to run the tool loop), so they POST their
+// own bring-your-own-key config — { baseUrl, apiKey, authSchema, authHeaderName, model, messages } —
+// and this handler streams the upstream reply back as a tiny SSE protocol:
+// `data: {"t":"token","v":"…"}`, then `{"t":"done"}`, or `{"t":"error",…}`.
+//
+// Security posture: the credentials come from the caller, not the server — there is no server-held
+// secret to leak. The one risk this adds is SSRF (a same-origin caller pointing us at an internal
+// host), so we require https and refuse private/loopback/metadata hosts via isBlockedHost. The
+// same-origin guard blocks cross-site browser abuse. It can still reach arbitrary *public* HTTPS
+// hosts on the caller's behalf — inherent to a BYOK proxy.
 
-import { isOraculumModel, DEFAULT_MODEL_ID } from '../shared/models';
-import { resolveIdentity } from './userId';
-import { checkBudget, charge } from './ratelimit';
+import { isBlockedHost } from './tools';
 import {
   createToolCallParser,
   runTool,
@@ -16,6 +22,7 @@ import {
   type ToolCall,
   type ToolCallParser,
 } from './tools';
+import { normalizeByokConfig, type ByokConfig } from '../shared/byok';
 
 export interface WireMessage {
   role: 'system' | 'user' | 'assistant';
@@ -27,35 +34,9 @@ export interface WireMessage {
 // calls then a forced final answer. Also guarantees the agentic loop always terminates.
 const MAX_TOOL_TURNS = 3;
 
-// The upstream models are branded away behind the two Oraculum ids; both facades draw on this
-// same pool, tried in order with key rotation until one answers.
-const DEFAULT_MODELS = 'hy3,mimo-v2.5,glm-5.3-flash,qwen3.8-flash';
-
-const PERSONA =
-  'You are Oraculum, the assistant on the website for Sylor — a local-first AI coding workspace. ' +
-  'Be concise, warm, and genuinely helpful, and use Markdown when it aids clarity. When asked ' +
-  'about Sylor: it reads your project, shows every edit as a diff you approve before it touches ' +
-  'disk, and runs your build to verify its own work. It runs any local Ollama model or any ' +
-  'OpenAI-compatible endpoint, and includes the Sylorium browser, sub-agents, hooks, scheduled ' +
-  'tasks, SYLOR.md project memory, and a headless CLI. Windows is available today; macOS and ' +
-  'Linux are planned. The app is free — you only pay whatever model provider you choose.';
-
 const MAX_MESSAGES = 24;
 const MAX_CHARS = 8000;
-
-function env() {
-  const base = (process.env.B_AI_BASE_URL || 'https://api.b.ai/v1/').replace(/\/+$/, '');
-  const keys = (process.env.B_AI_KEYS || '')
-    .split(',')
-    .map((k) => k.trim())
-    .filter(Boolean);
-  const models = (process.env.B_AI_MODELS || DEFAULT_MODELS)
-    .split(',')
-    .map((m) => m.trim())
-    .filter(Boolean);
-  const maxTokens = Number(process.env.SYLOR_MAX_OUTPUT_TOKENS || 1536);
-  return { base, keys, models, maxTokens };
-}
+const MAX_OUTPUT_TOKENS = Number(process.env.SYLOR_MAX_OUTPUT_TOKENS || 1536);
 
 function json(status: number, body: unknown, extra?: Record<string, string>): Response {
   return new Response(JSON.stringify(body), {
@@ -65,7 +46,8 @@ function json(status: number, body: unknown, extra?: Record<string, string>): Re
 }
 
 // Cheap CSRF/abuse guard: reject an explicit cross-origin POST. A same-origin fetch either omits
-// Origin or matches the request host; curl without Origin is allowed (it can't ride a user's cookie).
+// Origin or matches the request host; a native app (curl, the mobile client) sends no Origin and is
+// allowed (it can't ride a user's cookie, and it carries its own credentials).
 function sameOrigin(req: Request): boolean {
   const origin = req.headers.get('origin');
   if (!origin) return true;
@@ -77,7 +59,7 @@ function sameOrigin(req: Request): boolean {
 }
 
 // Trust nothing from the client but user/assistant turns of bounded size; a client-supplied
-// system role is folded to user so the persona can't be overridden.
+// system role is folded to user so the caller can't inject a privileged instruction.
 function sanitizeMessages(input: unknown): WireMessage[] {
   if (!Array.isArray(input)) return [];
   const out: WireMessage[] = [];
@@ -90,58 +72,41 @@ function sanitizeMessages(input: unknown): WireMessage[] {
   return out;
 }
 
-// A capped, key-rotated list of (model, key) attempts: each model paired with up to two keys,
-// starting from a random key so load spreads across the pool.
-function buildAttempts(models: string[], keys: string[]): { model: string; key: string }[] {
-  const start = Math.floor(Math.random() * keys.length);
-  const cap = Math.min(6, models.length * keys.length);
-  const out: { model: string; key: string }[] = [];
-  for (let i = 0; i < models.length && out.length < cap; i++) {
-    for (let j = 0; j < Math.min(2, keys.length) && out.length < cap; j++) {
-      out.push({ model: models[i], key: keys[(start + i + j) % keys.length] });
-    }
-  }
-  return out;
+// Derive the auth header for the user's endpoint, mirroring the desktop GatewayProvider vocabulary.
+function authHeaders(cfg: ByokConfig): Record<string, string> {
+  if (!cfg.apiKey || cfg.authSchema === 'none') return {};
+  if (cfg.authSchema === 'header') return { [cfg.authHeaderName || 'Authorization']: cfg.apiKey };
+  return { Authorization: `Bearer ${cfg.apiKey}` };
 }
 
-// 400/422 mean the request body itself is wrong — retrying other combos won't help.
-function isFatalStatus(s: number): boolean {
-  return s === 400 || s === 422;
-}
-
-// Open an upstream stream, failing over across the pool. Failover happens BEFORE we hand a
-// Response to the client, so once we return an upstream we never silently switch mid-stream.
-async function openUpstream(messages: WireMessage[]): Promise<Response | null> {
-  const { base, keys, models, maxTokens } = env();
-  if (keys.length === 0) return null;
-
-  for (const { model, key } of buildAttempts(models, keys)) {
+// Open the upstream stream against the caller's own endpoint. There is a single endpoint, so there
+// is no failover; a non-OK status or a transport error simply surfaces as an in-stream error.
+async function openUpstream(cfg: ByokConfig, model: string, messages: WireMessage[]): Promise<Response | null> {
+  const base = cfg.baseUrl.replace(/\/+$/, '');
+  try {
+    const res = await fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        Accept: 'text/event-stream',
+        ...authHeaders(cfg),
+      },
+      body: JSON.stringify({
+        model,
+        stream: true,
+        stream_options: { include_usage: true },
+        messages,
+        max_tokens: MAX_OUTPUT_TOKENS,
+      }),
+    });
+    if (res.ok && res.body) return res;
     try {
-      const res = await fetch(`${base}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${key}`,
-          'content-type': 'application/json',
-          Accept: 'text/event-stream',
-        },
-        body: JSON.stringify({
-          model,
-          stream: true,
-          stream_options: { include_usage: true },
-          messages,
-          max_tokens: maxTokens,
-        }),
-      });
-      if (res.ok && res.body) return res;
-      try {
-        await res.body?.cancel();
-      } catch {
-        /* ignore */
-      }
-      if (isFatalStatus(res.status)) break;
+      await res.body?.cancel();
     } catch {
-      // Network/timeout — try the next combination.
+      /* ignore */
     }
+  } catch {
+    // Network/timeout — nothing to fail over to with a single endpoint.
   }
   return null;
 }
@@ -149,14 +114,13 @@ async function openUpstream(messages: WireMessage[]): Promise<Response | null> {
 // Consume one upstream reply, forwarding visible text as `token` events. When `parser` is set it
 // also watches for a tool-call fence, holding that block back and returning the parsed call so the
 // loop can run it (the block itself is written to the reply by the loop, not here). Returns the
-// visible text, the call (if any), and the turn's token usage. Does NOT send `done`.
+// visible text and the call (if any). Does NOT send `done`.
 async function readTurn(
   upstream: Response,
   send: (obj: unknown) => void,
   parser: ToolCallParser | null,
-): Promise<{ visible: string; call: ToolCall | null; usage: number }> {
+): Promise<{ visible: string; call: ToolCall | null }> {
   let visible = '';
-  let usage = 0;
   let call: ToolCall | null = null;
 
   const emit = (text: string): void => {
@@ -179,10 +143,8 @@ async function readTurn(
     // Buffered fallback: the whole JSON body, emitted as one token.
     const data = (await upstream.json().catch(() => null)) as {
       choices?: { message?: { content?: string } }[];
-      usage?: { total_tokens?: number };
     } | null;
     emit(data?.choices?.[0]?.message?.content ?? '');
-    usage = Number(data?.usage?.total_tokens) || 0;
   } else {
     const reader = upstream.body!.getReader();
     const dec = new TextDecoder();
@@ -199,14 +161,9 @@ async function readTurn(
         const d = line.slice(5).trim();
         if (d === '[DONE]') continue;
         try {
-          const j = JSON.parse(d) as {
-            choices?: { delta?: { content?: string } }[];
-            usage?: { total_tokens?: number };
-          };
+          const j = JSON.parse(d) as { choices?: { delta?: { content?: string } }[] };
           const delta = j?.choices?.[0]?.delta?.content;
           if (typeof delta === 'string' && delta) emit(delta);
-          const u = j?.usage?.total_tokens;
-          if (typeof u === 'number') usage = u;
         } catch {
           // Partial JSON across chunks — the remainder stays buffered for the next read.
         }
@@ -230,18 +187,17 @@ async function readTurn(
       send({ t: 'token', v: tail });
     }
   }
-  return { visible, call, usage };
+  return { visible, call };
 }
 
 // The bounded agentic loop, run inside the streamed Response. Each turn opens an upstream, streams
 // its visible text, and — while tools are on and we haven't hit the last turn — runs any tool the
 // model calls, writing the call + result blocks into the reply so both clients render a card, then
-// re-prompts. Charging happens once, before close. Tool blocks ride the existing `token` protocol,
-// so the client SSE contract is unchanged.
+// re-prompts. Tool blocks ride the existing `token` protocol, so the client SSE contract is unchanged.
 function buildAgentStream(
   base: WireMessage[],
-  uid: string,
-  inputChars: number,
+  cfg: ByokConfig,
+  model: string,
   toolsOn: boolean,
 ): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
@@ -250,8 +206,6 @@ function buildAgentStream(
     async start(controller) {
       const send = (obj: unknown) => controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
       const messages: WireMessage[] = [...base];
-      let totalUsage = 0;
-      let totalOut = 0;
       let errored = false;
       try {
         for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
@@ -262,16 +216,14 @@ function buildAgentStream(
               content: 'Answer the user now using what you already have. Do not call any more tools.',
             });
           }
-          const upstream = await openUpstream(messages);
+          const upstream = await openUpstream(cfg, model, messages);
           if (!upstream) {
             send({ t: 'error', code: 'upstream' });
             errored = true;
             break;
           }
           const parser = toolsOn && !isLast ? createToolCallParser() : null;
-          const { visible, call, usage } = await readTurn(upstream, send, parser);
-          totalUsage += usage;
-          totalOut += visible.length;
+          const { visible, call } = await readTurn(upstream, send, parser);
           if (!call) break; // the model wrote its final answer
 
           const name = call.name ?? 'tool';
@@ -287,9 +239,7 @@ function buildAgentStream(
             content: `Tool result for ${name}:\n${result}\n\nUse this to answer the user's request, or call another tool if you still need more. Do not repeat an identical call.`,
           });
         }
-        const billed = totalUsage > 0 ? totalUsage : Math.ceil((inputChars + totalOut) / 4);
-        await charge(uid, billed);
-        if (!errored) send({ t: 'done', usage: billed });
+        if (!errored) send({ t: 'done' });
         controller.close();
       } catch {
         try {
@@ -310,43 +260,39 @@ export async function handleChat(req: Request): Promise<Response> {
   if (req.method !== 'POST') return json(405, { error: 'method_not_allowed' });
   if (!sameOrigin(req)) return json(403, { error: 'forbidden' });
 
-  let payload: { model?: unknown; messages?: unknown };
+  let payload: { model?: unknown; messages?: unknown } & Partial<ByokConfig>;
   try {
     payload = await req.json();
   } catch {
     return json(400, { error: 'bad_json' });
   }
 
-  // The model is a facade; validate it but the pool is the same for both.
-  const _modelId = isOraculumModel(payload.model) ? payload.model : DEFAULT_MODEL_ID;
   const history = sanitizeMessages(payload.messages);
   if (history.length === 0) return json(400, { error: 'no_messages' });
 
-  const { uid, setCookie } = resolveIdentity(req);
-  const cookieHeader = setCookie ? { 'set-cookie': setCookie } : undefined;
+  // The caller supplies its own endpoint + key + model (bring-your-own-key).
+  const cfg = normalizeByokConfig(payload);
+  const model = typeof payload.model === 'string' ? payload.model.trim() : '';
+  if (!cfg.baseUrl || !model) return json(400, { error: 'no_config' });
 
-  const budget = await checkBudget(uid);
-  if (budget.blocked) {
-    return json(
-      429,
-      { error: 'quota', resetSeconds: budget.resetSeconds, limit: budget.limit },
-      cookieHeader,
-    );
+  // SSRF guard: only public HTTPS endpoints — no loopback/private/metadata hosts.
+  let host: string;
+  try {
+    const u = new URL(cfg.baseUrl);
+    if (u.protocol !== 'https:') return json(400, { error: 'bad_base_url' });
+    host = u.hostname;
+  } catch {
+    return json(400, { error: 'bad_base_url' });
   }
-
-  // No keys configured is a hard 502 (a misconfig, not a transient upstream blip). With keys, the
-  // agentic loop runs inside the stream; a network failure mid-loop surfaces as an in-stream error.
-  if (env().keys.length === 0) return json(502, { error: 'upstream' }, cookieHeader);
+  if (isBlockedHost(host)) return json(400, { error: 'bad_base_url' });
 
   const toolsOn = toolsEnabled();
   const messages: WireMessage[] = [
-    { role: 'system', content: PERSONA },
     ...(toolsOn ? [{ role: 'system' as const, content: toolsSystemPrompt() }] : []),
     ...history,
   ];
 
-  const inputChars = messages.reduce((n, m) => n + m.content.length, 0);
-  const stream = buildAgentStream(messages, uid, inputChars, toolsOn);
+  const stream = buildAgentStream(messages, cfg, model, toolsOn);
 
   return new Response(stream, {
     status: 200,
@@ -354,7 +300,6 @@ export async function handleChat(req: Request): Promise<Response> {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-cache, no-transform',
       'x-accel-buffering': 'no',
-      ...(cookieHeader || {}),
     },
   });
 }

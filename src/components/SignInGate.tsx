@@ -250,10 +250,10 @@ function ProfileForm() {
 }
 
 export function SignInGate() {
-  const { user, profile, loading, profileLoading, signOutUser } = useAuth();
+  const { user, profile, byok, loading, profileLoading, signOutUser } = useAuth();
 
   if (loading || (user && profileLoading)) return <Splash />;
   if (!user) return <SignInScreen />;
   if (!profile) return <ProfileForm />;
-  return <ChatPage profile={profile} onSignOut={signOutUser} />;
+  return <ChatPage profile={profile} byok={byok} onSignOut={signOutUser} />;
 }

@@ -94,7 +94,7 @@ function apiDev(): Plugin {
 
 export default defineConfig(({ mode }) => {
   // Load every env var (empty prefix, not just VITE_) from .env* and expose it to
-  // the dev gateway middleware via process.env — B_AI_*, UPSTASH_*, SYLOR_*.
+  // the dev gateway middleware via process.env — SYLOR_* (tools kill-switch, max tokens).
   const env = loadEnv(mode, process.cwd(), '');
   Object.assign(process.env, env);
 

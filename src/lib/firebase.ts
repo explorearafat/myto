@@ -8,7 +8,14 @@
 // Firestore straight from the client).
 
 import { initializeApp, type FirebaseApp } from 'firebase/app';
-import { getAuth, GithubAuthProvider, GoogleAuthProvider } from 'firebase/auth';
+import {
+  browserLocalPersistence,
+  getAuth,
+  GithubAuthProvider,
+  GoogleAuthProvider,
+  indexedDBLocalPersistence,
+  setPersistence,
+} from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 
 // authDomain is our own origin, not sylor-29cab.firebaseapp.com. The mobile app opens the
@@ -32,6 +39,13 @@ const firebaseConfig = {
 export const app: FirebaseApp = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+
+// Keep the session across reloads and relaunches so the user signs in once, not every visit.
+// IndexedDB is the most durable; fall back to localStorage where IndexedDB is unavailable. Fire and
+// forget — the SDK queues auth calls until this resolves, and the default is already local anyway.
+void setPersistence(auth, indexedDBLocalPersistence).catch(() =>
+  setPersistence(auth, browserLocalPersistence).catch(() => {}),
+);
 
 // Always show the account chooser so switching Google accounts is easy.
 export const googleProvider = new GoogleAuthProvider();

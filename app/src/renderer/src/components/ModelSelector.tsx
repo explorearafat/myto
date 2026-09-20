@@ -65,7 +65,6 @@ export function ModelSelector({ openUp = false }: { openUp?: boolean } = {}) {
   const models = useAppStore((s) => s.models)
   const modelsLoading = useAppStore((s) => s.modelsLoading)
   const activeModelId = useAppStore((s) => s.settings.modelId)
-  const refreshModels = useAppStore((s) => s.refreshModels)
   const selectModel = useAppStore((s) => s.selectModel)
   const openSettings = useAppStore((s) => s.openSettings)
 
@@ -82,12 +81,9 @@ export function ModelSelector({ openUp = false }: { openUp?: boolean } = {}) {
     return () => document.removeEventListener('mousedown', onDown)
   }, [open])
 
-  const toggle = (): void => {
-    const next = !open
-    setOpen(next)
-    // Lazily load the model list the first time the dropdown opens.
-    if (next && models.length === 0 && !modelsLoading) void refreshModels()
-  }
+  // The model list comes from the account's config (mirrored into the store), so
+  // opening the menu just toggles it — nothing to fetch.
+  const toggle = (): void => setOpen((o) => !o)
 
   // Anchor above the pill when it lives in the bottom composer, below otherwise.
   const menuPosition = openUp ? 'bottom-full mb-1' : 'top-full mt-1'
@@ -105,7 +101,7 @@ export function ModelSelector({ openUp = false }: { openUp?: boolean } = {}) {
             )}
             {!modelsLoading && models.length === 0 && (
               <div className="px-3 py-2 text-[12px] text-muted">
-                No models found. Check provider settings.
+                No models — add them on the website.
               </div>
             )}
             {models.map((m) => {

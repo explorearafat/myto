@@ -7,12 +7,22 @@ import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
 import { useAppStore } from '@renderer/store/useAppStore'
 import { useSessionStore } from '@renderer/store/useSessionStore'
 import { useProjectStore } from '@renderer/store/useProjectStore'
+import { useByokConfig } from '@renderer/lib/useByokConfig'
 
 export default function App() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
   const loadSettings = useAppStore((s) => s.loadSettings)
+  const applyByokConfig = useAppStore((s) => s.applyByokConfig)
   const boot = useSessionStore((s) => s.boot)
   const refreshProjects = useProjectStore((s) => s.refresh)
+
+  // Firestore is the single source of truth for the chat model config: subscribe
+  // to the signed-in account's BYOK doc and mirror it onto the persisted local
+  // settings whenever it changes (this also seeds the offline cache).
+  const { config } = useByokConfig()
+  useEffect(() => {
+    void applyByokConfig(config)
+  }, [config, applyByokConfig])
 
   // Load persisted provider settings first (so the provider is ready), then open
   // a fresh landing page (boot never restores the last chat) with the full global

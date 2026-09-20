@@ -29,7 +29,7 @@ import { Markdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
 import { parseToolBlocks, hasToolBlocks } from '../lib/toolBlocks';
 import { streamChat, type ChatWireMessage } from '../lib/chatClient';
-import { ORACULUM_MODELS, DEFAULT_MODEL_ID, modelName } from '../shared/models';
+import { isByokConfigured, type ByokConfig } from '../shared/byok';
 import { profileSummary, type UserProfile } from '../shared/profile';
 
 /*
@@ -38,11 +38,11 @@ import { profileSummary, type UserProfile } from '../shared/profile';
  * column that opens on a time-of-day greeting over one rounded input, then collapses into a
  * transcript with the input pinned below once a message is sent.
  *
- * Replies are real: each turn POSTs the conversation to our own /api/chat gateway (which holds
- * the upstream keys, enforces a per-user token quota, and fails over across a model pool) and
- * streams the answer back token by token. The visitor picks between two branded "Oraculum"
- * models; both route across the same pool server-side. If the gateway is unreachable (e.g. local
- * dev with no keys), the turn falls back to the built-in knowledge base so the page still answers.
+ * Replies are real: each turn POSTs the conversation to our own /api/chat gateway, which proxies
+ * to the user's own OpenAI-compatible endpoint using the models they configured on the
+ * Authentication page (bring-your-own-key). The user picks among their own models. If the endpoint
+ * is unreachable, the turn falls back to the built-in knowledge base so the page still answers; if
+ * no models are configured yet, the composer points the user to the Authentication page.
  *
  * Type follows Claude's split: Georgia (`.font-display`) for the greeting, Inter for everything else.
  */
@@ -127,15 +127,15 @@ function getUserName(): string {
   return DEFAULT_NAME;
 }
 
-/** Initial model selection, restored from localStorage when valid. */
-function getInitialModel(): string {
+/** Initial model selection: the stored id when it's still one of the account's models, else the first. */
+function getInitialModel(models: ByokConfig['models']): string {
   try {
     const v = localStorage.getItem(MODEL_KEY);
-    if (v && ORACULUM_MODELS.some((m) => m.id === v)) return v;
+    if (v && models.some((m) => m.id === v)) return v;
   } catch {
     // ignore
   }
-  return DEFAULT_MODEL_ID;
+  return models[0]?.id ?? '';
 }
 
 /**
@@ -183,21 +183,9 @@ function usePrefersReducedMotion(): boolean {
   return reduced;
 }
 
-/** The calm caveat shown when a visitor has spent their free token budget. */
-function QuotaCard({ resetSeconds }: { resetSeconds?: number }) {
-  const hrs = resetSeconds ? Math.max(1, Math.round(resetSeconds / 3600)) : null;
-  return (
-    <div className="rounded-xl border border-[#e4b8a8] bg-[#f9ede8] px-4 py-3 text-[14px] leading-relaxed text-[#8a3b22]">
-      You’ve used the free Oraculum tokens for now
-      {hrs ? ` — they reset in about ${hrs} hour${hrs > 1 ? 's' : ''}` : ''}. Sylor’s full chat runs
-      in the app with your own model, unmetered.
-    </div>
-  );
-}
-
 /**
  * One assistant reply. Presentational: it renders whatever the turn currently holds — a "Thinking…"
- * strip, the streamed Markdown with a blinking caret, a done answer, or the quota card.
+ * strip, the streamed Markdown with a blinking caret, or a done answer.
  */
 function AgentReply({
   turn,
@@ -218,8 +206,6 @@ function AgentReply({
             <span className="thinking-dot" aria-hidden="true" />
             Thinking…
           </div>
-        ) : turn.status === 'error' && turn.errorCode === 'quota' ? (
-          <QuotaCard resetSeconds={turn.resetSeconds} />
         ) : (
           <div>
             {turn.text ? (
@@ -313,20 +299,25 @@ function SectionView({ view }: { view: Exclude<View, 'chat'> }) {
 interface ChatPageProps {
   /** The signed-in user's profile — drives the greeting, the account chip, and reply context. */
   profile?: UserProfile;
+  /** The account's bring-your-own-key config — the models the picker offers + the creds to call. */
+  byok?: ByokConfig | null;
   /** Sign the user out; when provided, a sign-out control appears on the account chip. */
   onSignOut?: () => void;
 }
 
-export function ChatPage({ profile, onSignOut }: ChatPageProps = {}) {
+export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
   const reduced = usePrefersReducedMotion();
   const [greeting] = useState(getGreeting);
   const name = profile?.nickname?.trim() || profile?.name?.trim() || getUserName();
+
+  const models = byok?.models ?? [];
+  const configured = isByokConfigured(byok);
 
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState('');
   const [view, setView] = useState<View>('chat');
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [selectedModelId, setSelectedModelId] = useState<string>(getInitialModel);
+  const [selectedModelId, setSelectedModelId] = useState<string>(() => getInitialModel(models));
   const [streamingId, setStreamingId] = useState<number | null>(null);
 
   const nextId = useRef(1);
@@ -347,6 +338,12 @@ export function ChatPage({ profile, onSignOut }: ChatPageProps = {}) {
   // Abort any in-flight request when the page unmounts.
   useEffect(() => () => abortRef.current?.abort(), []);
 
+  // Keep the selection valid as the account's models load or change (e.g. one was deleted).
+  useEffect(() => {
+    if (models.length === 0) return;
+    if (!models.some((m) => m.id === selectedModelId)) setSelectedModelId(models[0].id);
+  }, [models, selectedModelId]);
+
   const startStream = useCallback((id: number, modelId: string, messages: ChatWireMessage[]) => {
     const controller = new AbortController();
     abortRef.current = controller;
@@ -364,28 +361,29 @@ export function ChatPage({ profile, onSignOut }: ChatPageProps = {}) {
     void streamChat({
       model: modelId,
       messages,
+      baseUrl: byok?.baseUrl ?? '',
+      apiKey: byok?.apiKey ?? '',
+      authSchema: byok?.authSchema ?? 'bearer',
+      authHeaderName: byok?.authHeaderName ?? 'Authorization',
       signal: controller.signal,
       onToken: (chunk) => patch((t) => ({ ...t, status: 'streaming', text: t.text + chunk })),
       onDone: () => {
-        // A live reply with no content, or an unreachable gateway, falls back to the KB answer.
+        // A live reply with no content, or an unreachable endpoint, falls back to the KB answer.
         patch((t) => ({ ...t, status: 'done', text: t.text || kbMarkdown(t.question) }));
         finish();
       },
-      onError: (code, info) => {
-        patch((t) =>
-          code === 'quota'
-            ? { ...t, status: 'error', errorCode: 'quota', resetSeconds: info?.resetSeconds }
-            : { ...t, status: 'done', text: t.text || kbMarkdown(t.question) },
-        );
+      onError: () => {
+        // Any gateway/endpoint error falls back to the built-in knowledge base so the page stays useful.
+        patch((t) => ({ ...t, status: 'done', text: t.text || kbMarkdown(t.question) }));
         finish();
       },
     });
-  }, []);
+  }, [byok]);
 
   const askText = useCallback(
     (text: string) => {
       const q = text.trim();
-      if (!q || streamingRef.current) return;
+      if (!q || streamingRef.current || !configured) return;
       const id = nextId.current++;
       const modelId = selectedModelId;
 
@@ -406,7 +404,7 @@ export function ChatPage({ profile, onSignOut }: ChatPageProps = {}) {
       setInput('');
       startStream(id, modelId, messages);
     },
-    [selectedModelId, startStream, profile],
+    [selectedModelId, startStream, profile, configured],
   );
 
   // Re-run one earlier turn: rebuild the wire history from the turns before it (so the model has
@@ -540,8 +538,15 @@ export function ChatPage({ profile, onSignOut }: ChatPageProps = {}) {
         value={input}
         onChange={(e) => setInput(e.target.value)}
         onKeyDown={onKeyDown}
-        placeholder={started ? 'Reply to Sylor…' : 'How can I help you today?'}
-        className="composer-input block max-h-[200px] w-full resize-none bg-transparent px-5 pt-4 pb-2 text-[15px] leading-relaxed text-[#141413] outline-none placeholder:text-[#9c988e]"
+        disabled={!configured}
+        placeholder={
+          configured
+            ? started
+              ? 'Reply to Sylor…'
+              : 'How can I help you today?'
+            : 'Add a model in Authentication to start chatting…'
+        }
+        className="composer-input block max-h-[200px] w-full resize-none bg-transparent px-5 pt-4 pb-2 text-[15px] leading-relaxed text-[#141413] outline-none placeholder:text-[#9c988e] disabled:cursor-not-allowed"
       />
       <div className="flex items-center justify-between gap-2 px-3 pb-3 pt-1">
         <div className="flex items-center gap-1">
@@ -561,35 +566,41 @@ export function ChatPage({ profile, onSignOut }: ChatPageProps = {}) {
           <details ref={detailsRef} className="relative">
             <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] text-[#544f46] transition-colors duration-150 hover:bg-[#f0eee6] hover:text-[#141413] [&::-webkit-details-marker]:hidden">
               <SylorStar size={16} />
-              {modelName(selectedModelId)}
+              {models.find((m) => m.id === selectedModelId)?.name || 'Model'}
               <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
             </summary>
             <div className="absolute right-0 bottom-full z-10 mb-2 w-72 rounded-xl border border-[#e4e1d8] bg-white p-1.5 shadow-[0_8px_28px_rgba(20,20,19,0.12)]">
               <p className="px-2 py-1 text-[11px] font-medium uppercase tracking-[0.06em] text-[#9c988e]">
                 Model
               </p>
-              {ORACULUM_MODELS.map((m) => {
-                const active = m.id === selectedModelId;
-                return (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => pickModel(m.id)}
-                    className="flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-[#f0eee6]"
-                  >
-                    <Check
-                      className={
-                        'mt-0.5 h-4 w-4 shrink-0 ' + (active ? 'text-[#cf5535]' : 'text-transparent')
-                      }
-                      aria-hidden="true"
-                    />
-                    <span>
-                      <span className="block text-[13px] text-[#141413]">{m.name}</span>
-                      <span className="block text-[12px] text-[#6b675e]">{m.blurb}</span>
-                    </span>
-                  </button>
-                );
-              })}
+              {models.length === 0 ? (
+                <a
+                  href="/authentication"
+                  className="block rounded-lg px-2 py-1.5 text-[13px] text-[#6b675e] hover:bg-[#f0eee6]"
+                >
+                  Add a model in Authentication →
+                </a>
+              ) : (
+                models.map((m) => {
+                  const active = m.id === selectedModelId;
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => pickModel(m.id)}
+                      className="flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-[#f0eee6]"
+                    >
+                      <Check
+                        className={
+                          'mt-0.5 h-4 w-4 shrink-0 ' + (active ? 'text-[#cf5535]' : 'text-transparent')
+                        }
+                        aria-hidden="true"
+                      />
+                      <span className="block truncate text-[13px] text-[#141413]">{m.name}</span>
+                    </button>
+                  );
+                })
+              )}
             </div>
           </details>
           <button type="button" className={ICON_BTN} title="Voice" aria-label="Voice input">
@@ -608,7 +619,7 @@ export function ChatPage({ profile, onSignOut }: ChatPageProps = {}) {
           ) : (
             <button
               type="submit"
-              disabled={!input.trim()}
+              disabled={!input.trim() || !configured}
               aria-label="Send"
               className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#cf5535] text-white transition-colors duration-150 hover:bg-[#b8482c] active:translate-y-px disabled:cursor-not-allowed disabled:bg-[#e0c4ba]"
             >
@@ -790,6 +801,15 @@ export function ChatPage({ profile, onSignOut }: ChatPageProps = {}) {
                     {greeting}, {name}
                   </h1>
                 </div>
+                {!configured ? (
+                  <div className="mb-4 rounded-xl border border-[#e4b8a8] bg-[#f9ede8] px-4 py-3 text-[14px] leading-relaxed text-[#8a3b22]">
+                    No models set up yet. Add your provider’s base URL, API key, and a model on the{' '}
+                    <a href="/authentication" className="font-medium underline underline-offset-2">
+                      Authentication
+                    </a>{' '}
+                    page — they’ll power chat here and in the apps.
+                  </div>
+                ) : null}
                 {composer}
                 {disclaimer}
               </div>

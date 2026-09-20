@@ -650,6 +650,11 @@ export function ChatPanel() {
   const setComposerMode = useChatStore((s) => s.setComposerMode)
   const setPromptBlocks = useChatStore((s) => s.setPromptBlocks)
 
+  // A model must be configured on the account before chat can send. The store's
+  // modelId mirrors the account's Firestore config (and is cached in settings.json
+  // so it survives offline), so gating on it degrades gracefully.
+  const hasModel = useAppStore((s) => s.settings.modelId.trim().length > 0)
+
   // The signed-in account's given name, for the greeting — falling back to the OS
   // account name, then a friendly generic.
   const authUser = useAuthUser()
@@ -746,7 +751,7 @@ export function ChatPanel() {
 
   const submit = async (): Promise<void> => {
     const text = input
-    if ((text.trim().length === 0 && pending.length === 0) || running) return
+    if ((text.trim().length === 0 && pending.length === 0) || running || !hasModel) return
 
     const outgoing: OutgoingAttachment[] = pending.map((p) => ({
       attachment: p.attachment,
@@ -785,7 +790,7 @@ export function ChatPanel() {
     })
   }
 
-  const canSend = input.trim().length > 0 || pending.length > 0
+  const canSend = (input.trim().length > 0 || pending.length > 0) && hasModel
   const canAttach = sessionId != null
   const isEmpty = messages.length === 0
 
@@ -941,6 +946,12 @@ export function ChatPanel() {
           </div>
         </div>
       </div>
+
+      {!hasModel && (
+        <p className="mt-2 text-center text-[12px] text-muted">
+          No model configured. Add one on the Sylor website → Authentication page to start chatting.
+        </p>
+      )}
     </div>
   )
 

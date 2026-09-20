@@ -21,12 +21,15 @@ import {
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db, githubProvider, googleProvider } from './firebase';
 import type { ProfileDraft, UserProfile } from '../shared/profile';
+import { BYOK_DOC, normalizeByokConfig, type ByokConfig } from '../shared/byok';
 
 interface AuthContextValue {
   /** null until the first auth state resolves, then the signed-in user or null. */
   user: User | null;
   /** The signed-in user's Firestore profile, or null if they haven't onboarded yet. */
   profile: UserProfile | null;
+  /** The signed-in user's bring-your-own-key chat config, or null if none saved yet. */
+  byok: ByokConfig | null;
   /** True until the first onAuthStateChanged fires. */
   loading: boolean;
   /** True while a signed-in user's profile document is being fetched. */
@@ -93,31 +96,42 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [byok, setByok] = useState<ByokConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [profileLoading, setProfileLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Track the signed-in user and load their profile document.
+  // Track the signed-in user and load their profile + BYOK config documents.
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (u) => {
       setUser(u);
       setLoading(false);
       if (!u) {
         setProfile(null);
+        setByok(null);
         return;
       }
       setProfileLoading(true);
-      try {
-        const snap = await withTimeout(getDoc(doc(db, 'users', u.uid)), 12000, 'Profile read');
-        setProfile(snap.exists() ? (snap.data() as UserProfile) : null);
-      } catch (e) {
-        // Offline, rules not deployed, or the Firestore database isn't created yet — treat as
-        // "no profile" so onboarding shows its form instead of the splash hanging for minutes.
-        console.warn('[sylor] profile read failed — showing onboarding:', e);
-        setProfile(null);
-      } finally {
-        setProfileLoading(false);
-      }
+      // Read the profile and the BYOK config together; neither should block the other.
+      const [profileSnap, byokSnap] = await Promise.all([
+        withTimeout(getDoc(doc(db, 'users', u.uid)), 12000, 'Profile read').catch((e) => {
+          // Offline, rules not deployed, or Firestore not created yet — treat as "no profile" so
+          // onboarding shows its form instead of the splash hanging for minutes.
+          console.warn('[sylor] profile read failed — showing onboarding:', e);
+          return null;
+        }),
+        withTimeout(
+          getDoc(doc(db, 'users', u.uid, BYOK_DOC.col, BYOK_DOC.id)),
+          12000,
+          'Config read',
+        ).catch((e) => {
+          console.warn('[sylor] BYOK config read failed:', e);
+          return null;
+        }),
+      ]);
+      setProfile(profileSnap && profileSnap.exists() ? (profileSnap.data() as UserProfile) : null);
+      setByok(byokSnap && byokSnap.exists() ? normalizeByokConfig(byokSnap.data()) : null);
+      setProfileLoading(false);
     });
     return unsub;
   }, []);
@@ -138,6 +152,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signOutUser = useCallback(async () => {
     await signOut(auth);
     setProfile(null);
+    setByok(null);
   }, []);
 
   const saveProfile = useCallback(
@@ -171,6 +186,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     () => ({
       user,
       profile,
+      byok,
       loading,
       profileLoading,
       error,
@@ -182,6 +198,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [
       user,
       profile,
+      byok,
       loading,
       profileLoading,
       error,

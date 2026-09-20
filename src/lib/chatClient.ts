@@ -17,18 +17,24 @@ export interface StreamHandlers {
 export interface StreamOptions extends StreamHandlers {
   model: string;
   messages: ChatWireMessage[];
+  /** The user's own OpenAI-compatible endpoint, key, and auth scheme (bring-your-own-key). */
+  baseUrl: string;
+  apiKey: string;
+  authSchema: 'bearer' | 'header' | 'none';
+  authHeaderName: string;
   signal?: AbortSignal;
 }
 
 export async function streamChat(opts: StreamOptions): Promise<void> {
-  const { model, messages, signal, onToken, onDone, onError } = opts;
+  const { model, messages, baseUrl, apiKey, authSchema, authHeaderName, signal, onToken, onDone, onError } =
+    opts;
 
   let res: Response;
   try {
     res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model, messages }),
+      body: JSON.stringify({ model, messages, baseUrl, apiKey, authSchema, authHeaderName }),
       signal,
     });
   } catch (err) {

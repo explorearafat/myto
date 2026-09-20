@@ -1,5 +1,5 @@
-// Server-side tool calling for the Oraculum gateway. The upstream pool is streaming-only and
-// speaks no native `tool_calls`, so — exactly like the desktop app — tools ride a text protocol:
+// Server-side tool calling for the chat gateway. The user's endpoint is streamed and may speak no
+// native `tool_calls`, so — exactly like the desktop app — tools ride a text protocol:
 // the model emits a fenced ```sylor:tool block, we detect it mid-stream, run the tool, and feed a
 // ```sylor:tool_result block back. Because the loop lives here in the gateway, BOTH the website
 // and the mobile app inherit tools for free; each client only has to render the two block kinds.
@@ -263,8 +263,8 @@ export function formatWiki(query: string, hits: Array<{ title: string; snippet: 
 
 // ── Input readers + SSRF guard ────────────────────────────────────────────────────────────────
 
-/** Block obvious private/loopback/metadata hosts so web_fetch can't be turned inward. */
-function isBlockedHost(host: string): boolean {
+/** Block obvious private/loopback/metadata hosts so web_fetch (and the BYOK proxy) can't be turned inward. */
+export function isBlockedHost(host: string): boolean {
   const h = host.toLowerCase();
   if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
   if (h === '169.254.169.254' || h === 'metadata.google.internal') return true;

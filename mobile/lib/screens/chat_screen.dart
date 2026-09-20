@@ -4,8 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../models/chat.dart';
-import '../models/oraculum_model.dart';
+import '../models/byok_config.dart';
 import '../services/auth_service.dart';
+import '../services/byok_service.dart';
 import '../services/chat_client.dart';
 import '../services/conversation_store.dart';
 import '../theme.dart';
@@ -44,6 +45,11 @@ class _ChatScreenState extends State<ChatScreen> {
   ConversationStore get _store => context.read<ConversationStore>();
 
   void _send(String text) {
+    final cfg = context.read<ByokService>().config;
+    if (cfg == null || !cfg.isConfigured) {
+      _snack('Add your provider and a model on the Sylor website first.');
+      return;
+    }
     final store = _store;
     store.addMessage(ChatMessage(role: Role.user, content: text));
 
@@ -59,7 +65,22 @@ class _ChatScreenState extends State<ChatScreen> {
         .map((m) => m.toWire())
         .toList();
 
-    _sub = _client.send(model: store.active.modelId, messages: history).listen(
+    // Chat against the account's own endpoint. If the stored model was removed, fall back to the
+    // first available one.
+    final modelId = cfg.models.any((m) => m.id == store.active.modelId)
+        ? store.active.modelId
+        : cfg.models.first.id;
+
+    _sub = _client
+        .send(
+          model: modelId,
+          messages: history,
+          baseUrl: cfg.baseUrl,
+          apiKey: cfg.apiKey,
+          authSchema: cfg.authSchema,
+          authHeaderName: cfg.authHeaderName,
+        )
+        .listen(
       (event) {
         switch (event) {
           case ChatToken(:final text):
@@ -111,7 +132,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _pickModel() async {
     final store = _store;
-    final chosen = await showModelPicker(context, selectedId: store.active.modelId);
+    final models = context.read<ByokService>().config?.models ?? const <ByokModel>[];
+    if (models.isEmpty) {
+      _snack('Add your provider and a model on the Sylor website first.');
+      return;
+    }
+    final chosen = await showModelPicker(context, models: models, selectedId: store.active.modelId);
     if (chosen != null) store.setActiveModel(chosen);
   }
 
@@ -179,7 +205,17 @@ class _ChatScreenState extends State<ChatScreen> {
     final palette = Theme.of(context).palette;
     final store = context.watch<ConversationStore>();
     final auth = context.watch<AuthService>();
+    final byok = context.watch<ByokService>();
     final messages = store.active.messages;
+    final configured = byok.config?.isConfigured ?? false;
+
+    String modelLabel() {
+      final models = byok.config?.models ?? const <ByokModel>[];
+      final match = models.where((m) => m.id == store.active.modelId);
+      if (match.isNotEmpty) return match.first.name;
+      if (models.isNotEmpty) return models.first.name;
+      return 'Model';
+    }
 
     return Scaffold(
       key: _scaffoldKey,
@@ -194,7 +230,7 @@ class _ChatScreenState extends State<ChatScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  oraculumModelName(store.active.modelId),
+                  modelLabel(),
                   style: TextStyle(color: palette.text, fontSize: 16, fontWeight: FontWeight.w600),
                 ),
                 Icon(Icons.expand_more_rounded, color: palette.muted, size: 20),
@@ -213,7 +249,9 @@ class _ChatScreenState extends State<ChatScreen> {
       body: Column(
         children: [
           Expanded(
-            child: messages.isEmpty
+            child: !configured
+                ? _SetupPrompt(palette: palette)
+                : messages.isEmpty
                 ? ChatEmptyState(onStarter: _useStarter, firstName: _firstName(auth))
                 : ListView.builder(
                     controller: _scroll,
@@ -238,13 +276,14 @@ class _ChatScreenState extends State<ChatScreen> {
                     },
                   ),
           ),
-          ChatComposer(
-            controller: _composer,
-            focusNode: _composerFocus,
-            onSend: _send,
-            onStop: _stop,
-            streaming: _streaming,
-          ),
+          if (configured)
+            ChatComposer(
+              controller: _composer,
+              focusNode: _composerFocus,
+              onSend: _send,
+              onStop: _stop,
+              streaming: _streaming,
+            ),
         ],
       ),
     );
@@ -254,5 +293,47 @@ class _ChatScreenState extends State<ChatScreen> {
     final name = auth.displayName.trim();
     if (name.isEmpty || name == 'Guest') return null;
     return name.split(RegExp(r'\s+')).first;
+  }
+}
+
+/// Shown when the account has no bring-your-own-key config yet: chat can't run until the user adds
+/// their provider and a model on the website's Authentication page.
+class _SetupPrompt extends StatelessWidget {
+  const _SetupPrompt({required this.palette});
+
+  final SylorPalette palette;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.key_rounded, size: 40, color: palette.muted),
+            const SizedBox(height: 16),
+            Text(
+              'Add your model',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: palette.text, fontSize: 20, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Open the Sylor website, sign in, and add your provider’s base URL, API key, and a '
+              'model on the Authentication page. It’ll sync here automatically.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: palette.muted, fontSize: 14, height: 1.5),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'sylorcode.vercel.app/authentication',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: palette.accent, fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }

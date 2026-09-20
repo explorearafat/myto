@@ -4,13 +4,15 @@ import 'package:provider/provider.dart';
 import 'screens/chat_screen.dart';
 import 'screens/sign_in_screen.dart';
 import 'services/auth_service.dart';
+import 'services/byok_service.dart';
 import 'services/conversation_store.dart';
 import 'theme.dart';
 
 class SylorApp extends StatelessWidget {
-  const SylorApp({super.key, required this.auth, required this.store});
+  const SylorApp({super.key, required this.auth, required this.byok, required this.store});
 
   final AuthService auth;
+  final ByokService byok;
   final ConversationStore store;
 
   @override
@@ -18,6 +20,7 @@ class SylorApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider<AuthService>.value(value: auth),
+        ChangeNotifierProvider<ByokService>.value(value: byok),
         ChangeNotifierProvider<ConversationStore>.value(value: store),
       ],
       child: MaterialApp(
@@ -37,6 +40,12 @@ class _Gate extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final resolved = context.select<AuthService, bool>((a) => a.resolved);
+    // Hold a splash until the first auth state resolves, so a persisted session doesn't flash the
+    // sign-in screen on a cold start (which invites a redundant, repeated sign-in).
+    if (!resolved) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
     final authed = context.select<AuthService, bool>((a) => a.isAuthed);
     return authed ? const ChatScreen() : const SignInScreen();
   }

@@ -9,6 +9,7 @@ import type {
   ToolSettings
 } from '@shared/types'
 import { DEFAULT_PROVIDER_SETTINGS } from '@shared/defaults'
+import type { ByokConfig } from '@shared/byok'
 
 /** Derives the top-nav environment badge from the active provider. */
 function envForProvider(kind: ProviderKind): EnvStatus {
@@ -89,6 +90,16 @@ export interface AppState {
   ) => Promise<ModelInfo[]>
   /** Select a model by id (looking up its display name from the model list). */
   selectModel: (modelId: string, modelName?: string) => Promise<void>
+  /**
+   * Ingest the account's BYOK config (from Firestore, via useByokConfig) and
+   * mirror it onto the persisted local settings: force `activeProvider: 'gateway'`,
+   * copy the connection onto `gateway`, and rebuild the available `models` list.
+   * The current model selection is preserved when it's still in the new list,
+   * otherwise it falls back to the first model. Persisting caches it in
+   * sylor-settings.json so the provider still works offline. A null config
+   * (signed-out / offline) is a no-op, so the last cache keeps driving the app.
+   */
+  applyByokConfig: (config: ByokConfig | null) => Promise<void>
 }
 
 /**
@@ -142,8 +153,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       model: settings.modelName || settings.modelId,
       theme: settings.ui.theme
     })
-    // Populate the model list in the background; failures are non-fatal.
-    void get().refreshModels()
+    // The model list is sourced from the account's Firestore config (see
+    // applyByokConfig), not a provider list endpoint, so nothing to fetch here.
   },
 
   saveSettings: async (next) => {
@@ -199,5 +210,31 @@ export const useAppStore = create<AppState>((set, get) => ({
     const found = models.find((m) => m.id === modelId)
     const name = modelName || found?.name || modelId
     await get().saveSettings({ ...settings, modelId, modelName: name })
+  },
+
+  applyByokConfig: async (config) => {
+    // Null (signed-out / offline read failure): leave the cached settings alone.
+    if (!config) return
+    const { settings } = get()
+    const models: ModelInfo[] = config.models.map((m) => ({ id: m.id, name: m.name }))
+    // Keep the current selection if it's still offered; otherwise default to the
+    // first model (or blank when the account has none — the empty state).
+    const keep = settings.modelId && models.some((m) => m.id === settings.modelId)
+    const chosen = keep
+      ? { id: settings.modelId, name: settings.modelName || settings.modelId }
+      : (models[0] ?? { id: '', name: '' })
+    set({ models })
+    await get().saveSettings({
+      ...settings,
+      activeProvider: 'gateway',
+      gateway: {
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+        authSchema: config.authSchema,
+        authHeaderName: config.authHeaderName
+      },
+      modelId: chosen.id,
+      modelName: chosen.name
+    })
   }
 }))

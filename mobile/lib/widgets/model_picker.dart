@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 
-import '../models/oraculum_model.dart';
+import '../models/byok_config.dart';
 import '../theme.dart';
 import 'sylor_star.dart';
 
-
-Future<String?> showModelPicker(BuildContext context, {required String selectedId}) {
+Future<String?> showModelPicker(
+  BuildContext context, {
+  required List<ByokModel> models,
+  required String selectedId,
+}) {
   final palette = Theme.of(context).palette;
   return showModalBottomSheet<String>(
     context: context,
@@ -13,13 +16,14 @@ Future<String?> showModelPicker(BuildContext context, {required String selectedI
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),
-    builder: (context) => _ModelPickerSheet(selectedId: selectedId),
+    builder: (context) => _ModelPickerSheet(models: models, selectedId: selectedId),
   );
 }
 
 class _ModelPickerSheet extends StatelessWidget {
-  const _ModelPickerSheet({required this.selectedId});
+  const _ModelPickerSheet({required this.models, required this.selectedId});
 
+  final List<ByokModel> models;
   final String selectedId;
 
   @override
@@ -48,22 +52,22 @@ class _ModelPickerSheet extends StatelessWidget {
               ),
             ),
           ),
-          for (final model in kOraculumModels) _tile(context, palette, model),
+          for (final model in models) _tile(context, palette, model),
           const SizedBox(height: 8),
         ],
       ),
     );
   }
 
-  Widget _tile(BuildContext context, SylorPalette palette, OraculumModel model) {
+  Widget _tile(BuildContext context, SylorPalette palette, ByokModel model) {
     final selected = model.id == selectedId;
     return ListTile(
       leading: SylorStar(size: 24, color: palette.accent),
       title: Text(
-        model.name,
+        model.name.isNotEmpty ? model.name : model.id,
         style: TextStyle(color: palette.text, fontSize: 15, fontWeight: FontWeight.w600),
       ),
-      subtitle: Text(model.blurb, style: TextStyle(color: palette.muted, fontSize: 13)),
+      subtitle: Text(model.id, style: TextStyle(color: palette.muted, fontSize: 13)),
       trailing: selected ? Icon(Icons.check_rounded, color: palette.accent) : null,
       onTap: () => Navigator.of(context).pop(model.id),
     );
