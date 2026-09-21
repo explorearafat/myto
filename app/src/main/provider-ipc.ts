@@ -10,12 +10,15 @@ import type {
   GatewayConfig,
   ListModelsResult,
   OllamaConfig,
+  PreviewTarget,
   ProviderKind,
   ProviderSettings,
   TestConnectionResult,
+  TodoItem,
   ToolSideEffect
 } from '../shared/types'
 import { createProvider, providerFromSettings } from './providers'
+import type { Provider } from './providers/provider'
 import { toErrorMessage } from './providers/http'
 import { getSettings, saveSettings } from './settings'
 import {
@@ -25,7 +28,7 @@ import {
   FILE_PROTOCOL_SYSTEM_PROMPT,
   STATUS_SYSTEM_PROMPT
 } from './status'
-import { runTool, toolsSystemPrompt, TOOLS, type ToolGate } from './tools/registry'
+import { availableTools, lookupTool, runTool, toolsSystemPrompt, type ToolGate } from './tools/registry'
 import { approvalDetail, requiresApproval } from './tools/approvals'
 import { createToolCallParser, toolResultBlock, type ToolCall } from './tools/toolParser'
 
@@ -48,12 +51,40 @@ const REASONING_CAPTION_MS = 300
 const MAX_TOOL_TURNS = 6
 
 /**
- * The tool-round ceiling in Cowork mode. Agentic work over a folder — explore,
- * read several files, write, verify — legitimately needs more round-trips than a
- * chat answer, so Cowork gets a larger budget while still guaranteeing the loop
- * terminates (the final turn withholds tools, exactly as in Chat).
+ * The tool-round ceiling in Cowork mode. Real agentic work — scaffold a project,
+ * read and write many files, install deps, run and fix a build — routinely needs
+ * dozens of round-trips, so a small cap (it was 16) made Cowork give up before it
+ * could finish anything substantial. This is now a high HARD ceiling that only
+ * bounds a genuinely runaway loop; in-loop context compaction (below) keeps the
+ * message history from growing without limit as the turns add up, and a stall guard
+ * ends the loop early if the model stops making progress. The final turn still
+ * withholds tools so the reply never ends mid-loop.
  */
-const MAX_TOOL_TURNS_COWORK = 16
+const MAX_TOOL_TURNS_COWORK = 60
+
+/**
+ * When the running message history (system prompts + the growing tool round-trips)
+ * exceeds roughly this many characters, the older middle of it is compacted into a
+ * short summary before the next turn — see {@link compactHistory}. ~4 chars/token,
+ * so ~90k chars ≈ ~22k tokens: comfortably inside even a modest context window while
+ * leaving ample room for the next generation. A long Cowork task would otherwise
+ * blow past the window after enough file reads and tool results.
+ */
+const COMPACT_OVER_CHARS = 90_000
+
+/**
+ * How many of the most recent messages to keep verbatim when compacting. The last
+ * few round-trips are what the model is actively reasoning over, so they must stay
+ * intact; everything older is what gets folded into the summary.
+ */
+const COMPACT_KEEP_RECENT = 6
+
+/**
+ * Stall guard: if the model issues this many IDENTICAL consecutive tool calls (same
+ * name + input), the loop stops early rather than burning the whole budget spinning
+ * on a call that isn't advancing the task. It is fed a nudge before the final count.
+ */
+const MAX_REPEAT_CALLS = 3
 
 /** Tracks in-flight streams so the renderer can cancel them by id. */
 const activeStreams = new Map<string, AbortController>()
@@ -121,10 +152,22 @@ export function registerProviderIpc(): void {
         error?: string
         status?: string
         approval?: ApprovalRequest
+        preview?: PreviewTarget
+        todos?: TodoItem[]
       }): void => {
         if (!sender.isDestroyed()) {
           sender.send(IpcChannel.ProvidersStreamChunk, { streamId, ...chunk })
         }
+      }
+
+      /** Forward a preview the `preview` tool raised to the renderer's pane (Cowork). */
+      const onPreview = (target: PreviewTarget): void => {
+        send({ delta: '', done: false, preview: target })
+      }
+
+      /** Forward the working plan the `update_plan` tool published (Cowork). */
+      const onPlan = (todos: TodoItem[]): void => {
+        send({ delta: '', done: false, todos })
       }
 
       /**
@@ -169,6 +212,15 @@ export function registerProviderIpc(): void {
         const maxToolTurns = mode === 'cowork' ? MAX_TOOL_TURNS_COWORK : MAX_TOOL_TURNS
         // Permission tier for side-effecting tools; only consulted in Cowork.
         const permissionMode = settings.cowork.permissionMode
+
+        /**
+         * Run a focused read-only sub-task in a nested agent (the `spawn_agent` tool).
+         * Bound to this run's provider/model/gate and cancel signal. Returns a digest;
+         * the sub-agent shares nothing with the visible stream, so it never touches the
+         * UI or the main history except through the string it returns.
+         */
+        const delegate = (task: string): Promise<string> =>
+          runNestedAgent(provider, modelId, gate, task, controller.signal)
 
         /**
          * Stream one model turn into the reply. Forwards <status> captions and
@@ -318,7 +370,39 @@ export function registerProviderIpc(): void {
           ...messages
         ]
 
+        // The user's actual ask — the latest user turn. Restated on every tool-result
+        // turn below so a long agentic loop (especially on a smaller model) keeps the
+        // goal in view instead of latching onto the freshest tool output. Without this,
+        // an early empty/sparse tool result (e.g. list_dir on a new folder) reads as
+        // "nothing to do" and the model abandons the task mid-loop. Trimmed so a huge
+        // pasted turn can't blow up every subsequent message.
+        const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+        const goal = (lastUser?.content ?? '').trim()
+        const goalReminder = goal
+          ? `Remember, the user's request is: "${goal.length > 500 ? `${goal.slice(0, 500)}…` : goal}"\n\n`
+          : ''
+
+        // Everything up to here — the system prompts and the original conversation —
+        // is the fixed head that compaction never touches; the loop only appends after
+        // it. Captured so {@link compactHistory} knows where the compactible middle
+        // (the accumulated tool round-trips) begins.
+        const baseLen = history.length
+
+        // Stall guard state: the signature of the last tool call and how many times in
+        // a row it has repeated identically (see MAX_REPEAT_CALLS).
+        let lastCallSig = ''
+        let repeatCount = 0
+
         for (let turn = 0; turn < maxToolTurns; turn++) {
+          // Keep the running history inside the context window on long tasks: once it
+          // grows past the threshold, fold the older middle into a short summary so the
+          // loop can continue instead of eventually overflowing the model. Cowork only —
+          // a plain-chat tool loop is short and never reaches this.
+          if (mode === 'cowork' && historyChars(history) > COMPACT_OVER_CHARS) {
+            await compactMiddle(history, baseLen, provider, modelId, controller.signal)
+            if (controller.signal.aborted) return
+          }
+
           const { visible, call, error } = await runTurn(history, true)
           if (controller.signal.aborted) return
           if (error) {
@@ -336,9 +420,23 @@ export function registerProviderIpc(): void {
           const toolName = call.name ?? 'tool'
           send({ delta: `\n${call.block}\n`, done: false, status: `Running ${toolName}` })
 
+          // Stall guard: if the model keeps issuing the same call, it is spinning, not
+          // progressing. Track the streak; once it hits the limit, stop the loop early
+          // (fall through to the closing turn) instead of burning the whole budget.
+          const callSig = `${call.name ?? ''}:${JSON.stringify(call.input ?? null)}`
+          if (callSig === lastCallSig) repeatCount++
+          else {
+            lastCallSig = callSig
+            repeatCount = 1
+          }
+          if (repeatCount >= MAX_REPEAT_CALLS) {
+            send({ delta: toolResultBlock(toolName, `Stopped: "${toolName}" was called ${repeatCount} times identically without progress.`), done: false })
+            break
+          }
+
           // Permission gate: side-effecting tools in Cowork may need the user's OK,
           // unless already granted "always" for this run.
-          const sideEffect = call.name ? TOOLS[call.name]?.sideEffect : undefined
+          const sideEffect = call.name ? lookupTool(call.name)?.sideEffect : undefined
           let result: string
           if (
             mode === 'cowork' &&
@@ -356,9 +454,9 @@ export function registerProviderIpc(): void {
             result =
               decision === 'deny'
                 ? `The user denied permission to run "${toolName}". Do not retry it; continue without it, or tell the user what you would need to proceed.`
-                : await runTool(call, { ...gate, signal: controller.signal })
+                : await runTool(call, { ...gate, signal: controller.signal, onPreview, onPlan, delegate })
           } else {
-            result = await runTool(call, { ...gate, signal: controller.signal })
+            result = await runTool(call, { ...gate, signal: controller.signal, onPreview, onPlan, delegate })
           }
           if (controller.signal.aborted) return
           send({ delta: toolResultBlock(toolName, result), done: false })
@@ -370,7 +468,7 @@ export function registerProviderIpc(): void {
           history.push({ role: 'assistant', content: assistantTurn })
           history.push({
             role: 'user',
-            content: `Tool result for ${toolName}:\n${result}\n\nUse this to answer the user's request, or call another tool if you still need more. Do not repeat an identical call.`
+            content: `Tool result for ${toolName}:\n${result}\n\n${goalReminder}Keep going until the request is fully done: call another tool if you still need to, or give your final answer once it is complete. Do not repeat an identical call. An empty or sparse result (e.g. a near-empty folder) is a starting point, not a reason to stop — build what was asked for.`
           })
         }
 
@@ -406,6 +504,175 @@ export function registerProviderIpc(): void {
       pendingApprovals.get(approvalId)?.(decision)
     }
   )
+}
+
+/** Total characters across a message history — a cheap proxy for token pressure. */
+function historyChars(history: ChatMessage[]): number {
+  let n = 0
+  for (const m of history) n += m.content.length
+  return n
+}
+
+/**
+ * The instruction that shapes a compaction summary. Asked for a compact, factual
+ * record of the work so far — what was done, what was learned, what remains — so the
+ * loop can continue from it without the raw transcript.
+ */
+const COMPACT_INSTRUCTION =
+  'You are compacting an AI agent\'s working transcript to save space. Summarize the steps below as a tight, factual progress note the agent can keep working from. Include: files created/edited (with paths), commands run and their key outcomes, important facts discovered, and what still appears to be left. Use short bullet points. Do not add commentary, do not address the user — this is an internal note.'
+
+/**
+ * Fold the older middle of a Cowork tool loop's history into a single summary so the
+ * running context stays inside the model's window on long tasks. Mutates `history`
+ * in place: everything from `baseLen` (just past the fixed system+conversation head)
+ * up to the last {@link COMPACT_KEEP_RECENT} messages is replaced by one summary
+ * turn. The recent tail is kept verbatim because that is what the model is actively
+ * reasoning over.
+ *
+ * The summary is written by the model itself (a one-shot {@link Provider.getCompletion});
+ * if that call fails or is offline, a deterministic placeholder note is spliced in
+ * instead, so compaction never wedges the loop — it just degrades to a terse marker.
+ */
+async function compactMiddle(
+  history: ChatMessage[],
+  baseLen: number,
+  provider: Provider,
+  modelId: string,
+  signal: AbortSignal
+): Promise<void> {
+  const end = history.length - COMPACT_KEEP_RECENT
+  const middleCount = end - baseLen
+  // Need a worthwhile middle to bother compacting (at least a couple of round-trips).
+  if (middleCount < 3) return
+
+  // Build the transcript to summarize, capped so the summarizer call itself stays
+  // small even though the history it is folding is large: take the tail of the joined
+  // text (the most recent, most relevant middle) if it runs long.
+  const TRANSCRIPT_CAP = 40_000
+  let transcript = history
+    .slice(baseLen, end)
+    .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+    .join('\n\n')
+  if (transcript.length > TRANSCRIPT_CAP) {
+    transcript = `…[earlier steps truncated]\n\n${transcript.slice(-TRANSCRIPT_CAP)}`
+  }
+
+  let summaryText = ''
+  try {
+    summaryText = (
+      await provider.getCompletion(
+        modelId,
+        [
+          { role: 'system', content: COMPACT_INSTRUCTION },
+          { role: 'user', content: transcript }
+        ],
+        undefined,
+        signal
+      )
+    ).trim()
+  } catch {
+    summaryText = ''
+  }
+  if (signal.aborted) return
+
+  const note =
+    summaryText ||
+    `[${middleCount} earlier tool steps were omitted here to save space. Continue from the recent steps below and the user's request.]`
+  const summaryTurn: ChatMessage = {
+    role: 'user',
+    content: `Progress so far (summary of earlier steps):\n${note}`
+  }
+  // Replace the middle with the single summary turn.
+  history.splice(baseLen, middleCount, summaryTurn)
+}
+
+/** Bounded turns for a delegated sub-agent — it is a focused sub-task, not a full run. */
+const NESTED_AGENT_MAX_TURNS = 8
+/** Cap on the digest a sub-agent hands back, so one delegation can't bloat the main context. */
+const NESTED_DIGEST_CAP = 6000
+/** Tools a sub-agent must never touch: side effects, and the UI/meta tools that make no headless sense. */
+const SUBAGENT_EXCLUDED = new Set(['preview', 'update_plan', 'spawn_agent'])
+
+/**
+ * Run a delegated read-only sub-task to completion and return its findings as a
+ * string (the `spawn_agent` tool's payload). This is a small, self-contained agentic
+ * loop that never touches the visible stream: it drives the model turn-by-turn with
+ * {@link Provider.getCompletion} (not the streaming path), detects a tool call in each
+ * full response, runs it, and feeds the result back — until the model answers without
+ * a tool call or the turn budget is spent.
+ *
+ * The sub-agent is strictly read-only: only non-side-effecting tools are advertised
+ * or run (no write/edit/delete/run_code/run_command), and it cannot itself delegate.
+ * All writing stays with the main agent, so delegation is safe to use freely. The
+ * digest is length-capped so a big investigation still returns a compact result.
+ */
+async function runNestedAgent(
+  provider: Provider,
+  modelId: string,
+  gate: ToolGate,
+  task: string,
+  signal: AbortSignal
+): Promise<string> {
+  const tools = availableTools(gate).filter((t) => !t.sideEffect && !SUBAGENT_EXCLUDED.has(t.name))
+  const toolLines = tools.map((t) => `- ${t.name} — ${t.description} Input example: ${t.usage}`).join('\n')
+  const system = [
+    'You are a focused, read-only research sub-agent working inside a folder on behalf of a main agent.',
+    'You are given ONE task. Investigate it with the read-only tools below, then reply with a concise findings report — facts, exact file paths, and anything the main agent needs to act. You CANNOT write files, edit, delete, or run code; do not try, and do not ask the user anything.',
+    '',
+    'To call a tool, write ONE fenced block and then STOP:',
+    '',
+    '```sylor:tool',
+    '{"tool": "<name>", "input": { ... }}',
+    '```',
+    '',
+    'After the block, wait — the result comes back as a ```sylor:tool_result block. Read it, then call another tool or write your final report. Keep the report tight and factual.',
+    '',
+    'Available tools:',
+    toolLines
+  ].join('\n')
+
+  const history: ChatMessage[] = [
+    { role: 'system', content: system },
+    { role: 'user', content: `Task: ${task}` }
+  ]
+
+  for (let turn = 0; turn < NESTED_AGENT_MAX_TURNS; turn++) {
+    if (signal.aborted) return 'Sub-agent cancelled.'
+    let text: string
+    try {
+      text = await provider.getCompletion(modelId, history, undefined, signal)
+    } catch (err) {
+      return `Sub-agent error: ${toErrorMessage(err)}`
+    }
+    // Detect a tool call in the full (non-streamed) response.
+    const { call } = createToolCallParser().push(text)
+    if (!call) return text.trim().slice(0, NESTED_DIGEST_CAP) // no call → final report
+
+    const toolName = call.name ?? 'tool'
+    const def = call.name ? lookupTool(call.name) : undefined
+    const result =
+      def?.sideEffect || (call.name && SUBAGENT_EXCLUDED.has(call.name))
+        ? `The "${toolName}" tool is off-limits to a read-only sub-agent. Use read/search tools only and report what you find.`
+        : await runTool(call, { ...gate, signal })
+    if (signal.aborted) return 'Sub-agent cancelled.'
+    history.push({ role: 'assistant', content: text })
+    history.push({
+      role: 'user',
+      content: `Tool result for ${toolName}:\n${result}\n\nContinue investigating, or give your final findings report if you have enough.`
+    })
+  }
+
+  // Budget spent: ask for the report now, tools withheld.
+  history.push({
+    role: 'system',
+    content: 'Stop using tools now. Write your final concise findings report from what you have gathered.'
+  })
+  try {
+    const final = await provider.getCompletion(modelId, history, undefined, signal)
+    return final.trim().slice(0, NESTED_DIGEST_CAP) || 'The sub-agent finished without a clear report.'
+  } catch (err) {
+    return `Sub-agent error: ${toErrorMessage(err)}`
+  }
 }
 
 /** Resolves a request against saved settings, filling provider/model defaults. */

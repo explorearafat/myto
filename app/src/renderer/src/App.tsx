@@ -13,6 +13,8 @@ export default function App() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
   const loadSettings = useAppStore((s) => s.loadSettings)
   const applyByokConfig = useAppStore((s) => s.applyByokConfig)
+  const refreshConnectorStatus = useAppStore((s) => s.refreshConnectorStatus)
+  const watchConnectorStatus = useAppStore((s) => s.watchConnectorStatus)
   const boot = useSessionStore((s) => s.boot)
   const refreshProjects = useProjectStore((s) => s.refresh)
 
@@ -32,6 +34,14 @@ export default function App() {
     void boot()
     void refreshProjects()
   }, [loadSettings, boot, refreshProjects])
+
+  // Connectors (MCP): subscribe to main-process status pushes and pull the initial
+  // snapshot (the startup sync may have already settled before this mounts).
+  useEffect(() => {
+    const unsubscribe = watchConnectorStatus()
+    void refreshConnectorStatus()
+    return unsubscribe
+  }, [watchConnectorStatus, refreshConnectorStatus])
 
   return (
     <div className="relative flex h-full flex-col">

@@ -36,10 +36,30 @@ function toolHeadline(tool: ToolSegment): string {
       return name ? `Deleting ${name}` : 'Deleting file'
     case 'list_dir':
       return path && path !== '.' ? `Listing ${path}` : 'Listing folder'
+    case 'preview': {
+      const url = typeof input.url === 'string' ? input.url : ''
+      if (name) return `Showing ${name} in preview`
+      if (url) return `Opening ${url} in preview`
+      return 'Opening preview'
+    }
     case 'run_code': {
       const lang = typeof input.language === 'string' ? input.language : ''
       return lang ? `Running ${lang} code` : 'Running code'
     }
+    case 'run_command': {
+      const cmd = typeof input.command === 'string' ? input.command : ''
+      return cmd ? `Running ${cmd.length > 40 ? `${cmd.slice(0, 40)}…` : cmd}` : 'Running command'
+    }
+    case 'search_code': {
+      const query = typeof input.query === 'string' ? input.query : ''
+      return query ? `Searching for “${query.length > 32 ? `${query.slice(0, 32)}…` : query}”` : 'Searching code'
+    }
+    case 'find_files': {
+      const pattern = typeof input.pattern === 'string' ? input.pattern : ''
+      return pattern ? `Finding ${pattern}` : 'Finding files'
+    }
+    case 'spawn_agent':
+      return 'Delegating to a sub-agent'
     case 'web_search':
       return 'Web search'
     case 'web_fetch':
@@ -86,11 +106,46 @@ function ToolGlyph({ name }: { name: string | null }): ReactNode {
       </svg>
     )
   }
+  if (name === 'preview') {
+    return (
+      <svg {...common}>
+        <rect x="1.75" y="3" width="12.5" height="10" rx="1.5" {...stroke} />
+        <path d="M1.75 5.75h12.5" {...stroke} />
+        <circle cx="3.9" cy="4.4" r="0.4" fill="currentColor" />
+      </svg>
+    )
+  }
   if (name === 'write_file' || name === 'edit_file' || name === 'read_file' || name === 'delete_file') {
     return (
       <svg {...common}>
         <path d="M9 1.75H4a1 1 0 0 0-1 1v10.5a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5.75L9 1.75Z" {...stroke} />
         <path d="M9 1.75V5.75h4" {...stroke} />
+      </svg>
+    )
+  }
+  if (name === 'search_code' || name === 'find_files') {
+    return (
+      <svg {...common}>
+        <circle cx="6.75" cy="6.75" r="4" {...stroke} />
+        <path d="M10 10l3.25 3.25" {...stroke} />
+      </svg>
+    )
+  }
+  if (name === 'run_command') {
+    return (
+      <svg {...common}>
+        <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5" {...stroke} />
+        <path d="M4.25 6l2 2-2 2M7.75 10.25h3.5" {...stroke} />
+      </svg>
+    )
+  }
+  if (name === 'spawn_agent') {
+    return (
+      <svg {...common}>
+        <circle cx="4" cy="4" r="1.75" {...stroke} />
+        <circle cx="11.5" cy="5" r="1.75" {...stroke} />
+        <circle cx="8" cy="12" r="1.75" {...stroke} />
+        <path d="M5.4 5.1 8 10.4M10.3 6.4 8.4 10.6" {...stroke} />
       </svg>
     )
   }
@@ -106,8 +161,17 @@ function ToolGlyph({ name }: { name: string | null }): ReactNode {
   )
 }
 
-/** The Cowork filesystem tools — rendered as quiet, borderless activity lines. */
-const FS_TOOLS = new Set(['write_file', 'edit_file', 'read_file', 'list_dir', 'delete_file'])
+/** The Cowork tools rendered as quiet, borderless activity lines (fs + search + preview). */
+const FS_TOOLS = new Set([
+  'write_file',
+  'edit_file',
+  'read_file',
+  'list_dir',
+  'delete_file',
+  'preview',
+  'search_code',
+  'find_files'
+])
 
 /**
  * Lines added / removed for a file-authoring call, computed from the call input
@@ -140,6 +204,11 @@ function formatInput(input: unknown): string {
 
 export function ToolCard({ tool, cowork = false }: { tool: ToolSegment; cowork?: boolean }): ReactNode {
   const [expanded, setExpanded] = useState(false)
+
+  // update_plan has no card of its own — its whole purpose is the live PlanPanel
+  // that AssistantMessage pins above the reply, so a tool card here would just
+  // duplicate it. Render nothing.
+  if (tool.name === 'update_plan') return null
 
   const running = tool.result === null
   const phase = running ? (tool.complete ? 'Running…' : 'Preparing…') : tool.complete ? null : 'Running…'

@@ -9,9 +9,12 @@ import { registerAttachmentIpc } from './attachment-ipc'
 import { registerAuthIpc } from './auth-ipc'
 import { registerFileIpc } from './file-ipc'
 import { registerCoworkIpc } from './cowork-ipc'
+import { registerPreviewIpc } from './preview-ipc'
+import { registerMcpIpc, syncConnectors, disposeConnectors } from './mcp-ipc'
+import { syncSkills } from './skills/manager'
 import { closeDb, setDbPath } from './db/db'
 import { reconcileInterruptedRuns } from './db/sessions'
-import { setUserDataDir } from './settings'
+import { setUserDataDir, getSettings, setSettingsSavedListener } from './settings'
 
 /** Registers window-control IPC handlers used by the custom title bar. */
 function registerWindowControls(): void {
@@ -92,8 +95,32 @@ app.whenReady().then(() => {
   registerAuthIpc()
   registerFileIpc()
   registerCoworkIpc()
+  registerPreviewIpc()
+  registerMcpIpc()
 
   createWindow()
+
+  // Register the enabled skills as tools up front (synchronous, cheap).
+  try {
+    syncSkills(getSettings().skills)
+  } catch (error) {
+    console.error('[sylor] skill sync failed:', error)
+  }
+
+  // Re-sync skills whenever settings are saved, so adding/editing a skill in the UI
+  // takes effect on the next turn without a restart. (Connectors re-sync explicitly
+  // from the renderer because they surface async connection status.)
+  setSettingsSavedListener((settings) => {
+    try {
+      syncSkills(settings.skills)
+    } catch (error) {
+      console.error('[sylor] skill re-sync failed:', error)
+    }
+  })
+
+  // Connect to the user's enabled connectors in the background. Failure-isolated
+  // inside the manager, so a dead server never blocks the window or a chat turn.
+  void syncConnectors()
 
   app.on('activate', () => {
     // On macOS, re-create a window when the dock icon is clicked and none are open.
@@ -111,6 +138,8 @@ app.on('before-quit', () => {
   // Abort any in-flight provider streams and close the DB so nothing outlives the app.
   cancelAllStreams()
   closeDb()
+  // Close connector (MCP) connections — kills any spawned stdio server processes.
+  void disposeConnectors()
 })
 
 /*

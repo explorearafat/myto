@@ -90,6 +90,105 @@ describe('normalise — model fields', () => {
   })
 })
 
+describe('normalise — connectors (mcpServers)', () => {
+  it('defaults to an empty list', () => {
+    expect(normalise({}).mcpServers).toEqual([])
+    expect(normalise({ mcpServers: 'nope' }).mcpServers).toEqual([])
+  })
+
+  it('keeps a valid stdio server and fills defaults', () => {
+    const out = normalise({
+      mcpServers: [{ id: 'a', name: 'Files', transport: 'stdio', command: 'npx', args: ['-y', 'x'] }]
+    })
+    expect(out.mcpServers).toHaveLength(1)
+    expect(out.mcpServers[0]).toMatchObject({
+      id: 'a',
+      name: 'Files',
+      enabled: true,
+      transport: 'stdio',
+      command: 'npx',
+      args: ['-y', 'x']
+    })
+  })
+
+  it('keeps a valid http server with headers', () => {
+    const out = normalise({
+      mcpServers: [
+        { id: 'b', name: 'API', enabled: false, transport: 'http', url: 'https://x/mcp', headers: { Authorization: 'Bearer z' } }
+      ]
+    })
+    expect(out.mcpServers[0]).toMatchObject({
+      id: 'b',
+      enabled: false,
+      transport: 'http',
+      url: 'https://x/mcp',
+      headers: { Authorization: 'Bearer z' }
+    })
+  })
+
+  it('drops malformed entries (missing id/name, or a command/url)', () => {
+    const out = normalise({
+      mcpServers: [
+        { name: 'no id', transport: 'stdio', command: 'x' }, // no id
+        { id: 'c', name: 'no command', transport: 'stdio' }, // stdio without command
+        { id: 'd', name: 'no url', transport: 'http' }, // http without url
+        null,
+        { id: 'e', name: 'ok', transport: 'stdio', command: 'run' } // the one keeper
+      ]
+    })
+    expect(out.mcpServers.map((s) => s.id)).toEqual(['e'])
+  })
+
+  it('coerces an unknown transport to stdio', () => {
+    const out = normalise({
+      mcpServers: [{ id: 'f', name: 'x', transport: 'carrier-pigeon', command: 'run' }]
+    })
+    expect(out.mcpServers[0].transport).toBe('stdio')
+  })
+})
+
+describe('normalise — skills', () => {
+  it('defaults to an empty list and ignores non-arrays', () => {
+    expect(normalise({}).skills).toEqual([])
+    expect(normalise({ skills: 'nope' }).skills).toEqual([])
+  })
+
+  it('keeps a valid skill and defaults enabled to true', () => {
+    const out = normalise({
+      skills: [{ id: 's1', name: 'Review', description: 'd', instructions: 'do it' }]
+    })
+    expect(out.skills).toHaveLength(1)
+    expect(out.skills[0]).toMatchObject({ id: 's1', name: 'Review', enabled: true })
+  })
+
+  it('drops skills missing id, name, or instructions', () => {
+    const out = normalise({
+      skills: [
+        { name: 'no id', instructions: 'x' },
+        { id: 'a', name: 'no instructions' },
+        { id: 'b', name: 'ok', instructions: 'keep me' }
+      ]
+    })
+    expect(out.skills.map((s) => s.id)).toEqual(['b'])
+  })
+
+  it('preserves a skill/server source tag (plugin provenance)', () => {
+    const out = normalise({
+      skills: [{ id: 's', name: 'x', instructions: 'y', source: 'plugin_1' }],
+      mcpServers: [{ id: 'm', name: 'x', transport: 'stdio', command: 'run', source: 'plugin_1' }]
+    })
+    expect(out.skills[0].source).toBe('plugin_1')
+    expect(out.mcpServers[0].source).toBe('plugin_1')
+  })
+})
+
+describe('normalise — plugins', () => {
+  it('defaults to an empty list and drops entries without id/name', () => {
+    expect(normalise({}).plugins).toEqual([])
+    expect(normalise({ plugins: [{ name: 'no id' }, { id: 'p', name: 'ok' }] }).plugins.map((p) => p.id)).toEqual(['p'])
+  })
+})
+
 // The on-disk round-trip through the stubbed userData path: a save normalises and
 // persists, and a fresh read (cache cleared) returns exactly the saved shape.
 describe('saveSettings / getSettings round-trip', () => {

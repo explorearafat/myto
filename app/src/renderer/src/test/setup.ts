@@ -116,6 +116,15 @@ const sylorMock: SylorApi = {
   },
   cowork: {
     pickWorkspace: vi.fn().mockResolvedValue(null)
+  },
+  preview: {
+    openExternal: vi.fn()
+  },
+  mcp: {
+    status: vi.fn().mockResolvedValue([]),
+    sync: vi.fn().mockResolvedValue([]),
+    test: vi.fn().mockResolvedValue({ ok: false, error: 'unavailable' }),
+    onStatusChanged: vi.fn().mockReturnValue(() => {})
   }
 }
 

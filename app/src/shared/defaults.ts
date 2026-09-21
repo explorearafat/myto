@@ -40,5 +40,12 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
     // Ask before every side-effecting tool by default — the safe tier. The user
     // can raise it to auto-approve edits or bypass permissions from the composer.
     permissionMode: 'ask'
-  }
+  },
+  // No connectors until the user adds one (Settings › Connectors). Each is an MCP
+  // server whose tools Sylor can call once connected.
+  mcpServers: [],
+  // No skills until the user adds one (Settings › Skills).
+  skills: [],
+  // No plugins until the user installs one (Settings › Plugins).
+  plugins: []
 }

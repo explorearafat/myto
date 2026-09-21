@@ -11,7 +11,7 @@ import { ModelSelector } from './ModelSelector'
 import { PromptBuilder } from './PromptBuilder'
 import { SylorStar } from './SylorStar'
 import { SylorLogo } from './SylorLogo'
-import type { ApprovalRequest, CoworkPermissionMode, Attachment } from '@shared/types'
+import type { ApprovalRequest, CoworkPermissionMode, Attachment, TodoItem } from '@shared/types'
 
 /** Human-readable byte size for an attachment chip (e.g. "12.4 KB"). */
 function formatBytes(bytes: number): string {
@@ -483,8 +483,81 @@ function ApprovalPrompt({ approval }: { approval: ApprovalRequest }) {
   )
 }
 
-/** Filesystem tools only exist in Cowork, so their presence marks a Cowork turn. */
-const FS_TOOL_NAMES = new Set(['write_file', 'edit_file', 'read_file', 'list_dir', 'delete_file'])
+/** These tools only exist in Cowork, so their presence marks a Cowork turn. */
+const FS_TOOL_NAMES = new Set([
+  'write_file',
+  'edit_file',
+  'read_file',
+  'list_dir',
+  'delete_file',
+  'preview',
+  'update_plan',
+  'search_code',
+  'find_files',
+  'run_command',
+  'spawn_agent'
+])
+
+/**
+ * The live plan checklist (Cowork), pinned above the reply. The model maintains it
+ * with the `update_plan` tool; each item is pending, working, or done. This is the
+ * user's at-a-glance view of a multi-step task's progress — and, held on the run, it
+ * survives a session switch (see useChatStore `todos`).
+ */
+function PlanPanel({ todos }: { todos: TodoItem[] }) {
+  if (todos.length === 0) return null
+  const done = todos.filter((t) => t.status === 'done').length
+  return (
+    <div className="my-2 rounded-xl border border-border/70 bg-surface/40 px-3 py-2.5">
+      <div className="mb-1.5 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-muted">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M5.5 3.5h7M5.5 8h7M5.5 12.5h7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+          <circle cx="2.5" cy="3.5" r="1.1" fill="currentColor" />
+          <circle cx="2.5" cy="8" r="1.1" fill="currentColor" />
+          <circle cx="2.5" cy="12.5" r="1.1" fill="currentColor" />
+        </svg>
+        Plan
+        <span className="ml-auto font-mono text-[10px] normal-case tracking-normal text-muted">
+          {done}/{todos.length}
+        </span>
+      </div>
+      <ul className="flex flex-col gap-1">
+        {todos.map((t, i) => (
+          <li key={i} className="flex items-start gap-2 text-[12.5px] leading-snug">
+            <span className="mt-0.5 shrink-0">
+              {t.status === 'done' ? (
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="text-green-500">
+                  <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.3" />
+                  <path d="M5.3 8.2l1.9 1.9 3.5-3.8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : t.status === 'in_progress' ? (
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="sylor-thinking text-primary">
+                  <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.3" />
+                  <circle cx="8" cy="8" r="2.5" fill="currentColor" />
+                </svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="text-muted">
+                  <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.3" strokeDasharray="2 2" />
+                </svg>
+              )}
+            </span>
+            <span
+              className={
+                t.status === 'done'
+                  ? 'text-muted line-through'
+                  : t.status === 'in_progress'
+                    ? 'font-medium text-text'
+                    : 'text-text'
+              }
+            >
+              {t.title}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
 
 function AssistantMessage({ message }: { message: ChatMessageUI }) {
   const displayContent = message.content.trimEnd()
@@ -507,6 +580,8 @@ function AssistantMessage({ message }: { message: ChatMessageUI }) {
       )}
 
       {message.pending && <StatusLine caption={statusCaption(message, displayContent)} />}
+
+      {message.todos && message.todos.length > 0 && <PlanPanel todos={message.todos} />}
 
       {segments.map((seg, i) =>
         seg.kind === 'file' ? (

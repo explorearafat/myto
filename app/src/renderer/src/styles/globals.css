@@ -462,6 +462,20 @@ h3 {
   transform: scale(0.97);
 }
 
+/* Indeterminate loading bar for the preview pane: a segment sliding L→R while the
+   guest webview is still fetching. */
+@keyframes sylor-preview-bar {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+.sylor-preview-bar {
+  animation: sylor-preview-bar 1.1s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sylor-splash,
   .sylor-splash__mark,
@@ -494,6 +508,10 @@ h3 {
   .sylor-drawer-in,
   .sylor-fade-in {
     animation-duration: 0.01ms;
+  }
+  .sylor-preview-bar {
+    animation: none;
+    opacity: 0.5;
   }
   .sylor-press {
     transition: none;

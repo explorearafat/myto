@@ -1,15 +1,30 @@
 import { useState, type ReactNode } from 'react'
 import type { Theme } from '@shared/types'
 import { useAppStore } from '@renderer/store/useAppStore'
+import { ConnectorsPane } from '@renderer/components/ConnectorsPane'
+import { SkillsPane } from '@renderer/components/SkillsPane'
+import { PluginsPane } from '@renderer/components/PluginsPane'
 
 /** The Settings window's left-rail categories. */
-type SettingsCategory = 'appearance' | 'model' | 'tools'
+type SettingsCategory = 'appearance' | 'model' | 'tools' | 'connectors' | 'skills' | 'plugins'
 
 /** Title + one-line subtitle shown in each category pane's header. */
 const CATEGORY_META: Record<SettingsCategory, { label: string; subtitle: string }> = {
   appearance: { label: 'Appearance', subtitle: 'Theme and visual style.' },
   model: { label: 'Model', subtitle: 'The model Sylor talks to, from your Sylor account.' },
-  tools: { label: 'Tools', subtitle: 'What Sylor can do beyond chatting — search the web, run code.' }
+  tools: { label: 'Tools', subtitle: 'What Sylor can do beyond chatting — search the web, run code.' },
+  connectors: {
+    label: 'Connectors',
+    subtitle: 'MCP servers that give Sylor extra tools — files, APIs, and more.'
+  },
+  skills: {
+    label: 'Skills',
+    subtitle: 'Reusable instruction packs Sylor pulls in when a task matches.'
+  },
+  plugins: {
+    label: 'Plugins',
+    subtitle: 'Bundles that install skills and connectors together in one step.'
+  }
 }
 
 /** Small monochrome glyph for each category, tinted by the nav's active state. */
@@ -45,10 +60,49 @@ function CategoryIcon({ id }: { id: SettingsCategory }): ReactNode {
           />
         </svg>
       )
+    case 'connectors':
+      return (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path
+            d="M6 10l4-4M5.2 7.2 3.6 8.8a2 2 0 1 0 2.8 2.8l1.6-1.6M10.8 8.8l1.6-1.6a2 2 0 1 0-2.8-2.8L8 6"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )
+    case 'skills':
+      return (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path
+            d="M8 1.8l1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.6l-3.8 2 .7-4.3-3.1-3 4.3-.6L8 1.8z"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )
+    case 'plugins':
+      return (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.3" />
+          <rect x="9" y="2.5" width="4.5" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.3" />
+          <rect x="2.5" y="9" width="4.5" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.3" />
+          <path d="M11.25 9v4.5M9 11.25h4.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+        </svg>
+      )
   }
 }
 
-const CATEGORY_ORDER: SettingsCategory[] = ['model', 'tools', 'appearance']
+const CATEGORY_ORDER: SettingsCategory[] = [
+  'model',
+  'tools',
+  'connectors',
+  'skills',
+  'plugins',
+  'appearance'
+]
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Reusable controls
@@ -346,6 +400,9 @@ export function SettingsPanel() {
               {category === 'appearance' && <AppearancePane />}
               {category === 'tools' && <ToolsPane />}
               {category === 'model' && <ModelPane />}
+              {category === 'connectors' && <ConnectorsPane />}
+              {category === 'skills' && <SkillsPane />}
+              {category === 'plugins' && <PluginsPane />}
             </div>
           </div>
         </div>

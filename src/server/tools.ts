@@ -205,6 +205,45 @@ async function fetchText(url: string, accept: string, signal: AbortSignal): Prom
   }
 }
 
+// A browser-like User-Agent for search: DuckDuckGo's HTML endpoints serve datacenter
+// IPs a stripped/challenge page when the UA looks like a bot, which is exactly why the
+// old scraper came back empty from Vercel. A real browser UA gets the normal results page.
+const BROWSER_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36';
+
+/**
+ * POST a form body to a URL with browser-like headers. DuckDuckGo's `/html/` endpoint
+ * is far more reliable via POST `q=…` (form) than a GET query string from a server IP.
+ */
+async function fetchSearch(
+  url: string,
+  form: Record<string, string> | null,
+  signal: AbortSignal,
+): Promise<Response> {
+  const ctrl = new AbortController();
+  const onAbort = (): void => ctrl.abort();
+  signal.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const headers: Record<string, string> = {
+      'user-agent': BROWSER_UA,
+      accept: 'text/html,application/xhtml+xml',
+      'accept-language': 'en-US,en;q=0.9',
+    };
+    const init: RequestInit = form
+      ? {
+          method: 'POST',
+          headers: { ...headers, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams(form).toString(),
+        }
+      : { headers };
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
 // ── Search result formatting ──────────────────────────────────────────────────────────────────
 
 export interface SearchResult {
@@ -226,14 +265,38 @@ function decodeDdgHref(href: string): string {
 }
 
 export function parseDuckDuckGo(html: string, limit = 6): SearchResult[] {
-  const anchorRe = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-  const snippetRe = /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+  const anchorRe = /<a[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const snippetRe = /<a[^>]*class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
   const snippets: string[] = [];
   let m: RegExpExecArray | null;
   while ((m = snippetRe.exec(html))) snippets.push(stripTags(m[1]));
   const results: SearchResult[] = [];
   let i = 0;
   while ((m = anchorRe.exec(html)) && results.length < limit) {
+    const title = stripTags(m[2]);
+    if (title) results.push({ title, url: decodeDdgHref(m[1]), snippet: snippets[i] ?? '' });
+    i++;
+  }
+  return results;
+}
+
+/**
+ * Parse the DuckDuckGo Lite page (`lite.duckduckgo.com/lite/`) — a plain table layout
+ * used as a fallback when the main HTML endpoint returns nothing. Result links carry
+ * `class="result-link"`; the snippet sits in a following `td.result-snippet`.
+ */
+export function parseDuckDuckGoLite(html: string, limit = 6): SearchResult[] {
+  // The Lite page puts href BEFORE the class and quotes the class with single quotes
+  // (`<a rel="nofollow" href="URL" class='result-link'>`), so the regex must be quote-
+  // agnostic and match that attribute order — not the html endpoint's class-then-href.
+  const linkRe = /<a[^>]*href=["']([^"']+)["'][^>]*class=["'][^"']*result-link[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const snippetRe = /<td[^>]*class=["'][^"']*result-snippet[^"']*["'][^>]*>([\s\S]*?)<\/td>/gi;
+  const snippets: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = snippetRe.exec(html))) snippets.push(stripTags(m[1]));
+  const results: SearchResult[] = [];
+  let i = 0;
+  while ((m = linkRe.exec(html)) && results.length < limit) {
     const title = stripTags(m[2]);
     if (title) results.push({ title, url: decodeDdgHref(m[1]), snippet: snippets[i] ?? '' });
     i++;
@@ -324,9 +387,47 @@ const webSearch: ToolDef = {
   async run(input, signal) {
     const query = readQuery(input);
     if (!query) return 'web_search needs {"query": "…"}.';
-    const res = await fetchText(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, 'text/html', signal);
-    if (!res.ok) return `Search failed: HTTP ${res.status} ${res.statusText}`;
-    return formatSearchResults(query, parseDuckDuckGo(await res.text()));
+
+    // DuckDuckGo's HTML endpoint is flaky from datacenter IPs (Vercel): a GET with a
+    // bot-ish UA often returns an empty/challenge page — which is why search "worked"
+    // but came back with no results. Try three resilient strategies in order and use
+    // the first that yields results:
+    //   1. POST form to html.duckduckgo.com/html/ (most reliable from a server).
+    //   2. GET the same endpoint (some regions/edges prefer it).
+    //   3. GET the Lite endpoint, which has its own simpler layout.
+    const attempts: Array<() => Promise<SearchResult[]>> = [
+      async () => {
+        const r = await fetchSearch('https://html.duckduckgo.com/html/', { q: query }, signal);
+        return r.ok ? parseDuckDuckGo(await r.text()) : [];
+      },
+      async () => {
+        const r = await fetchSearch(
+          `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
+          null,
+          signal,
+        );
+        return r.ok ? parseDuckDuckGo(await r.text()) : [];
+      },
+      async () => {
+        const r = await fetchSearch('https://lite.duckduckgo.com/lite/', { q: query }, signal);
+        return r.ok ? parseDuckDuckGoLite(await r.text()) : [];
+      },
+    ];
+
+    for (const attempt of attempts) {
+      if (signal.aborted) return 'web_search was cancelled.';
+      let results: SearchResult[] = [];
+      try {
+        results = await attempt();
+      } catch {
+        // Try the next strategy — a single endpoint hiccup shouldn't fail the search.
+        continue;
+      }
+      if (results.length) return formatSearchResults(query, results);
+    }
+    // Every strategy came back empty. Suggest Wikipedia so the model has a next move
+    // instead of telling the user "search doesn't work".
+    return `No web results for "${query}" (the search endpoint returned nothing). Try rephrasing the query, or use wiki_search for an encyclopedic answer.`;
   },
 };
 

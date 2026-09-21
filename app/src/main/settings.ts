@@ -16,8 +16,12 @@ import { DEFAULT_PROVIDER_SETTINGS } from '../shared/defaults'
 import type {
   AuthSchema,
   CoworkPermissionMode,
+  McpServerConfig,
+  McpTransport,
+  PluginConfig,
   ProviderKind,
   ProviderSettings,
+  SkillConfig,
   Theme
 } from '../shared/types'
 
@@ -118,6 +122,92 @@ const VALID_PROVIDERS: ProviderKind[] = ['ollama', 'gateway']
 const VALID_SCHEMAS: AuthSchema[] = ['none', 'bearer', 'header']
 const VALID_THEMES: Theme[] = ['light', 'dark']
 const VALID_PERMISSION_MODES: CoworkPermissionMode[] = ['ask', 'autoApprove', 'bypass']
+const VALID_TRANSPORTS: McpTransport[] = ['stdio', 'http', 'sse']
+
+/** A string→string record, keeping only string values (env / headers hygiene). */
+function stringRecord(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === 'string') out[k] = v
+  }
+  return Object.keys(out).length ? out : undefined
+}
+
+/**
+ * Validate one persisted connector entry, dropping anything malformed. Returns null
+ * for an entry that can't be a usable server (no id/name, or a transport missing its
+ * command/url) so a corrupt config can't crash the connector manager at connect time.
+ */
+function normaliseMcpServer(raw: unknown): McpServerConfig | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  const id = typeof o.id === 'string' && o.id.trim() ? o.id.trim() : ''
+  const name = typeof o.name === 'string' && o.name.trim() ? o.name.trim() : ''
+  if (!id || !name) return null
+  const transport: McpTransport = VALID_TRANSPORTS.includes(o.transport as McpTransport)
+    ? (o.transport as McpTransport)
+    : 'stdio'
+  const server: McpServerConfig = {
+    id,
+    name,
+    enabled: typeof o.enabled === 'boolean' ? o.enabled : true,
+    transport
+  }
+  if (typeof o.source === 'string' && o.source.trim()) server.source = o.source.trim()
+  if (transport === 'stdio') {
+    const command = typeof o.command === 'string' ? o.command.trim() : ''
+    if (!command) return null
+    server.command = command
+    server.args = Array.isArray(o.args) ? o.args.filter((a): a is string => typeof a === 'string') : []
+    const env = stringRecord(o.env)
+    if (env) server.env = env
+  } else {
+    const url = typeof o.url === 'string' ? o.url.trim() : ''
+    if (!url) return null
+    server.url = url
+    const headers = stringRecord(o.headers)
+    if (headers) server.headers = headers
+  }
+  return server
+}
+
+/**
+ * Validate one persisted skill entry. Drops anything without an id, name, or
+ * instructions (an empty skill would advertise a tool that teaches the model nothing).
+ */
+function normaliseSkill(raw: unknown): SkillConfig | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  const id = typeof o.id === 'string' && o.id.trim() ? o.id.trim() : ''
+  const name = typeof o.name === 'string' && o.name.trim() ? o.name.trim() : ''
+  const instructions = typeof o.instructions === 'string' ? o.instructions.trim() : ''
+  if (!id || !name || !instructions) return null
+  const skill: SkillConfig = {
+    id,
+    name,
+    description: typeof o.description === 'string' ? o.description.trim() : '',
+    instructions,
+    enabled: typeof o.enabled === 'boolean' ? o.enabled : true
+  }
+  if (typeof o.source === 'string' && o.source.trim()) skill.source = o.source.trim()
+  return skill
+}
+
+/** Validate one persisted plugin record. Drops entries without an id + name. */
+function normalisePlugin(raw: unknown): PluginConfig | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  const id = typeof o.id === 'string' && o.id.trim() ? o.id.trim() : ''
+  const name = typeof o.name === 'string' && o.name.trim() ? o.name.trim() : ''
+  if (!id || !name) return null
+  return {
+    id,
+    name,
+    description: typeof o.description === 'string' ? o.description.trim() : '',
+    enabled: typeof o.enabled === 'boolean' ? o.enabled : true
+  }
+}
 
 /**
  * Merges a raw (possibly partial or stale) settings object onto the defaults,
@@ -174,7 +264,16 @@ export function normalise(raw: unknown): ProviderSettings {
       permissionMode: VALID_PERMISSION_MODES.includes(cowork.permissionMode as CoworkPermissionMode)
         ? (cowork.permissionMode as CoworkPermissionMode)
         : d.cowork.permissionMode
-    }
+    },
+    mcpServers: Array.isArray(o.mcpServers)
+      ? o.mcpServers.map(normaliseMcpServer).filter((s): s is McpServerConfig => s !== null)
+      : d.mcpServers,
+    skills: Array.isArray(o.skills)
+      ? o.skills.map(normaliseSkill).filter((s): s is SkillConfig => s !== null)
+      : d.skills,
+    plugins: Array.isArray(o.plugins)
+      ? o.plugins.map(normalisePlugin).filter((p): p is PluginConfig => p !== null)
+      : d.plugins
   }
 }
 

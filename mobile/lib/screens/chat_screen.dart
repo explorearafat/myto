@@ -32,8 +32,17 @@ class _ChatScreenState extends State<ChatScreen> {
   StreamSubscription<ChatEvent>? _sub;
   bool _streaming = false;
   ChatMessage? _pending;
+
+  // Streaming tokens arrive far faster than the screen needs to repaint. We append
+  // each token straight into the message model (cheap) and only rebuild on a throttle,
+  // so a fast reply repaints ~15×/s instead of once per token — the difference between
+  // a smooth stream and the whole transcript re-laying-out on every character.
+  Timer? _flushTimer;
+  bool _dirty = false;
+
   @override
   void dispose() {
+    _flushTimer?.cancel();
     _sub?.cancel();
     _client.abort();
     _scroll.dispose();
@@ -84,8 +93,9 @@ class _ChatScreenState extends State<ChatScreen> {
       (event) {
         switch (event) {
           case ChatToken(:final text):
-            setState(() => assistant.content += text);
-            _scrollToBottomIfNear();
+            // Mutate the model now (no rebuild); repaint on the throttle below.
+            assistant.content += text;
+            _scheduleFlush();
           case ChatDone():
             _finish();
           case ChatFailure(:final code, :final resetSeconds):
@@ -97,6 +107,21 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// Coalesce streamed tokens into a single repaint every ~66ms. Without this every
+  /// token triggers a full `setState`, rebuilding the whole transcript (and re-parsing
+  /// the streaming message's Markdown/tool blocks) — the main cause of streaming lag.
+  void _scheduleFlush() {
+    _dirty = true;
+    if (_flushTimer != null) return;
+    _flushTimer = Timer(const Duration(milliseconds: 66), () {
+      _flushTimer = null;
+      if (!mounted || !_dirty) return;
+      _dirty = false;
+      setState(() {});
+      _scrollToBottomIfNear();
+    });
+  }
+
   void _useStarter(String prompt) {
     _composer.text = prompt;
     _composer.selection = TextSelection.collapsed(offset: prompt.length);
@@ -105,6 +130,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _finish() {
     if (!_streaming) return;
+    // Flush any tokens buffered since the last throttled repaint.
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    _dirty = false;
     _sub?.cancel();
     _sub = null;
     if (!mounted) return;

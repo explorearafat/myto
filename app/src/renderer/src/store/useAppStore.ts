@@ -2,14 +2,19 @@ import { create } from 'zustand'
 import type {
   CoworkPermissionMode,
   EnvStatus,
+  McpServerConfig,
+  McpServerStatus,
+  McpTestResult,
   ModelInfo,
   ProviderKind,
   ProviderSettings,
   SettingsTab,
+  SkillConfig,
   Theme,
   ToolSettings
 } from '@shared/types'
 import { DEFAULT_PROVIDER_SETTINGS } from '@shared/defaults'
+import { expandPluginManifest } from '@shared/plugins'
 import type { ByokConfig } from '@shared/byok'
 
 /** Derives the top-nav environment badge from the active provider. */
@@ -82,6 +87,34 @@ export interface AppState {
   /** Set Cowork's permission tier (ask / autoApprove / bypass) and persist it. */
   setCoworkPermissionMode: (mode: CoworkPermissionMode) => Promise<void>
 
+  // ── Connectors (MCP) ──
+  /** Live status of every configured connector, keyed by server id (main-process pushed). */
+  mcpStatuses: McpServerStatus[]
+  /** Add or replace a connector in settings, persist, then (re)connect. */
+  saveConnector: (config: McpServerConfig) => Promise<void>
+  /** Remove a connector by id from settings, persist, then reconcile connections. */
+  removeConnector: (id: string) => Promise<void>
+  /** Probe a candidate connector config without saving it. */
+  testConnector: (config: McpServerConfig) => Promise<McpTestResult>
+  /** Pull the current connector statuses from the main process. */
+  refreshConnectorStatus: () => Promise<void>
+  /** Subscribe to main-process status pushes; returns an unsubscribe fn (called once on boot). */
+  watchConnectorStatus: () => () => void
+
+  // ── Skills ──
+  /** Add or replace a skill in settings and persist (main re-registers its tool on save). */
+  saveSkill: (skill: SkillConfig) => Promise<void>
+  /** Remove a skill by id and persist. */
+  removeSkill: (id: string) => Promise<void>
+
+  // ── Plugins ──
+  /** Install a plugin from a pasted manifest string; expands into skills/connectors. Throws a user message on a bad manifest. */
+  installPlugin: (manifest: string) => Promise<void>
+  /** Uninstall a plugin: remove its record and every skill/connector it installed. */
+  uninstallPlugin: (id: string) => Promise<void>
+  /** Enable/disable a plugin and all the skills/connectors it installed, together. */
+  setPluginEnabled: (id: string, enabled: boolean) => Promise<void>
+
   /** Load persisted settings from the main process (called once on boot). */
   loadSettings: () => Promise<void>
   /** Persist settings to the main process and update local state. */
@@ -131,6 +164,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   model: DEFAULT_PROVIDER_SETTINGS.modelName,
   theme: DEFAULT_PROVIDER_SETTINGS.ui.theme,
   railOpen: true,
+  mcpStatuses: [],
 
   setProjectName: (projectName) => set({ projectName }),
   setMaximized: (isMaximized) => set({ isMaximized }),
@@ -163,6 +197,81 @@ export const useAppStore = create<AppState>((set, get) => ({
   setCoworkPermissionMode: async (mode) => {
     const { settings } = get()
     await get().saveSettings({ ...settings, cowork: { ...settings.cowork, permissionMode: mode } })
+  },
+
+  saveConnector: async (config) => {
+    const { settings } = get()
+    const existing = settings.mcpServers.filter((s) => s.id !== config.id)
+    await get().saveSettings({ ...settings, mcpServers: [...existing, config] })
+    // Reconnect from the freshly-saved list, then reflect the new statuses.
+    set({ mcpStatuses: await window.sylor.mcp.sync() })
+  },
+
+  removeConnector: async (id) => {
+    const { settings } = get()
+    await get().saveSettings({
+      ...settings,
+      mcpServers: settings.mcpServers.filter((s) => s.id !== id)
+    })
+    set({ mcpStatuses: await window.sylor.mcp.sync() })
+  },
+
+  testConnector: (config) => window.sylor.mcp.test(config),
+
+  refreshConnectorStatus: async () => {
+    set({ mcpStatuses: await window.sylor.mcp.status() })
+  },
+
+  watchConnectorStatus: () =>
+    window.sylor.mcp.onStatusChanged((mcpStatuses) => set({ mcpStatuses })),
+
+  saveSkill: async (skill) => {
+    const { settings } = get()
+    const rest = settings.skills.filter((s) => s.id !== skill.id)
+    await get().saveSettings({ ...settings, skills: [...rest, skill] })
+  },
+
+  removeSkill: async (id) => {
+    const { settings } = get()
+    await get().saveSettings({ ...settings, skills: settings.skills.filter((s) => s.id !== id) })
+  },
+
+  installPlugin: async (manifest) => {
+    // expandPluginManifest throws a user-facing message on a bad manifest; let it
+    // propagate so the pane can show it.
+    const { plugin, skills, mcpServers } = expandPluginManifest(manifest)
+    const { settings } = get()
+    await get().saveSettings({
+      ...settings,
+      skills: [...settings.skills, ...skills],
+      mcpServers: [...settings.mcpServers, ...mcpServers],
+      plugins: [...settings.plugins, plugin]
+    })
+    // Connect any servers the plugin added (skills re-register via the save listener).
+    set({ mcpStatuses: await window.sylor.mcp.sync() })
+  },
+
+  uninstallPlugin: async (id) => {
+    const { settings } = get()
+    await get().saveSettings({
+      ...settings,
+      skills: settings.skills.filter((s) => s.source !== id),
+      mcpServers: settings.mcpServers.filter((s) => s.source !== id),
+      plugins: settings.plugins.filter((p) => p.id !== id)
+    })
+    set({ mcpStatuses: await window.sylor.mcp.sync() })
+  },
+
+  setPluginEnabled: async (id, enabled) => {
+    const { settings } = get()
+    // Flip the plugin and every item it installed together.
+    await get().saveSettings({
+      ...settings,
+      plugins: settings.plugins.map((p) => (p.id === id ? { ...p, enabled } : p)),
+      skills: settings.skills.map((s) => (s.source === id ? { ...s, enabled } : s)),
+      mcpServers: settings.mcpServers.map((m) => (m.source === id ? { ...m, enabled } : m))
+    })
+    set({ mcpStatuses: await window.sylor.mcp.sync() })
   },
 
   loadSettings: async () => {

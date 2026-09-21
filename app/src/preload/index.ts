@@ -100,6 +100,22 @@ const api: SylorApi = {
   },
   cowork: {
     pickWorkspace: () => ipcRenderer.invoke(IpcChannel.CoworkPickWorkspace)
+  },
+  preview: {
+    openExternal: (url) => ipcRenderer.send(IpcChannel.PreviewOpenExternal, url)
+  },
+  mcp: {
+    status: () => ipcRenderer.invoke(IpcChannel.McpStatus),
+    sync: () => ipcRenderer.invoke(IpcChannel.McpSync),
+    test: (config) => ipcRenderer.invoke(IpcChannel.McpTest, config),
+    onStatusChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, statuses: Parameters<typeof callback>[0]) =>
+        callback(statuses)
+      ipcRenderer.on(IpcChannel.McpStatusChanged, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.McpStatusChanged, listener)
+      }
+    }
   }
 }
 

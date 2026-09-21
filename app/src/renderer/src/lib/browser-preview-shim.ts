@@ -196,6 +196,17 @@ function installShim(): void {
     cowork: {
       // The browser preview has no native folder dialog; report "cancelled".
       pickWorkspace: () => Promise.resolve(null)
+    },
+    preview: {
+      // No OS shell in the browser preview; opening externally is a no-op.
+      openExternal: () => {}
+    },
+    mcp: {
+      // No connector processes in the browser preview.
+      status: () => Promise.resolve([]),
+      sync: () => Promise.resolve([]),
+      test: () => Promise.resolve({ ok: false, error: 'Connectors are unavailable in the browser preview.' }),
+      onStatusChanged: () => () => {}
     }
   }
 

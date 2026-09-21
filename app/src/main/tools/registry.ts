@@ -1,9 +1,14 @@
-import type { ChatMode, ProviderSettings, ToolSideEffect } from '../../shared/types'
+import type { ChatMode, PreviewTarget, ProviderSettings, TodoItem, ToolSideEffect } from '../../shared/types'
 import { toErrorMessage } from '../providers/http'
 import type { ToolCall } from './toolParser'
 import { webFetchTool, webSearchTool, wikiSearchTool } from './web'
 import { runCodeTool } from './runCode'
 import { fsTools } from './fs'
+import { previewTool } from './preview'
+import { updatePlanTool } from './plan'
+import { searchTools } from './search'
+import { runCommandTool } from './command'
+import { spawnAgentTool } from './agent'
 
 /**
  * The tool registry: the catalogue of tools the chat can use, the dispatcher that
@@ -35,6 +40,26 @@ export interface ToolGate {
 export interface ToolContext extends ToolGate {
   /** Cancels the tool when the user hits Stop (chained to the stream's controller). */
   signal: AbortSignal
+  /**
+   * Show something in Sylor's preview pane (Cowork). The `preview` tool calls this
+   * to open/point the side pane; the stream loop turns it into a
+   * {@link CompletionChunk.preview}. Optional — absent outside the streaming loop
+   * (e.g. in unit tests), in which case the preview tool degrades to a plain note.
+   */
+  onPreview?: (target: PreviewTarget) => void
+  /**
+   * Publish the agent's working plan (Cowork). The `update_plan` tool calls this to
+   * push the current checklist; the stream loop turns it into a
+   * {@link CompletionChunk.todos}. Optional — absent outside the streaming loop.
+   */
+  onPlan?: (todos: TodoItem[]) => void
+  /**
+   * Run a focused read-only sub-task in a nested agent and resolve to its digest.
+   * The `spawn_agent` tool calls this; the nested loop lives in provider-ipc.ts
+   * (it needs the provider + model). Optional — absent outside the streaming loop,
+   * where the tool degrades to a plain "not available" note.
+   */
+  delegate?: (task: string) => Promise<string>
 }
 
 /** One tool the model can call through the text protocol. */
@@ -62,16 +87,64 @@ const ALL_TOOLS: readonly ToolDef[] = [
   webSearchTool,
   wikiSearchTool,
   runCodeTool,
-  ...fsTools
+  runCommandTool,
+  ...fsTools,
+  ...searchTools,
+  previewTool,
+  updatePlanTool,
+  spawnAgentTool
 ]
 
 /** Lookup by name. Mutable only so tests can inject a fake tool; not written at runtime. */
 export const TOOLS: Record<string, ToolDef> = Object.fromEntries(ALL_TOOLS.map((t) => [t.name, t]))
 
+/**
+ * Runtime-registered tools — the ones that come and go while the app runs: tools
+ * exposed by a connected MCP server, an enabled skill, or an installed plugin. Kept
+ * in a SEPARATE map from the built-in {@link TOOLS} catalogue on purpose: the
+ * built-in surface is a fixed, snapshot-tested set, and a connector appearing must
+ * never change it. These are merged into {@link availableTools} and {@link lookupTool}
+ * at call time. Names are expected to be namespaced (e.g. `mcp__github__create_issue`)
+ * so a connector can't shadow a built-in or another connector.
+ */
+const extensionTools = new Map<string, ToolDef>()
+
+/** Register (or replace) a runtime tool. Called by the MCP manager as servers connect. */
+export function registerExtensionTool(tool: ToolDef): void {
+  extensionTools.set(tool.name, tool)
+}
+
+/** Remove runtime tools by name (a server disconnecting, a skill/plugin being disabled). */
+export function unregisterExtensionTools(names: Iterable<string>): void {
+  for (const name of names) extensionTools.delete(name)
+}
+
+/** Drop every runtime tool. Called on shutdown and when tests need a clean slate. */
+export function clearExtensionTools(): void {
+  extensionTools.clear()
+}
+
+/** The names of every currently-registered runtime tool. */
+export function extensionToolNames(): string[] {
+  return [...extensionTools.keys()]
+}
+
+/**
+ * Look up a tool by name across the built-in catalogue and the runtime extensions.
+ * The single resolution point so dispatch, side-effect gating, and the sub-agent
+ * loop all see connectors, not just the built-ins.
+ */
+export function lookupTool(name: string): ToolDef | undefined {
+  return TOOLS[name] ?? extensionTools.get(name)
+}
+
 /** The tools usable under `gate`: none when tool use is off, else each tool's own gate. */
 export function availableTools(gate: ToolGate): ToolDef[] {
   if (!gate.settings.tools.enabled) return []
-  return ALL_TOOLS.filter((t) => t.available(gate))
+  const built = ALL_TOOLS.filter((t) => t.available(gate))
+  if (extensionTools.size === 0) return built
+  const ext = [...extensionTools.values()].filter((t) => t.available(gate))
+  return [...built, ...ext]
 }
 
 /**
@@ -85,7 +158,7 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<string>
   if (call.error || !call.name) {
     return `That tool call did not parse (${call.error ?? 'unknown error'}). Re-issue it as one compact JSON object {"tool": "name", "input": { ... }} inside a sylor:tool block.`
   }
-  const tool = TOOLS[call.name]
+  const tool = lookupTool(call.name)
   if (!tool) {
     return `Unknown tool "${call.name}". Available tools: ${availableTools(ctx).map((t) => t.name).join(', ') || '(none)'}.`
   }

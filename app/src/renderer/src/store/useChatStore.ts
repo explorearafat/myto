@@ -6,10 +6,13 @@ import type {
   ChatImage,
   ChatMessage,
   ChatMode,
-  PersistedSession
+  PersistedSession,
+  PreviewTarget,
+  TodoItem
 } from '@shared/types'
 import type { PromptBlock } from '@shared/types/prompt-builder'
 import { takeReveal } from '../lib/reveal'
+import { usePreviewStore } from './usePreviewStore'
 
 /**
  * How often (ms) buffered stream deltas are flushed into the rendered message.
@@ -62,6 +65,12 @@ export interface ChatMessageUI {
    * the run ends. Transient — never persisted.
    */
   pendingApproval?: ApprovalRequest
+  /**
+   * The agent's current working plan (Cowork) — the checklist the model maintains
+   * with the `update_plan` tool, pinned above the reply. Set as the run streams and
+   * kept after it ends so the finished plan stays visible. Transient — never persisted.
+   */
+  todos?: TodoItem[]
 }
 
 /**
@@ -104,6 +113,11 @@ interface LiveRun {
    * waiting on the user re-attaches to the live prompt.
    */
   pendingApproval?: ApprovalRequest
+  /**
+   * The run's current working plan (Cowork), held here — like `status`/`content` —
+   * so switching back to a background run re-attaches to its live checklist.
+   */
+  todos?: TodoItem[]
   /** Cancels the main-process stream and detaches its chunk listener. */
   disposer: () => void
   /** Un-flushed delta text, drained by the flush timer. */
@@ -352,7 +366,8 @@ function projectLiveRun(
       pending: true,
       error: undefined,
       status: run.status,
-      pendingApproval: run.pendingApproval
+      pendingApproval: run.pendingApproval,
+      todos: run.todos
     }
   } else {
     messages.push({
@@ -361,7 +376,8 @@ function projectLiveRun(
       content: run.content,
       pending: true,
       status: run.status,
-      pendingApproval: run.pendingApproval
+      pendingApproval: run.pendingApproval,
+      todos: run.todos
     })
   }
 
@@ -584,12 +600,29 @@ export const useChatStore = create<ChatState>((set, get) => {
       }
     }
 
+    /**
+     * Set this run's working plan (Cowork). Held on the run (survives a session
+     * switch) and mirrored onto the on-screen assistant turn when visible — the same
+     * shape as {@link setApproval}/{@link setStatus}. Kept after the run ends so the
+     * finished checklist stays on the turn.
+     */
+    const setTodos = (todos: TodoItem[]): void => {
+      run.todos = todos
+      if (isVisible()) {
+        set((state) => ({
+          messages: state.messages.map((m) => (m.id === assistantId ? { ...m, todos } : m))
+        }))
+      }
+    }
+
     const onChunk = (chunk: {
       delta: string
       done: boolean
       error?: string
       status?: string
       approval?: ApprovalRequest
+      preview?: PreviewTarget
+      todos?: TodoItem[]
     }): void => {
       // `!== undefined`, not truthiness: an empty-string status is a deliberate
       // signal to clear the caption (the main process sends it when a reasoning
@@ -598,6 +631,11 @@ export const useChatStore = create<ChatState>((set, get) => {
       if (chunk.status !== undefined) setStatus(chunk.status)
       // A side-effecting Cowork tool is awaiting the user's OK — raise the prompt.
       if (chunk.approval) setApproval(chunk.approval)
+      // Sylor opened something in its preview pane — drive the (global) pane. Not
+      // scoped to this run: the pane is a standalone surface, like a browser window.
+      if (chunk.preview) usePreviewStore.getState().show(chunk.preview)
+      // Sylor published/updated its working plan — pin the live checklist on this turn.
+      if (chunk.todos) setTodos(chunk.todos)
       if (chunk.delta) {
         run.buffer += chunk.delta
         scheduleFlush()

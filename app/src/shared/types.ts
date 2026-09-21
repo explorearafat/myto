@@ -66,7 +66,7 @@ export type Theme = 'light' | 'dark'
  * a plain chatbot there are only two panes: the model/provider connection and
  * appearance.
  */
-export type SettingsTab = 'appearance' | 'model'
+export type SettingsTab = 'appearance' | 'model' | 'tools' | 'connectors' | 'skills' | 'plugins'
 
 /**
  * Reasoning effort the model should spend before answering. Threaded from the
@@ -126,6 +126,124 @@ export interface CoworkSettings {
 }
 
 /**
+ * How a connector (MCP server) is reached:
+ *  - `stdio` → a local process Sylor spawns (command + args), talking over stdin/stdout.
+ *              The classic MCP model: `npx @modelcontextprotocol/server-filesystem …`.
+ *  - `http`  → a remote server speaking Streamable HTTP at a URL (the modern web transport).
+ *  - `sse`   → a remote server speaking the older HTTP+SSE transport at a URL.
+ */
+export type McpTransport = 'stdio' | 'http' | 'sse'
+
+/**
+ * One configured connector — an MCP server that exposes tools Sylor can call.
+ * Persisted in settings. A `stdio` server spawns `command`/`args` locally with the
+ * given `env`; an `http`/`sse` server connects to `url` (optionally with `headers`,
+ * e.g. an Authorization bearer). Disabled servers are kept but never connected.
+ * Modeled on the `mcpServers` shape Claude Desktop and other MCP hosts use, so a
+ * user can paste a known config.
+ */
+export interface McpServerConfig {
+  /** Stable id (generated); used as the key for status + tool namespacing. */
+  id: string
+  /** Human label shown in the UI and used to namespace this server's tools. */
+  name: string
+  /** Whether Sylor should connect to it. Off = kept in the list, not connected. */
+  enabled: boolean
+  /** The plugin that installed this server, if any. Absent = the user added it directly. */
+  source?: string
+  transport: McpTransport
+  /** stdio: the executable to run (e.g. 'npx', 'uvx', an absolute path). */
+  command?: string
+  /** stdio: arguments passed to {@link command}. */
+  args?: string[]
+  /** stdio: extra environment variables for the spawned process. */
+  env?: Record<string, string>
+  /** http/sse: the server endpoint URL. */
+  url?: string
+  /** http/sse: extra request headers (e.g. `{ Authorization: 'Bearer …' }`). */
+  headers?: Record<string, string>
+}
+
+/** Lifecycle of a connector's connection, surfaced in the Connectors UI. */
+export type McpConnectionState = 'connected' | 'connecting' | 'error' | 'disabled'
+
+/** Live status of one connector — what the renderer shows next to each server. */
+export interface McpServerStatus {
+  id: string
+  state: McpConnectionState
+  /** Number of tools the server exposed (when connected). */
+  toolCount: number
+  /** Namespaced names of the tools this server contributes (for display). */
+  toolNames: string[]
+  /** A short human message when {@link state} is 'error'. */
+  error?: string
+}
+
+/**
+ * A skill — a named, reusable instruction pack the model can pull in on demand.
+ * Modeled on Claude's Skills / SKILL.md: the {@link description} is always visible to
+ * the model (so it knows the skill exists and when it applies), and the full
+ * {@link instructions} are loaded only when it invokes the skill's tool
+ * (`skill__<slug>`). That progressive disclosure keeps the base context small while
+ * still giving the model deep, task-specific know-how when it's relevant.
+ */
+export interface SkillConfig {
+  /** Stable id (generated); keys the skill in settings. */
+  id: string
+  /** Short name shown to the model and in the UI (e.g. "PDF forms"). */
+  name: string
+  /** One line telling the model what this skill is for and when to use it. */
+  description: string
+  /** The full playbook loaded when the skill is invoked. Markdown/plain text. */
+  instructions: string
+  /** Whether the skill is offered to the model. Disabled = kept but not advertised. */
+  enabled: boolean
+  /** The plugin that installed this skill, if any. Absent = the user added it directly. */
+  source?: string
+}
+
+/**
+ * A plugin — a shareable bundle that installs a set of skills and/or connectors in
+ * one step (like a Claude Code plugin, minus the marketplace). Installing a plugin
+ * expands its {@link PluginManifest} into ordinary skills + connectors tagged with the
+ * plugin's id (their `source`), so they show up and work exactly like hand-added ones
+ * and can be removed together when the plugin is uninstalled.
+ */
+export interface PluginConfig {
+  /** Stable id (generated); tags every skill/connector this plugin installed. */
+  id: string
+  /** Display name from the manifest. */
+  name: string
+  /** One-line summary from the manifest. */
+  description: string
+  /** Whether the plugin (and all its items) are active. */
+  enabled: boolean
+}
+
+/**
+ * The importable shape a user pastes to install a plugin. Skills and servers here
+ * omit ids/enabled/source — those are assigned at install time. Kept intentionally
+ * close to the `mcpServers` config shape so a known bundle can be pasted as-is.
+ */
+export interface PluginManifest {
+  name: string
+  description?: string
+  skills?: Array<Pick<SkillConfig, 'name' | 'description' | 'instructions'>>
+  mcpServers?: Array<Omit<McpServerConfig, 'id' | 'enabled' | 'source'>>
+}
+
+/** Result of probing one connector config (the "Test" button) without saving it. */
+export interface McpTestResult {
+  ok: boolean
+  /** On success, how many tools the server exposed. */
+  toolCount?: number
+  /** On success, the (un-namespaced) tool names, for a quick preview. */
+  toolNames?: string[]
+  /** On failure, a short human reason. */
+  error?: string
+}
+
+/**
  * How Cowork asks before a tool that changes something runs, mirroring Claude
  * Code's permission modes:
  *  - `ask`         → confirm every side-effecting tool before it runs (default).
@@ -138,6 +256,40 @@ export type CoworkPermissionMode = 'ask' | 'autoApprove' | 'bypass'
 
 /** What a tool changes, used to decide whether it needs approval. Absent = read-only. */
 export type ToolSideEffect = 'write' | 'exec'
+
+/**
+ * Something Sylor wants to show in its own preview pane (Cowork). Raised by the
+ * `preview` tool and carried on a {@link CompletionChunk} so it rides the same
+ * stream as the reply; the renderer opens the side pane on it. A `file` target is
+ * a working-folder artifact (an HTML page, a PDF, an image, a chart) already
+ * resolved to a `file://` URL; a `url` target is a localhost/remote page (a plan,
+ * a running dev server) — both load in the same isolated `partition="preview"`
+ * webview guest.
+ */
+export interface PreviewTarget {
+  /** Whether this points at a working-folder file or a web URL — drives the icon/label. */
+  kind: 'file' | 'url'
+  /** The URL the preview webview loads: a `file://…` URL for files, or the http(s) URL. */
+  url: string
+  /** A short human label for the pane header (the relative path, or the URL). */
+  title: string
+}
+
+/** Where a plan step stands. Drives the checklist icon in the plan panel. */
+export type TodoStatus = 'pending' | 'in_progress' | 'done'
+
+/**
+ * One item in the agent's working plan (Cowork). The model maintains an ordered
+ * checklist with the `update_plan` tool as it works a multi-step task; the renderer
+ * pins it above the reply so the user can watch the task advance. Transient — a live
+ * view of the run, never persisted.
+ */
+export interface TodoItem {
+  /** Short imperative step, e.g. "Scaffold the project" or "Write SignUp.jsx". */
+  title: string
+  /** pending → in_progress → done. Exactly one item is usually in_progress. */
+  status: TodoStatus
+}
 
 /** The user's answer to an approval prompt. */
 export type ApprovalDecision = 'allow' | 'allow_always' | 'deny'
@@ -176,6 +328,12 @@ export interface ProviderSettings {
   tools: ToolSettings
   /** Cowork (agentic mode) preferences — chiefly the working folder. */
   cowork: CoworkSettings
+  /** Configured connectors (MCP servers) whose tools Sylor can call. */
+  mcpServers: McpServerConfig[]
+  /** Skills — reusable instruction packs the model can pull in on demand. */
+  skills: SkillConfig[]
+  /** Installed plugins — bundles that expand into the skills/connectors above. */
+  plugins: PluginConfig[]
 }
 
 /** A model advertised by a provider's list endpoint. */
@@ -285,6 +443,19 @@ export interface CompletionChunk {
    * blocked awaiting that decision. Absent on ordinary chunks.
    */
   approval?: ApprovalRequest
+  /**
+   * Something Sylor wants to show in its preview pane (Cowork), raised by the
+   * `preview` tool. Present only on the chunk that opens it (empty `delta`); the
+   * renderer opens/points the side pane at it. Unlike {@link approval} this never
+   * blocks the loop — Sylor keeps working while the pane updates. Absent otherwise.
+   */
+  preview?: PreviewTarget
+  /**
+   * The agent's current working plan (Cowork), raised by the `update_plan` tool.
+   * Present only on the chunk that updates it (empty `delta`); the renderer pins a
+   * checklist above the reply. Non-blocking like {@link preview}. Absent otherwise.
+   */
+  todos?: TodoItem[]
 }
 
 /**
@@ -501,6 +672,34 @@ export interface CoworkApi {
   pickWorkspace: () => Promise<string | null>
 }
 
+/**
+ * Sylor's preview pane (Cowork). The pane itself is renderer-only — an isolated
+ * `<webview>` the {@link PreviewTarget} stream drives — so this surface is just the
+ * one thing the renderer can't do in-process: hand a URL to the OS to open in the
+ * user's real browser (the pane's "open externally" control).
+ */
+export interface PreviewApi {
+  /** Open a preview URL (file:// or http(s)) in the user's default external browser. */
+  openExternal: (url: string) => void
+}
+
+/**
+ * Connectors (MCP servers). The server list itself lives in ordinary settings
+ * (`mcpServers`), edited through the normal settings save; this surface is the live
+ * side — connecting, probing, and watching status. The renderer saves a config, then
+ * calls {@link sync} to (re)connect; {@link test} probes a config before saving it.
+ */
+export interface McpApi {
+  /** Current live status of every configured connector. */
+  status: () => Promise<McpServerStatus[]>
+  /** (Re)connect to all enabled connectors from the saved settings; resolves the new statuses. */
+  sync: () => Promise<McpServerStatus[]>
+  /** Probe one connector config without saving it — resolves ok + tool count, or an error. */
+  test: (config: McpServerConfig) => Promise<McpTestResult>
+  /** Subscribe to status changes (a connect/disconnect settled). Returns an unsubscribe fn. */
+  onStatusChanged: (callback: (statuses: McpServerStatus[]) => void) => () => void
+}
+
 /** The full `window.sylor` API surface exposed by the preload script. */
 export interface SylorApi {
   window: WindowApi
@@ -526,6 +725,10 @@ export interface SylorApi {
   files: FilesApi
   /** Cowork (agentic mode): the working-folder picker. */
   cowork: CoworkApi
+  /** Sylor's preview pane: open a preview target in the user's external browser. */
+  preview: PreviewApi
+  /** Connectors (MCP servers): live status, (re)connect, and probe. */
+  mcp: McpApi
 }
 
 // ---------------------------------------------------------------------------
