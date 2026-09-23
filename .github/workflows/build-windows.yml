@@ -3,7 +3,7 @@ name: Build Windows App
 # Publish a new Myto-Setup.exe whenever you push a version tag (e.g. v0.1.1),
 # or run it manually from the Actions tab. The landing page links to
 # /releases/latest/download/Myto-Setup.exe, so a new release auto-updates the
-# download button on sylorcode.vercel.app.
+# download button on mytocode.vercel.app.
 on:
   push:
     tags:

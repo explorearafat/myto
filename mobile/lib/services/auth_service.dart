@@ -19,7 +19,7 @@ class AuthService extends ChangeNotifier {
   AuthService({required this.firebaseReady});
 
   /// The website page that runs Google sign-in and relays the token back to us.
-  static const _brokerUrl = 'https://sylorcode.vercel.app/authentication';
+  static const _brokerUrl = 'https://mytocode.vercel.app/authentication';
 
   /// The custom scheme the broker redirects to; must match the Android manifest's
   /// CallbackActivity `<data android:scheme>` and the `sylor://` the broker builds.

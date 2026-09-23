@@ -24,11 +24,11 @@ import { getFirestore } from 'firebase/firestore';
 // different origin, so getRedirectResult comes back empty and sign-in loops. Serving auth from our
 // own origin fixes that — vercel.json transparently proxies /__/auth/* to
 // sylor-29cab.firebaseapp.com (Firebase's "reverse proxy" recipe), so no auth files are self-hosted.
-// Requires https://sylorcode.vercel.app/__/auth/handler in the Google OAuth client's authorized
-// redirect URIs, and sylorcode.vercel.app in Firebase Auth → Authorized domains.
+// Requires https://mytocode.vercel.app/__/auth/handler in the Google OAuth client's authorized
+// redirect URIs, and mytocode.vercel.app in Firebase Auth → Authorized domains.
 const firebaseConfig = {
   apiKey: 'AIzaSyCLUPgeIy_gp9M5hkjHxbj1ohMoGQ4HpRQ',
-  authDomain: 'sylorcode.vercel.app',
+  authDomain: 'mytocode.vercel.app',
   projectId: 'sylor-29cab',
   storageBucket: 'sylor-29cab.firebasestorage.app',
   messagingSenderId: '148077878463',

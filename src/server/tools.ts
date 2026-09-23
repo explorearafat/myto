@@ -145,7 +145,7 @@ export function toolResultBlock(name: string, result: string): string {
 
 // ── HTML → text + fetch helpers ───────────────────────────────────────────────────────────────
 
-const UA = 'MytoChat/0.2 (+https://sylorcode.vercel.app)';
+const UA = 'MytoChat/0.2 (+https://mytocode.vercel.app)';
 const FETCH_CAP = 6000;
 const FETCH_TIMEOUT_MS = 8000;
 

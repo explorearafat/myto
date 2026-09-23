@@ -356,7 +356,7 @@ class _SetupPrompt extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             Text(
-              'sylorcode.vercel.app/authentication',
+              'mytocode.vercel.app/authentication',
               textAlign: TextAlign.center,
               style: TextStyle(color: palette.accent, fontSize: 13, fontWeight: FontWeight.w600),
             ),

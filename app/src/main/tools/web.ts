@@ -13,7 +13,7 @@ import type { ToolDef } from './registry'
  */
 
 /** Identifies the client to endpoints (Wikipedia asks for a descriptive UA). */
-const UA = 'MytoChat/0.2 (+https://sylorcode.vercel.app)'
+const UA = 'MytoChat/0.2 (+https://mytocode.vercel.app)'
 
 /**
  * A real-browser User-Agent for web search. DuckDuckGo's HTML endpoints serve a

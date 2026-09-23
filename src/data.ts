@@ -17,7 +17,7 @@ export const LINKS = {
   /** All published installers (downloads mirror — no source). */
   releases: 'https://github.com/explorearafat/sylor-dist/releases/latest',
   /** Live web build — try it with zero install. */
-  web: 'https://sylorcode.vercel.app',
+  web: 'https://mytocode.vercel.app',
 };
 
 /**

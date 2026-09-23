@@ -3,7 +3,7 @@ name: Build Android App
 # Publish a native Myto APK whenever you push a version tag (e.g. v0.1.6), or run
 # it manually from the Actions tab. The download page links to
 # /releases/latest/download/myto.apk, so a new release auto-updates the Android
-# button on sylorcode.vercel.app — the mobile mirror of build-windows.yml.
+# button on mytocode.vercel.app — the mobile mirror of build-windows.yml.
 on:
   push:
     tags:

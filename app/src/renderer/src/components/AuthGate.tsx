@@ -13,7 +13,7 @@ import { MytoMark } from './MytoMark'
  *
  * Google refuses its OAuth screen inside an embedded webview, so we never show it
  * in-app. "Continue with Google" asks the main process (auth-ipc.ts) to open the
- * system browser to sylorcode.vercel.app/authentication; that page signs in and relays
+ * system browser to mytocode.vercel.app/authentication; that page signs in and relays
  * the Google ID token back to a loopback listener. We finish here with
  * signInWithCredential — a plain REST call that needs no popup and no extra setup.
  *

@@ -18,7 +18,7 @@ import type { AuthHandoffResult } from '../shared/types'
  * 127.0.0.1 keeps the listener local (and avoids a Windows Firewall prompt).
  */
 
-const AUTH_PAGE = 'https://sylorcode.vercel.app/authentication'
+const AUTH_PAGE = 'https://mytocode.vercel.app/authentication'
 const TIMEOUT_MS = 3 * 60_000
 
 // The Myto mark (monochrome mitochondria — a tilted organic bean with a double membrane and four

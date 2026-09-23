@@ -7,7 +7,7 @@ import 'package:http/http.dart' as http;
 /// (see api/chat.ts + src/server/gateway.ts). Native HTTP clients send no `Origin` header,
 /// so the gateway's same-origin guard lets these requests through (a browser fetch would be
 /// blocked, which is why this app targets mobile, not Flutter web).
-const String kGatewayUrl = 'https://sylorcode.vercel.app/api/chat';
+const String kGatewayUrl = 'https://mytocode.vercel.app/api/chat';
 
 /// One event from the streaming reply.
 sealed class ChatEvent {

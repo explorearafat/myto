@@ -683,7 +683,7 @@ export type AuthHandoffResult =
 
 /**
  * Browser-mediated Google sign-in. Google blocks its OAuth screen inside embedded
- * webviews, so the app opens the system browser to sylorcode.vercel.app/authentication,
+ * webviews, so the app opens the system browser to mytocode.vercel.app/authentication,
  * receives the Google ID token back on a loopback listener, and the renderer completes
  * Firebase sign-in with signInWithCredential. No server secret is involved.
  */

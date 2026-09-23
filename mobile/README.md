@@ -152,7 +152,7 @@ lib/
     chat_screen.dart         The chat surface; drives the gateway and streams the reply in.
 ```
 
-The gateway is `https://sylorcode.vercel.app/api/chat` and speaks a tiny SSE protocol
+The gateway is `https://mytocode.vercel.app/api/chat` and speaks a tiny SSE protocol
 (`data: {"t":"token"|"done"|"error", …}`). Native HTTP clients send no `Origin` header, so the
 gateway's same-origin guard lets the app through.
 
