@@ -1,0 +1,125 @@
+import { describe, it, expect } from 'vitest';
+import {
+  pickWebAdapter,
+  openAiWebAdapter,
+  anthropicWebAdapter,
+  type WebWireAdapter,
+} from './adapters';
+import type { ByokConfig } from '../shared/byok';
+import type { WireMessage } from './gateway';
+
+function cfg(over: Partial<ByokConfig> = {}): ByokConfig {
+  return {
+    baseUrl: 'https://api.example.com/v1',
+    apiKey: 'secret',
+    authSchema: 'bearer',
+    authHeaderName: 'Authorization',
+    models: [],
+    updatedAt: 0,
+    ...over,
+  };
+}
+
+describe('pickWebAdapter', () => {
+  it('selects Anthropic for the real API host and any *.anthropic.com', () => {
+    expect(pickWebAdapter('https://api.anthropic.com')).toBe(anthropicWebAdapter);
+    expect(pickWebAdapter('https://api.anthropic.com/v1')).toBe(anthropicWebAdapter);
+    expect(pickWebAdapter('https://gw.anthropic.com/v1')).toBe(anthropicWebAdapter);
+  });
+
+  it('selects Anthropic for an explicit /v1/messages path off-domain', () => {
+    expect(pickWebAdapter('https://proxy.example.com/v1/messages')).toBe(anthropicWebAdapter);
+  });
+
+  it('keeps OpenAI for ordinary hosts and an unparseable URL', () => {
+    expect(pickWebAdapter('https://api.openai.com/v1')).toBe(openAiWebAdapter);
+    expect(pickWebAdapter('https://myproxy.dev/anthropic')).toBe(openAiWebAdapter);
+    expect(pickWebAdapter('not a url')).toBe(openAiWebAdapter);
+  });
+});
+
+describe('openAiWebAdapter', () => {
+  const a: WebWireAdapter = openAiWebAdapter;
+
+  it('builds the chat URL, auth headers, and OpenAI body', () => {
+    expect(a.upstreamUrl('https://api.example.com/v1')).toBe('https://api.example.com/v1/chat/completions');
+    expect(a.upstreamHeaders(cfg())).toEqual({ Authorization: 'Bearer secret' });
+    expect(a.upstreamHeaders(cfg({ authSchema: 'header', authHeaderName: 'x-api-key' }))).toEqual({ 'x-api-key': 'secret' });
+    expect(a.upstreamHeaders(cfg({ authSchema: 'none' }))).toEqual({});
+    const msgs: WireMessage[] = [{ role: 'user', content: 'hi' }];
+    expect(a.buildBody('gpt-4o', msgs, 1536)).toEqual({
+      model: 'gpt-4o',
+      stream: true,
+      stream_options: { include_usage: true },
+      messages: msgs,
+      max_tokens: 1536,
+    });
+  });
+
+  it('parses SSE deltas, the [DONE] sentinel, and buffered content', () => {
+    expect(a.parseStreamLine('[DONE]')).toBe('');
+    expect(a.parseStreamLine(JSON.stringify({ choices: [{ delta: { content: 'He' } }] }))).toBe('He');
+    expect(a.parseStreamLine(JSON.stringify({ choices: [{ delta: {} }] }))).toBe('');
+    expect(a.parseStreamLine('{bad json')).toBe('');
+    expect(a.parseBuffered({ choices: [{ message: { content: 'full' } }] })).toBe('full');
+    expect(a.parseBuffered(null)).toBe('');
+  });
+});
+
+describe('anthropicWebAdapter', () => {
+  const a: WebWireAdapter = anthropicWebAdapter;
+
+  it('joins the messages path without doubling /v1', () => {
+    expect(a.upstreamUrl('https://api.anthropic.com')).toBe('https://api.anthropic.com/v1/messages');
+    expect(a.upstreamUrl('https://api.anthropic.com/v1')).toBe('https://api.anthropic.com/v1/messages');
+  });
+
+  it('sends both required headers and never a bearer, whatever the schema says', () => {
+    const headers = a.upstreamHeaders(cfg({ baseUrl: 'https://api.anthropic.com', apiKey: 'sk-ant' }));
+    expect(headers['x-api-key']).toBe('sk-ant');
+    expect(headers['anthropic-version']).toBe('2023-06-01');
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it('hoists system turns and emits an Anthropic body (max_tokens, no reasoning_effort)', () => {
+    const msgs: WireMessage[] = [
+      { role: 'system', content: 'sys A' },
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'hello' },
+      { role: 'system', content: 'sys B' },
+      { role: 'user', content: 'more' },
+    ];
+    const body = a.buildBody('claude-3-5-sonnet', msgs, 1536);
+    expect(body.system).toBe('sys A\n\nsys B');
+    expect(body.messages).toEqual([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'hello' },
+      { role: 'user', content: 'more' },
+    ]);
+    expect(body.max_tokens).toBe(1536);
+    expect(body.stream).toBe(true);
+    expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  it('omits system when there are no system turns', () => {
+    expect(a.buildBody('m', [{ role: 'user', content: 'hi' }], 1536).system).toBeUndefined();
+  });
+
+  it('forwards only text_delta, dropping thinking/other events and bad JSON', () => {
+    const textDelta = JSON.stringify({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hi' } });
+    const thinking = JSON.stringify({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'hmm' } });
+    expect(a.parseStreamLine(textDelta)).toBe('Hi');
+    expect(a.parseStreamLine(thinking)).toBe('');
+    expect(a.parseStreamLine(JSON.stringify({ type: 'message_stop' }))).toBe('');
+    expect(a.parseStreamLine(JSON.stringify({ type: 'error', error: { message: 'boom' } }))).toBe('');
+    expect(a.parseStreamLine('{bad')).toBe('');
+  });
+
+  it('joins buffered content[] text blocks and ignores non-text bodies', () => {
+    expect(
+      a.parseBuffered({ content: [{ type: 'text', text: 'a' }, { type: 'thinking', text: 'x' }, { type: 'text', text: 'b' }] }),
+    ).toBe('ab');
+    expect(a.parseBuffered({ type: 'error', error: { message: 'bad' } })).toBe('');
+    expect(a.parseBuffered(null)).toBe('');
+  });
+});

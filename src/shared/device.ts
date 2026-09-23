@@ -1,4 +1,4 @@
-// A record of a device that has signed in to Sylor through the web sign-in page (/authentication).
+// A record of a device that has signed in to Myto through the web sign-in page (/authentication).
 // Stored in Firestore at users/{uid}/devices/{deviceId} (client-side, guarded by firestore.rules),
 // one document per browser. Nothing here is secret — it is the user's own sign-in history.
 //
@@ -7,7 +7,7 @@
 // Firestore reads/writes — lives in src/lib/devices.ts. Keeping the stored shape and the user-agent
 // parser here means both stay importable and testable without a browser.
 
-/** Which Sylor surface a sign-in came through. */
+/** Which Myto surface a sign-in came through. */
 export type DevicePlatform = 'web' | 'desktop' | 'mobile';
 
 export interface DeviceSession {

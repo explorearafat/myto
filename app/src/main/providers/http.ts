@@ -154,10 +154,14 @@ export async function httpFetch(url: string, options: FetchOptions = {}): Promis
   }
 
   try {
+    // A string body is sent verbatim (the caller pre-encoded it and sets its own
+    // content-type, e.g. a form POST); any other value is JSON-encoded and gets the
+    // JSON content-type unless the caller overrode it.
+    const rawBody = typeof body === 'string'
     return await fetch(url, {
       method,
-      headers: body != null ? { 'content-type': 'application/json', ...headers } : headers,
-      body: body != null ? JSON.stringify(body) : undefined,
+      headers: body != null && !rawBody ? { 'content-type': 'application/json', ...headers } : headers,
+      body: body == null ? undefined : rawBody ? (body as string) : JSON.stringify(body),
       signal: controller.signal
     })
   } catch (err) {

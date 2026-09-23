@@ -1,6 +1,6 @@
 import { LINKS } from '../data';
 
-/* Deliberately slim — the reference has a Pricing entry, and Sylor's answer is
+/* Deliberately slim — the reference has a Pricing entry, and Myto's answer is
    short and honest: the app is free, you only pay whoever serves your model. */
 export function Pricing() {
   return (
@@ -17,7 +17,7 @@ export function Pricing() {
             Free. You bring the model.
           </h2>
           <p className="mx-auto mt-5 max-w-[46ch] text-[17px] leading-relaxed text-[#544f46]">
-            The Sylor app costs nothing. Your only spend is whatever your model provider charges —
+            The Myto app costs nothing. Your only spend is whatever your model provider charges —
             and that is <span className="font-medium text-[#141413]">zero</span> when the model runs
             locally on your machine.
           </p>
@@ -36,7 +36,7 @@ export function Pricing() {
             href={LINKS.downloadPage}
             className="mt-9 inline-flex items-center rounded-lg bg-[#141413] px-6 py-3 text-[15px] font-medium text-[#faf9f5] no-underline transition-colors duration-150 hover:bg-[#2b2721] active:translate-y-px"
           >
-            Get Sylor free
+            Get Myto free
           </a>
         </div>
       </div>

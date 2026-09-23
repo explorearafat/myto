@@ -23,6 +23,7 @@ import {
   type ToolCallParser,
 } from './tools';
 import { normalizeByokConfig, type ByokConfig } from '../shared/byok';
+import { pickWebAdapter, type WebWireAdapter } from './adapters';
 
 export interface WireMessage {
   role: 'system' | 'user' | 'assistant';
@@ -72,32 +73,26 @@ function sanitizeMessages(input: unknown): WireMessage[] {
   return out;
 }
 
-// Derive the auth header for the user's endpoint, mirroring the desktop GatewayProvider vocabulary.
-function authHeaders(cfg: ByokConfig): Record<string, string> {
-  if (!cfg.apiKey || cfg.authSchema === 'none') return {};
-  if (cfg.authSchema === 'header') return { [cfg.authHeaderName || 'Authorization']: cfg.apiKey };
-  return { Authorization: `Bearer ${cfg.apiKey}` };
-}
-
-// Open the upstream stream against the caller's own endpoint. There is a single endpoint, so there
-// is no failover; a non-OK status or a transport error simply surfaces as an in-stream error.
-async function openUpstream(cfg: ByokConfig, model: string, messages: WireMessage[]): Promise<Response | null> {
+// Open the upstream stream against the caller's own endpoint. The adapter supplies the format's URL,
+// auth headers, and request body; everything else (Accept, failure handling) is provider-agnostic.
+// There is a single endpoint, so there is no failover; a non-OK status or a transport error simply
+// surfaces as an in-stream error.
+async function openUpstream(
+  cfg: ByokConfig,
+  model: string,
+  messages: WireMessage[],
+  adapter: WebWireAdapter,
+): Promise<Response | null> {
   const base = cfg.baseUrl.replace(/\/+$/, '');
   try {
-    const res = await fetch(`${base}/chat/completions`, {
+    const res = await fetch(adapter.upstreamUrl(base), {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         Accept: 'text/event-stream',
-        ...authHeaders(cfg),
+        ...adapter.upstreamHeaders(cfg),
       },
-      body: JSON.stringify({
-        model,
-        stream: true,
-        stream_options: { include_usage: true },
-        messages,
-        max_tokens: MAX_OUTPUT_TOKENS,
-      }),
+      body: JSON.stringify(adapter.buildBody(model, messages, MAX_OUTPUT_TOKENS)),
     });
     if (res.ok && res.body) return res;
     try {
@@ -119,6 +114,7 @@ async function readTurn(
   upstream: Response,
   send: (obj: unknown) => void,
   parser: ToolCallParser | null,
+  adapter: WebWireAdapter,
 ): Promise<{ visible: string; call: ToolCall | null }> {
   let visible = '';
   let call: ToolCall | null = null;
@@ -140,11 +136,9 @@ async function readTurn(
 
   const ct = upstream.headers.get('content-type') || '';
   if (!ct.includes('text/event-stream')) {
-    // Buffered fallback: the whole JSON body, emitted as one token.
-    const data = (await upstream.json().catch(() => null)) as {
-      choices?: { message?: { content?: string } }[];
-    } | null;
-    emit(data?.choices?.[0]?.message?.content ?? '');
+    // Buffered fallback: the gateway ignored `stream:true` and answered with one JSON blob.
+    const data = await upstream.json().catch(() => null);
+    emit(adapter.parseBuffered(data));
   } else {
     const reader = upstream.body!.getReader();
     const dec = new TextDecoder();
@@ -158,15 +152,8 @@ async function readTurn(
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
         if (!line.startsWith('data:')) continue;
-        const d = line.slice(5).trim();
-        if (d === '[DONE]') continue;
-        try {
-          const j = JSON.parse(d) as { choices?: { delta?: { content?: string } }[] };
-          const delta = j?.choices?.[0]?.delta?.content;
-          if (typeof delta === 'string' && delta) emit(delta);
-        } catch {
-          // Partial JSON across chunks — the remainder stays buffered for the next read.
-        }
+        const text = adapter.parseStreamLine(line.slice(5).trim());
+        if (text) emit(text);
       }
       if (call) {
         // A complete tool call arrived — stop this turn early and hand back to the loop.
@@ -205,6 +192,8 @@ function buildAgentStream(
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const send = (obj: unknown) => controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
+      // Auto-detect the wire format once per reply from the caller's base URL.
+      const adapter = pickWebAdapter(cfg.baseUrl);
       const messages: WireMessage[] = [...base];
       let errored = false;
       try {
@@ -216,14 +205,14 @@ function buildAgentStream(
               content: 'Answer the user now using what you already have. Do not call any more tools.',
             });
           }
-          const upstream = await openUpstream(cfg, model, messages);
+          const upstream = await openUpstream(cfg, model, messages, adapter);
           if (!upstream) {
             send({ t: 'error', code: 'upstream' });
             errored = true;
             break;
           }
           const parser = toolsOn && !isLast ? createToolCallParser() : null;
-          const { visible, call } = await readTurn(upstream, send, parser);
+          const { visible, call } = await readTurn(upstream, send, parser, adapter);
           if (!call) break; // the model wrote its final answer
 
           const name = call.name ?? 'tool';

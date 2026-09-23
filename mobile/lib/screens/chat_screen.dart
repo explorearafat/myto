@@ -56,7 +56,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _send(String text) {
     final cfg = context.read<ByokService>().config;
     if (cfg == null || !cfg.isConfigured) {
-      _snack('Add your provider and a model on the Sylor website first.');
+      _snack('Add your provider and a model on the Myto website first.');
       return;
     }
     final store = _store;
@@ -163,7 +163,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final store = _store;
     final models = context.read<ByokService>().config?.models ?? const <ByokModel>[];
     if (models.isEmpty) {
-      _snack('Add your provider and a model on the Sylor website first.');
+      _snack('Add your provider and a model on the Myto website first.');
       return;
     }
     final chosen = await showModelPicker(context, models: models, selectedId: store.active.modelId);
@@ -212,7 +212,7 @@ class _ChatScreenState extends State<ChatScreen> {
         return '_You\'ve reached the shared daily limit. Please try again '
             '${_resetPhrase(resetSeconds)}._';
       case 'network':
-        return '_Couldn\'t reach Sylor. Check your connection and try again._';
+        return '_Couldn\'t reach Myto. Check your connection and try again._';
       default:
         return '_Something went wrong reaching the model. Please try again._';
     }
@@ -330,7 +330,7 @@ class _ChatScreenState extends State<ChatScreen> {
 class _SetupPrompt extends StatelessWidget {
   const _SetupPrompt({required this.palette});
 
-  final SylorPalette palette;
+  final MytoPalette palette;
 
   @override
   Widget build(BuildContext context) {
@@ -349,7 +349,7 @@ class _SetupPrompt extends StatelessWidget {
             ),
             const SizedBox(height: 10),
             Text(
-              'Open the Sylor website, sign in, and add your provider’s base URL, API key, and a '
+              'Open the Myto website, sign in, and add your provider’s base URL, API key, and a '
               'model on the Authentication page. It’ll sync here automatically.',
               textAlign: TextAlign.center,
               style: TextStyle(color: palette.muted, fontSize: 14, height: 1.5),

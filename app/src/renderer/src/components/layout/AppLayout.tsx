@@ -23,15 +23,15 @@ function Handle() {
  * sizes are passed as strings (e.g. "22" === 22%).
  */
 export function AppLayout() {
-  const root = useDefaultLayout({ id: 'sylor.root' })
+  const root = useDefaultLayout({ id: 'myto.root' })
   const railOpen = useAppStore((s) => s.railOpen)
-  // Sylor's preview pane opens on the right when the `preview` tool shows something.
+  // Myto's preview pane opens on the right when the `preview` tool shows something.
   const previewOpen = usePreviewStore((s) => s.open)
 
   return (
     <Group
       orientation="horizontal"
-      id="sylor.root"
+      id="myto.root"
       className="h-full"
       defaultLayout={root.defaultLayout}
       onLayoutChanged={root.onLayoutChanged}

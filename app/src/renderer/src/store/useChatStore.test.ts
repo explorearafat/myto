@@ -19,12 +19,12 @@ function loadedSession(id: string, messages: PersistedMessage[] = []): Persisted
   }
 }
 
-/** The jsdom setup stubs every window.sylor method as a vi.fn; narrow to that. */
+/** The jsdom setup stubs every window.myto method as a vi.fn; narrow to that. */
 const asMock = (fn: unknown): ReturnType<typeof vi.fn> => fn as ReturnType<typeof vi.fn>
 
 /** The mocked streaming entrypoint the lean chat store drives replies through. */
 const streamMock = (): ReturnType<typeof vi.fn> =>
-  asMock(window.sylor.providers.streamCompletion)
+  asMock(window.myto.providers.streamCompletion)
 
 /** Drives a captured run's stream, filling in the CompletionChunk defaults. */
 type Emit = (chunk: { delta?: string; done?: boolean; error?: string; status?: string }) => void
@@ -125,7 +125,7 @@ describe('useChatStore hydration', () => {
  */
 describe('useChatStore assistant persistence', () => {
   it('persists the assistant row up-front, not only on done', async () => {
-    const append = asMock(window.sylor.sessions.appendMessage)
+    const append = asMock(window.myto.sessions.appendMessage)
     append.mockClear()
 
     await startRunIn('sess-persist-1', 'hi')
@@ -141,7 +141,7 @@ describe('useChatStore assistant persistence', () => {
   it('checkpoints streamed prose before done, so an interrupted run keeps its reply', async () => {
     const emit = await startRunIn('sess-persist-2', 'question')
     const assistantId = useChatStore.getState().messages.at(-1)!.id
-    const append = asMock(window.sylor.sessions.appendMessage)
+    const append = asMock(window.myto.sessions.appendMessage)
     append.mockClear()
 
     vi.useFakeTimers()
@@ -162,7 +162,7 @@ describe('useChatStore assistant persistence', () => {
   it('persists the partial reply when the run is cancelled (Stop)', async () => {
     const emit = await startRunIn('sess-persist-3', 'question')
     const assistantId = useChatStore.getState().messages.at(-1)!.id
-    const append = asMock(window.sylor.sessions.appendMessage)
+    const append = asMock(window.myto.sessions.appendMessage)
     append.mockClear()
 
     // A delta arrives but is still buffered (its flush timer hasn't fired) when the
@@ -345,7 +345,7 @@ describe('useChatStore live status', () => {
  */
 describe('useChatStore message actions', () => {
   it('toggles a like reaction on and off, persisting each change', () => {
-    const setFeedback = asMock(window.sylor.sessions.setFeedback)
+    const setFeedback = asMock(window.myto.sessions.setFeedback)
     setFeedback.mockClear()
     useChatStore.getState().applyLoaded(
       loadedSession('sess-fb-1', [{ id: 'm1', role: 'assistant', content: 'hi' }])
@@ -363,7 +363,7 @@ describe('useChatStore message actions', () => {
   })
 
   it('toggles the reported flag, persisting it alongside the reaction', () => {
-    const setFeedback = asMock(window.sylor.sessions.setFeedback)
+    const setFeedback = asMock(window.myto.sessions.setFeedback)
     setFeedback.mockClear()
     useChatStore.getState().applyLoaded(
       loadedSession('sess-fb-2', [{ id: 'm1', role: 'assistant', content: 'hi' }])
@@ -381,7 +381,7 @@ describe('useChatStore message actions', () => {
         { id: 'm2', role: 'assistant', content: 'old reply' }
       ])
     )
-    const reset = asMock(window.sylor.sessions.resetMessage)
+    const reset = asMock(window.myto.sessions.resetMessage)
     reset.mockClear()
     let onChunk: ((c: CompletionChunk) => void) | null = null
     streamMock().mockImplementationOnce((_req: unknown, cb: (c: CompletionChunk) => void) => {

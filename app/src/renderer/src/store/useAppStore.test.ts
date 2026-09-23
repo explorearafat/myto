@@ -5,7 +5,7 @@ import { DEFAULT_PROVIDER_SETTINGS } from '@shared/defaults'
 describe('useAppStore', () => {
   beforeEach(() => {
     useAppStore.setState({
-      projectName: 'Sylor',
+      projectName: 'Myto',
       isMaximized: false,
       settings: DEFAULT_PROVIDER_SETTINGS,
       settingsLoaded: false,
@@ -22,7 +22,7 @@ describe('useAppStore', () => {
 
   it('exposes the expected defaults', () => {
     const state = useAppStore.getState()
-    expect(state.projectName).toBe('Sylor')
+    expect(state.projectName).toBe('Myto')
     expect(state.envStatus).toBe('local')
     expect(state.isMaximized).toBe(false)
     expect(state.settings.activeProvider).toBe('ollama')

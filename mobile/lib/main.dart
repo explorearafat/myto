@@ -16,7 +16,7 @@ Future<void> main() async {
   final store = ConversationStore();
   await store.load();
 
-  runApp(SylorApp(auth: auth, byok: byok, store: store));
+  runApp(MytoApp(auth: auth, byok: byok, store: store));
 }
 
 Future<bool> _initFirebase() async {

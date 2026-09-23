@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../theme.dart';
-import 'sylor_star.dart';
+import 'myto_mark.dart';
 
 
 class ChatEmptyState extends StatelessWidget {
@@ -55,7 +55,7 @@ class ChatEmptyState extends StatelessWidget {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const SylorStarAura(auraSize: 132, starSize: 56),
+                const MytoMarkAura(auraSize: 132, starSize: 56),
                 const SizedBox(height: 20),
                 Text(
                   _greeting(firstName),
@@ -83,7 +83,7 @@ class ChatEmptyState extends StatelessWidget {
     );
   }
 
-  Widget _grid(SylorPalette palette) {
+  Widget _grid(MytoPalette palette) {
     return Column(
       children: [
         Row(
@@ -105,7 +105,7 @@ class ChatEmptyState extends StatelessWidget {
     );
   }
 
-  Widget _card(SylorPalette palette, _Starter s) {
+  Widget _card(MytoPalette palette, _Starter s) {
     return Material(
       color: palette.surface,
       borderRadius: BorderRadius.circular(14),

@@ -6,6 +6,7 @@ import type {
   ListModelsResult,
   TestConnectionResult
 } from '../../shared/types'
+import { pickAdapter, type WireAdapter } from './adapters'
 import { collectCompletion } from './collect'
 import {
   COMPLETION_TIMEOUT_MS,
@@ -17,88 +18,41 @@ import {
   STREAM_STALL_MS,
   toErrorMessage
 } from './http'
-import { modelInfo, type Provider } from './provider'
+import { type Provider } from './provider'
 
 /**
- * OpenAI-compatible sampling fields for the request body. We prefer
- * `reasoning_effort` (a capable gateway maps it to the model's extended-thinking
- * budget — the single biggest quality lever) and, because Anthropic-backed
- * proxies reject a custom temperature while thinking is on, send `temperature`
- * ONLY when no reasoning effort is requested. `max_tokens` is orthogonal to both
- * and is added whenever the caller sets it (the `max` tier), lifting the output
- * ceiling so a big generation isn't truncated. Unknown fields are ignored by
- * spec-compliant gateways, so this can only help a capable backend.
+ * The remote-gateway provider. It owns all the shared plumbing — fetch, the stall
+ * guard, the SSE line reader, content-type sniffing, the Cloudflare/HTML block
+ * detection, and Retry-After — and delegates every format-specific decision
+ * (endpoint URLs, auth headers, request body, per-line parse, buffered parse,
+ * models parse) to a {@link WireAdapter} chosen from the base URL. That is what
+ * lets one BYOK config drive an OpenAI-compatible endpoint or the native Anthropic
+ * Messages API through a single interface; see `./adapters`.
  */
-function samplingBody(options?: CompletionOptions): Record<string, unknown> {
-  if (!options) return {}
-  const body: Record<string, unknown> = {}
-  if (options.reasoningEffort) {
-    // 'max' is Sylor-internal; the wire vocabulary tops out at 'high'.
-    body.reasoning_effort = options.reasoningEffort === 'max' ? 'high' : options.reasoningEffort
-  } else if (typeof options.temperature === 'number') {
-    body.temperature = options.temperature
-  }
-  if (typeof options.maxTokens === 'number') body.max_tokens = options.maxTokens
-  return body
-}
-
-/**
- * Expands our {@link ChatMessage}[] into the OpenAI chat wire format. A text-only
- * message passes straight through (`{role, content: string}`); a message carrying
- * images is rewritten into the multimodal parts array — one `text` part plus an
- * `image_url` part per image, each a `data:<mime>;base64,<bytes>` URL the gateway
- * forwards to the model's vision input. A gateway or model without vision ignores
- * the parts it can't use, and the text caption in `content` still carries meaning.
- */
-function toOpenAiMessages(messages: ChatMessage[]): unknown[] {
-  return messages.map((m) => {
-    if (!m.images || m.images.length === 0) return { role: m.role, content: m.content }
-    const parts: unknown[] = [{ type: 'text', text: m.content }]
-    for (const img of m.images) {
-      parts.push({
-        type: 'image_url',
-        image_url: { url: `data:${img.mediaType};base64,${img.dataBase64}` }
-      })
-    }
-    return { role: m.role, content: parts }
-  })
-}
-interface GatewayModelsResponse {
-  data?: Array<{ id: string }>
-}
-interface ChatCompletionResponse {
-  choices?: Array<{ message?: { content?: string } }>
-  error?: { message?: string }
-}
-interface ChatCompletionStreamChunk {
-  choices?: Array<{ delta?: { content?: string; reasoning?: string } }>
-  error?: { message?: string }
-}
 export class GatewayProvider implements Provider {
   private readonly baseUrl: string
   private readonly config: GatewayConfig
+  private readonly adapter: WireAdapter
 
   constructor(config: GatewayConfig) {
     this.baseUrl = normaliseBaseUrl(config.baseUrl)
     this.config = config
+    // Auto-detect the wire format from the endpoint host; invisible to the config.
+    this.adapter = pickAdapter(this.baseUrl)
   }
+
   private authHeaders(): Record<string, string> {
-    const { authSchema, apiKey, authHeaderName } = this.config
-    if (!apiKey) return {}
-    if (authSchema === 'bearer') return { Authorization: `Bearer ${apiKey}` }
-    if (authSchema === 'header' && authHeaderName.trim()) return { [authHeaderName.trim()]: apiKey }
-    return {}
+    return this.adapter.authHeaders(this.config)
   }
 
   async listModels(): Promise<ListModelsResult> {
     if (!this.baseUrl) return { ok: false, models: [], error: 'Base URL is required.' }
     try {
-      const data = await httpJson<GatewayModelsResponse>(`${this.baseUrl}/models`, {
+      const data = await httpJson<unknown>(this.adapter.modelsUrl(this.baseUrl), {
         headers: this.authHeaders(),
         timeoutMs: 10_000
       })
-      const models = (data.data ?? []).map((m) => modelInfo(m.id))
-      return { ok: true, models }
+      return { ok: true, models: this.adapter.parseModels(data) }
     } catch (err) {
       return { ok: false, models: [], error: toErrorMessage(err) }
     }
@@ -122,15 +76,11 @@ export class GatewayProvider implements Provider {
       }
     }
     try {
-      const res = await httpFetch(`${this.baseUrl}/chat/completions`, {
+      const res = await httpFetch(this.adapter.chatUrl(this.baseUrl), {
         method: 'POST',
         headers: this.authHeaders(),
         timeoutMs: 20_000,
-        body: {
-          model: modelId,
-          max_tokens: 1,
-          messages: [{ role: 'user', content: 'ping' }]
-        }
+        body: this.adapter.pingBody(modelId)
       })
       const latencyMs = Date.now() - started
       if (!res.ok) {
@@ -191,17 +141,32 @@ export class GatewayProvider implements Provider {
     guard: ReturnType<typeof stallGuard>,
     options?: CompletionOptions
   ): Promise<void> {
-    const res = await httpFetch(`${this.baseUrl}/chat/completions`, {
+    const res = await httpFetch(this.adapter.chatUrl(this.baseUrl), {
       method: 'POST',
       // `Accept` nudges gateways that decide streaming from request headers to
       // actually stream; the non-SSE fallback below covers those that ignore it.
       headers: { Accept: 'text/event-stream', ...this.authHeaders() },
       timeoutMs: COMPLETION_TIMEOUT_MS,
       signal: guard.signal,
-      body: { model: modelId, stream: true, messages: toOpenAiMessages(messages), ...samplingBody(options) }
+      body: this.adapter.buildBody(modelId, messages, options)
     })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
+      // A Cloudflare / edge firewall block returns an HTML page, not an API error.
+      // Dumping that raw HTML into the chat is noise and hides what's wrong, so
+      // detect it and surface a clear, actionable message instead.
+      const server = (res.headers.get('server') ?? '').toLowerCase()
+      const looksHtml = /^\s*<!doctype html|^\s*<html/i.test(text)
+      const cloudflareBlock =
+        looksHtml && (server.includes('cloudflare') || /attention required|cloudflare|you have been blocked/i.test(text))
+      if (cloudflareBlock || looksHtml) {
+        const err = new Error(
+          `Your model endpoint refused the request (HTTP ${res.status}${
+            cloudflareBlock ? ', blocked by Cloudflare' : ''
+          }). The endpoint is reachable but its firewall is rejecting chat requests from your network — this is on the provider, not Myto. Try a different network or VPN, or switch to a working endpoint on the Myto website → Authentication page.`
+        )
+        throw err
+      }
       const err = new Error(`HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 160)}` : ''}`)
       // Surface Retry-After so withRetry can honour it (Principle 6 #2).
       const retryAfter = res.headers.get('retry-after')
@@ -221,46 +186,32 @@ export class GatewayProvider implements Provider {
     // fed that to the SSE reader it would find no `data:` lines and emit nothing —
     // the connection "works" yet the user gets total silence. Detect a
     // non-event-stream response, read the whole body, and emit its content as one
-    // delta so the answer still arrives. An error field is surfaced, and an
-    // unrecognised body throws (visible) rather than failing quietly.
+    // delta so the answer still arrives. The adapter's parseBuffered surfaces an
+    // error field and throws (visible) on an unrecognised body rather than failing
+    // quietly.
     const contentType = res.headers.get('content-type') ?? ''
     if (!res.body || !contentType.includes('text/event-stream')) {
-      const data = (await res.json().catch(() => null)) as ChatCompletionResponse | null
-      if (data?.error?.message) throw new Error(data.error.message)
-      if (data && Array.isArray(data.choices)) {
-        const content = data.choices[0]?.message?.content ?? ''
-        if (content) onChunk({ delta: content, done: false })
-        onChunk({ delta: '', done: true })
-        return
-      }
-      throw new Error(
-        'The gateway returned a non-streaming response with no recognisable message content. ' +
-          'The model id may not be valid for chat completions on this endpoint.'
-      )
+      const data = await res.json().catch(() => null)
+      const content = this.adapter.parseBuffered(data)
+      if (content) onChunk({ delta: content, done: false })
+      onChunk({ delta: '', done: true })
+      return
     }
 
     await readSse(
       res.body,
       (data) => {
-        if (data === '[DONE]') {
-          onChunk({ delta: '', done: true })
-          return
-        }
-        let parsed: ChatCompletionStreamChunk
-        try {
-          parsed = JSON.parse(data) as ChatCompletionStreamChunk
-        } catch {
-          return
-        }
-        if (parsed.error?.message) throw new Error(parsed.error.message)
-        // Reasoning models stream their chain-of-thought in `delta.reasoning` while
-        // `delta.content` stays empty — often for tens of seconds. Forward it
-        // out-of-band (empty delta) so the funnel can show a live "thinking"
-        // caption; it must never join the reply text.
-        const reasoning = parsed.choices?.[0]?.delta?.reasoning
-        if (reasoning) onChunk({ delta: '', done: false, reasoning })
-        const delta = parsed.choices?.[0]?.delta?.content ?? ''
-        if (delta) onChunk({ delta, done: false })
+        // The adapter maps this format's SSE payload onto a normalised event
+        // (delta / reasoning / done), or null to ignore it, and throws on an
+        // in-band error frame so it surfaces instead of going silent.
+        const event = this.adapter.parseStreamData(data)
+        if (!event) return
+        // Reasoning is forwarded out-of-band (empty delta) so the funnel can show a
+        // live "thinking" caption; it must never join the reply text. Emit it
+        // before the content delta, matching the pre-adapter ordering.
+        if (event.reasoning) onChunk({ delta: '', done: false, reasoning: event.reasoning })
+        if (event.delta) onChunk({ delta: event.delta, done: false })
+        if (event.done) onChunk({ delta: '', done: true })
       },
       // Progress is *any* byte, including a keep-alive comment line — the point
       // is that the connection is still producing, not that it produced content.

@@ -21,6 +21,7 @@ import type {
   PluginConfig,
   ProviderKind,
   ProviderSettings,
+  ReasoningEffort,
   SkillConfig,
   Theme
 } from '../shared/types'
@@ -123,6 +124,7 @@ const VALID_SCHEMAS: AuthSchema[] = ['none', 'bearer', 'header']
 const VALID_THEMES: Theme[] = ['light', 'dark']
 const VALID_PERMISSION_MODES: CoworkPermissionMode[] = ['ask', 'autoApprove', 'bypass']
 const VALID_TRANSPORTS: McpTransport[] = ['stdio', 'http', 'sse']
+const VALID_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'max']
 
 /** A string→string record, keeping only string values (env / headers hygiene). */
 function stringRecord(raw: unknown): Record<string, string> | undefined {
@@ -212,7 +214,7 @@ function normalisePlugin(raw: unknown): PluginConfig | null {
 /**
  * Merges a raw (possibly partial or stale) settings object onto the defaults,
  * validating every field. Exported for unit tests; also the single normalisation
- * point for {@link getSettings} and {@link saveSettings}. Now that Sylor is a
+ * point for {@link getSettings} and {@link saveSettings}. Now that Myto is a
  * plain chatbot the only UI preference is the theme.
  */
 export function normalise(raw: unknown): ProviderSettings {
@@ -273,7 +275,10 @@ export function normalise(raw: unknown): ProviderSettings {
       : d.skills,
     plugins: Array.isArray(o.plugins)
       ? o.plugins.map(normalisePlugin).filter((p): p is PluginConfig => p !== null)
-      : d.plugins
+      : d.plugins,
+    reasoningEffort: VALID_EFFORTS.includes(o.reasoningEffort as ReasoningEffort)
+      ? (o.reasoningEffort as ReasoningEffort)
+      : d.reasoningEffort
   }
 }
 
@@ -295,7 +300,7 @@ export function saveSettings(settings: ProviderSettings): ProviderSettings {
   } catch (error) {
     // A surface that reacts badly to a preference must never lose the save that
     // has already been written to disk.
-    console.error('[sylor] settings-saved listener failed:', error)
+    console.error('[myto] settings-saved listener failed:', error)
   }
   return normalised
 }

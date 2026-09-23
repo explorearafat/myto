@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { usePreviewStore, currentTarget } from '../store/usePreviewStore'
 
 /**
- * Sylor's preview pane (Cowork): a small browser beside the chat that Sylor drives
+ * Myto's preview pane (Cowork): a small browser beside the chat that Myto drives
  * with the `preview` tool to show its work as it goes — a plan, an HTML page, a
  * generated PDF/chart/image, or a localhost dev server. The user gets ordinary
  * browser controls over it (back / forward / reload / pop out / close).
@@ -110,7 +110,7 @@ export function PreviewPane() {
           <div className="truncate text-[12px] font-medium text-text" title={target?.title}>
             {target?.title || 'Preview'}
           </div>
-          <div className="text-[10px] text-muted">Sylor preview</div>
+          <div className="text-[10px] text-muted">Myto preview</div>
         </div>
 
         <PaneButton label="Back" disabled={index <= 0} onClick={back}>
@@ -149,7 +149,7 @@ export function PreviewPane() {
 
       {/* The loading shimmer sits just under the header. */}
       <div className="h-0.5 shrink-0 overflow-hidden bg-transparent">
-        {loading && <div className="sylor-preview-bar h-full w-1/3 bg-primary/70" />}
+        {loading && <div className="myto-preview-bar h-full w-1/3 bg-primary/70" />}
       </div>
 
       {/* The guest. Keyed remounts on navigate/reload keep it purely prop-driven. */}

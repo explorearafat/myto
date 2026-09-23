@@ -193,7 +193,7 @@ export function mostRecentSession(): string | null {
 
 /** Shown on an assistant turn whose run never finished (see {@link reconcileInterruptedRuns}). */
 export const INTERRUPTED_NOTE =
-  'Interrupted — Sylor closed while this reply was still being written. Press Rewrite to run it again.'
+  'Interrupted — Myto closed while this reply was still being written. Press Rewrite to run it again.'
 
 /**
  * Tag assistant turns left empty by a run that never finished.

@@ -8,13 +8,13 @@
  * result block. This is the funnel that pulls a tool CALL out of the raw token
  * stream:
  *
- *     ```sylor:tool
+ *     ```myto:tool
  *     {"tool": "web_search", "input": {"query": "webgpu 2026"}}
  *     ```
  *
  * {@link createToolCallParser} mirrors the status stripper's hold-back-tail design
  * (see main/status.ts): it forwards ordinary text immediately but holds a run that
- * could still grow into an opening `` ```sylor:tool `` fence, and once the block's
+ * could still grow into an opening `` ```myto:tool `` fence, and once the block's
  * closing fence arrives it returns the whole block plus the parsed call. The reply
  * loop (provider-ipc.ts) — not this parser — owns the terminal `done`.
  *
@@ -22,11 +22,11 @@
  */
 
 /** The info-line marker that opens a tool-call block (always exactly 3 backticks). */
-const MARKER = '```sylor:tool'
+const MARKER = '```myto:tool'
 
 /** A completed tool call detected in the stream. */
 export interface ToolCall {
-  /** The exact block text (```` ```sylor:tool … ``` ````) to write into the reply for the card. */
+  /** The exact block text (```` ```myto:tool … ``` ````) to write into the reply for the card. */
   block: string
   /** Parsed tool name, or null when the JSON was missing/malformed. */
   name: string | null
@@ -208,5 +208,5 @@ export function fenceFor(text: string): string {
  */
 export function toolResultBlock(name: string, result: string): string {
   const fence = fenceFor(result)
-  return `\n\n${fence}sylor:tool_result ${name}\n${result}\n${fence}\n\n`
+  return `\n\n${fence}myto:tool_result ${name}\n${result}\n${fence}\n\n`
 }

@@ -3,7 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../services/auth_service.dart';
 import '../theme.dart';
-import '../widgets/sylor_star.dart';
+import '../widgets/myto_mark.dart';
 
 class SignInScreen extends StatelessWidget {
   const SignInScreen({super.key});
@@ -31,10 +31,10 @@ class SignInScreen extends StatelessWidget {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const SylorStarAura(auraSize: 132, starSize: 64),
+                    const MytoMarkAura(auraSize: 132, starSize: 64),
                     const SizedBox(height: 18),
                   Text(
-                    'Sylor',
+                    'Myto',
                     style: TextStyle(
                       color: palette.text,
                       fontSize: 30,
@@ -80,7 +80,7 @@ class SignInScreen extends StatelessWidget {
     );
   }
 
-  Widget _errorBanner(SylorPalette palette, String message) => Container(
+  Widget _errorBanner(MytoPalette palette, String message) => Container(
         margin: const EdgeInsets.only(bottom: 18),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
@@ -95,11 +95,11 @@ class SignInScreen extends StatelessWidget {
     required String label,
     required IconData icon,
     required VoidCallback? onTap,
-    required SylorPalette palette,
+    required MytoPalette palette,
     required bool filled,
   }) {
     final bg = filled ? palette.accent : palette.surface;
-    final fg = filled ? Colors.white : palette.text;
+    final fg = filled ? palette.onAccent : palette.text;
     return SizedBox(
       width: double.infinity,
       height: 52,

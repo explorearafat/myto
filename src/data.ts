@@ -3,16 +3,16 @@
 // that must not drift — links, the current release, and the platform matrix.
 
 export const LINKS = {
-  // Sylor is closed-source. The source repo is private, and private-repo release
+  // Myto is closed-source. The source repo is private, and private-repo release
   // assets are not anonymously downloadable — so every public download points at
   // the `sylor-dist` mirror, which holds only the built installers, never source.
   /** Direct Windows installer (public downloads mirror). */
-  download: 'https://github.com/explorearafat/sylor-dist/releases/latest/download/Sylor-Setup.exe',
+  download: 'https://github.com/explorearafat/sylor-dist/releases/latest/download/Myto-Setup.exe',
   /** Native Android APK (public downloads mirror). */
-  androidApk: 'https://github.com/explorearafat/sylor-dist/releases/latest/download/sylor.apk',
+  androidApk: 'https://github.com/explorearafat/sylor-dist/releases/latest/download/myto.apk',
   /** The platform chooser — where the header/footer Download links point. */
   downloadPage: '/download',
-  /** The Sylor chat — a full chat interface, client-side, that answers questions about Sylor. */
+  /** The Myto chat — a full chat interface, client-side, that answers questions about Myto. */
   chatPage: '/chat',
   /** All published installers (downloads mirror — no source). */
   releases: 'https://github.com/explorearafat/sylor-dist/releases/latest',
@@ -57,7 +57,7 @@ export const PLATFORMS: Platform[] = [
     status: 'Planned',
     ready: false,
     requires: 'Apple silicon and Intel',
-    body: 'Not built yet. Sylor runs on Electron, so this is packaging and signing work rather than a rewrite — the releases page is the place to watch.',
+    body: 'Not built yet. Myto runs on Electron, so this is packaging and signing work rather than a rewrite — the releases page is the place to watch.',
   },
   {
     name: 'Linux',

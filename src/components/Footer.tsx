@@ -1,4 +1,4 @@
-import { SylorStar } from './SylorStar';
+import { MytoMark } from './MytoMark';
 import { LINKS } from '../data';
 
 /* In-page sections (hash) plus the real subpages. On a subpage the hashes have
@@ -30,12 +30,15 @@ export function Footer({ subpage = false }: FooterProps) {
               href={subpage ? '/' : '#top'}
               className="flex items-center gap-2.5 no-underline"
             >
-              <SylorStar size={22} />
+              <MytoMark size={22} />
               <span className="font-display text-[20px] leading-none tracking-[-0.01em] text-[#141413]">
-                Sylor
+                Myto
               </span>
             </a>
-            <p className="mt-3.5 max-w-[34ch] text-[14px] leading-relaxed text-[#6b675e]">
+            <p className="mt-3 text-[11px] font-medium uppercase tracking-[0.2em] text-[#9c988e]">
+              Build · Chat · Cowork
+            </p>
+            <p className="mt-2.5 max-w-[34ch] text-[14px] leading-relaxed text-[#6b675e]">
               The AI coding agent for modern developers.
             </p>
           </div>
@@ -55,7 +58,7 @@ export function Footer({ subpage = false }: FooterProps) {
         </div>
 
         <div className="mt-10 border-t border-[#eceae2] pt-6 text-[13px] text-[#9c988e]">
-          © 2026 Sylor. All rights reserved.
+          © 2026 Myto. All rights reserved.
         </div>
       </div>
     </footer>

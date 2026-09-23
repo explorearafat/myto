@@ -34,19 +34,19 @@ function seedActive(title = 'New session'): void {
  */
 function wireRenameRoundTrip(): { current: () => string } {
   let title = 'New session'
-  window.sylor.sessions.rename = vi.fn(async (_id: string, t: string) => {
+  window.myto.sessions.rename = vi.fn(async (_id: string, t: string) => {
     title = t
   })
-  window.sylor.sessions.list = vi.fn(async () => [summary({ title })])
+  window.myto.sessions.list = vi.fn(async () => [summary({ title })])
   return { current: () => title }
 }
 
 beforeEach(() => {
   // Benign defaults; individual tests override the ones they assert on.
   useSessionStore.setState({ sessions: [], activeSessionId: null, activeProjectId: null })
-  window.sylor.sessions.rename = vi.fn().mockResolvedValue(undefined)
-  window.sylor.sessions.list = vi.fn().mockResolvedValue([])
-  window.sylor.providers.getCompletion = vi.fn().mockResolvedValue({ ok: true, content: '' })
+  window.myto.sessions.rename = vi.fn().mockResolvedValue(undefined)
+  window.myto.sessions.list = vi.fn().mockResolvedValue([])
+  window.myto.providers.getCompletion = vi.fn().mockResolvedValue({ ok: true, content: '' })
 })
 
 describe('deriveTitle (instant heuristic)', () => {
@@ -107,52 +107,52 @@ describe('cleanModelTitle (sanitize a model reply)', () => {
 describe('autoName (heuristic first, AI refinement)', () => {
   it('sets the heuristic immediately, then refines with the AI title', async () => {
     wireRenameRoundTrip()
-    window.sylor.providers.getCompletion = vi
+    window.myto.providers.getCompletion = vi
       .fn()
       .mockResolvedValue({ ok: true, content: 'Build A Todo App' })
     seedActive('New session')
 
     await useSessionStore.getState().autoName('build a todo app in react')
 
-    const rename = vi.mocked(window.sylor.sessions.rename)
+    const rename = vi.mocked(window.myto.sessions.rename)
     expect(rename).toHaveBeenNthCalledWith(1, 'sess-1', 'build a todo app in react')
     expect(rename).toHaveBeenNthCalledWith(2, 'sess-1', 'Build A Todo App')
   })
 
   it('keeps the heuristic when the provider is unreachable (empty reply)', async () => {
     wireRenameRoundTrip()
-    window.sylor.providers.getCompletion = vi.fn().mockResolvedValue({ ok: false, content: '' })
+    window.myto.providers.getCompletion = vi.fn().mockResolvedValue({ ok: false, content: '' })
     seedActive('New session')
 
     await useSessionStore.getState().autoName('build a todo app')
 
-    const rename = vi.mocked(window.sylor.sessions.rename)
+    const rename = vi.mocked(window.myto.sessions.rename)
     expect(rename).toHaveBeenCalledTimes(1)
     expect(rename).toHaveBeenCalledWith('sess-1', 'build a todo app')
   })
 
   it('keeps the heuristic when the AI title equals it (no redundant rename)', async () => {
     wireRenameRoundTrip()
-    window.sylor.providers.getCompletion = vi
+    window.myto.providers.getCompletion = vi
       .fn()
       .mockResolvedValue({ ok: true, content: 'build a todo app' })
     seedActive('New session')
 
     await useSessionStore.getState().autoName('build a todo app')
 
-    expect(vi.mocked(window.sylor.sessions.rename)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(window.myto.sessions.rename)).toHaveBeenCalledTimes(1)
   })
 
   it('never touches a session that already carries a real title', async () => {
-    window.sylor.providers.getCompletion = vi
+    window.myto.providers.getCompletion = vi
       .fn()
       .mockResolvedValue({ ok: true, content: 'Something' })
     seedActive('User Named This')
 
     await useSessionStore.getState().autoName('build a todo app')
 
-    expect(vi.mocked(window.sylor.sessions.rename)).not.toHaveBeenCalled()
-    expect(vi.mocked(window.sylor.providers.getCompletion)).not.toHaveBeenCalled()
+    expect(vi.mocked(window.myto.sessions.rename)).not.toHaveBeenCalled()
+    expect(vi.mocked(window.myto.providers.getCompletion)).not.toHaveBeenCalled()
   })
 
   it('is a no-op for an attachment-only turn (no usable prompt text)', async () => {
@@ -161,13 +161,13 @@ describe('autoName (heuristic first, AI refinement)', () => {
 
     await useSessionStore.getState().autoName('   \n  ')
 
-    expect(vi.mocked(window.sylor.sessions.rename)).not.toHaveBeenCalled()
+    expect(vi.mocked(window.myto.sessions.rename)).not.toHaveBeenCalled()
   })
 
   it('does not clobber a manual rename that lands while the AI call is in flight', async () => {
     wireRenameRoundTrip()
     // Simulate the user renaming the session during the awaited AI round-trip.
-    window.sylor.providers.getCompletion = vi.fn(async () => {
+    window.myto.providers.getCompletion = vi.fn(async () => {
       useSessionStore.setState({ sessions: [summary({ title: 'User Renamed' })] })
       return { ok: true, content: 'Ai Suggested Title' }
     })
@@ -177,7 +177,7 @@ describe('autoName (heuristic first, AI refinement)', () => {
 
     // Only the heuristic rename ran; the AI pass backed off because the title
     // no longer matched what it had set.
-    const titles = vi.mocked(window.sylor.sessions.rename).mock.calls.map((c) => c[1])
+    const titles = vi.mocked(window.myto.sessions.rename).mock.calls.map((c) => c[1])
     expect(titles).toEqual(['build a todo app'])
   })
 })
@@ -185,8 +185,8 @@ describe('autoName (heuristic first, AI refinement)', () => {
 describe('boot (fresh landing page, never restores the last chat)', () => {
   it('clears any stale project filter, shows an empty draft, and does NOT reopen mostRecent', async () => {
     useSessionStore.setState({ activeProjectId: 'proj-old', activeSessionId: 'sess-old' })
-    window.sylor.sessions.mostRecent = vi.fn().mockResolvedValue('sess-recent')
-    window.sylor.sessions.list = vi.fn().mockResolvedValue([])
+    window.myto.sessions.mostRecent = vi.fn().mockResolvedValue('sess-recent')
+    window.myto.sessions.list = vi.fn().mockResolvedValue([])
 
     await useSessionStore.getState().boot()
 
@@ -197,14 +197,14 @@ describe('boot (fresh landing page, never restores the last chat)', () => {
     expect(useSessionStore.getState().activeSessionId).toBeNull()
     expect(useChatStore.getState().sessionId).toBeNull()
     // The last conversation is deliberately NOT restored (reopen = clean slate).
-    expect(window.sylor.sessions.mostRecent).not.toHaveBeenCalled()
+    expect(window.myto.sessions.mostRecent).not.toHaveBeenCalled()
   })
 })
 
 describe('newDraft (Claude-Desktop "New chat": no row until the first send)', () => {
   it('drops to an unsaved draft, keeps the project scope, and refreshes the list', async () => {
     useSessionStore.setState({ activeSessionId: 'sess-old', activeProjectId: 'proj-x' })
-    window.sylor.sessions.list = vi.fn().mockResolvedValue([summary({ id: 'sess-x' })])
+    window.myto.sessions.list = vi.fn().mockResolvedValue([summary({ id: 'sess-x' })])
 
     await useSessionStore.getState().newDraft()
 
@@ -213,7 +213,7 @@ describe('newDraft (Claude-Desktop "New chat": no row until the first send)', ()
     expect(useSessionStore.getState().activeProjectId).toBe('proj-x')
     expect(useChatStore.getState().sessionId).toBeNull()
     // The (global) recents list is reloaded so the rail stays current.
-    expect(window.sylor.sessions.list).toHaveBeenCalledWith('proj-x')
+    expect(window.myto.sessions.list).toHaveBeenCalledWith('proj-x')
     expect(useSessionStore.getState().sessions.map((s) => s.id)).toEqual(['sess-x'])
   })
 })

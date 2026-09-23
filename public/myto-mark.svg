@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Myto — universal logo mark. A monochrome mitochondria: a tilted, organic bean with a
+  double membrane (two continuous contours) and four rounded finger-like cristae folding in
+  from the lower wall, one pole left open. viewBox 0 0 512 512, hand-built Bézier paths.
+  Uses currentColor so it inverts with context; the embedded <style> gives a light/dark
+  default so it also works as a bare favicon or <img src>. To recolour when inlined, set
+  `color` on the <svg> (or an ancestor). Kept identical to MytoMark.tsx and the mobile painter.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Myto">
+  <title>Myto</title>
+  <style>
+    :root { color: #181818; }
+    @media (prefers-color-scheme: dark) { :root { color: #f0f0ec; } }
+  </style>
+  <g transform="rotate(12 256 256)">
+    <path stroke-width="17" d="M100 260C100 212 134 178 182 170C214 165 234 187 258 193C284 199 302 170 342 168C394 166 436 202 434 254C432 306 398 348 344 356C302 362 282 368 252 368C194 368 132 354 110 320C97 300 98 282 100 260Z"/>
+    <path stroke-width="13" d="M142 258C142 224 168 204 202 199C228 195 244 209 266 214C288 219 302 200 330 200C366 200 394 222 392 256C390 292 366 320 328 326C300 330 284 334 258 334C214 334 174 324 156 302C143 288 142 274 142 258Z"/>
+    <path stroke-width="14" d="M184 300C172 274 176 244 192 224"/>
+    <path stroke-width="15" d="M216 312C206 282 210 242 226 216"/>
+    <path stroke-width="14" d="M250 312C244 284 254 248 272 226"/>
+    <path stroke-width="13" d="M286 302C282 282 292 262 310 248"/>
+  </g>
+</svg>

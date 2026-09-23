@@ -8,7 +8,7 @@ import tailwindcss from '@tailwindcss/vite'
  *
  * `electron-vite dev` launches a native Electron window and cannot be captured
  * by the web preview tooling. This config serves the renderer as a plain web
- * page over HTTP so the UI can be screenshotted. `window.sylor` is provided by
+ * page over HTTP so the UI can be screenshotted. `window.myto` is provided by
  * the browser-preview shim (src/renderer/src/lib/browser-preview-shim.ts), which
  * only activates when the Electron bridge is absent. Mirrors the `renderer`
  * block of electron.vite.config.ts (aliases, React, Tailwind).

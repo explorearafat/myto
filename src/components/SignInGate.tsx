@@ -6,7 +6,7 @@
 import { useState, type FormEvent } from 'react';
 import { LoaderCircle } from 'lucide-react';
 import { useAuth } from '../lib/auth';
-import { SylorStar } from './SylorStar';
+import { MytoMark } from './MytoMark';
 import { ChatPage } from './ChatPage';
 import type { ProfileDraft } from '../shared/profile';
 
@@ -46,8 +46,8 @@ function GithubMark({ className }: { className?: string }) {
 function Splash() {
   return (
     <div className="flex h-[100dvh] flex-col items-center justify-center gap-3 bg-[#faf9f5] text-[#6b675e]">
-      <SylorStar size={30} />
-      <LoaderCircle className="h-5 w-5 animate-spin text-[#cf5535]" aria-hidden="true" />
+      <MytoMark size={30} />
+      <LoaderCircle className="h-5 w-5 animate-spin text-[#141413]" aria-hidden="true" />
     </div>
   );
 }
@@ -72,10 +72,10 @@ function SignInScreen() {
     <div className="flex h-[100dvh] flex-col items-center justify-center bg-[#faf9f5] px-4 text-[#141413]">
       <div className="chat-in w-full max-w-sm">
         <div className="mb-7 flex flex-col items-center text-center">
-          <SylorStar size={34} />
-          <h1 className="font-display mt-4 text-[28px] font-normal leading-tight">Sign in to Sylor</h1>
+          <MytoMark size={34} />
+          <h1 className="font-display mt-4 text-[28px] font-normal leading-tight">Sign in to Myto</h1>
           <p className="mt-2 text-[14px] leading-relaxed text-[#6b675e]">
-            Sylor learns who you are so its answers fit you. Sign in to start chatting.
+            Myto learns who you are so its answers fit you. Sign in to start chatting.
           </p>
         </div>
 
@@ -115,7 +115,7 @@ function SignInScreen() {
         ) : null}
 
         <p className="mt-6 text-center text-[12px] leading-relaxed text-[#9c988e]">
-          A preview chat. Sylor’s full workspace runs in the app with your own model.
+          A preview chat. Myto’s full workspace runs in the app with your own model.
         </p>
       </div>
     </div>
@@ -148,19 +148,19 @@ function ProfileForm() {
   };
 
   const field =
-    'w-full rounded-xl border border-[#e4e1d8] bg-white px-3.5 py-2.5 text-[15px] text-[#141413] outline-none transition-[border-color,box-shadow] duration-150 placeholder:text-[#9c988e] focus:border-[#cbc6ba] focus:shadow-[0_0_0_4px_rgba(207,85,53,0.10)]';
+    'w-full rounded-xl border border-[#e4e1d8] bg-white px-3.5 py-2.5 text-[15px] text-[#141413] outline-none transition-[border-color,box-shadow] duration-150 placeholder:text-[#9c988e] focus:border-[#cbc6ba] focus:shadow-[0_0_0_4px_rgba(20,20,19,0.10)]';
   const label = 'mb-1.5 block text-[13px] font-medium text-[#544f46]';
 
   return (
     <div className="flex h-[100dvh] flex-col overflow-y-auto bg-[#faf9f5] px-4 py-10 text-[#141413]">
       <div className="chat-in mx-auto w-full max-w-md">
         <div className="mb-6 flex flex-col items-center text-center">
-          <SylorStar size={30} />
+          <MytoMark size={30} />
           <h1 className="font-display mt-4 text-[26px] font-normal leading-tight">
-            Tell Sylor about you
+            Tell Myto about you
           </h1>
           <p className="mt-2 text-[14px] leading-relaxed text-[#6b675e]">
-            A few details so Sylor’s answers fit you. Short is fine — you can add more later.
+            A few details so Myto’s answers fit you. Short is fine — you can add more later.
           </p>
         </div>
 
@@ -181,7 +181,7 @@ function ProfileForm() {
           </div>
           <div>
             <label htmlFor="pf-nick" className={label}>
-              What should Sylor call you?
+              What should Myto call you?
             </label>
             <input
               id="pf-nick"
@@ -217,7 +217,7 @@ function ProfileForm() {
           </div>
           <div>
             <label htmlFor="pf-about" className={label}>
-              Anything else Sylor should know?{' '}
+              Anything else Myto should know?{' '}
               <span className="font-normal text-[#9c988e]">(optional)</span>
             </label>
             <textarea
@@ -238,7 +238,7 @@ function ProfileForm() {
           <button
             type="submit"
             disabled={!name.trim() || saving}
-            className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#cf5535] px-4 py-3 text-[15px] font-medium text-white transition-colors duration-150 hover:bg-[#b8482c] active:translate-y-px disabled:cursor-not-allowed disabled:bg-[#e0c4ba]"
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#141413] px-4 py-3 text-[15px] font-medium text-white transition-colors duration-150 hover:bg-[#2b2a27] active:translate-y-px disabled:cursor-not-allowed disabled:bg-[#c9c6bd]"
           >
             {saving ? <LoaderCircle className="h-5 w-5 animate-spin" aria-hidden="true" /> : null}
             Start chatting

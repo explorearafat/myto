@@ -1,14 +1,14 @@
 import '@testing-library/jest-dom/vitest'
 import { vi } from 'vitest'
 import { DEFAULT_PROVIDER_SETTINGS } from '@shared/defaults'
-import type { SylorApi } from '@shared/types'
+import type { MytoApi } from '@shared/types'
 
 /**
- * jsdom has no Electron preload bridge, so stub `window.sylor` with a minimal
+ * jsdom has no Electron preload bridge, so stub `window.myto` with a minimal
  * fake. Provider methods echo/no-op so store logic (which reads back the saved
  * value) works without a real main process.
  */
-const sylorMock: SylorApi = {
+const mytoMock: MytoApi = {
   window: {
     minimize: vi.fn(),
     toggleMaximize: vi.fn(),
@@ -31,7 +31,8 @@ const sylorMock: SylorApi = {
       onChunk({ streamId: 'test', delta: '', done: true })
       return Promise.resolve(() => {})
     }),
-    decideApproval: vi.fn()
+    decideApproval: vi.fn(),
+    answerQuestions: vi.fn()
   },
   sessions: {
     // Query ops resolve sane empty defaults so boot() has no session and falls
@@ -125,10 +126,13 @@ const sylorMock: SylorApi = {
     sync: vi.fn().mockResolvedValue([]),
     test: vi.fn().mockResolvedValue({ ok: false, error: 'unavailable' }),
     onStatusChanged: vi.fn().mockReturnValue(() => {})
+  },
+  voice: {
+    transcribe: vi.fn().mockResolvedValue({ ok: false, error: 'no-gateway' })
   }
 }
 
-vi.stubGlobal('sylor', sylorMock)
-// Also attach to window so `window.sylor` resolves in component code.
-;(globalThis as unknown as { window: { sylor: SylorApi } }).window ??= {} as never
-;(window as unknown as { sylor: SylorApi }).sylor = sylorMock
+vi.stubGlobal('myto', mytoMock)
+// Also attach to window so `window.myto` resolves in component code.
+;(globalThis as unknown as { window: { myto: MytoApi } }).window ??= {} as never
+;(window as unknown as { myto: MytoApi }).myto = mytoMock

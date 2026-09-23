@@ -87,7 +87,7 @@ async function suggestAiTitle(prompt: string): Promise<string> {
       { role: 'system', content: TITLE_SYSTEM },
       { role: 'user', content: prompt.slice(0, TITLE_INPUT_CAP) }
     ]
-    const res = await window.sylor.providers.getCompletion({ messages })
+    const res = await window.myto.providers.getCompletion({ messages })
     if (!res.ok || !res.content) return ''
     return cleanModelTitle(res.content)
   } catch {
@@ -106,7 +106,7 @@ async function loadInto(
   set: StoreApi<SessionState>['setState'],
   get: StoreApi<SessionState>['getState']
 ): Promise<boolean> {
-  const loaded = await window.sylor.sessions.load(id)
+  const loaded = await window.myto.sessions.load(id)
   if (!loaded) {
     // Deleted out from under us — fall back to a fresh landing page.
     await get().newDraft()
@@ -223,7 +223,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   refresh: async () => {
-    const sessions = await window.sylor.sessions.list(get().activeProjectId)
+    const sessions = await window.myto.sessions.list(get().activeProjectId)
     set({ sessions })
   },
 
@@ -259,14 +259,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   create: async () => {
     // New chats are filed under the project the rail is scoped to (or none).
-    const summary = await window.sylor.sessions.create(get().activeProjectId)
+    const summary = await window.myto.sessions.create(get().activeProjectId)
     useChatStore.getState().resetTo(summary.id, summary.projectId)
     set({ activeSessionId: summary.id })
     await get().refresh()
   },
 
   rename: async (id, title) => {
-    await window.sylor.sessions.rename(id, title)
+    await window.myto.sessions.rename(id, title)
     await get().refresh()
   },
 
@@ -298,11 +298,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Stop that chat's background run first: the row is about to disappear, and a
     // run left pointing at it would keep working with no way to reach it.
     useChatStore.getState().cancelSession(id)
-    await window.sylor.sessions.remove(id)
+    await window.myto.sessions.remove(id)
     if (get().activeSessionId === id) {
       // The open session was deleted: reopen the next most-recent, or — if none
       // remain — drop to a fresh landing page.
-      const remaining = await window.sylor.sessions.list(get().activeProjectId)
+      const remaining = await window.myto.sessions.list(get().activeProjectId)
       if (remaining.length > 0) {
         await get().open(remaining[0].id)
       } else {

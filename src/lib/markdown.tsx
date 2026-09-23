@@ -44,7 +44,7 @@ function inline(text: string, keyBase: string): ReactNode[] {
             href={href}
             target={external ? '_blank' : undefined}
             rel={external ? 'noopener noreferrer' : undefined}
-            className="text-[#cf5535] underline underline-offset-2 hover:text-[#b8482c]"
+            className="text-[#141413] underline underline-offset-2 hover:text-[#2b2a27]"
           >
             {label}
           </a>,
@@ -165,11 +165,11 @@ function CodeBlock({ code, lang }: { code: string; lang?: string }) {
           aria-label={copied ? 'Copied' : 'Copy code'}
         >
           {copied ? (
-            <Check className="h-3.5 w-3.5 text-[#cf5535]" aria-hidden="true" />
+            <Check className="h-3.5 w-3.5 text-[#141413]" aria-hidden="true" />
           ) : (
             <Copy className="h-3.5 w-3.5 text-[#6b675e]" aria-hidden="true" />
           )}
-          <span className={copied ? 'text-[#cf5535]' : 'text-[#6b675e]'}>
+          <span className={copied ? 'text-[#141413]' : 'text-[#6b675e]'}>
             {copied ? 'Copied' : 'Copy'}
           </span>
         </button>
@@ -211,7 +211,7 @@ export function Markdown({ text }: { text: string }) {
               {b.items.map((it, ii) => (
                 <li key={ii} className="flex gap-2.5 text-[14px] text-[#544f46]">
                   <span
-                    className="mt-[0.5em] h-1 w-1 shrink-0 rounded-full bg-[#cf5535]"
+                    className="mt-[0.5em] h-1 w-1 shrink-0 rounded-full bg-[#141413]"
                     aria-hidden="true"
                   />
                   <span>{inline(it, `${bi}-${ii}`)}</span>
@@ -225,7 +225,7 @@ export function Markdown({ text }: { text: string }) {
             <ol key={bi} className="space-y-1.5">
               {b.items.map((it, ii) => (
                 <li key={ii} className="flex gap-2.5 text-[14px] text-[#544f46]">
-                  <span className="shrink-0 font-medium text-[#cf5535]">{ii + 1}.</span>
+                  <span className="shrink-0 font-medium text-[#141413]">{ii + 1}.</span>
                   <span>{inline(it, `${bi}-${ii}`)}</span>
                 </li>
               ))}

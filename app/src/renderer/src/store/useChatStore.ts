@@ -8,6 +8,7 @@ import type {
   ChatMode,
   PersistedSession,
   PreviewTarget,
+  QuestionRequest,
   TodoItem
 } from '@shared/types'
 import type { PromptBlock } from '@shared/types/prompt-builder'
@@ -66,6 +67,12 @@ export interface ChatMessageUI {
    */
   pendingApproval?: ApprovalRequest
   /**
+   * A pending batch of ask_user questions Myto raised mid-turn. Set while the loop is
+   * blocked awaiting answers; the assistant turn renders a question card. Cleared once
+   * answered (see answerQuestions) or the run ends. Transient — never persisted.
+   */
+  pendingQuestion?: QuestionRequest
+  /**
    * The agent's current working plan (Cowork) — the checklist the model maintains
    * with the `update_plan` tool, pinned above the reply. Set as the run streams and
    * kept after it ends so the finished plan stays visible. Transient — never persisted.
@@ -113,6 +120,8 @@ interface LiveRun {
    * waiting on the user re-attaches to the live prompt.
    */
   pendingApproval?: ApprovalRequest
+  /** A pending ask_user question batch for this run, or undefined when none is open. */
+  pendingQuestion?: QuestionRequest
   /**
    * The run's current working plan (Cowork), held here — like `status`/`content` —
    * so switching back to a background run re-attaches to its live checklist.
@@ -234,6 +243,8 @@ export interface ChatState {
    * (which resumes the blocked tool loop) and clears the prompt from the UI.
    */
   decideApproval: (approvalId: string, decision: ApprovalDecision) => void
+  /** Answer a pending ask_user question batch (resumes the blocked loop). */
+  answerQuestions: (questionId: string, answers: string[]) => void
 }
 
 /**
@@ -301,7 +312,7 @@ async function collectImages(attachments: OutgoingAttachment[]): Promise<ChatIma
   const images: ChatImage[] = []
   for (const { attachment } of attachments) {
     if (!attachment.mime.startsWith('image/')) continue
-    const dataUrl = await window.sylor.attachments.read(attachment.id)
+    const dataUrl = await window.myto.attachments.read(attachment.id)
     if (!dataUrl) continue
     const match = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl)
     if (match) images.push({ mediaType: match[1], dataBase64: match[2] })
@@ -367,6 +378,7 @@ function projectLiveRun(
       error: undefined,
       status: run.status,
       pendingApproval: run.pendingApproval,
+      pendingQuestion: run.pendingQuestion,
       todos: run.todos
     }
   } else {
@@ -377,6 +389,7 @@ function projectLiveRun(
       pending: true,
       status: run.status,
       pendingApproval: run.pendingApproval,
+      pendingQuestion: run.pendingQuestion,
       todos: run.todos
     })
   }
@@ -446,7 +459,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     // with no answer slot. `appendMessage` upserts by id, so the regenerate path
     // (row already blanked) and the streaming checkpoints below reuse it.
     if (ownerSessionId) {
-      window.sylor.sessions.appendMessage(ownerSessionId, {
+      window.myto.sessions.appendMessage(ownerSessionId, {
         id: assistantId,
         role: 'assistant',
         content: ''
@@ -481,7 +494,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         const now = Date.now()
         if (now - run.lastPersist >= ASSISTANT_PERSIST_MS) {
           run.lastPersist = now
-          window.sylor.sessions.appendMessage(ownerSessionId, {
+          window.myto.sessions.appendMessage(ownerSessionId, {
             id: assistantId,
             role: 'assistant',
             content: run.content
@@ -510,11 +523,12 @@ export const useChatStore = create<ChatState>((set, get) => {
       flush(true)
       run.settled = true
       run.pendingApproval = undefined
+      run.pendingQuestion = undefined
       run.disposer() // detach the listener (a post-completion cancel is a no-op)
       if (ownerSessionId) liveRuns.delete(ownerSessionId)
       syncLiveSessions()
       if (ownerSessionId) {
-        window.sylor.sessions.appendMessage(ownerSessionId, {
+        window.myto.sessions.appendMessage(ownerSessionId, {
           id: assistantId,
           role: 'assistant',
           content: run.content
@@ -523,7 +537,9 @@ export const useChatStore = create<ChatState>((set, get) => {
       if (isVisible()) {
         set((state) => ({
           messages: state.messages.map((m) =>
-            m.id === assistantId ? { ...m, pending: false, pendingApproval: undefined } : m
+            m.id === assistantId
+              ? { ...m, pending: false, pendingApproval: undefined, pendingQuestion: undefined }
+              : m
           ),
           running: false,
           runId: null,
@@ -538,13 +554,14 @@ export const useChatStore = create<ChatState>((set, get) => {
       flush(true)
       run.settled = true
       run.pendingApproval = undefined
+      run.pendingQuestion = undefined
       run.disposer()
       if (ownerSessionId) liveRuns.delete(ownerSessionId)
       syncLiveSessions()
       const content = run.content || '_Request failed._'
       run.content = content
       if (ownerSessionId) {
-        window.sylor.sessions.appendMessage(ownerSessionId, {
+        window.myto.sessions.appendMessage(ownerSessionId, {
           id: assistantId,
           role: 'assistant',
           content,
@@ -559,6 +576,7 @@ export const useChatStore = create<ChatState>((set, get) => {
                   ...m,
                   pending: false,
                   pendingApproval: undefined,
+                  pendingQuestion: undefined,
                   error: message,
                   content: m.content || '_Request failed._'
                 }
@@ -600,6 +618,18 @@ export const useChatStore = create<ChatState>((set, get) => {
       }
     }
 
+    /** Set or clear this run's pending ask_user questions (mirrors {@link setApproval}). */
+    const setQuestion = (question: QuestionRequest | undefined): void => {
+      run.pendingQuestion = question
+      if (isVisible()) {
+        set((state) => ({
+          messages: state.messages.map((m) =>
+            m.id === assistantId ? { ...m, pendingQuestion: question } : m
+          )
+        }))
+      }
+    }
+
     /**
      * Set this run's working plan (Cowork). Held on the run (survives a session
      * switch) and mirrored onto the on-screen assistant turn when visible — the same
@@ -621,6 +651,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       error?: string
       status?: string
       approval?: ApprovalRequest
+      question?: QuestionRequest
       preview?: PreviewTarget
       todos?: TodoItem[]
     }): void => {
@@ -631,10 +662,12 @@ export const useChatStore = create<ChatState>((set, get) => {
       if (chunk.status !== undefined) setStatus(chunk.status)
       // A side-effecting Cowork tool is awaiting the user's OK — raise the prompt.
       if (chunk.approval) setApproval(chunk.approval)
-      // Sylor opened something in its preview pane — drive the (global) pane. Not
+      // Myto asked the user clarifying questions (ask_user) — raise the question card.
+      if (chunk.question) setQuestion(chunk.question)
+      // Myto opened something in its preview pane — drive the (global) pane. Not
       // scoped to this run: the pane is a standalone surface, like a browser window.
       if (chunk.preview) usePreviewStore.getState().show(chunk.preview)
-      // Sylor published/updated its working plan — pin the live checklist on this turn.
+      // Myto published/updated its working plan — pin the live checklist on this turn.
       if (chunk.todos) setTodos(chunk.todos)
       if (chunk.delta) {
         run.buffer += chunk.delta
@@ -649,7 +682,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     // Kick off the stream. `streamCompletion` is async and resolves its disposer on
     // a later microtask; store it on the run, or invoke it at once if the run has
     // already settled (a cancel/completion beat the resolution — see LiveRun.settled).
-    void window.sylor.providers.streamCompletion({ messages: history, mode }, onChunk).then((dispose) => {
+    void window.myto.providers.streamCompletion({ messages: history, mode }, onChunk).then((dispose) => {
       if (run.settled) dispose()
       else run.disposer = dispose
     })
@@ -672,7 +705,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       const finalContent = run.content + run.buffer
       run.buffer = ''
       run.content = finalContent
-      window.sylor.sessions.appendMessage(run.ownerSessionId, {
+      window.myto.sessions.appendMessage(run.ownerSessionId, {
         id: run.assistantId,
         role: 'assistant',
         content: finalContent
@@ -747,13 +780,13 @@ export const useChatStore = create<ChatState>((set, get) => {
       // finalized on completion/error — so an interruption can't lose the reply.
       const owner = get().sessionId
       if (owner) {
-        window.sylor.sessions.appendMessage(owner, {
+        window.myto.sessions.appendMessage(owner, {
           id: userMsg.id,
           role: 'user',
           content: userMsg.content
         })
         if (bound.length > 0) {
-          void window.sylor.attachments.attachToMessage(
+          void window.myto.attachments.attachToMessage(
             bound.map((a) => a.id),
             userMsg.id
           )
@@ -778,7 +811,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       disposeRun(get().sessionId)
       set((state) => ({
         messages: state.messages.map((m) =>
-          m.pending ? { ...m, pending: false, pendingApproval: undefined } : m
+          m.pending ? { ...m, pending: false, pendingApproval: undefined, pendingQuestion: undefined } : m
         ),
         running: false,
         runId: null,
@@ -806,7 +839,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       if (get().sessionId === sessionId) {
         set((state) => ({
           messages: state.messages.map((m) =>
-          m.pending ? { ...m, pending: false, pendingApproval: undefined } : m
+          m.pending ? { ...m, pending: false, pendingApproval: undefined, pendingQuestion: undefined } : m
         ),
           running: false,
           runId: null,
@@ -827,7 +860,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         )
       }))
       if (sessionId)
-        window.sylor.sessions.setFeedback(sessionId, messageId, next, msg.flagged ?? false)
+        window.myto.sessions.setFeedback(sessionId, messageId, next, msg.flagged ?? false)
     },
 
     toggleFlag: (messageId) => {
@@ -839,7 +872,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         messages: state.messages.map((m) => (m.id === messageId ? { ...m, flagged: next } : m))
       }))
       if (sessionId)
-        window.sylor.sessions.setFeedback(sessionId, messageId, msg.feedback ?? null, next)
+        window.myto.sessions.setFeedback(sessionId, messageId, msg.feedback ?? null, next)
     },
 
     regenerate: (messageId) => {
@@ -874,7 +907,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         running: true
       }))
       // Clear the persisted copy so a reload shows only the regenerated result.
-      if (sessionId) window.sylor.sessions.resetMessage(sessionId, messageId)
+      if (sessionId) window.myto.sessions.resetMessage(sessionId, messageId)
 
       startRun(sessionId, messageId, history, get().coworkMode ? 'cowork' : 'chat')
     },
@@ -912,7 +945,7 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     decideApproval: (approvalId, decision) => {
       // Tell the main process (resumes the blocked tool loop).
-      window.sylor.providers.decideApproval(approvalId, decision)
+      window.myto.providers.decideApproval(approvalId, decision)
       // Clear the prompt from whichever run holds it + the on-screen message.
       let assistantId: string | null = null
       for (const run of liveRuns.values()) {
@@ -925,6 +958,26 @@ export const useChatStore = create<ChatState>((set, get) => {
         messages: state.messages.map((m) =>
           m.pendingApproval?.approvalId === approvalId || (assistantId && m.id === assistantId)
             ? { ...m, pendingApproval: undefined }
+            : m
+        )
+      }))
+    },
+
+    answerQuestions: (questionId, answers) => {
+      // Tell the main process (resumes the blocked ask_user tool).
+      window.myto.providers.answerQuestions(questionId, answers)
+      // Clear the question card from whichever run holds it + the on-screen message.
+      let assistantId: string | null = null
+      for (const run of liveRuns.values()) {
+        if (run.pendingQuestion?.questionId === questionId) {
+          run.pendingQuestion = undefined
+          assistantId = run.assistantId
+        }
+      }
+      set((state) => ({
+        messages: state.messages.map((m) =>
+          m.pendingQuestion?.questionId === questionId || (assistantId && m.id === assistantId)
+            ? { ...m, pendingQuestion: undefined }
             : m
         )
       }))

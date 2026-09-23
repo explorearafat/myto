@@ -9,7 +9,7 @@ import type { ToolContext, ToolGate } from './registry'
 let dir: string
 
 beforeAll(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'sylor-search-'))
+  dir = await mkdtemp(join(tmpdir(), 'myto-search-'))
   await mkdir(join(dir, 'src'), { recursive: true })
   await mkdir(join(dir, 'node_modules', 'pkg'), { recursive: true })
   await writeFile(join(dir, 'src', 'app.ts'), 'export function handleLogin() {\n  return true\n}\n')

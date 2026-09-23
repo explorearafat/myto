@@ -1,8 +1,8 @@
 name: Build Windows App
 
-# Publish a new Sylor-Setup.exe whenever you push a version tag (e.g. v0.1.1),
+# Publish a new Myto-Setup.exe whenever you push a version tag (e.g. v0.1.1),
 # or run it manually from the Actions tab. The landing page links to
-# /releases/latest/download/Sylor-Setup.exe, so a new release auto-updates the
+# /releases/latest/download/Myto-Setup.exe, so a new release auto-updates the
 # download button on sylorcode.vercel.app.
 on:
   push:
@@ -39,7 +39,7 @@ jobs:
       - name: Publish installer to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: app/release/Sylor-Setup.exe
+          files: app/release/Myto-Setup.exe
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

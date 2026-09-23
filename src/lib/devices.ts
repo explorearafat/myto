@@ -99,7 +99,7 @@ export async function recordDeviceSignIn(uid: string, platform: DevicePlatform):
     }
     return true;
   } catch (e) {
-    console.warn('[sylor] device sign-in not recorded:', e);
+    console.warn('[myto] device sign-in not recorded:', e);
     return false;
   }
 }
@@ -116,7 +116,7 @@ export async function listDevices(uid: string): Promise<DeviceSession[]> {
     rows.sort((a, b) => (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0));
     return rows;
   } catch (e) {
-    console.warn('[sylor] devices list failed:', e);
+    console.warn('[myto] devices list failed:', e);
     return [];
   }
 }

@@ -21,20 +21,22 @@ import type { AuthHandoffResult } from '../shared/types'
 const AUTH_PAGE = 'https://sylorcode.vercel.app/authentication'
 const TIMEOUT_MS = 3 * 60_000
 
-// The Sylor star (twelve-ray terracotta sunburst) as an inline SVG — matches the renderer's
-// SylorStar.tsx geometry so the browser handoff page shows the real mark, not a text glyph.
-const LONG_RAY = 'M12 1.4C12.85 6 12.85 8.4 12 11C11.15 8.4 11.15 6 12 1.4Z'
-const SHORT_RAY = 'M12 4.8C12.6 7.4 12.6 8.9 12 11C11.4 8.9 11.4 7.4 12 4.8Z'
-
-function starSvg(size: number): string {
-  const rays = Array.from(
-    { length: 12 },
-    (_, i) =>
-      `<path d="${i % 2 === 0 ? LONG_RAY : SHORT_RAY}" transform="rotate(${i * 30} 12 12)"/>`
-  ).join('')
+// The Myto mark (monochrome mitochondria — a tilted organic bean with a double membrane and four
+// rounded finger-like cristae) as an inline SVG, matching the renderer's MytoMark.tsx / public/myto-mark.svg
+// geometry so the browser handoff page shows the real logo, not a text glyph. Inked for the light handoff page.
+function markSvg(size: number): string {
+  const paths = [
+    '<path stroke-width="17" d="M100 260C100 212 134 178 182 170C214 165 234 187 258 193C284 199 302 170 342 168C394 166 436 202 434 254C432 306 398 348 344 356C302 362 282 368 252 368C194 368 132 354 110 320C97 300 98 282 100 260Z"/>',
+    '<path stroke-width="13" d="M142 258C142 224 168 204 202 199C228 195 244 209 266 214C288 219 302 200 330 200C366 200 394 222 392 256C390 292 366 320 328 326C300 330 284 334 258 334C214 334 174 324 156 302C143 288 142 274 142 258Z"/>',
+    '<path stroke-width="14" d="M184 300C172 274 176 244 192 224"/>',
+    '<path stroke-width="15" d="M216 312C206 282 210 242 226 216"/>',
+    '<path stroke-width="14" d="M250 312C244 284 254 248 272 226"/>',
+    '<path stroke-width="13" d="M286 302C282 282 292 262 310 248"/>'
+  ].join('')
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="${size}" height="${size}" ` +
-    `fill="#cf5535" role="img" aria-label="Sylor">${rays}</svg>`
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="${size}" height="${size}" ` +
+    `fill="none" stroke="#181818" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Myto">` +
+    `<g transform="rotate(12 256 256)">${paths}</g></svg>`
   )
 }
 
@@ -48,7 +50,7 @@ function page(title: string, body: string): string {
     'margin-bottom:1rem}h1{font-size:1.25rem;margin:.25rem 0}' +
     'p{color:rgba(20,20,19,.6);font-size:.9rem}</style></head><body><div class="c">' +
     '<div class="s">' +
-    starSvg(44) +
+    markSvg(44) +
     '</div><h1>' +
     title +
     '</h1><p>' +
@@ -83,11 +85,11 @@ function runGoogleSignIn(): Promise<AuthHandoffResult> {
       res.statusCode = 200
       res.setHeader('content-type', 'text/html; charset=utf-8')
       if (!idToken || gotState !== state) {
-        res.end(page('Sign-in failed', 'Something went wrong. Return to Sylor and try again.'))
+        res.end(page('Sign-in failed', 'Something went wrong. Return to Myto and try again.'))
         finish({ ok: false, error: 'The sign-in response was invalid. Please try again.' })
         return
       }
-      res.end(page("You're signed in", 'You can close this tab and return to Sylor.'))
+      res.end(page("You're signed in", 'You can close this tab and return to Myto.'))
       finish({ ok: true, idToken })
     })
 

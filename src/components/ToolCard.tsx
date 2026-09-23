@@ -54,7 +54,7 @@ export function ToolCard({ tool }: { tool: ToolSegment }) {
         <ToolIcon name={tool.name} />
         <span className="text-[12.5px] font-medium text-[#141413]">{toolLabel(tool.name)}</span>
         {phase ? (
-          <span className="text-[11px] font-medium text-[#cf5535]">{phase}</span>
+          <span className="text-[11px] font-medium text-[#141413]">{phase}</span>
         ) : (
           <span className="rounded bg-[#f0eee6] px-1.5 py-0.5 font-mono text-[9px] font-medium uppercase tracking-[0.08em] text-[#9c988e]">
             done

@@ -41,10 +41,10 @@ export function TitleBar() {
 
   useEffect(() => {
     let active = true
-    window.sylor.window.isMaximized().then((value) => {
+    window.myto.window.isMaximized().then((value) => {
       if (active) setIsMaximized(value)
     })
-    const unsubscribe = window.sylor.window.onMaximizedChange(setIsMaximized)
+    const unsubscribe = window.myto.window.onMaximizedChange(setIsMaximized)
     return () => {
       active = false
       unsubscribe()
@@ -57,14 +57,14 @@ export function TitleBar() {
       className="flex h-8 shrink-0 items-center justify-end bg-bg select-none"
     >
       <div className="flex h-full items-stretch">
-        <ControlButton label="Minimize" onClick={() => window.sylor.window.minimize()}>
+        <ControlButton label="Minimize" onClick={() => window.myto.window.minimize()}>
           <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
             <rect x="1" y="4.5" width="8" height="1" fill="currentColor" />
           </svg>
         </ControlButton>
         <ControlButton
           label={isMaximized ? 'Restore' : 'Maximize'}
-          onClick={() => window.sylor.window.toggleMaximize()}
+          onClick={() => window.myto.window.toggleMaximize()}
         >
           {isMaximized ? (
             <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
@@ -84,7 +84,7 @@ export function TitleBar() {
             </svg>
           )}
         </ControlButton>
-        <ControlButton label="Close" variant="danger" onClick={() => window.sylor.window.close()}>
+        <ControlButton label="Close" variant="danger" onClick={() => window.myto.window.close()}>
           <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
             <path d="M1 1 L9 9 M9 1 L1 9" stroke="currentColor" strokeWidth="1" />
           </svg>

@@ -1,9 +1,9 @@
-import type { SylorApi } from '@shared/types'
+import type { MytoApi } from '@shared/types'
 import 'react'
 
 declare global {
   interface Window {
-    sylor: SylorApi
+    myto: MytoApi
   }
 }
 

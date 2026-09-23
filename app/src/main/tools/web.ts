@@ -13,7 +13,16 @@ import type { ToolDef } from './registry'
  */
 
 /** Identifies the client to endpoints (Wikipedia asks for a descriptive UA). */
-const UA = 'SylorChat/0.2 (+https://sylorcode.vercel.app)'
+const UA = 'MytoChat/0.2 (+https://sylorcode.vercel.app)'
+
+/**
+ * A real-browser User-Agent for web search. DuckDuckGo's HTML endpoints serve a
+ * stripped/challenge page (no results) when the request looks like a bot — which
+ * is exactly why the old bare-GET scraper came back empty. A browser UA on a POST
+ * gets the normal results page. See {@link webSearchTool}.
+ */
+const BROWSER_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36'
 
 /** Largest readable-text payload handed back to the model, in characters. */
 const FETCH_CAP = 8000
@@ -100,11 +109,12 @@ function decodeDdgHref(href: string): string {
 /**
  * Scrape the top results out of the DuckDuckGo HTML endpoint. Titles/links and
  * snippets are captured separately (each result carries one of each, in order)
- * and zipped by index — resilient to markup drift between the two.
+ * and zipped by index — resilient to markup drift between the two. Attribute
+ * quotes may be single or double, so the regexes are quote-agnostic.
  */
 export function parseDuckDuckGo(html: string, limit = 6): SearchResult[] {
-  const anchorRe = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
-  const snippetRe = /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi
+  const anchorRe = /<a[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi
+  const snippetRe = /<a[^>]*class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi
 
   const snippets: string[] = []
   let m: RegExpExecArray | null
@@ -113,6 +123,31 @@ export function parseDuckDuckGo(html: string, limit = 6): SearchResult[] {
   const results: SearchResult[] = []
   let i = 0
   while ((m = anchorRe.exec(html)) && results.length < limit) {
+    const title = stripTags(m[2])
+    if (title) results.push({ title, url: decodeDdgHref(m[1]), snippet: snippets[i] ?? '' })
+    i++
+  }
+  return results
+}
+
+/**
+ * Parse the DuckDuckGo Lite page (`lite.duckduckgo.com/lite/`) — a plain table
+ * layout used as a last-resort fallback when the main HTML endpoint returns
+ * nothing. Result links carry `class="result-link"` with href BEFORE the class,
+ * so the regex matches that attribute order (unlike the html endpoint's
+ * class-then-href) and is quote-agnostic.
+ */
+export function parseDuckDuckGoLite(html: string, limit = 6): SearchResult[] {
+  const linkRe = /<a[^>]*href=["']([^"']+)["'][^>]*class=["'][^"']*result-link[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi
+  const snippetRe = /<td[^>]*class=["'][^"']*result-snippet[^"']*["'][^>]*>([\s\S]*?)<\/td>/gi
+
+  const snippets: string[] = []
+  let m: RegExpExecArray | null
+  while ((m = snippetRe.exec(html))) snippets.push(stripTags(m[1]))
+
+  const results: SearchResult[] = []
+  let i = 0
+  while ((m = linkRe.exec(html)) && results.length < limit) {
     const title = stripTags(m[2])
     if (title) results.push({ title, url: decodeDdgHref(m[1]), snippet: snippets[i] ?? '' })
     i++
@@ -185,6 +220,32 @@ export const webFetchTool: ToolDef = {
   }
 }
 
+/**
+ * Fetch a search endpoint with browser-like headers. When `form` is given it's a
+ * POST with a url-encoded body (DuckDuckGo's `/html/` endpoint is far more reliable
+ * via POST `q=…` than a GET query string); otherwise a plain GET. The browser UA
+ * is what gets the normal results page instead of a bot challenge.
+ */
+async function fetchSearch(
+  url: string,
+  form: Record<string, string> | null,
+  signal: AbortSignal
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    'user-agent': BROWSER_UA,
+    accept: 'text/html,application/xhtml+xml',
+    'accept-language': 'en-US,en;q=0.9'
+  }
+  if (!form) return httpFetch(url, { headers, timeoutMs: 20_000, signal })
+  return httpFetch(url, {
+    method: 'POST',
+    headers: { ...headers, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(form).toString(),
+    timeoutMs: 20_000,
+    signal
+  })
+}
+
 export const webSearchTool: ToolDef = {
   name: 'web_search',
   description: 'Search the web and return the top results (titles, links, snippets).',
@@ -193,13 +254,45 @@ export const webSearchTool: ToolDef = {
   async run(input, ctx) {
     const query = readQuery(input)
     if (!query) return 'web_search needs a JSON input like {"query": "…"}.'
-    const res = await httpFetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
-      headers: { 'user-agent': UA, accept: 'text/html' },
-      timeoutMs: 20_000,
-      signal: ctx.signal
-    })
-    if (!res.ok) return `Search failed: HTTP ${res.status} ${res.statusText}`
-    return formatSearchResults(query, parseDuckDuckGo(await res.text()))
+
+    // DuckDuckGo's HTML endpoint is picky: a bare GET with a non-browser UA often
+    // returns an empty/challenge page — which is why search "ran" but came back with
+    // nothing. Try three resilient strategies in order and use the first that yields
+    // results:
+    //   1. POST form to html.duckduckgo.com/html/ (most reliable).
+    //   2. GET the same endpoint (some networks/edges prefer it).
+    //   3. GET the Lite endpoint, which has its own simpler layout.
+    const attempts: Array<() => Promise<SearchResult[]>> = [
+      async () => {
+        const r = await fetchSearch('https://html.duckduckgo.com/html/', { q: query }, ctx.signal)
+        return r.ok ? parseDuckDuckGo(await r.text()) : []
+      },
+      async () => {
+        const r = await fetchSearch(
+          `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
+          null,
+          ctx.signal
+        )
+        return r.ok ? parseDuckDuckGo(await r.text()) : []
+      },
+      async () => {
+        const r = await fetchSearch('https://lite.duckduckgo.com/lite/', { q: query }, ctx.signal)
+        return r.ok ? parseDuckDuckGoLite(await r.text()) : []
+      }
+    ]
+
+    for (const attempt of attempts) {
+      if (ctx.signal.aborted) return 'web_search was cancelled.'
+      let results: SearchResult[] = []
+      try {
+        results = await attempt()
+      } catch {
+        // A single endpoint hiccup shouldn't fail the whole search — try the next.
+        continue
+      }
+      if (results.length) return formatSearchResults(query, results)
+    }
+    return `No web results for "${query}" (the search endpoint returned nothing). Try rephrasing the query, or use wiki_search for an encyclopedic answer.`
   }
 }
 

@@ -1,9 +1,9 @@
-/* Truthful to how Sylor actually runs: choose a model, describe the work, approve
+/* Truthful to how Myto actually runs: choose a model, describe the work, approve
    each diff, and let it verify against your build. */
 const STEPS = [
   {
     title: 'Choose your model',
-    body: 'Point Sylor at a local Ollama or any OpenAI-compatible endpoint.',
+    body: 'Point Myto at a local Ollama or any OpenAI-compatible endpoint.',
   },
   {
     title: 'Describe the task',
@@ -15,7 +15,7 @@ const STEPS = [
   },
   {
     title: 'Ship it verified',
-    body: 'Sylor runs your build and tests, reads the errors, and fixes until it passes.',
+    body: 'Myto runs your build and tests, reads the errors, and fixes until it passes.',
   },
 ];
 
@@ -53,7 +53,7 @@ export function HowItWorks() {
                 style={{ transitionDelay: `${i * 80}ms` }}
                 className="relative flex flex-col items-center text-center"
               >
-                <div className="flex h-12 w-12 items-center justify-center rounded-full border border-[#e6b8ac] bg-[#faf1ee] font-display text-[18px] text-[#cf5535]">
+                <div className="flex h-12 w-12 items-center justify-center rounded-full border border-[#d8d5cc] bg-[#f0efe9] font-display text-[18px] text-[#141413]">
                   {i + 1}
                 </div>
                 <h3 className="mt-5 font-display font-normal text-[19px] tracking-[-0.01em] text-[#141413]">

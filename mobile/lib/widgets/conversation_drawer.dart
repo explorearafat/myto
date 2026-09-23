@@ -5,7 +5,7 @@ import '../models/chat.dart';
 import '../services/auth_service.dart';
 import '../services/conversation_store.dart';
 import '../theme.dart';
-import 'sylor_star.dart';
+import 'myto_mark.dart';
 
 
 class ConversationDrawer extends StatelessWidget {
@@ -29,10 +29,10 @@ class ConversationDrawer extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(16, 14, 12, 6),
               child: Row(
                 children: [
-                  SylorStar(size: 24, color: palette.accent),
+                  MytoMark(size: 24, color: palette.accent),
                   const SizedBox(width: 10),
                   Text(
-                    'Sylor',
+                    'Myto',
                     style: TextStyle(
                       color: palette.text,
                       fontSize: 18,
@@ -64,7 +64,7 @@ class ConversationDrawer extends StatelessWidget {
     );
   }
 
-  Widget _empty(SylorPalette palette) => Center(
+  Widget _empty(MytoPalette palette) => Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
           child: Text(
@@ -75,7 +75,7 @@ class ConversationDrawer extends StatelessWidget {
         ),
       );
 
-  Widget _row(BuildContext context, SylorPalette palette, ConversationStore store, Conversation c) {
+  Widget _row(BuildContext context, MytoPalette palette, ConversationStore store, Conversation c) {
     final active = store.active.id == c.id;
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 2),
@@ -132,7 +132,7 @@ class ConversationDrawer extends StatelessWidget {
     if (ok == true) store.delete(c.id);
   }
 
-  Widget _account(BuildContext context, SylorPalette palette, AuthService auth) {
+  Widget _account(BuildContext context, MytoPalette palette, AuthService auth) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
       child: Row(
@@ -186,7 +186,7 @@ class _NewChatButton extends StatelessWidget {
   const _NewChatButton({required this.onTap, required this.palette});
 
   final VoidCallback onTap;
-  final SylorPalette palette;
+  final MytoPalette palette;
 
   @override
   Widget build(BuildContext context) {

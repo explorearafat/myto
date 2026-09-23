@@ -8,8 +8,8 @@ import 'services/byok_service.dart';
 import 'services/conversation_store.dart';
 import 'theme.dart';
 
-class SylorApp extends StatelessWidget {
-  const SylorApp({super.key, required this.auth, required this.byok, required this.store});
+class MytoApp extends StatelessWidget {
+  const MytoApp({super.key, required this.auth, required this.byok, required this.store});
 
   final AuthService auth;
   final ByokService byok;
@@ -24,10 +24,10 @@ class SylorApp extends StatelessWidget {
         ChangeNotifierProvider<ConversationStore>.value(value: store),
       ],
       child: MaterialApp(
-        title: 'Sylor',
+        title: 'Myto',
         debugShowCheckedModeBanner: false,
-        theme: sylorLightTheme(),
-        darkTheme: sylorDarkTheme(),
+        theme: mytoLightTheme(),
+        darkTheme: mytoDarkTheme(),
         themeMode: ThemeMode.system,
         home: const _Gate(),
       ),

@@ -34,10 +34,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 const INPUT =
-  'w-full rounded-lg border border-[#e4e1d8] bg-white px-3 py-2 text-[14px] text-[#141413] outline-none transition-colors duration-150 placeholder:text-[#a8a397] focus:border-[#cf5535]';
+  'w-full rounded-lg border border-[#e4e1d8] bg-white px-3 py-2 text-[14px] text-[#141413] outline-none transition-colors duration-150 placeholder:text-[#a8a397] focus:border-[#141413]';
 const LABEL = 'mb-1.5 block text-[13px] font-medium text-[#544f46]';
 const PRIMARY_BTN =
-  'inline-flex items-center justify-center gap-2 rounded-xl bg-[#cf5535] px-4 py-2.5 text-[14px] font-medium text-white transition-colors duration-150 hover:bg-[#b8482c] disabled:cursor-not-allowed disabled:opacity-60';
+  'inline-flex items-center justify-center gap-2 rounded-xl bg-[#141413] px-4 py-2.5 text-[14px] font-medium text-white transition-colors duration-150 hover:bg-[#2b2a27] disabled:cursor-not-allowed disabled:opacity-60';
 const GHOST_BTN =
   'inline-flex items-center gap-1.5 rounded-lg border border-[#e4e1d8] bg-white px-3 py-2 text-[13px] font-medium text-[#141413] transition-colors duration-150 hover:border-[#cbc6ba] hover:bg-[#fbfaf7]';
 const ERROR_BOX =
@@ -69,7 +69,7 @@ export function ByokPanel({ uid }: { uid: string }) {
         );
         if (live && snap.exists()) setConfig(normalizeByokConfig(snap.data()));
       } catch (e) {
-        console.warn('[sylor] BYOK config read failed:', e);
+        console.warn('[myto] BYOK config read failed:', e);
       } finally {
         if (live) setLoading(false);
       }
@@ -116,7 +116,7 @@ export function ByokPanel({ uid }: { uid: string }) {
       setConfig(next);
       setSaved(true);
     } catch (e) {
-      console.warn('[sylor] BYOK config save failed:', e);
+      console.warn('[myto] BYOK config save failed:', e);
       setError('Couldn’t save. If this keeps happening, the security rules may not be published yet.');
     } finally {
       setSaving(false);

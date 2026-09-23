@@ -1,5 +1,5 @@
 // browser-preview-shim MUST run first: in a plain browser (no Electron preload)
-// it installs an in-memory `window.sylor` so the UI renders for screenshots. It
+// it installs an in-memory `window.myto` so the UI renders for screenshots. It
 // is a no-op inside the packaged app (the real bridge is already present).
 import './lib/browser-preview-shim'
 import './styles/globals.css'

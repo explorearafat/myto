@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 /**
- * The rail is a plain-chatbot sidebar now: the Sylor wordmark, a New-chat action,
+ * The rail is a plain-chatbot sidebar now: the Myto wordmark, a New-chat action,
  * the nav cluster (Projects / Artifacts / Code / Customize), the date-bucketed
  * recents list, and a footer showing the signed-in Google account — avatar, first
  * name and plan — beside an icon cluster (search · collapse). These tests pin the

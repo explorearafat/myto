@@ -2,14 +2,14 @@ import { create } from 'zustand'
 import type { PreviewTarget } from '@shared/types'
 
 /**
- * Sylor's preview pane state (Cowork). The pane is Sylor's own little browser: the
+ * Myto's preview pane state (Cowork). The pane is Myto's own little browser: the
  * `preview` tool streams a {@link PreviewTarget} in, which opens the pane and points
- * it at the target; the user can then navigate back/forward through what Sylor has
+ * it at the target; the user can then navigate back/forward through what Myto has
  * shown, reload, pop it out to their real browser, or close it.
  *
  * It's deliberately a global, session-independent surface — like a browser window
  * that stays where it is when you switch tabs — so switching chats never tears down
- * a preview Sylor put up. Only the `preview` tool (Cowork-only) ever opens it, so it
+ * a preview Myto put up. Only the `preview` tool (Cowork-only) ever opens it, so it
  * simply stays hidden in ordinary chat.
  *
  * Navigation is modelled as a linear history with a cursor, exactly like a browser:
@@ -22,7 +22,7 @@ import type { PreviewTarget } from '@shared/types'
 export interface PreviewState {
   /** Whether the pane is on screen. */
   open: boolean
-  /** Everything Sylor has shown, oldest first (the back/forward stack). */
+  /** Everything Myto has shown, oldest first (the back/forward stack). */
   history: PreviewTarget[]
   /** Cursor into {@link history}: which target is currently displayed (-1 = none). */
   index: number
@@ -32,7 +32,7 @@ export interface PreviewState {
   /**
    * Show a target (from the `preview` tool): open the pane and navigate to it. If it
    * is the same URL already showing, this is treated as a reload instead of a new
-   * history entry, so re-previewing a file Sylor just rewrote refreshes in place.
+   * history entry, so re-previewing a file Myto just rewrote refreshes in place.
    */
   show: (target: PreviewTarget) => void
   /** Step back through history (no-op at the start). */
@@ -88,6 +88,6 @@ export const usePreviewStore = create<PreviewState>((set, get) => ({
 
   openExternal: () => {
     const target = currentTarget(get())
-    if (target) window.sylor.preview.openExternal(target.url)
+    if (target) window.myto.preview.openExternal(target.url)
   }
 }))

@@ -10,7 +10,7 @@ import { useAppStore } from '@renderer/store/useAppStore'
 /*
  * The Connectors settings pane.
  *
- * A connector is an MCP server whose tools Sylor can call. This pane lists the
+ * A connector is an MCP server whose tools Myto can call. This pane lists the
  * configured servers with their live connection status, and hosts the add/edit form
  * (transport, command/args or URL/headers). The server list is ordinary settings —
  * saving here persists through the normal settings store and triggers a reconnect
@@ -56,7 +56,7 @@ function stringifyEnv(env: Record<string, string> | undefined): string {
 }
 
 const TRANSPORT_OPTIONS: ReadonlyArray<{ id: McpTransport; label: string; hint: string }> = [
-  { id: 'stdio', label: 'Local (stdio)', hint: 'Sylor runs a command on this machine' },
+  { id: 'stdio', label: 'Local (stdio)', hint: 'Myto runs a command on this machine' },
   { id: 'http', label: 'HTTP', hint: 'Connect to a remote server URL' },
   { id: 'sse', label: 'SSE', hint: 'Older HTTP + Server-Sent Events' }
 ]
@@ -387,14 +387,14 @@ export function ConnectorsPane() {
     <div className="space-y-5">
       {!toolsEnabled && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3.5 py-3 text-[12px] leading-relaxed text-amber-500">
-          Tool use is turned off, so connector tools won't be offered to Sylor. Turn it on in
+          Tool use is turned off, so connector tools won't be offered to Myto. Turn it on in
           Settings → Tools to use your connectors.
         </div>
       )}
 
       <p className="text-[12px] leading-relaxed text-muted">
-        Connectors are MCP servers that give Sylor extra tools — a filesystem, a GitHub client, a
-        database, your own API. Add one below; once connected, its tools are available to Sylor just
+        Connectors are MCP servers that give Myto extra tools — a filesystem, a GitHub client, a
+        database, your own API. Add one below; once connected, its tools are available to Myto just
         like the built-in ones.
       </p>
 

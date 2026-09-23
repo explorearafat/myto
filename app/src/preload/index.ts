@@ -1,11 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IpcChannel } from '../shared/ipc'
-import type { CompletionChunk, SylorApi } from '../shared/types'
+import type { CompletionChunk, MytoApi } from '../shared/types'
 
 /** Monotonic counter used to correlate streaming chunks with their request. */
 let streamCounter = 0
 
-const api: SylorApi = {
+const api: MytoApi = {
   window: {
     minimize: () => ipcRenderer.send(IpcChannel.WindowMinimize),
     toggleMaximize: () => ipcRenderer.send(IpcChannel.WindowToggleMaximize),
@@ -52,7 +52,9 @@ const api: SylorApi = {
       }
     },
     decideApproval: (approvalId, decision) =>
-      ipcRenderer.send(IpcChannel.ProvidersApprovalDecision, approvalId, decision)
+      ipcRenderer.send(IpcChannel.ProvidersApprovalDecision, approvalId, decision),
+    answerQuestions: (questionId, answers) =>
+      ipcRenderer.send(IpcChannel.ProvidersQuestionAnswer, questionId, answers)
   },
   sessions: {
     list: (projectId) => ipcRenderer.invoke(IpcChannel.SessionsList, projectId),
@@ -116,13 +118,16 @@ const api: SylorApi = {
         ipcRenderer.removeListener(IpcChannel.McpStatusChanged, listener)
       }
     }
+  },
+  voice: {
+    transcribe: (input) => ipcRenderer.invoke(IpcChannel.VoiceTranscribe, input)
   }
 }
 
-// With contextIsolation enabled, expose the API on the isolated `window.sylor`.
+// With contextIsolation enabled, expose the API on the isolated `window.myto`.
 if (process.contextIsolated) {
-  contextBridge.exposeInMainWorld('sylor', api)
+  contextBridge.exposeInMainWorld('myto', api)
 } else {
   // Fallback for the unlikely case isolation is disabled.
-  ;(globalThis as unknown as { sylor: SylorApi }).sylor = api
+  ;(globalThis as unknown as { myto: MytoApi }).myto = api
 }

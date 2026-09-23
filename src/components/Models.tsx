@@ -1,7 +1,7 @@
 import { MODEL_BRANDS } from '../lib/modelBrands';
 
 /*
- * The reference page's logo wall, told honestly: Sylor has no customer logos, so this shows
+ * The reference page's logo wall, told honestly: Myto has no customer logos, so this shows
  * the model families it runs — any of these via a local Ollama or an OpenAI-compatible
  * endpoint. Each name now carries its official brand mark (see ../lib/modelBrands), drawn in
  * the brand colour; the serif wordmark beside it stays neutral so the row reads as editorial,
@@ -45,7 +45,7 @@ export function Models() {
           className="mx-auto mt-9 max-w-[52ch] text-[15px] leading-relaxed text-[#6b675e]"
         >
           Run a model locally with Ollama, or set the base URL and key for any OpenAI-compatible
-          endpoint. Sylor never locks you to one provider.
+          endpoint. Myto never locks you to one provider.
         </p>
       </div>
     </section>

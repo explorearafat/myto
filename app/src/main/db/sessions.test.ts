@@ -26,14 +26,14 @@ import { createProject } from '@main/db/projects'
  * inside a temp dir for the suite. Each test starts from a fresh DB so ordering
  * assertions are deterministic.
  */
-const ROOT = '/proj/sylor'
+const ROOT = '/proj/myto'
 let dir: string
 let n = 1000
 /** Monotonic fake clock — `Date.now()` is injected everywhere, so tests control it. */
 const tick = (): number => (n += 1000)
 
 beforeAll(() => {
-  dir = mkdtempSync(join(tmpdir(), 'sylor-db-'))
+  dir = mkdtempSync(join(tmpdir(), 'myto-db-'))
 })
 
 afterAll(() => {

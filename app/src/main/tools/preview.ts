@@ -5,9 +5,9 @@ import { resolveInWorkspace } from './fs'
 import type { ToolDef, ToolGate } from './registry'
 
 /**
- * The `preview` tool: Sylor's own preview pane, in Cowork.
+ * The `preview` tool: Myto's own preview pane, in Cowork.
  *
- * This is what lets Sylor SHOW its work while it goes — a plan it wrote, an HTML
+ * This is what lets Myto SHOW its work while it goes — a plan it wrote, an HTML
  * page it built, a PDF/chart/image it generated, or a localhost dev server it
  * started — in a browser pane beside the chat, self-controlled, without the user
  * having to open anything. It is read-only display: it opens a view, it never
@@ -17,7 +17,7 @@ import type { ToolDef, ToolGate } from './registry'
  *  - a working-folder file (the common case): a relative path, resolved through the
  *    same {@link resolveInWorkspace} sandbox the filesystem tools use and turned
  *    into a `file://` URL so it can't point outside the folder.
- *  - a web URL: an http(s) address (typically a localhost dev server Sylor just
+ *  - a web URL: an http(s) address (typically a localhost dev server Myto just
  *    started, or a page it wants the user to look at).
  *
  * The actual pane is renderer-side (an isolated `<webview>`); this tool just emits

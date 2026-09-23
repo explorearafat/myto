@@ -33,7 +33,7 @@ export function DownloadPage() {
               style={{ transitionDelay: '60ms' }}
               className="mx-auto mt-5 font-display font-normal text-[44px] leading-[1.0] tracking-[-0.02em] text-[#141413] sm:text-[64px]"
             >
-              Get Sylor
+              Get Myto
             </h1>
             <p
               data-reveal
@@ -68,7 +68,7 @@ export function DownloadPage() {
                 data-reveal
                 className={
                   'rounded-2xl border p-6 ' +
-                  (p.ready ? 'border-[#cf5535]/40 bg-white' : 'border-[#e4e1d8] bg-[#faf9f5]')
+                  (p.ready ? 'border-[#141413]/40 bg-white' : 'border-[#e4e1d8] bg-[#faf9f5]')
                 }
               >
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -80,7 +80,7 @@ export function DownloadPage() {
                     className={
                       'rounded-full border px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wider ' +
                       (p.ready
-                        ? 'border-[#e6b8ac] bg-[#fbeee9] text-[#a8442a]'
+                        ? 'border-[#d8d5cc] bg-[#fbeee9] text-[#57544e]'
                         : 'border-[#e4e1d8] bg-[#f0eee6] text-[#6b675e]')
                     }
                   >
@@ -121,7 +121,7 @@ export function DownloadPage() {
                         href={LINKS.releases}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="font-medium text-[#141413] underline decoration-[#cbc6ba] underline-offset-2 transition-colors duration-150 hover:decoration-[#cf5535]"
+                        className="font-medium text-[#141413] underline decoration-[#cbc6ba] underline-offset-2 transition-colors duration-150 hover:decoration-[#141413]"
                       >
                         Watch the releases page
                       </a>{' '}
@@ -138,7 +138,7 @@ export function DownloadPage() {
             className="mt-10 rounded-2xl border border-[#e4e1d8] bg-[#f0eee6] p-6 text-[14px] leading-relaxed text-[#544f46]"
           >
             <p>
-              After installing, open a project folder and describe the first task. Sylor needs a
+              After installing, open a project folder and describe the first task. Myto needs a
               model to talk to — Ollama on{' '}
               <span className="font-medium text-[#141413]">localhost:11434</span>, or any
               OpenAI-compatible endpoint you set in Settings.
@@ -146,10 +146,10 @@ export function DownloadPage() {
             <p className="mt-3">
               <a
                 href="/#features"
-                className="inline-flex items-center gap-1.5 font-medium text-[#141413] underline decoration-[#cbc6ba] underline-offset-2 transition-colors duration-150 hover:decoration-[#cf5535]"
+                className="inline-flex items-center gap-1.5 font-medium text-[#141413] underline decoration-[#cbc6ba] underline-offset-2 transition-colors duration-150 hover:decoration-[#141413]"
               >
                 <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
-                Read what Sylor does
+                Read what Myto does
               </a>
             </p>
           </div>

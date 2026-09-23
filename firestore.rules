@@ -1,6 +1,6 @@
 rules_version = '2';
 
-// Firestore security rules for Sylor. Deploy these in the Firebase console
+// Firestore security rules for Myto. Deploy these in the Firebase console
 // (Firestore Database → Rules → paste → Publish) or with `firebase deploy --only firestore:rules`.
 //
 // Each signed-in user can read and write ONLY their own data under users/{uid} — their profile

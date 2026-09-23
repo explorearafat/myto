@@ -132,8 +132,8 @@ describe('parseFileBlocks', () => {
 })
 
 /**
- * Tool use rides the reply as two adjacent fenced blocks — a `sylor:tool` call and
- * a `sylor:tool_result <name>` result (written by main/tools). The parser coalesces
+ * Tool use rides the reply as two adjacent fenced blocks — a `myto:tool` call and
+ * a `myto:tool_result <name>` result (written by main/tools). The parser coalesces
  * them into a single card, shows a call still waiting on its result as "running",
  * and must not disturb the file/prose parsing around it.
  */
@@ -142,11 +142,11 @@ describe('parseFileBlocks — tool segments', () => {
     const md = [
       'Let me search.',
       '',
-      '```sylor:tool',
+      '```myto:tool',
       '{"tool": "web_search", "input": {"query": "webgpu 2026"}}',
       '```',
       '',
-      '```sylor:tool_result web_search',
+      '```myto:tool_result web_search',
       '1. WebGPU is widely supported',
       '```',
       '',
@@ -163,7 +163,7 @@ describe('parseFileBlocks — tool segments', () => {
   })
 
   it('shows a call whose result has not arrived as running (result null, complete)', () => {
-    const md = '```sylor:tool\n{"tool": "web_fetch", "input": {"url": "https://x.com"}}\n```'
+    const md = '```myto:tool\n{"tool": "web_fetch", "input": {"url": "https://x.com"}}\n```'
     const tool = toolAt(parseFileBlocks(md), 0)
     expect(tool.name).toBe('web_fetch')
     expect(tool.result).toBeNull()
@@ -171,13 +171,13 @@ describe('parseFileBlocks — tool segments', () => {
   })
 
   it('flags a still-streaming call block (no closing fence) as incomplete', () => {
-    const tool = toolAt(parseFileBlocks('```sylor:tool\n{"tool": "web_search"'), 0)
+    const tool = toolAt(parseFileBlocks('```myto:tool\n{"tool": "web_search"'), 0)
     expect(tool.result).toBeNull()
     expect(tool.complete).toBe(false)
   })
 
   it('tolerates a malformed call body, keeping the raw text as input', () => {
-    const tool = toolAt(parseFileBlocks('```sylor:tool\n{not json}\n```'), 0)
+    const tool = toolAt(parseFileBlocks('```myto:tool\n{not json}\n```'), 0)
     expect(tool.name).toBeNull()
     expect(tool.input).toBe('{not json}')
   })
@@ -190,11 +190,11 @@ describe('parseFileBlocks — tool segments', () => {
       'print(1)',
       '```',
       '',
-      '```sylor:tool',
+      '```myto:tool',
       '{"tool": "web_search", "input": {}}',
       '```',
       '',
-      '```sylor:tool_result web_search',
+      '```myto:tool_result web_search',
       'ok',
       '```'
     ].join('\n')
@@ -209,7 +209,7 @@ describe('parseFileBlocks — tool segments', () => {
     // main/tools widens the result fence past any inner backtick run, so an inner
     // ``` never closes the block early.
     const md = [
-      '````sylor:tool_result web_fetch',
+      '````myto:tool_result web_fetch',
       'Example:',
       '```js',
       'console.log(1)',

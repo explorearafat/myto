@@ -7,7 +7,7 @@ import { useProjectStore } from '@renderer/store/useProjectStore'
  * instructions, long-term memory, and knowledge docs). Instructions, memory, and
  * knowledge are injected into the engine's system prompt whenever a chat runs
  * under this project (see buildProjectPreamble in the workflow engine). Memory is
- * normally grown by Sylor via the `remember` tool; here it can be edited/cleared.
+ * normally grown by Myto via the `remember` tool; here it can be edited/cleared.
  */
 export function ProjectDialog({
   project,
@@ -141,7 +141,7 @@ export function ProjectDialog({
                 />
               </label>
 
-              {/* Long-term memory: what Sylor has learned across this project's
+              {/* Long-term memory: what Myto has learned across this project's
                   chats. Appended to automatically via the `remember` tool and
                   editable/clearable here. */}
               <label className="flex flex-col gap-1.5">
@@ -162,7 +162,7 @@ export function ProjectDialog({
                 <textarea
                   value={memory}
                   rows={4}
-                  placeholder="Sylor writes what it learns about this project here as you chat. You can edit or clear it."
+                  placeholder="Myto writes what it learns about this project here as you chat. You can edit or clear it."
                   spellCheck={false}
                   onChange={(e) => setMemoryDraft(e.target.value)}
                   className="resize-none rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none transition-colors placeholder:text-muted/60 focus:border-primary/70"

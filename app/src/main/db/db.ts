@@ -199,10 +199,10 @@ function migrate(handle: DatabaseSync): void {
 
   if (current < 4) {
     // Per-project long-term memory (power feature): one growing note per project
-    // that the engine injects into every chat filed under it and that Sylor
+    // that the engine injects into every chat filed under it and that Myto
     // appends to via the `remember` tool. Distinct from `instructions` (user's
     // standing guidance) and `project_knowledge` (curated docs): memory is what
-    // Sylor learns over time. A single TEXT column keeps "one project = one
+    // Myto learns over time. A single TEXT column keeps "one project = one
     // memory" literally true; existing rows default to empty.
     handle.exec(`ALTER TABLE projects ADD COLUMN memory TEXT NOT NULL DEFAULT ''`)
   }

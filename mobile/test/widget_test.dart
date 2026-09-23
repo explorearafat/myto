@@ -18,16 +18,16 @@ void main() {
 
   testWidgets('signed-out users see the sign-in gate', (tester) async {
     final (auth, store) = await buildServices();
-    await tester.pumpWidget(SylorApp(auth: auth, store: store));
+    await tester.pumpWidget(MytoApp(auth: auth, store: store));
     await tester.pump();
 
-    expect(find.text('Sylor'), findsWidgets);
+    expect(find.text('Myto'), findsWidgets);
     expect(find.text('Continue without signing in'), findsOneWidget);
   });
 
   testWidgets('a guest lands on the empty chat screen', (tester) async {
     final (auth, store) = await buildServices(guest: true);
-    await tester.pumpWidget(SylorApp(auth: auth, store: store));
+    await tester.pumpWidget(MytoApp(auth: auth, store: store));
     await tester.pump();
 
     expect(find.text('How can I help today?'), findsOneWidget);

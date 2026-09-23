@@ -10,7 +10,7 @@ import { copyToClipboard } from '../lib/clipboard';
 const BTN =
   'flex h-8 w-8 items-center justify-center rounded-lg transition-colors duration-150 hover:bg-[#f0eee6]';
 const IDLE = 'text-[#9c988e] hover:text-[#141413]';
-const ACTIVE = 'text-[#cf5535]';
+const ACTIVE = 'text-[#141413]';
 
 export function MessageActions({
   text,
@@ -40,7 +40,7 @@ export function MessageActions({
         aria-label={copied ? 'Copied' : 'Copy'}
       >
         {copied ? (
-          <Check className="h-[15px] w-[15px] text-[#cf5535]" aria-hidden="true" />
+          <Check className="h-[15px] w-[15px] text-[#141413]" aria-hidden="true" />
         ) : (
           <Copy className="h-[15px] w-[15px]" aria-hidden="true" />
         )}

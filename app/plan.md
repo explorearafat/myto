@@ -1,7 +1,7 @@
-# Sylor – Project Plan
+# Myto – Project Plan
 
 ## Project Overview
-**Sylor** is a desktop application inspired by the functionality and interface of Claude Code. It serves as a full‑featured AI‑powered coding workspace that combines local and remote large language models, a smart code editor, an integrated terminal, and intelligent project management. The goal is to provide a premium, responsive, and token‑efficient development environment that works both online and offline.
+**Myto** is a desktop application inspired by the functionality and interface of Claude Code. It serves as a full‑featured AI‑powered coding workspace that combines local and remote large language models, a smart code editor, an integrated terminal, and intelligent project management. The goal is to provide a premium, responsive, and token‑efficient development environment that works both online and offline.
 
 ---
 

@@ -12,7 +12,7 @@ import { Globe, LoaderCircle, LogOut, Monitor, Smartphone } from 'lucide-react';
 import { auth, googleProvider } from '../lib/firebase';
 import { getDeviceId, listDevices, recordDeviceSignIn } from '../lib/devices';
 import { absoluteDate, relativeTime, type DevicePlatform, type DeviceSession } from '../shared/device';
-import { SylorStar } from './SylorStar';
+import { MytoMark } from './MytoMark';
 import { ByokPanel } from './ByokPanel';
 
 /*
@@ -111,7 +111,7 @@ function GoogleG({ className }: { className?: string }) {
 const GOOGLE_BTN =
   'flex w-full items-center justify-center gap-3 rounded-xl border border-[#e4e1d8] bg-white px-4 py-3 text-[15px] font-medium text-[#141413] transition-colors duration-150 hover:border-[#cbc6ba] hover:bg-[#fbfaf7] disabled:cursor-not-allowed disabled:opacity-60';
 const PRIMARY_BTN =
-  'flex w-full items-center justify-center gap-2 rounded-xl bg-[#cf5535] px-4 py-3 text-[15px] font-medium text-white transition-colors duration-150 hover:bg-[#b8482c] disabled:cursor-not-allowed disabled:opacity-60';
+  'flex w-full items-center justify-center gap-2 rounded-xl bg-[#141413] px-4 py-3 text-[15px] font-medium text-white transition-colors duration-150 hover:bg-[#2b2a27] disabled:cursor-not-allowed disabled:opacity-60';
 const ERROR_BOX =
   'rounded-lg border border-[#e4b8a8] bg-[#f9ede8] px-3 py-2 text-[13px] leading-relaxed text-[#8a3b22]';
 
@@ -129,7 +129,7 @@ function Shell({ children, wide }: { children: ReactNode; wide?: boolean }) {
 function CardHead({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div className="flex flex-col items-center text-center">
-      <SylorStar size={34} title="Sylor" />
+      <MytoMark size={34} title="Myto" />
       <h1 className="font-display mt-4 text-[26px] font-normal leading-tight">{title}</h1>
       <p className="mt-2 max-w-[44ch] text-[14px] leading-relaxed text-[#6b675e]">{children}</p>
     </div>
@@ -152,7 +152,7 @@ function platformLabel(platform: DevicePlatform): string {
 /** Two initials for the avatar fallback when the account has no photo. */
 function initialsOf(u: User): string {
   const base = (u.displayName || u.email || '').trim();
-  if (!base) return 'S';
+  if (!base) return 'M';
   const parts = base.split(/\s+/);
   const first = parts[0]?.[0] || '';
   const last = parts.length > 1 ? parts[parts.length - 1][0] : '';
@@ -206,7 +206,7 @@ function DeviceList({ devices }: { devices: DeviceSession[] }) {
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span className="text-[15px] font-medium text-[#141413]">{d.label}</span>
                 {current ? (
-                  <span className="rounded-full border border-[#e6b8ac] bg-[#fbeee9] px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-[#a8442a]">
+                  <span className="rounded-full border border-[#d8d5cc] bg-[#fbeee9] px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-[#57544e]">
                     This device
                   </span>
                 ) : null}
@@ -385,7 +385,7 @@ export function AuthBroker() {
 
   // ── Broker flow (app opened this page). Independent of the web session — always mint a fresh token. ──
   if (target) {
-    const appName = target.platform === 'mobile' ? 'the Sylor app' : 'the Sylor desktop app';
+    const appName = target.platform === 'mobile' ? 'the Myto app' : 'the Myto desktop app';
 
     // Signed in with a fresh token — authorize this device, then count down and hand off.
     if (phase === 'authorize' || phase === 'authorizing' || phase === 'redirecting') {
@@ -432,7 +432,7 @@ export function AuthBroker() {
     // Not signed in yet — run the Google OAuth grant.
     return (
       <Shell>
-        <CardHead title="Sign in to Sylor">
+        <CardHead title="Sign in to Myto">
           Continue with Google to sign in to {appName}.
         </CardHead>
 
@@ -460,8 +460,8 @@ export function AuthBroker() {
     return (
       <Shell>
         <div className="flex flex-col items-center gap-3 py-6 text-[#6b675e]">
-          <SylorStar size={30} title="Sylor" />
-          <LoaderCircle className="h-5 w-5 animate-spin text-[#cf5535]" aria-hidden="true" />
+          <MytoMark size={30} title="Myto" />
+          <LoaderCircle className="h-5 w-5 animate-spin text-[#141413]" aria-hidden="true" />
         </div>
       </Shell>
     );
@@ -473,8 +473,8 @@ export function AuthBroker() {
       <Shell wide>
         <CardHead title="Your devices">
           {count === 0
-            ? 'This is where sign-ins made through Sylor’s web sign-in show up.'
-            : `Signed in on ${count} device${count === 1 ? '' : 's'} through Sylor’s web sign-in.`}
+            ? 'This is where sign-ins made through Myto’s web sign-in show up.'
+            : `Signed in on ${count} device${count === 1 ? '' : 's'} through Myto’s web sign-in.`}
         </CardHead>
 
         <div className="mt-6 mb-4 flex items-center justify-between gap-3 rounded-xl border border-[#e4e1d8] bg-white px-4 py-3">
@@ -513,7 +513,7 @@ export function AuthBroker() {
               Your models
             </h2>
             <p className="mx-auto mt-2 max-w-[46ch] text-[14px] leading-relaxed text-[#6b675e]">
-              Add your own provider and models. These power chat in Sylor’s web app, desktop app, and
+              Add your own provider and models. These power chat in Myto’s web app, desktop app, and
               mobile app — everywhere you’re signed in.
             </p>
           </div>
@@ -526,8 +526,8 @@ export function AuthBroker() {
   // Signed out, opened directly.
   return (
     <Shell>
-      <CardHead title="Sylor sign-in">
-        This is the page the Sylor desktop and mobile apps open to sign in with Google. Sign in here to
+      <CardHead title="Myto sign-in">
+        This is the page the Myto desktop and mobile apps open to sign in with Google. Sign in here to
         see the devices on your account.
       </CardHead>
 
@@ -547,9 +547,9 @@ export function AuthBroker() {
       <div className="mt-6 text-center">
         <a
           href="/"
-          className="text-[13px] font-medium text-[#141413] underline decoration-[#cbc6ba] underline-offset-2 transition-colors duration-150 hover:decoration-[#cf5535]"
+          className="text-[13px] font-medium text-[#141413] underline decoration-[#cbc6ba] underline-offset-2 transition-colors duration-150 hover:decoration-[#141413]"
         >
-          Back to Sylor
+          Back to Myto
         </a>
       </div>
     </Shell>

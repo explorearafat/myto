@@ -44,33 +44,33 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   knowledge: [],
 
   refresh: async () => {
-    const projects = await window.sylor.projects.list()
+    const projects = await window.myto.projects.list()
     set({ projects })
   },
 
   create: async (name) => {
-    const project = await window.sylor.projects.create(name)
+    const project = await window.myto.projects.create(name)
     await get().refresh()
     return project
   },
 
   rename: async (id, name) => {
-    await window.sylor.projects.rename(id, name)
+    await window.myto.projects.rename(id, name)
     await get().refresh()
   },
 
   setInstructions: async (id, instructions) => {
-    await window.sylor.projects.setInstructions(id, instructions)
+    await window.myto.projects.setInstructions(id, instructions)
     await get().refresh()
   },
 
   setMemory: async (id, memory) => {
-    await window.sylor.projects.setMemory(id, memory)
+    await window.myto.projects.setMemory(id, memory)
     await get().refresh()
   },
 
   remove: async (id) => {
-    await window.sylor.projects.remove(id)
+    await window.myto.projects.remove(id)
     const session = useSessionStore.getState()
     if (session.activeProjectId === id) {
       // The scoped project is gone — fall back to the all-chats view (this also
@@ -81,17 +81,17 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   loadKnowledge: async (projectId) => {
-    const knowledge = await window.sylor.projects.listKnowledge(projectId)
+    const knowledge = await window.myto.projects.listKnowledge(projectId)
     set({ knowledge })
   },
 
   addKnowledge: async (projectId, name, content) => {
-    await window.sylor.projects.addKnowledge(projectId, name, content)
+    await window.myto.projects.addKnowledge(projectId, name, content)
     await get().loadKnowledge(projectId)
   },
 
   removeKnowledge: async (projectId, id) => {
-    await window.sylor.projects.removeKnowledge(id)
+    await window.myto.projects.removeKnowledge(id)
     await get().loadKnowledge(projectId)
   }
 }))

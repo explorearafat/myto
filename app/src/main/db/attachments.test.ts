@@ -18,13 +18,13 @@ import { appendMessage, createSession, deleteSession, loadSession } from '@main/
  * disk, written by the IPC layer), so these tests exercise CRUD + the pending →
  * bound lifecycle + cascade-on-session-delete.
  */
-const ROOT = '/proj/sylor'
+const ROOT = '/proj/myto'
 let dir: string
 let n = 5000
 const tick = (): number => (n += 1000)
 
 beforeAll(() => {
-  dir = mkdtempSync(join(tmpdir(), 'sylor-att-'))
+  dir = mkdtempSync(join(tmpdir(), 'myto-att-'))
 })
 
 afterAll(() => {

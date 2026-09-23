@@ -60,7 +60,7 @@ export function registerSessionIpc(): void {
     try {
       rmSync(join(app.getPath('userData'), 'attachments', id), { recursive: true, force: true })
     } catch (err) {
-      console.error('[sylor] attachment cleanup on session delete failed:', err)
+      console.error('[myto] attachment cleanup on session delete failed:', err)
     }
   })
 
@@ -123,6 +123,6 @@ function safe(fn: () => void): void {
   try {
     fn()
   } catch (err) {
-    console.error('[sylor] session persistence write failed:', err)
+    console.error('[myto] session persistence write failed:', err)
   }
 }

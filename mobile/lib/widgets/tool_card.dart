@@ -5,8 +5,8 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 
 /// Tool-call rendering for the mobile transcript. The chat gateway runs the tool loop and
-/// writes each round-trip into the reply as two fenced blocks — a ```sylor:tool call and a
-/// ```sylor:tool_result <name> result (see src/server/tools.ts). This file splits an assistant
+/// writes each round-trip into the reply as two fenced blocks — a ```myto:tool call and a
+/// ```myto:tool_result <name> result (see src/server/tools.ts). This file splits an assistant
 /// message into those segments and renders each tool round-trip as a collapsible card, matching
 /// the website's ToolCard. The Dart mirror of src/lib/toolBlocks.ts + src/components/ToolCard.tsx.
 
@@ -38,16 +38,16 @@ class ToolSegment extends ChatSegment {
 }
 
 /// Cheap pre-check so the plain-Markdown path stays untouched when there are no tools.
-bool hasToolBlocks(String s) => s.contains('```sylor:tool');
+bool hasToolBlocks(String s) => s.contains('```myto:tool');
 
 final RegExp _fence = RegExp(r'^(`{3,})[ \t]*(.*)$');
 final RegExp _closeFence = RegExp(r'^(`{3,})[ \t]*$');
 
 ({String kind, String? name})? _parseToolInfo(String info) {
   final trimmed = info.trim();
-  if (trimmed == 'sylor:tool') return (kind: 'call', name: null);
-  if (trimmed == 'sylor:tool_result' || trimmed.startsWith('sylor:tool_result ')) {
-    final name = trimmed.substring('sylor:tool_result'.length).trim();
+  if (trimmed == 'myto:tool') return (kind: 'call', name: null);
+  if (trimmed == 'myto:tool_result' || trimmed.startsWith('myto:tool_result ')) {
+    final name = trimmed.substring('myto:tool_result'.length).trim();
     return (kind: 'result', name: name.isEmpty ? null : name);
   }
   return null;
@@ -166,7 +166,7 @@ class ToolCard extends StatefulWidget {
   const ToolCard({super.key, required this.segment, required this.palette});
 
   final ToolSegment segment;
-  final SylorPalette palette;
+  final MytoPalette palette;
 
   @override
   State<ToolCard> createState() => _ToolCardState();
@@ -232,7 +232,7 @@ class _ToolCardState extends State<ToolCard> {
     );
   }
 
-  Widget _block(BuildContext context, String label, String body, SylorPalette palette, {required double maxHeight}) {
+  Widget _block(BuildContext context, String label, String body, MytoPalette palette, {required double maxHeight}) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
       child: Column(

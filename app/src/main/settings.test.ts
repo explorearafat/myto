@@ -8,7 +8,7 @@ import { rmSync } from 'node:fs'
 // afterAll removes. `vi.hoisted` computes it without top-level-variable capture in
 // the hoisted mock factory.
 const { USERDATA } = vi.hoisted(() => ({
-  USERDATA: `${process.env.TEMP || process.env.TMP || process.env.TMPDIR || '/tmp'}/sylor-settings-test-${process.pid}`
+  USERDATA: `${process.env.TEMP || process.env.TMP || process.env.TMPDIR || '/tmp'}/myto-settings-test-${process.pid}`
 }))
 vi.mock('electron', () => ({ app: { getPath: () => USERDATA } }))
 

@@ -14,7 +14,7 @@ interface Feature {
   body: string;
 }
 
-/* Six things Sylor genuinely does — no filler, no metrics. */
+/* Six things Myto genuinely does — no filler, no metrics. */
 const FEATURES: Feature[] = [
   {
     Icon: Layers,
@@ -24,12 +24,12 @@ const FEATURES: Feature[] = [
   {
     Icon: FolderTree,
     title: 'Whole-project context',
-    body: 'Sylor reads across your codebase and carries notes forward in SYLOR.md, so it never relearns the same thing twice.',
+    body: 'Myto reads across your codebase and carries notes forward in MYTO.md, so it never relearns the same thing twice.',
   },
   {
     Icon: Terminal,
     title: 'A real terminal',
-    body: 'A full shell in the workspace. Sylor runs builds, tests, and dev servers, then reads the output like you would.',
+    body: 'A full shell in the workspace. Myto runs builds, tests, and dev servers, then reads the output like you would.',
   },
   {
     Icon: ShieldCheck,
@@ -76,7 +76,7 @@ export function Features() {
               style={{ transitionDelay: `${(i % 3) * 60}ms` }}
               className="rounded-2xl border border-[#e4e1d8] bg-white p-7 transition-transform duration-300 hover:scale-[1.02] hover:-translate-y-1 hover:border-[#d8d3c8] hover:shadow-[0_18px_44px_-26px_rgba(20,20,19,0.3)]"
             >
-              <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-[#eadfd9] bg-[#faf1ee] text-[#cf5535]">
+              <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-[#e3e1d8] bg-[#f0efe9] text-[#141413]">
                 <f.Icon className="h-5 w-5" strokeWidth={1.75} aria-hidden="true" />
               </div>
               <h3 className="mt-5 font-display font-normal text-[22px] font-medium tracking-[-0.005em] text-[#141413]">

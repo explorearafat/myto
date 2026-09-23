@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import { LINKS } from '../data';
 import { matchAnswer } from '../chatKb';
-import { SylorStar } from './SylorStar';
+import { MytoMark } from './MytoMark';
 import { MessageActions } from './MessageActions';
 import { Markdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
@@ -33,7 +33,7 @@ import { isByokConfigured, type ByokConfig } from '../shared/byok';
 import { profileSummary, type UserProfile } from '../shared/profile';
 
 /*
- * The Sylor chat, modeled closely on claude.ai/new: a left sidebar (brand, New chat, the
+ * The Myto chat, modeled closely on claude.ai/new: a left sidebar (brand, New chat, the
  * Code/Projects/Artifacts/Customize sections, recents, and an account chip) beside a main
  * column that opens on a time-of-day greeting over one rounded input, then collapses into a
  * transcript with the input pinned below once a message is sent.
@@ -74,33 +74,33 @@ const NAV: { view: Exclude<View, 'chat'>; label: string; icon: LucideIcon }[] = 
   { view: 'customize', label: 'Customize', icon: Settings2 },
 ];
 
-/** Copy for the non-chat section views — every line traces to a real Sylor capability. */
+/** Copy for the non-chat section views — every line traces to a real Myto capability. */
 const SECTIONS: Record<Exclude<View, 'chat'>, { icon: LucideIcon; title: string; body: string }> = {
   code: {
     icon: Code2,
     title: 'Code',
-    body: 'In the Sylor app this is where code lives — it reads your project, plans the work, shows every change as a diff, then runs your build to check the change compiles.',
+    body: 'In the Myto app this is where code lives — it reads your project, plans the work, shows every change as a diff, then runs your build to check the change compiles.',
   },
   projects: {
     icon: FolderKanban,
     title: 'Projects',
-    body: 'Open a project folder and Sylor carries its context forward in SYLOR.md — across sessions, folder switches, and restarts, so it never relearns your codebase from scratch.',
+    body: 'Open a project folder and Myto carries its context forward in MYTO.md — across sessions, folder switches, and restarts, so it never relearns your codebase from scratch.',
   },
   artifacts: {
     icon: Shapes,
     title: 'Artifacts',
-    body: 'Preview what Sylor builds: start your dev server beside the chat and let it read the live page — the DOM and computed styles — to confirm a change actually landed.',
+    body: 'Preview what Myto builds: start your dev server beside the chat and let it read the live page — the DOM and computed styles — to confirm a change actually landed.',
   },
   customize: {
     icon: Settings2,
     title: 'Customize',
-    body: 'Extend Sylor with Skills, MCP servers, and connectors. Each one states what it can reach and stays off until you turn it on.',
+    body: 'Extend Myto with Skills, MCP servers, and connectors. Each one states what it can reach and stays off until you turn it on.',
   },
 };
 
 /** The three things "Customize" gathers, shown as cards on that section view. */
 const CUSTOMIZE_ITEMS: { icon: LucideIcon; label: string; body: string }[] = [
-  { icon: Sparkles, label: 'Skills', body: 'Markdown procedures Sylor can follow on request.' },
+  { icon: Sparkles, label: 'Skills', body: 'Markdown procedures Myto can follow on request.' },
   { icon: Blocks, label: 'MCP servers', body: 'Connect tools over the Model Context Protocol.' },
   { icon: Plug, label: 'Connectors', body: 'Local files, network, or system — labelled and opt-in.' },
 ];
@@ -199,7 +199,7 @@ function AgentReply({
   const reduced = usePrefersReducedMotion();
   return (
     <div className="chat-in mt-5 flex gap-3" aria-live="polite">
-      <SylorStar size={26} className="mt-0.5 shrink-0" />
+      <MytoMark size={26} className="mt-0.5 shrink-0" />
       <div className="min-w-0 flex-1">
         {turn.status === 'thinking' ? (
           <div className="flex items-center gap-2 py-1 text-[13px] text-[#6b675e]">
@@ -229,7 +229,7 @@ function AgentReply({
             ) : null}
             {streaming && !reduced ? (
               <span
-                className="caret ml-0.5 inline-block h-[1.05em] w-[2px] translate-y-[0.15em] bg-[#cf5535] align-middle"
+                className="caret ml-0.5 inline-block h-[1.05em] w-[2px] translate-y-[0.15em] bg-[#141413] align-middle"
                 aria-hidden="true"
               />
             ) : null}
@@ -256,7 +256,7 @@ function SectionView({ view }: { view: Exclude<View, 'chat'> }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-6 py-12 text-center">
       <div className="w-full max-w-md">
-        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl border border-[#e4e1d8] bg-white text-[#cf5535]">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl border border-[#e4e1d8] bg-white text-[#141413]">
           <Icon className="h-6 w-6" aria-hidden="true" />
         </div>
         <h2 className="font-display mt-5 text-[26px] font-normal leading-tight text-[#141413]">
@@ -273,7 +273,7 @@ function SectionView({ view }: { view: Exclude<View, 'chat'> }) {
                   key={item.label}
                   className="flex items-start gap-3 rounded-xl border border-[#e4e1d8] bg-white px-4 py-3"
                 >
-                  <RowIcon className="mt-0.5 h-4 w-4 shrink-0 text-[#cf5535]" aria-hidden="true" />
+                  <RowIcon className="mt-0.5 h-4 w-4 shrink-0 text-[#141413]" aria-hidden="true" />
                   <div>
                     <p className="text-[14px] font-medium text-[#141413]">{item.label}</p>
                     <p className="text-[13px] leading-relaxed text-[#6b675e]">{item.body}</p>
@@ -286,9 +286,9 @@ function SectionView({ view }: { view: Exclude<View, 'chat'> }) {
 
         <a
           href={LINKS.downloadPage}
-          className="mt-7 inline-flex items-center gap-2 rounded-md bg-[#cf5535] px-4 py-2 text-[14px] font-medium text-white no-underline transition-colors duration-150 hover:bg-[#b8482c] active:translate-y-px"
+          className="mt-7 inline-flex items-center gap-2 rounded-md bg-[#141413] px-4 py-2 text-[14px] font-medium text-white no-underline transition-colors duration-150 hover:bg-[#2b2a27] active:translate-y-px"
         >
-          Get Sylor
+          Get Myto
           <ArrowRight className="h-4 w-4" aria-hidden="true" />
         </a>
       </div>
@@ -526,10 +526,10 @@ export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
         e.preventDefault();
         if (!busy) askText(input);
       }}
-      className="rounded-3xl border border-[#e4e1d8] bg-white shadow-[0_1px_2px_rgba(20,20,19,0.04)] transition-[border-color,box-shadow] duration-150 focus-within:border-[#cbc6ba] focus-within:shadow-[0_0_0_4px_rgba(207,85,53,0.10)]"
+      className="rounded-3xl border border-[#e4e1d8] bg-white shadow-[0_1px_2px_rgba(20,20,19,0.04)] transition-[border-color,box-shadow] duration-150 focus-within:border-[#cbc6ba] focus-within:shadow-[0_0_0_4px_rgba(20,20,19,0.10)]"
     >
       <label htmlFor="chat-input" className="sr-only">
-        Message Sylor
+        Message Myto
       </label>
       <textarea
         id="chat-input"
@@ -542,7 +542,7 @@ export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
         placeholder={
           configured
             ? started
-              ? 'Reply to Sylor…'
+              ? 'Reply to Myto…'
               : 'How can I help you today?'
             : 'Add a model in Authentication to start chatting…'
         }
@@ -565,7 +565,7 @@ export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
         <div className="flex items-center gap-1">
           <details ref={detailsRef} className="relative">
             <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] text-[#544f46] transition-colors duration-150 hover:bg-[#f0eee6] hover:text-[#141413] [&::-webkit-details-marker]:hidden">
-              <SylorStar size={16} />
+              <MytoMark size={16} />
               {models.find((m) => m.id === selectedModelId)?.name || 'Model'}
               <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
             </summary>
@@ -592,7 +592,7 @@ export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
                     >
                       <Check
                         className={
-                          'mt-0.5 h-4 w-4 shrink-0 ' + (active ? 'text-[#cf5535]' : 'text-transparent')
+                          'mt-0.5 h-4 w-4 shrink-0 ' + (active ? 'text-[#141413]' : 'text-transparent')
                         }
                         aria-hidden="true"
                       />
@@ -621,7 +621,7 @@ export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
               type="submit"
               disabled={!input.trim() || !configured}
               aria-label="Send"
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#cf5535] text-white transition-colors duration-150 hover:bg-[#b8482c] active:translate-y-px disabled:cursor-not-allowed disabled:bg-[#e0c4ba]"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#141413] text-white transition-colors duration-150 hover:bg-[#2b2a27] active:translate-y-px disabled:cursor-not-allowed disabled:bg-[#c9c6bd]"
             >
               <ArrowUp className="h-[18px] w-[18px]" aria-hidden="true" />
             </button>
@@ -633,7 +633,7 @@ export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
 
   const disclaimer = (
     <p className="mt-2 text-center text-[11px] text-[#9c988e]">
-      Sylor can make mistakes. Double-check important info.
+      Myto can make mistakes. Double-check important info.
     </p>
   );
 
@@ -668,9 +668,9 @@ export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
             href="/"
             className="flex items-center gap-2 rounded-lg px-1.5 py-1 no-underline transition-colors duration-150 hover:bg-[#ece9e0]"
           >
-            <SylorStar size={24} />
+            <MytoMark size={24} />
             <span className="text-[15px] font-semibold tracking-[-0.01em] text-[#141413]">
-              Sylor
+              Myto
             </span>
           </a>
           <button
@@ -689,7 +689,7 @@ export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
             onClick={newChat}
             className="flex w-full items-center gap-3 rounded-lg border border-[#e4e1d8] bg-white px-3 py-2 text-left text-[14px] font-medium text-[#141413] transition-colors duration-150 hover:border-[#cbc6ba]"
           >
-            <SquarePen className="h-4 w-4 text-[#cf5535]" aria-hidden="true" />
+            <SquarePen className="h-4 w-4 text-[#141413]" aria-hidden="true" />
             New chat
           </button>
         </div>
@@ -741,7 +741,7 @@ export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
                 className="h-8 w-8 shrink-0 rounded-full object-cover"
               />
             ) : (
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#cf5535] text-[13px] font-semibold text-white">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#141413] text-[13px] font-semibold text-white">
                 {name.charAt(0).toUpperCase()}
               </span>
             )}
@@ -776,7 +776,7 @@ export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
             <PanelLeft className="h-[18px] w-[18px]" aria-hidden="true" />
           </button>
           <a href="/" className="text-[15px] font-semibold text-[#141413] no-underline">
-            Sylor
+            Myto
           </a>
           <button
             type="button"
@@ -796,7 +796,7 @@ export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
             <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-10">
               <div className="chat-in w-full max-w-2xl">
                 <div className="mb-7 flex items-center justify-center gap-3">
-                  <SylorStar className="h-7 w-7 shrink-0" />
+                  <MytoMark className="h-7 w-7 shrink-0" />
                   <h1 className="font-display text-[28px] font-normal leading-tight text-[#141413] sm:text-[36px]">
                     {greeting}, {name}
                   </h1>
@@ -819,7 +819,7 @@ export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
             <>
               <div className="min-h-0 flex-1 overflow-y-auto">
                 <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-8">
-                  <div role="log" aria-label="Conversation with Sylor" className="space-y-6">
+                  <div role="log" aria-label="Conversation with Myto" className="space-y-6">
                     {turns.map((t) => (
                       <div key={t.id}>
                         <div className="flex justify-end">
@@ -837,7 +837,7 @@ export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
                   </div>
                   {/* A faint caveat under the newest reply — Claude's per-response note. */}
                   <p className="pl-[38px] text-[12px] leading-relaxed text-[#141413]/40">
-                    Sylor can make mistakes. Double-check important info.
+                    Myto can make mistakes. Double-check important info.
                   </p>
                   <div ref={endRef} />
                 </div>

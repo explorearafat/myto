@@ -1,6 +1,6 @@
-# Sylor
+# Myto
 
-A premium desktop AI coding workspace inspired by Claude Code. Sylor combines local
+A premium desktop AI coding workspace inspired by Claude Code. Myto combines local
 (Ollama) and remote (gateway) LLMs, a Monaco-based code editor, an integrated terminal,
 and intelligent, token-efficient project workflows.
 
@@ -44,7 +44,7 @@ npm run dev
 ```
 src/
 ├─ main/        Electron main process (window, IPC handlers)
-├─ preload/     contextBridge — the typed window.sylor API
+├─ preload/     contextBridge — the typed window.myto API
 ├─ shared/      Types + IPC channel constants shared across processes
 └─ renderer/    React UI (components, store, styles, Monaco/xterm)
 ```

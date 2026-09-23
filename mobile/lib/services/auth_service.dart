@@ -77,7 +77,7 @@ class AuthService extends ChangeNotifier {
         await FirebaseAuth.instance.signInWithCredential(credential);
       });
 
-  /// Opens the Sylor website in a Custom Tab to run Google sign-in in a real browser, then
+  /// Opens the Myto website in a Custom Tab to run Google sign-in in a real browser, then
   /// reads back the relayed OIDC ID token from the `sylor://auth-callback` deep link. A random
   /// `state` is round-tripped and re-checked so we reject any callback we didn't initiate. See
   /// the website's AuthBroker page for the other half of this handshake.
@@ -119,7 +119,7 @@ class AuthService extends ChangeNotifier {
 
   Future<void> _run(Future<void> Function() action) async {
     if (!firebaseReady) {
-      _error = 'Sign-in isn\'t available right now. Please update Sylor and try again.';
+      _error = 'Sign-in isn\'t available right now. Please update Myto and try again.';
       notifyListeners();
       return;
     }

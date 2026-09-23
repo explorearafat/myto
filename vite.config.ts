@@ -13,7 +13,7 @@ const SUBPAGES = ['/download', '/chat', '/authentication'];
 
 function extraPages(): Plugin {
   return {
-    name: 'sylor-extra-pages',
+    name: 'myto-extra-pages',
     configureServer(server) {
       server.middlewares.use((req, _res, next) => {
         for (const base of SUBPAGES) {
@@ -37,7 +37,7 @@ function extraPages(): Plugin {
  */
 function apiDev(): Plugin {
   return {
-    name: 'sylor-api-dev',
+    name: 'myto-api-dev',
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const url = req.url || '';

@@ -7,7 +7,7 @@ import type { ToolDef, ToolGate } from './registry'
  * A multi-step task (build an app, refactor a module, produce a report) is far more
  * reliable when the agent decomposes it into an explicit ordered plan and keeps that
  * plan in view as it works — it stops the model from losing the thread halfway
- * through and lets the user watch progress advance. This tool lets Sylor publish and
+ * through and lets the user watch progress advance. This tool lets Myto publish and
  * update that checklist: it hands the current list of steps (each `pending`,
  * `in_progress`, or `done`) to the renderer, which pins it above the reply.
  *

@@ -9,6 +9,7 @@ import {
 import { modelInfo } from '@main/providers/provider'
 import { OllamaProvider } from '@main/providers/ollama'
 import { GatewayProvider } from '@main/providers/gateway'
+import { pickAdapter, openAiAdapter, anthropicAdapter } from '@main/providers/adapters'
 import type { GatewayConfig } from '@shared/types'
 
 describe('http helpers', () => {
@@ -469,7 +470,7 @@ describe('GatewayProvider', () => {
     expect(body.temperature).toBeUndefined()
   })
 
-  it('clamps the Sylor-internal "max" effort down to the wire vocabulary "high"', async () => {
+  it('clamps the Myto-internal "max" effort down to the wire vocabulary "high"', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'ok' } }] }))
     const provider = new GatewayProvider(baseConfig)
     await provider.getCompletion('gpt-4o-mini', [{ role: 'user', content: 'hi' }], {
@@ -567,5 +568,230 @@ describe('GatewayProvider', () => {
     await expect(
       provider.getCompletion('gpt-4o-mini', [{ role: 'user', content: 'hi' }])
     ).rejects.toThrow(/HTTP 500/)
+  })
+})
+
+// ── Wire-format adapters (auto-detected by base URL) ─────────────────────────
+
+describe('pickAdapter', () => {
+  it('selects the Anthropic adapter for the real Anthropic API host', () => {
+    expect(pickAdapter('https://api.anthropic.com')).toBe(anthropicAdapter)
+    expect(pickAdapter('https://api.anthropic.com/v1')).toBe(anthropicAdapter)
+  })
+
+  it('selects the Anthropic adapter for any *.anthropic.com host', () => {
+    expect(pickAdapter('https://gw.anthropic.com/v1')).toBe(anthropicAdapter)
+  })
+
+  it('keeps the OpenAI adapter for ordinary OpenAI-compatible hosts', () => {
+    expect(pickAdapter('https://api.openai.com/v1')).toBe(openAiAdapter)
+    expect(pickAdapter('https://api.example.com/v1')).toBe(openAiAdapter)
+    // "anthropic" appearing as a path segment on another host is not a match.
+    expect(pickAdapter('https://myproxy.dev/anthropic')).toBe(openAiAdapter)
+  })
+
+  it('falls back to Anthropic when the base explicitly targets /v1/messages off-domain', () => {
+    expect(pickAdapter('https://proxy.example.com/v1/messages')).toBe(anthropicAdapter)
+  })
+
+  it('defaults to OpenAI for an empty or unparseable base URL', () => {
+    expect(pickAdapter('')).toBe(openAiAdapter)
+    expect(pickAdapter('not a url')).toBe(openAiAdapter)
+  })
+})
+
+describe('GatewayProvider — Anthropic endpoint (auto-detected)', () => {
+  const fetchMock = vi.fn()
+  // authSchema is 'bearer' on purpose: the Anthropic adapter must IGNORE it and
+  // send its own dual headers, proving detection overrides the saved auth scheme.
+  const anthropicConfig: GatewayConfig = {
+    baseUrl: 'https://api.anthropic.com',
+    apiKey: 'sk-ant-key',
+    authSchema: 'bearer',
+    authHeaderName: 'Authorization'
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockReset()
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  // A well-formed Anthropic message stream: the SSE reader only sees `data:`
+  // lines, and each payload is dispatched on its own `type`. No `[DONE]`.
+  function anthropicSse(...texts: string[]): Response {
+    const lines: string[] = [
+      'data: {"type":"message_start","message":{"id":"msg_1"}}\n',
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n'
+    ]
+    for (const t of texts) {
+      lines.push(
+        `data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: t } })}\n`
+      )
+    }
+    lines.push('data: {"type":"content_block_stop","index":0}\n')
+    lines.push('data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n')
+    lines.push('data: {"type":"message_stop"}\n')
+    return streamedResponse(lines, 'text/event-stream')
+  }
+
+  async function collect(res: Response): Promise<{ text: string; reasoning: string; done: boolean }> {
+    fetchMock.mockResolvedValue(res)
+    const provider = new GatewayProvider(anthropicConfig)
+    let text = ''
+    let reasoning = ''
+    let done = false
+    await provider.streamCompletion('claude-3-5-sonnet-20241022', [{ role: 'user', content: 'hi' }], (c) => {
+      if (c.delta) text += c.delta
+      if (c.reasoning) reasoning += c.reasoning
+      if (c.done) done = true
+    })
+    return { text, reasoning, done }
+  }
+
+  it('POSTs to /v1/messages with BOTH required auth headers and no bearer', async () => {
+    fetchMock.mockResolvedValue(anthropicSse('ok'))
+    const provider = new GatewayProvider(anthropicConfig)
+    await provider.streamCompletion('claude-3-5-sonnet-20241022', [{ role: 'user', content: 'hi' }], () => {})
+
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.anthropic.com/v1/messages')
+    const headers = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<string, string>
+    expect(headers['x-api-key']).toBe('sk-ant-key')
+    expect(headers['anthropic-version']).toBe('2023-06-01')
+    expect(headers.Authorization).toBeUndefined()
+  })
+
+  it('joins the messages path without doubling a trailing /v1', async () => {
+    fetchMock.mockResolvedValue(anthropicSse('ok'))
+    const provider = new GatewayProvider({ ...anthropicConfig, baseUrl: 'https://api.anthropic.com/v1' })
+    await provider.streamCompletion('claude-3-5-sonnet-20241022', [{ role: 'user', content: 'hi' }], () => {})
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.anthropic.com/v1/messages')
+  })
+
+  it('hoists system turns to a top-level system string and defaults max_tokens', async () => {
+    fetchMock.mockResolvedValue(anthropicSse('ok'))
+    const provider = new GatewayProvider(anthropicConfig)
+    await provider.streamCompletion(
+      'claude-3-5-sonnet-20241022',
+      [
+        { role: 'system', content: 'You are Myto.' },
+        { role: 'system', content: 'Be concise.' },
+        { role: 'user', content: 'hi' }
+      ],
+      () => {}
+    )
+    const body = sentBody(fetchMock)
+    expect(body.system).toBe('You are Myto.\n\nBe concise.')
+    expect(body.messages).toEqual([{ role: 'user', content: 'hi' }])
+    expect(body.max_tokens).toBe(4096)
+    expect(body.stream).toBe(true)
+    expect(body.reasoning_effort).toBeUndefined()
+  })
+
+  it('never sends reasoning_effort even when an effort is requested', async () => {
+    fetchMock.mockResolvedValue(anthropicSse('ok'))
+    const provider = new GatewayProvider(anthropicConfig)
+    await provider.getCompletion('claude-3-5-sonnet-20241022', [{ role: 'user', content: 'hi' }], {
+      reasoningEffort: 'high'
+    })
+    const body = sentBody(fetchMock)
+    expect(body.reasoning_effort).toBeUndefined()
+    expect(body.temperature).toBeUndefined()
+  })
+
+  it('honours an explicit maxTokens (the max tier)', async () => {
+    fetchMock.mockResolvedValue(anthropicSse('ok'))
+    const provider = new GatewayProvider(anthropicConfig)
+    await provider.getCompletion('claude-3-5-sonnet-20241022', [{ role: 'user', content: 'hi' }], {
+      maxTokens: 32000
+    })
+    expect(sentBody(fetchMock).max_tokens).toBe(32000)
+  })
+
+  it('transforms an image attachment into an Anthropic base64 image block', async () => {
+    fetchMock.mockResolvedValue(anthropicSse('ok'))
+    const provider = new GatewayProvider(anthropicConfig)
+    await provider.getCompletion('claude-3-5-sonnet-20241022', [
+      { role: 'user', content: 'describe', images: [{ mediaType: 'image/png', dataBase64: 'AAAA' }] }
+    ])
+    expect(sentBody(fetchMock).messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'describe' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }
+        ]
+      }
+    ])
+  })
+
+  it('streams text_delta events as reply deltas', async () => {
+    const { text, done } = await collect(anthropicSse('He', 'llo'))
+    expect(text).toBe('Hello')
+    expect(done).toBe(true)
+  })
+
+  it('routes a thinking_delta to reasoning, never into the reply text', async () => {
+    const res = streamedResponse(
+      [
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}\n',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}\n',
+        'data: {"type":"message_stop"}\n'
+      ],
+      'text/event-stream'
+    )
+    const { text, reasoning, done } = await collect(res)
+    expect(text).toBe('Hi')
+    expect(reasoning).toBe('hmm')
+    expect(done).toBe(true)
+  })
+
+  it('throws on an in-band Anthropic error event', async () => {
+    const res = streamedResponse(
+      ['data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n'],
+      'text/event-stream'
+    )
+    fetchMock.mockResolvedValue(res)
+    const provider = new GatewayProvider(anthropicConfig)
+    await expect(
+      provider.streamCompletion('claude-3-5-sonnet-20241022', [{ role: 'user', content: 'hi' }], () => {})
+    ).rejects.toThrow(/Overloaded/)
+  })
+
+  it('parses a buffered content[] body when the endpoint ignores stream:true', async () => {
+    const { text, done } = await collect(
+      jsonResponse({ type: 'message', role: 'assistant', content: [{ type: 'text', text: 'Buffered hi' }] })
+    )
+    expect(text).toBe('Buffered hi')
+    expect(done).toBe(true)
+  })
+
+  it('throws on a buffered Anthropic error shape', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ type: 'error', error: { type: 'invalid_request_error', message: 'bad model' } })
+    )
+    const provider = new GatewayProvider(anthropicConfig)
+    await expect(
+      provider.streamCompletion('bad', [{ role: 'user', content: 'hi' }], () => {})
+    ).rejects.toThrow(/bad model/)
+  })
+
+  it('lists models from /v1/models with display names', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ data: [{ id: 'claude-3-5-sonnet-20241022', display_name: 'Claude 3.5 Sonnet' }] })
+    )
+    const provider = new GatewayProvider(anthropicConfig)
+    const result = await provider.listModels()
+    expect(result.ok).toBe(true)
+    expect(result.models).toEqual([{ id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet' }])
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.anthropic.com/v1/models')
+  })
+
+  it('collects getCompletion over the Anthropic stream', async () => {
+    fetchMock.mockResolvedValue(anthropicSse('one ', 'two'))
+    const provider = new GatewayProvider(anthropicConfig)
+    const text = await provider.getCompletion('claude-3-5-sonnet-20241022', [{ role: 'user', content: 'hi' }])
+    expect(text).toBe('one two')
+    expect(sentBody(fetchMock).stream).toBe(true)
   })
 })

@@ -10,7 +10,7 @@ import { IpcChannel } from '../shared/ipc'
  * Nothing is persisted here — the renderer takes the path and saves it into
  * settings.cowork.workspaceDir through the ordinary settings store, which is what
  * actually scopes the tools (see tools/fs.ts). Picking the folder is the user's
- * explicit opt-in to Sylor reading and writing inside it.
+ * explicit opt-in to Myto reading and writing inside it.
  */
 async function pickWorkspace(event: Electron.IpcMainInvokeEvent): Promise<string | null> {
   try {
@@ -25,7 +25,7 @@ async function pickWorkspace(event: Electron.IpcMainInvokeEvent): Promise<string
     if (result.canceled || result.filePaths.length === 0) return null
     return result.filePaths[0]
   } catch (error) {
-    console.error('[sylor] cowork workspace picker failed:', error)
+    console.error('[myto] cowork workspace picker failed:', error)
     return null
   }
 }

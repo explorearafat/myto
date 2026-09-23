@@ -9,6 +9,8 @@ import { updatePlanTool } from './plan'
 import { searchTools } from './search'
 import { runCommandTool } from './command'
 import { spawnAgentTool } from './agent'
+import { askUserTool } from './ask'
+import { installConnectorTool, installSkillTool } from './install'
 
 /**
  * The tool registry: the catalogue of tools the chat can use, the dispatcher that
@@ -41,7 +43,7 @@ export interface ToolContext extends ToolGate {
   /** Cancels the tool when the user hits Stop (chained to the stream's controller). */
   signal: AbortSignal
   /**
-   * Show something in Sylor's preview pane (Cowork). The `preview` tool calls this
+   * Show something in Myto's preview pane (Cowork). The `preview` tool calls this
    * to open/point the side pane; the stream loop turns it into a
    * {@link CompletionChunk.preview}. Optional — absent outside the streaming loop
    * (e.g. in unit tests), in which case the preview tool degrades to a plain note.
@@ -60,6 +62,13 @@ export interface ToolContext extends ToolGate {
    * where the tool degrades to a plain "not available" note.
    */
   delegate?: (task: string) => Promise<string>
+  /**
+   * Ask the user one or more clarifying questions and resolve to their answers (the
+   * `ask_user` tool). Blocks the loop until the user answers. Optional — absent outside
+   * the streaming loop, where the tool degrades to a note telling the model to proceed
+   * with its best judgement.
+   */
+  askUser?: (questions: import('../../shared/types').AskQuestion[]) => Promise<string[]>
 }
 
 /** One tool the model can call through the text protocol. */
@@ -92,7 +101,10 @@ const ALL_TOOLS: readonly ToolDef[] = [
   ...searchTools,
   previewTool,
   updatePlanTool,
-  spawnAgentTool
+  spawnAgentTool,
+  askUserTool,
+  installConnectorTool,
+  installSkillTool
 ]
 
 /** Lookup by name. Mutable only so tests can inject a fake tool; not written at runtime. */
@@ -156,7 +168,7 @@ export function availableTools(gate: ToolGate): ToolDef[] {
 export async function runTool(call: ToolCall, ctx: ToolContext): Promise<string> {
   if (!ctx.settings.tools.enabled) return 'Tool use is turned off (Settings › Tools).'
   if (call.error || !call.name) {
-    return `That tool call did not parse (${call.error ?? 'unknown error'}). Re-issue it as one compact JSON object {"tool": "name", "input": { ... }} inside a sylor:tool block.`
+    return `That tool call did not parse (${call.error ?? 'unknown error'}). Re-issue it as one compact JSON object {"tool": "name", "input": { ... }} inside a myto:tool block.`
   }
   const tool = lookupTool(call.name)
   if (!tool) {
@@ -185,13 +197,13 @@ export function toolsSystemPrompt(gate: ToolGate): string | null {
   return [
     'You can call tools to get real information before you answer. To call a tool, write ONE fenced block and then STOP — do not write the result yourself:',
     '',
-    '```sylor:tool',
+    '```myto:tool',
     '{"tool": "<name>", "input": { ... }}',
     '```',
     '',
     'Rules:',
     '- Put the call on a single line of compact JSON between the fences.',
-    '- After the block, output nothing and wait. The result comes back to you as a ```sylor:tool_result block.',
+    '- After the block, output nothing and wait. The result comes back to you as a ```myto:tool_result block.',
     '- Read the result, then either call another tool or write your final answer to the user.',
     '- Call a tool only when it genuinely helps: a fact you are unsure of, something current or time-sensitive, a page or source the user named, or code to run. Otherwise just answer directly.',
     '- Never invent a tool result or claim you used a tool you did not.',

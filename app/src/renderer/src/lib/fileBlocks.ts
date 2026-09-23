@@ -40,7 +40,7 @@ export interface FileSegment {
 /**
  * A tool call and (once it arrives) its result, pulled out for card rendering.
  * The main process writes tool use into the reply as two adjacent fenced blocks —
- * a `sylor:tool` call block and a `sylor:tool_result <name>` result block (see
+ * a `myto:tool` call block and a `myto:tool_result <name>` result block (see
  * main/tools/toolParser.ts) — which this parser coalesces into one segment.
  */
 export interface ToolSegment {
@@ -87,15 +87,15 @@ function parseInfo(info: string): { lang: string; path: string } | null {
 }
 
 /**
- * Recognise a tool-protocol fence info line. `sylor:tool` opens a call block;
- * `sylor:tool_result <name>` opens the matching result block. Returns null for
+ * Recognise a tool-protocol fence info line. `myto:tool` opens a call block;
+ * `myto:tool_result <name>` opens the matching result block. Returns null for
  * anything else so ordinary fences fall through to the file/prose logic.
  */
 function parseToolInfo(info: string): { kind: 'call' } | { kind: 'result'; name: string | null } | null {
   const trimmed = info.trim()
-  if (trimmed === 'sylor:tool') return { kind: 'call' }
-  if (trimmed === 'sylor:tool_result' || trimmed.startsWith('sylor:tool_result ')) {
-    const name = trimmed.slice('sylor:tool_result'.length).trim()
+  if (trimmed === 'myto:tool') return { kind: 'call' }
+  if (trimmed === 'myto:tool_result' || trimmed.startsWith('myto:tool_result ')) {
+    const name = trimmed.slice('myto:tool_result'.length).trim()
     return { kind: 'result', name: name || null }
   }
   return null
@@ -213,4 +213,60 @@ export function basename(path: string): string {
   const norm = path.replace(/\\/g, '/').replace(/\/+$/, '')
   const slash = norm.lastIndexOf('/')
   return slash >= 0 ? norm.slice(slash + 1) : norm
+}
+
+/**
+ * A friendly, present-tense headline for a tool round-trip — what Myto is doing,
+ * with the target when there is one (e.g. "Creating ai-news.pdf", "Listing folder",
+ * "Web search"). Shown on the tool card and, while the tool runs, in the live status
+ * line. Lives here (not in ToolCard) so both the card and the status line share it.
+ */
+export function toolHeadline(tool: ToolSegment): string {
+  const input = tool.input && typeof tool.input === 'object' ? (tool.input as Record<string, unknown>) : {}
+  const path = typeof input.path === 'string' ? input.path : ''
+  const name = basename(path)
+  switch (tool.name) {
+    case 'write_file':
+      return name ? `Creating ${name}` : 'Creating file'
+    case 'edit_file':
+      return name ? `Editing ${name}` : 'Editing file'
+    case 'read_file':
+      return name ? `Reading ${name}` : 'Reading file'
+    case 'delete_file':
+      return name ? `Deleting ${name}` : 'Deleting file'
+    case 'list_dir':
+      return path && path !== '.' ? `Listing ${path}` : 'Listing folder'
+    case 'preview': {
+      const url = typeof input.url === 'string' ? input.url : ''
+      if (name) return `Showing ${name} in preview`
+      if (url) return `Opening ${url} in preview`
+      return 'Opening preview'
+    }
+    case 'run_code': {
+      const lang = typeof input.language === 'string' ? input.language : ''
+      return lang ? `Running ${lang} code` : 'Running code'
+    }
+    case 'run_command': {
+      const cmd = typeof input.command === 'string' ? input.command : ''
+      return cmd ? `Running ${cmd.length > 40 ? `${cmd.slice(0, 40)}…` : cmd}` : 'Running command'
+    }
+    case 'search_code': {
+      const query = typeof input.query === 'string' ? input.query : ''
+      return query ? `Searching for “${query.length > 32 ? `${query.slice(0, 32)}…` : query}”` : 'Searching code'
+    }
+    case 'find_files': {
+      const pattern = typeof input.pattern === 'string' ? input.pattern : ''
+      return pattern ? `Finding ${pattern}` : 'Finding files'
+    }
+    case 'spawn_agent':
+      return 'Delegating to a sub-agent'
+    case 'web_search':
+      return 'Web search'
+    case 'web_fetch':
+      return 'Fetch page'
+    case 'wiki_search':
+      return 'Wikipedia'
+    default:
+      return tool.name ?? 'Tool'
+  }
 }

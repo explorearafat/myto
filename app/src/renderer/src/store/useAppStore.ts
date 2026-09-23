@@ -8,6 +8,7 @@ import type {
   ModelInfo,
   ProviderKind,
   ProviderSettings,
+  ReasoningEffort,
   SettingsTab,
   SkillConfig,
   Theme,
@@ -86,6 +87,8 @@ export interface AppState {
   pickCoworkWorkspace: () => Promise<string | null>
   /** Set Cowork's permission tier (ask / autoApprove / bypass) and persist it. */
   setCoworkPermissionMode: (mode: CoworkPermissionMode) => Promise<void>
+  /** Set the reasoning-effort tier (sent to the provider as reasoning_effort) and persist. */
+  setReasoningEffort: (effort: ReasoningEffort) => Promise<void>
 
   // ── Connectors (MCP) ──
   /** Live status of every configured connector, keyed by server id (main-process pushed). */
@@ -150,7 +153,7 @@ export interface AppState {
  * the main-process settings store.
  */
 export const useAppStore = create<AppState>((set, get) => ({
-  projectName: 'Sylor',
+  projectName: 'Myto',
   isMaximized: false,
 
   settings: DEFAULT_PROVIDER_SETTINGS,
@@ -187,7 +190,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   pickCoworkWorkspace: async () => {
-    const dir = await window.sylor.cowork.pickWorkspace()
+    const dir = await window.myto.cowork.pickWorkspace()
     if (!dir) return null
     const { settings } = get()
     await get().saveSettings({ ...settings, cowork: { ...settings.cowork, workspaceDir: dir } })
@@ -199,12 +202,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().saveSettings({ ...settings, cowork: { ...settings.cowork, permissionMode: mode } })
   },
 
+  setReasoningEffort: async (effort) => {
+    const { settings } = get()
+    await get().saveSettings({ ...settings, reasoningEffort: effort })
+  },
+
   saveConnector: async (config) => {
     const { settings } = get()
     const existing = settings.mcpServers.filter((s) => s.id !== config.id)
     await get().saveSettings({ ...settings, mcpServers: [...existing, config] })
     // Reconnect from the freshly-saved list, then reflect the new statuses.
-    set({ mcpStatuses: await window.sylor.mcp.sync() })
+    set({ mcpStatuses: await window.myto.mcp.sync() })
   },
 
   removeConnector: async (id) => {
@@ -213,17 +221,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       ...settings,
       mcpServers: settings.mcpServers.filter((s) => s.id !== id)
     })
-    set({ mcpStatuses: await window.sylor.mcp.sync() })
+    set({ mcpStatuses: await window.myto.mcp.sync() })
   },
 
-  testConnector: (config) => window.sylor.mcp.test(config),
+  testConnector: (config) => window.myto.mcp.test(config),
 
   refreshConnectorStatus: async () => {
-    set({ mcpStatuses: await window.sylor.mcp.status() })
+    set({ mcpStatuses: await window.myto.mcp.status() })
   },
 
   watchConnectorStatus: () =>
-    window.sylor.mcp.onStatusChanged((mcpStatuses) => set({ mcpStatuses })),
+    window.myto.mcp.onStatusChanged((mcpStatuses) => set({ mcpStatuses })),
 
   saveSkill: async (skill) => {
     const { settings } = get()
@@ -248,7 +256,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       plugins: [...settings.plugins, plugin]
     })
     // Connect any servers the plugin added (skills re-register via the save listener).
-    set({ mcpStatuses: await window.sylor.mcp.sync() })
+    set({ mcpStatuses: await window.myto.mcp.sync() })
   },
 
   uninstallPlugin: async (id) => {
@@ -259,7 +267,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       mcpServers: settings.mcpServers.filter((s) => s.source !== id),
       plugins: settings.plugins.filter((p) => p.id !== id)
     })
-    set({ mcpStatuses: await window.sylor.mcp.sync() })
+    set({ mcpStatuses: await window.myto.mcp.sync() })
   },
 
   setPluginEnabled: async (id, enabled) => {
@@ -271,11 +279,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       skills: settings.skills.map((s) => (s.source === id ? { ...s, enabled } : s)),
       mcpServers: settings.mcpServers.map((m) => (m.source === id ? { ...m, enabled } : m))
     })
-    set({ mcpStatuses: await window.sylor.mcp.sync() })
+    set({ mcpStatuses: await window.myto.mcp.sync() })
   },
 
   loadSettings: async () => {
-    const settings = await window.sylor.providers.getSettings()
+    const settings = await window.myto.providers.getSettings()
     applyThemeToDom(settings.ui.theme)
     set({
       settings,
@@ -289,7 +297,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   saveSettings: async (next) => {
-    const saved = await window.sylor.providers.saveSettings(next)
+    const saved = await window.myto.providers.saveSettings(next)
     applyThemeToDom(saved.ui.theme)
     set({
       settings: saved,
@@ -305,7 +313,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const config = kind === 'ollama' ? settings.ollama : settings.gateway
     set({ modelsLoading: true })
     try {
-      const result = await window.sylor.providers.listModels(kind, config)
+      const result = await window.myto.providers.listModels(kind, config)
       const models = result.ok ? result.models : []
       set({ models })
       // Auto-select like Claude Code: if the provider advertised models and none
@@ -324,7 +332,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   previewModels: async (kind, config) => {
     set({ modelsLoading: true })
     try {
-      const result = await window.sylor.providers.listModels(kind, config)
+      const result = await window.myto.providers.listModels(kind, config)
       const models = result.ok ? result.models : []
       set({ models })
       return models

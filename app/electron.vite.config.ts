@@ -22,7 +22,7 @@ export default defineConfig({
         // package.json is `"type": "module"`, so a `.js`/`.mjs` preload is ESM —
         // which Electron REFUSES to load when `sandbox: true`. Force CommonJS with
         // a `.cjs` extension (unconditionally CJS regardless of package type) so the
-        // sandboxed preload loads and `window.sylor` is actually exposed.
+        // sandboxed preload loads and `window.myto` is actually exposed.
         output: { format: 'cjs', entryFileNames: '[name].cjs' }
       }
     }
@@ -43,7 +43,7 @@ export default defineConfig({
       // (opaque origin, no CORS headers) and a cause of a blank window. Strip it
       // from the built HTML. Dev is served over http and is unaffected.
       {
-        name: 'sylor-strip-crossorigin',
+        name: 'myto-strip-crossorigin',
         transformIndexHtml: (html: string): string => html.replace(/\s+crossorigin/g, '')
       }
     ],

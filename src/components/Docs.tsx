@@ -14,15 +14,15 @@ const TOC = [
   'FAQ',
 ];
 
-/* Honest quick start: Sylor is a desktop app you can also drive headlessly.
-   Deliberately NOT `npm install -g sylor` — Sylor ships no npm package. */
+/* Honest quick start: Myto is a desktop app you can also drive headlessly.
+   Deliberately NOT `npm install -g myto` — Myto ships no npm package. */
 const CODE = `# Install the app, open your project, then describe the first task —
 # or drive the very same engine straight from your terminal:
 
-sylor -p "add a dark-mode toggle to the Settings page"
+myto -p "add a dark-mode toggle to the Settings page"
 
 # machine-readable output, for scripts and CI:
-sylor -p "list every TODO under src/" --json`;
+myto -p "list every TODO under src/" --json`;
 
 export function Docs() {
   const [copied, setCopied] = useState(false);
@@ -66,7 +66,7 @@ export function Docs() {
                   className={
                     'rounded-lg px-3 py-2 text-[14px] ' +
                     (i === 0
-                      ? 'bg-[#faf1ee] font-medium text-[#a8442a]'
+                      ? 'bg-[#f0efe9] font-medium text-[#57544e]'
                       : 'text-[#6b675e]')
                   }
                 >
@@ -82,7 +82,7 @@ export function Docs() {
               Quick start
             </h3>
             <p className="mt-3 max-w-[60ch] text-[15px] leading-relaxed text-[#544f46]">
-              Sylor is a desktop workspace — install it, open a folder, and start a conversation.
+              Myto is a desktop workspace — install it, open a folder, and start a conversation.
               Prefer the terminal? The same engine runs headlessly:
             </p>
 
@@ -101,7 +101,7 @@ export function Docs() {
                   aria-label={copied ? 'Copied' : 'Copy code'}
                 >
                   {copied ? (
-                    <Check className="h-3.5 w-3.5 text-[#cf5535]" aria-hidden="true" />
+                    <Check className="h-3.5 w-3.5 text-[#141413]" aria-hidden="true" />
                   ) : (
                     <Copy className="h-3.5 w-3.5" aria-hidden="true" />
                   )}
@@ -123,7 +123,7 @@ export function Docs() {
                     const rest = space === -1 ? '' : line.slice(space);
                     return (
                       <div key={i} className="text-[#2b2721]">
-                        <span className="text-[#a8442a]">{cmd}</span>
+                        <span className="text-[#57544e]">{cmd}</span>
                         {rest}
                       </div>
                     );
@@ -134,7 +134,7 @@ export function Docs() {
 
             <a
               href={LINKS.chatPage}
-              className="mt-6 inline-flex items-center gap-1.5 text-[15px] font-medium text-[#a8442a] no-underline transition-colors duration-150 hover:text-[#cf5535]"
+              className="mt-6 inline-flex items-center gap-1.5 text-[15px] font-medium text-[#57544e] no-underline transition-colors duration-150 hover:text-[#141413]"
             >
               Ask the assistant a setup question
               <ArrowRight className="h-4 w-4" aria-hidden="true" />

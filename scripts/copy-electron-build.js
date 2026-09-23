@@ -3,8 +3,8 @@
  * copy-electron-build.js
  *
  * Finds the Windows installer that app/ just built and copies it into the website's
- * public/electron/ folder as Sylor-Setup.exe, so download/index.html can link to
- * /electron/Sylor-Setup.exe without hardcoding a version.
+ * public/electron/ folder as Myto-Setup.exe, so download/index.html can link to
+ * /electron/Myto-Setup.exe without hardcoding a version.
  *
  * A script rather than a shell command because the artifact name is set by
  * app/electron-builder.yml and its output dir is release/, neither of which globs portably
@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 // release/ is what app/electron-builder.yml configures; dist/ is probed as a fallback.
 const SOURCE_DIRS = [join(ROOT, 'app', 'release'), join(ROOT, 'app', 'dist')]
-const TARGET_NAME = 'Sylor-Setup.exe'
+const TARGET_NAME = 'Myto-Setup.exe'
 const TARGET_DIR = join(ROOT, 'public', 'electron')
 const TARGET_PATH = join(TARGET_DIR, TARGET_NAME)
 
@@ -41,7 +41,7 @@ async function candidates() {
     for (const entry of entries) {
       const lower = entry.name.toLowerCase()
       // Top-level .exe only: win-unpacked/ is a directory, and NSIS writes a matching
-      // intermediate file (Sylor-Setup.__uninstaller.exe) beside the real installer.
+      // intermediate file (Myto-Setup.__uninstaller.exe) beside the real installer.
       if (!entry.isFile() || !lower.endsWith('.exe')) continue
       if (lower.includes('uninstall') || lower.includes('portable') || lower.includes('elevate')) continue
       const info = await stat(join(dir, entry.name))
@@ -64,7 +64,7 @@ async function main() {
     throw new Error(
       '[copy-electron-build] no .exe installer found in ' + where + '.\n' +
         'Run npm run build:electron first (npm --prefix app run dist:win), which writes\n' +
-        'app/release/Sylor-Setup.exe via electron-builder.\n' +
+        'app/release/Myto-Setup.exe via electron-builder.\n' +
         'For a web-only build, set SYLOR_ALLOW_MISSING_ELECTRON=1.'
     )
   }

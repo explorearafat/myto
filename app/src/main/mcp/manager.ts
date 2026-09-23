@@ -15,7 +15,7 @@ import {
  * The connector (MCP) manager.
  *
  * Owns the live connections to the MCP servers the user has configured. Each
- * enabled server is connected once; its tools are discovered and wrapped as Sylor
+ * enabled server is connected once; its tools are discovered and wrapped as Myto
  * {@link ToolDef}s registered into the runtime tool layer (see tools/registry.ts's
  * `registerExtensionTool`), so the ordinary text-protocol loop can call them exactly
  * like a built-in. Nothing here touches the built-in catalogue.
@@ -36,8 +36,8 @@ const CALL_TIMEOUT_MS = 120_000
 /** Cap on a single tool result folded back into the model's context. */
 const RESULT_CAP = 30_000
 
-/** The client identity Sylor advertises to every MCP server. */
-const CLIENT_INFO = { name: 'sylor', version: '1.0.0' }
+/** The client identity Myto advertises to every MCP server. */
+const CLIENT_INFO = { name: 'myto', version: '1.0.0' }
 
 /** A server name → a safe slug for tool namespacing (`GitHub API` → `github_api`). */
 export function slugify(name: string): string {
@@ -50,7 +50,7 @@ export function slugify(name: string): string {
   )
 }
 
-/** The namespaced tool name Sylor exposes for a server's tool. */
+/** The namespaced tool name Myto exposes for a server's tool. */
 export function toolNameFor(serverName: string, toolName: string): string {
   return `mcp__${slugify(serverName)}__${toolName}`
 }
@@ -271,7 +271,7 @@ class McpManager {
       : new StreamableHTTPClientTransport(url, { requestInit })
   }
 
-  /** Adapt one MCP tool into a Sylor {@link ToolDef} that proxies calls to the server. */
+  /** Adapt one MCP tool into a Myto {@link ToolDef} that proxies calls to the server. */
   private wrapTool(
     server: McpServerConfig,
     client: Client,

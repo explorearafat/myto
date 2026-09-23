@@ -1,9 +1,9 @@
 import { useState, type ReactNode } from 'react'
-import { basename, type ToolSegment } from '../lib/fileBlocks'
+import { toolHeadline, type ToolSegment } from '../lib/fileBlocks'
 import { CodeBody } from './Markdown'
 
 /**
- * Renders one tool round-trip — the call the model made and the result Sylor fed
+ * Renders one tool round-trip — the call the model made and the result Myto fed
  * back — as a compact card in the transcript, mirroring {@link FileCard}. The
  * header shows a per-tool glyph, a friendly label, and a phase pill; the body
  * (collapsed by default) shows the call input as JSON and the result text.
@@ -14,62 +14,6 @@ import { CodeBody } from './Markdown'
  * presentational — the raw blocks in the reply are what get persisted, so a reload
  * re-renders the same card.
  */
-
-/**
- * A friendly, present-tense headline for a tool round-trip — what Sylor is doing,
- * with the target when there is one (e.g. "Creating ai-news.pdf", "Running python
- * code"). This is the ONLY thing shown by default; the file's contents / diff stay
- * behind the collapsed body, so the transcript reads as activity, not a data dump.
- */
-function toolHeadline(tool: ToolSegment): string {
-  const input = tool.input && typeof tool.input === 'object' ? (tool.input as Record<string, unknown>) : {}
-  const path = typeof input.path === 'string' ? input.path : ''
-  const name = basename(path)
-  switch (tool.name) {
-    case 'write_file':
-      return name ? `Creating ${name}` : 'Creating file'
-    case 'edit_file':
-      return name ? `Editing ${name}` : 'Editing file'
-    case 'read_file':
-      return name ? `Reading ${name}` : 'Reading file'
-    case 'delete_file':
-      return name ? `Deleting ${name}` : 'Deleting file'
-    case 'list_dir':
-      return path && path !== '.' ? `Listing ${path}` : 'Listing folder'
-    case 'preview': {
-      const url = typeof input.url === 'string' ? input.url : ''
-      if (name) return `Showing ${name} in preview`
-      if (url) return `Opening ${url} in preview`
-      return 'Opening preview'
-    }
-    case 'run_code': {
-      const lang = typeof input.language === 'string' ? input.language : ''
-      return lang ? `Running ${lang} code` : 'Running code'
-    }
-    case 'run_command': {
-      const cmd = typeof input.command === 'string' ? input.command : ''
-      return cmd ? `Running ${cmd.length > 40 ? `${cmd.slice(0, 40)}…` : cmd}` : 'Running command'
-    }
-    case 'search_code': {
-      const query = typeof input.query === 'string' ? input.query : ''
-      return query ? `Searching for “${query.length > 32 ? `${query.slice(0, 32)}…` : query}”` : 'Searching code'
-    }
-    case 'find_files': {
-      const pattern = typeof input.pattern === 'string' ? input.pattern : ''
-      return pattern ? `Finding ${pattern}` : 'Finding files'
-    }
-    case 'spawn_agent':
-      return 'Delegating to a sub-agent'
-    case 'web_search':
-      return 'Web search'
-    case 'web_fetch':
-      return 'Fetch page'
-    case 'wiki_search':
-      return 'Wikipedia'
-    default:
-      return tool.name ?? 'Tool'
-  }
-}
 
 /** A small glyph per tool family. */
 function ToolGlyph({ name }: { name: string | null }): ReactNode {
@@ -224,7 +168,7 @@ export function ToolCard({ tool, cowork = false }: { tool: ToolSegment; cowork?:
           <ToolGlyph name={tool.name} />
         </span>
         <span className="truncate font-medium text-text">{toolHeadline(tool)}</span>
-        {phase && <span className="sylor-thinking shrink-0 text-[10px] font-medium">{phase}</span>}
+        {phase && <span className="myto-thinking shrink-0 text-[10px] font-medium">{phase}</span>}
         <span className="flex-1" />
         {counts && (
           <span className="shrink-0 font-mono text-[11px]">
@@ -259,13 +203,9 @@ export function ToolCard({ tool, cowork = false }: { tool: ToolSegment; cowork?:
           <ToolGlyph name={tool.name} />
         </span>
         <span className="truncate text-[12px] font-medium text-text">{toolHeadline(tool)}</span>
-        {phase ? (
-          <span className="sylor-thinking shrink-0 text-[10px] font-medium">{phase}</span>
-        ) : (
-          <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[9px] font-medium uppercase tracking-wide text-muted">
-            done
-          </span>
-        )}
+        {/* Only a live phase ("Running…") shows; once the result is in, the badge
+            disappears instantly — no lingering "done" marker. */}
+        {phase && <span className="myto-thinking shrink-0 text-[10px] font-medium">{phase}</span>}
         <span className="flex-1" />
         <svg
           width="13"

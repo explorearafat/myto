@@ -17,7 +17,7 @@ export function Hero() {
             style={{ transitionDelay: '90ms' }}
             className="mt-6 max-w-[48ch] text-[18px] leading-relaxed text-[#544f46] sm:text-[20px]"
           >
-            Sylor reads your project, edits with your approval, and runs your build — with the
+            Myto reads your project, edits with your approval, and runs your build — with the
             model you choose, running locally or on your own endpoint.
           </p>
 
@@ -49,7 +49,7 @@ export function Hero() {
           >
             <a
               href={LINKS.downloadPage}
-              className="font-medium text-[#a8442a] no-underline transition-colors duration-150 hover:text-[#cf5535]"
+              className="font-medium text-[#57544e] no-underline transition-colors duration-150 hover:text-[#141413]"
             >
               macOS &amp; Linux, and every release &rarr;
             </a>

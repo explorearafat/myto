@@ -11,15 +11,15 @@ type SettingsCategory = 'appearance' | 'model' | 'tools' | 'connectors' | 'skill
 /** Title + one-line subtitle shown in each category pane's header. */
 const CATEGORY_META: Record<SettingsCategory, { label: string; subtitle: string }> = {
   appearance: { label: 'Appearance', subtitle: 'Theme and visual style.' },
-  model: { label: 'Model', subtitle: 'The model Sylor talks to, from your Sylor account.' },
-  tools: { label: 'Tools', subtitle: 'What Sylor can do beyond chatting — search the web, run code.' },
+  model: { label: 'Model', subtitle: 'The model Myto talks to, from your Myto account.' },
+  tools: { label: 'Tools', subtitle: 'What Myto can do beyond chatting — search the web, run code.' },
   connectors: {
     label: 'Connectors',
-    subtitle: 'MCP servers that give Sylor extra tools — files, APIs, and more.'
+    subtitle: 'MCP servers that give Myto extra tools — files, APIs, and more.'
   },
   skills: {
     label: 'Skills',
-    subtitle: 'Reusable instruction packs Sylor pulls in when a task matches.'
+    subtitle: 'Reusable instruction packs Myto pulls in when a task matches.'
   },
   plugins: {
     label: 'Plugins',
@@ -208,7 +208,7 @@ function ToolsPane() {
     <div className="divide-y divide-border">
       <SettingRow
         title="Tool use"
-        description="Let Sylor search the web, fetch pages, and look things up on Wikipedia while it answers. Results appear as cards in the chat."
+        description="Let Myto search the web, fetch pages, and look things up on Wikipedia while it answers. Results appear as cards in the chat."
       >
         <Segmented
           ariaLabel="Tool use"
@@ -219,7 +219,7 @@ function ToolsPane() {
       </SettingRow>
       <SettingRow
         title="Run code on this machine"
-        description="Allow Sylor to execute python, JavaScript, or bash snippets locally and read the output. This runs code with your account's privileges — only enable it if you trust what you ask for. Off by default; requires Tool use to be on."
+        description="Allow Myto to execute python, JavaScript, or bash snippets locally and read the output. This runs code with your account's privileges — only enable it if you trust what you ask for. Off by default; requires Tool use to be on."
       >
         <Segmented
           ariaLabel="Run code on this machine"
@@ -261,7 +261,7 @@ function ModelPane() {
     <div className="space-y-5">
       {!configured && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3.5 py-3 text-[12px] leading-relaxed text-amber-500">
-          No model is configured for your account yet. Add your endpoint and models on the Sylor
+          No model is configured for your account yet. Add your endpoint and models on the Myto
           website → Authentication page, then they'll appear here automatically.
         </div>
       )}
@@ -315,7 +315,7 @@ function ModelPane() {
       </section>
 
       <p className="text-[12px] leading-relaxed text-muted">
-        Manage your models on the Sylor website → Authentication page. Changes sync here
+        Manage your models on the Myto website → Authentication page. Changes sync here
         automatically the next time this account's config updates.
       </p>
     </div>

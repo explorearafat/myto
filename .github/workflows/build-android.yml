@@ -1,8 +1,8 @@
 name: Build Android App
 
-# Publish a native Sylor APK whenever you push a version tag (e.g. v0.1.6), or run
+# Publish a native Myto APK whenever you push a version tag (e.g. v0.1.6), or run
 # it manually from the Actions tab. The download page links to
-# /releases/latest/download/sylor.apk, so a new release auto-updates the Android
+# /releases/latest/download/myto.apk, so a new release auto-updates the Android
 # button on sylorcode.vercel.app — the mobile mirror of build-windows.yml.
 on:
   push:
@@ -74,7 +74,7 @@ jobs:
         run: flutter pub get
 
       - name: Generate the launcher icon
-        # Stamp the Sylor star over the default Flutter icon that `flutter create` emitted, into the
+        # Stamp the Myto star over the default Flutter icon that `flutter create` emitted, into the
         # freshly generated android/. Reads the flutter_launcher_icons config + assets/icon/*.png
         # (both tracked in mobile/). Harmless to re-run; overwrites the mipmaps in place.
         run: dart run flutter_launcher_icons
@@ -85,12 +85,12 @@ jobs:
         run: flutter build apk --release
 
       - name: Stage the APK under a stable name
-        run: cp build/app/outputs/flutter-apk/app-release.apk sylor.apk
+        run: cp build/app/outputs/flutter-apk/app-release.apk myto.apk
 
       - name: Publish APK to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: mobile/sylor.apk
+          files: mobile/myto.apk
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -3,6 +3,8 @@ import { IpcChannel } from '../shared/ipc'
 import type {
   ApprovalDecision,
   ApprovalRequest,
+  AskQuestion,
+  QuestionRequest,
   ChatMessage,
   ChatMode,
   CompletionRequest,
@@ -29,6 +31,7 @@ import {
   STATUS_SYSTEM_PROMPT
 } from './status'
 import { availableTools, lookupTool, runTool, toolsSystemPrompt, type ToolGate } from './tools/registry'
+import { ensureMytoDir, readJournal, recordGoal, recordToolAction } from './cowork-memory'
 import { approvalDetail, requiresApproval } from './tools/approvals'
 import { createToolCallParser, toolResultBlock, type ToolCall } from './tools/toolParser'
 
@@ -86,6 +89,27 @@ const COMPACT_KEEP_RECENT = 6
  */
 const MAX_REPEAT_CALLS = 3
 
+/** Read-only "look at the project" tools — churning on these without building is the
+ *  classic weak-model stall (see the progress guard in the Cowork loop). */
+const EXPLORE_TOOLS = new Set(['list_dir', 'read_file', 'search_code', 'find_files'])
+/** After this many explorations with nothing built yet, force a "stop looking, build now". */
+const MAX_EXPLORE_WITHOUT_BUILD = 2
+
+/**
+ * Session-level compaction ceiling, in estimated tokens. Unlike {@link COMPACT_OVER_CHARS}
+ * (which folds the middle of an in-flight tool loop), this fires BEFORE a turn runs when
+ * the *conversation itself* — the accumulated user/assistant turns loaded from the DB —
+ * has grown large enough to crowd a big context window. Older turns are folded into one
+ * summary so both plain chat and Cowork keep answering on very long threads. It is purely
+ * in-flight: the summary is what the model sees this turn; the full transcript stays in
+ * the database untouched. ~200k tokens is comfortably inside a modern large-context model
+ * while leaving generous room for the reply.
+ */
+const SESSION_COMPACT_OVER_TOKENS = 200_000
+
+/** Most recent conversation turns kept verbatim when a long session is compacted. */
+const SESSION_KEEP_RECENT = 10
+
 /** Tracks in-flight streams so the renderer can cancel them by id. */
 const activeStreams = new Map<string, AbortController>()
 
@@ -96,6 +120,10 @@ const activeStreams = new Map<string, AbortController>()
  */
 const pendingApprovals = new Map<string, (decision: ApprovalDecision) => void>()
 let approvalCounter = 0
+
+/** Pending `ask_user` questions, keyed by questionId; the renderer's answers settle each. */
+const pendingQuestions = new Map<string, (answers: string[]) => void>()
+let questionCounter = 0
 
 /**
  * Registers all Phase 2 provider IPC handlers: settings read/write, model
@@ -152,6 +180,7 @@ export function registerProviderIpc(): void {
         error?: string
         status?: string
         approval?: ApprovalRequest
+        question?: QuestionRequest
         preview?: PreviewTarget
         todos?: TodoItem[]
       }): void => {
@@ -197,6 +226,32 @@ export function registerProviderIpc(): void {
           send({ delta: '', done: false, approval: { approvalId, toolName, sideEffect, detail } })
         })
 
+      /**
+       * Ask the user clarifying questions (the `ask_user` tool) and resolve to their
+       * answers. Mirrors {@link requestApproval}: raises a `question` chunk, blocks until
+       * the renderer replies via ProvidersQuestionAnswer, and on cancel resolves to empty
+       * answers so a Stop never parks the loop. Answers align with `questions` by index.
+       */
+      const requestQuestions = (questions: AskQuestion[]): Promise<string[]> =>
+        new Promise<string[]>((resolve) => {
+          if (controller.signal.aborted) {
+            resolve([])
+            return
+          }
+          const questionId = `q-${streamId}-${++questionCounter}`
+          const onAbort = (): void => settle([])
+          const settle = (answers: string[]): void => {
+            controller.signal.removeEventListener('abort', onAbort)
+            pendingQuestions.delete(questionId)
+            resolve(answers)
+          }
+          pendingQuestions.set(questionId, settle)
+          controller.signal.addEventListener('abort', onAbort, { once: true })
+          send({ delta: '', done: false, question: { questionId, questions } })
+        })
+
+      const askUser = (questions: AskQuestion[]): Promise<string[]> => requestQuestions(questions)
+
       /** Side-effect kinds the user granted for the rest of this run ("Always allow"). */
       const grantedAlways = new Set<ToolSideEffect>()
 
@@ -204,12 +259,34 @@ export function registerProviderIpc(): void {
         const { provider, modelId, messages } = resolveRequest(request)
         const settings = getSettings()
         const mode: ChatMode = request.mode ?? 'chat'
+
+        // Session-level auto-compaction: a very long thread (loaded whole from the DB)
+        // can crowd even a large context window. Before running the turn, if the
+        // conversation is over the token ceiling, fold its older turns into one summary
+        // so both plain chat and Cowork keep answering. Transient — the DB keeps the full
+        // transcript; only what the model sees this turn is compacted. A brief status
+        // caption surfaces it while the summarizer call runs.
+        let convo = messages
+        if (estimateTokens(convo) > SESSION_COMPACT_OVER_TOKENS) {
+          send({ delta: '', done: false, status: 'Compacting earlier conversation to fit context…' })
+          convo = await compactConversation(convo, provider, modelId, controller.signal)
+          if (controller.signal.aborted) return
+          send({ delta: '', done: false, status: '' })
+        }
         // In Cowork, the filesystem tools are scoped to this folder; null when none
         // is set, which keeps those tools dormant (see tools/fs.ts + registry.ts).
         const workspaceDir = settings.cowork.workspaceDir.trim() || null
         const gate: ToolGate = { settings, mode, workspaceDir }
         const toolsPrompt = toolsSystemPrompt(gate)
         const maxToolTurns = mode === 'cowork' ? MAX_TOOL_TURNS_COWORK : MAX_TOOL_TURNS
+
+        // Cowork project memory (.sylor/journal.md): read what earlier turns already
+        // did in this folder so this turn continues instead of repeating. Best-effort.
+        let coworkMemory = ''
+        if (mode === 'cowork' && workspaceDir) {
+          ensureMytoDir(workspaceDir)
+          coworkMemory = readJournal(workspaceDir)
+        }
         // Permission tier for side-effecting tools; only consulted in Cowork.
         const permissionMode = settings.cowork.permissionMode
 
@@ -317,7 +394,9 @@ export function registerProviderIpc(): void {
           }
 
           try {
-            await provider.streamCompletion(modelId, turnHistory, onProviderChunk, iter.signal)
+            await provider.streamCompletion(modelId, turnHistory, onProviderChunk, iter.signal, {
+              reasoningEffort: settings.reasoningEffort
+            })
           } catch (err) {
             controller.signal.removeEventListener('abort', onOuterAbort)
             if (controller.signal.aborted) return { visible, call: null } // user cancel
@@ -350,13 +429,24 @@ export function registerProviderIpc(): void {
           // Cowork turns the assistant into a goal-driven agent over the folder.
           ...(mode === 'cowork'
             ? [{ role: 'system' as const, content: COWORK_SYSTEM_PROMPT }]
+            : []),
+          // Inject the project journal so the agent continues rather than repeats.
+          ...(coworkMemory
+            ? [
+                {
+                  role: 'system' as const,
+                  content:
+                    'PROJECT MEMORY — you have worked in this folder before. Here is your journal of what you already did (most recent last). Do NOT repeat these steps; continue from where this leaves off:\n\n' +
+                    coworkMemory
+                }
+              ]
             : [])
         ]
 
         // Tools off (or none available): the original single-shot behaviour, so a
         // plain-chat reply is byte-for-byte what it was before tools existed.
         if (!toolsPrompt) {
-          const { error } = await runTurn([...baseSystem, ...messages], false)
+          const { error } = await runTurn([...baseSystem, ...convo], false)
           if (controller.signal.aborted) return
           send(error ? { delta: '', done: true, error } : { delta: '', done: true })
           return
@@ -367,7 +457,7 @@ export function registerProviderIpc(): void {
         const history: ChatMessage[] = [
           ...baseSystem,
           { role: 'system', content: toolsPrompt },
-          ...messages
+          ...convo
         ]
 
         // The user's actual ask — the latest user turn. Restated on every tool-result
@@ -376,11 +466,13 @@ export function registerProviderIpc(): void {
         // an early empty/sparse tool result (e.g. list_dir on a new folder) reads as
         // "nothing to do" and the model abandons the task mid-loop. Trimmed so a huge
         // pasted turn can't blow up every subsequent message.
-        const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+        const lastUser = [...convo].reverse().find((m) => m.role === 'user')
         const goal = (lastUser?.content ?? '').trim()
         const goalReminder = goal
           ? `Remember, the user's request is: "${goal.length > 500 ? `${goal.slice(0, 500)}…` : goal}"\n\n`
           : ''
+        // Log this turn's goal to the project journal (Cowork memory).
+        if (mode === 'cowork' && workspaceDir && goal) recordGoal(workspaceDir, goal)
 
         // Everything up to here — the system prompts and the original conversation —
         // is the fixed head that compaction never touches; the loop only appends after
@@ -392,6 +484,13 @@ export function registerProviderIpc(): void {
         // a row it has repeated identically (see MAX_REPEAT_CALLS).
         let lastCallSig = ''
         let repeatCount = 0
+
+        // Progress guard (Cowork): a weak model tends to loop on read-only exploration
+        // (list_dir/read_file) while only narrating "I'll build…", never actually writing
+        // a file. Track how many times it has explored without producing anything, so we
+        // can escalate from a hint to a hard "stop looking, build now" directive.
+        let buildsMade = 0
+        let exploreStreak = 0
 
         for (let turn = 0; turn < maxToolTurns; turn++) {
           // Keep the running history inside the context window on long tasks: once it
@@ -454,12 +553,31 @@ export function registerProviderIpc(): void {
             result =
               decision === 'deny'
                 ? `The user denied permission to run "${toolName}". Do not retry it; continue without it, or tell the user what you would need to proceed.`
-                : await runTool(call, { ...gate, signal: controller.signal, onPreview, onPlan, delegate })
+                : await runTool(call, { ...gate, signal: controller.signal, onPreview, onPlan, delegate, askUser })
           } else {
-            result = await runTool(call, { ...gate, signal: controller.signal, onPreview, onPlan, delegate })
+            result = await runTool(call, { ...gate, signal: controller.signal, onPreview, onPlan, delegate, askUser })
           }
           if (controller.signal.aborted) return
           send({ delta: toolResultBlock(toolName, result), done: false })
+          // Journal meaningful actions (writes/edits/deletes/commands/code) so the next
+          // turn knows they happened and doesn't repeat them (Cowork memory).
+          if (mode === 'cowork' && workspaceDir) recordToolAction(workspaceDir, call, result)
+
+          // Progress guard: count real building (writes/edits/code/commands) vs. read-only
+          // exploration. If the model keeps looking without ever building, escalate from
+          // the gentle nudge to a hard directive that forbids more exploration.
+          if (sideEffect) {
+            buildsMade++
+            exploreStreak = 0
+          } else if (call.name && EXPLORE_TOOLS.has(call.name)) {
+            exploreStreak++
+          } else if (call.name === 'update_plan') {
+            exploreStreak = 0 // planning is progress, not stalling
+          }
+          const stalling = mode === 'cowork' && buildsMade === 0 && exploreStreak >= MAX_EXPLORE_WITHOUT_BUILD
+          const progressDirective = stalling
+            ? `\n\nSTOP EXPLORING. You have inspected the folder ${exploreStreak} times and built NOTHING yet. The folder does not need more looking. Your VERY NEXT action MUST be to actually build: call update_plan with the concrete steps, then write_file to create the first real file. Do NOT call list_dir, read_file, search_code, or find_files again until files exist. Do not just say what you will do — do it now with a tool call.`
+            : ''
 
           // Record the round-trip for the model's next turn. The assistant turn is
           // its visible prose plus the call block; the tool result comes back as a
@@ -468,7 +586,7 @@ export function registerProviderIpc(): void {
           history.push({ role: 'assistant', content: assistantTurn })
           history.push({
             role: 'user',
-            content: `Tool result for ${toolName}:\n${result}\n\n${goalReminder}Keep going until the request is fully done: call another tool if you still need to, or give your final answer once it is complete. Do not repeat an identical call. An empty or sparse result (e.g. a near-empty folder) is a starting point, not a reason to stop — build what was asked for.`
+            content: `Tool result for ${toolName}:\n${result}\n\n${goalReminder}Keep going until the request is fully done: call another tool if you still need to, or give your final answer once it is complete. Do not repeat an identical call. An empty or sparse result (e.g. a near-empty folder) is a starting point, not a reason to stop — build what was asked for.${progressDirective}`
           })
         }
 
@@ -504,6 +622,14 @@ export function registerProviderIpc(): void {
       pendingApprovals.get(approvalId)?.(decision)
     }
   )
+
+  ipcMain.on(
+    IpcChannel.ProvidersQuestionAnswer,
+    (_event, questionId: string, answers: string[]) => {
+      // Settling removes the entry; a stray/duplicate answer is a harmless no-op.
+      pendingQuestions.get(questionId)?.(Array.isArray(answers) ? answers : [])
+    }
+  )
 }
 
 /** Total characters across a message history — a cheap proxy for token pressure. */
@@ -511,6 +637,82 @@ function historyChars(history: ChatMessage[]): number {
   let n = 0
   for (const m of history) n += m.content.length
   return n
+}
+
+/**
+ * Rough token estimate for a conversation. Uses the same ~4 chars/token proxy the rest
+ * of the codebase does (no tokenizer is bundled), which is close enough to decide when a
+ * thread is large enough to compact.
+ */
+function estimateTokens(messages: ChatMessage[]): number {
+  return Math.ceil(historyChars(messages) / 4)
+}
+
+/**
+ * The instruction that shapes a whole-conversation compaction summary. Unlike
+ * {@link COMPACT_INSTRUCTION} (which summarizes an agent's tool transcript), this folds the
+ * earlier part of a back-and-forth chat, so it's told to preserve the human-facing thread:
+ * facts, decisions, questions asked, code shared, and anything the assistant committed to.
+ */
+const SESSION_COMPACT_INSTRUCTION =
+  'You are compacting the earlier part of a chat conversation so it fits the context window. Summarize the messages below into a concise, factual note that preserves everything the assistant needs to keep the conversation coherent: key facts and details the user gave, decisions made, questions raised and answered, important code or file paths shared, and anything the assistant promised or is mid-way through. Use short bullet points or brief paragraphs. Do not add commentary and do not address anyone — this is an internal memory note.'
+
+/**
+ * Fold the older part of a long conversation into a single summary turn so a very long
+ * thread keeps fitting the model's context. Returns a NEW message array (the input is not
+ * mutated): the most recent {@link SESSION_KEEP_RECENT} turns are kept verbatim and
+ * everything older is replaced by one summary turn in front of them. Purely in-flight —
+ * the caller passes the result to the model for this turn only; the database still holds
+ * the full transcript.
+ *
+ * The summary is written by the model (a one-shot {@link Provider.getCompletion}); if that
+ * call fails or is cancelled the original messages are returned unchanged, so compaction
+ * can only ever help, never wedge a reply.
+ */
+async function compactConversation(
+  messages: ChatMessage[],
+  provider: Provider,
+  modelId: string,
+  signal: AbortSignal
+): Promise<ChatMessage[]> {
+  const keepFrom = Math.max(0, messages.length - SESSION_KEEP_RECENT)
+  const older = messages.slice(0, keepFrom)
+  const recent = messages.slice(keepFrom)
+  // Not worth a summarizer round-trip unless there's a real block of older turns to fold.
+  if (older.length < 2) return messages
+
+  const TRANSCRIPT_CAP = 60_000
+  let transcript = older.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n')
+  if (transcript.length > TRANSCRIPT_CAP) {
+    transcript = `…[earliest turns truncated]\n\n${transcript.slice(-TRANSCRIPT_CAP)}`
+  }
+
+  let summaryText = ''
+  try {
+    summaryText = (
+      await provider.getCompletion(
+        modelId,
+        [
+          { role: 'system', content: SESSION_COMPACT_INSTRUCTION },
+          { role: 'user', content: transcript }
+        ],
+        undefined,
+        signal
+      )
+    ).trim()
+  } catch {
+    return messages
+  }
+  if (signal.aborted) return messages
+
+  const note =
+    summaryText ||
+    `[${older.length} earlier messages were summarized here to fit the context window.]`
+  const summaryTurn: ChatMessage = {
+    role: 'user',
+    content: `Summary of earlier conversation (older messages were compacted to fit the context window):\n${note}`
+  }
+  return [summaryTurn, ...recent]
 }
 
 /**
@@ -591,7 +793,7 @@ const NESTED_AGENT_MAX_TURNS = 8
 /** Cap on the digest a sub-agent hands back, so one delegation can't bloat the main context. */
 const NESTED_DIGEST_CAP = 6000
 /** Tools a sub-agent must never touch: side effects, and the UI/meta tools that make no headless sense. */
-const SUBAGENT_EXCLUDED = new Set(['preview', 'update_plan', 'spawn_agent'])
+const SUBAGENT_EXCLUDED = new Set(['preview', 'update_plan', 'spawn_agent', 'ask_user'])
 
 /**
  * Run a delegated read-only sub-task to completion and return its findings as a
@@ -621,11 +823,11 @@ async function runNestedAgent(
     '',
     'To call a tool, write ONE fenced block and then STOP:',
     '',
-    '```sylor:tool',
+    '```myto:tool',
     '{"tool": "<name>", "input": { ... }}',
     '```',
     '',
-    'After the block, wait — the result comes back as a ```sylor:tool_result block. Read it, then call another tool or write your final report. Keep the report tight and factual.',
+    'After the block, wait — the result comes back as a ```myto:tool_result block. Read it, then call another tool or write your final report. Keep the report tight and factual.',
     '',
     'Available tools:',
     toolLines

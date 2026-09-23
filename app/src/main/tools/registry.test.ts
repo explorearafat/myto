@@ -57,9 +57,12 @@ function inject(tool: ToolDef): void {
 describe('TOOLS catalogue', () => {
   it('registers the web, code, and filesystem tools', () => {
     expect(Object.keys(TOOLS).sort()).toEqual([
+      'ask_user',
       'delete_file',
       'edit_file',
       'find_files',
+      'install_connector',
+      'install_skill',
       'list_dir',
       'preview',
       'read_file',
@@ -128,7 +131,7 @@ describe('toolsSystemPrompt', () => {
   })
   it('teaches the protocol and lists web tools without run_code or fs tools', () => {
     const p = toolsSystemPrompt(gate(settings(true)))!
-    expect(p).toContain('```sylor:tool')
+    expect(p).toContain('```myto:tool')
     expect(p).toContain('web_search')
     expect(p).not.toContain('run_code')
     expect(p).not.toContain('write_file')

@@ -1,4 +1,4 @@
-# Sylor Agent Architecture — Audit (Phase 0)
+# Myto Agent Architecture — Audit (Phase 0)
 
 **Status:** read-only audit. No code has been changed. This document is the Phase 0
 deliverable and the gate for Phase 1.
@@ -16,7 +16,7 @@ in full or in the relevant part: `engine.ts` (5172 lines), `orchestrator/orchest
 
 **How to read this:** each subsystem has three parts — **What it does today** (grounded
 in code), **The reference behaviour** (how Claude Code / Codex actually work), and **Where
-Sylor diverges** (with a severity and the practical consequence). This document does *not*
+Myto diverges** (with a severity and the practical consequence). This document does *not*
 propose fixes — that is Phase 1 (`design-proposal.md`). Where one of your five pre-named
 divergences is confirmed, softened, or partially corrected, I say so plainly rather than
 rubber-stamping it; an audit that only agrees is not an audit.
@@ -25,7 +25,7 @@ rubber-stamping it; an audit that only agrees is not an audit.
 
 ## 0. The reference model, in one paragraph
 
-Claude Code and Codex share a small set of design commitments that Sylor's core was
+Claude Code and Codex share a small set of design commitments that Myto's core was
 built before fully absorbing:
 
 - **Plans are data, sized to the task.** A live, model-owned list of concrete steps
@@ -48,7 +48,7 @@ built before fully absorbing:
   command physically cannot escape the workspace even if a check is wrong.
 - **Backoff is exponential with jitter and honours `Retry-After`.**
 
-Sylor already has a great deal of machinery — a model-first complexity router, a
+Myto already has a great deal of machinery — a model-first complexity router, a
 capability-based role registry, a shared-context blackboard, worktree isolation,
 project-memory documents, hooks, checkpoints. The divergences below are about *how
 specific subsystems behave*, not about missing features.
@@ -108,7 +108,7 @@ directly shaped by explicit user scope instructions. There is no fixed 3/5/9 lad
 no 29-section document template. Plan ceremony is proportional to the *actual* work, not
 to a bucket the work was sorted into.
 
-### Where Sylor diverges
+### Where Myto diverges
 
 - **The roadmap is a template, not a plan (High).** Even though it is complexity-*scaled*,
   within a bucket the phases are fixed strings. A `complex` build always gets the same 9
@@ -164,7 +164,7 @@ Claude Code keeps **one** live todo list, model-owned, rewritten in place as ite
 `pending → in_progress → completed`, and always visible. There is one source of truth and
 the model is responsible for keeping it current.
 
-### Where Sylor diverges
+### Where Myto diverges
 
 - **The signal the engine trusts is the least accurate one (Medium-High).** The
   continue-nudge reads live `plan.md` boxes — but those boxes are the ones that are *not*
@@ -209,7 +209,7 @@ between phases, not at the compaction seam inside a phase.
 Claude Code's compaction preserves the todo list and key working state across a summary;
 the plan is never the thing that gets summarised away.
 
-### Where Sylor diverges
+### Where Myto diverges
 
 - **plan.md / task-state is not re-anchored at the fold (High).** Confirmed. Inside a
   long agent loop, when compaction fires, the lead's memory of the plan is whatever
@@ -217,7 +217,7 @@ the plan is never the thing that gets summarised away.
   fold-note plus the recent tail. On a long run the executable plan can drift from
   `plan.md` on disk, because nothing re-reads it at the seam.
 - **Nuance worth keeping.** Your claim is precisely true for *intra-phase* compaction.
-  It is *not* the whole story: at phase transitions Sylor re-grounds from disk-backed
+  It is *not* the whole story: at phase transitions Myto re-grounds from disk-backed
   memory docs, which is a genuine strength and the right instinct — it just isn't applied
   at the point where the model's context is actually being lossily rewritten.
 - **The fold note is authored at `low` effort.** The summary that the lead will trust for
@@ -263,7 +263,7 @@ A subagent is handed a brief and the concrete context it needs, does its slice, 
 returns a report the parent keeps. The parent (and siblings) do not re-derive the
 subagent's findings; discovery done once is *owned* thereafter.
 
-### Where Sylor diverges
+### Where Myto diverges
 
 - **The handoff carries lossy prose, not the concrete artifacts (Medium-High).**
   Confirmed with nuance. The mechanism exists and is thoughtful — but what flows between
@@ -307,7 +307,7 @@ command) should not burn max reasoning; a hard step (architecting a module, diag
 subtle bug) should. Codex exposes `model_reasoning_effort`; Claude Code varies thinking
 budget.
 
-### Where Sylor diverges
+### Where Myto diverges
 
 - **Fixed per turn, not scaled per step (Medium).** Confirmed. A `complex` turn runs
   *every* step at `max` — including the trivial ones — and a `simple`/`medium` turn runs
@@ -348,7 +348,7 @@ Bounded but adaptive: **keep the caps** (you were explicit — "don't remove the
 but catch the specific failure class that has produced "faltu results" — work reported as
 done that isn't.
 
-### Where Sylor diverges / what to examine
+### Where Myto diverges / what to examine
 
 - **The fail-open review is the likely locus of "faltu results" (Medium).** It is the
   *right* default in spirit (a flaky reviewer shouldn't block a genuinely-good change),
@@ -400,7 +400,7 @@ spawns the **real system shell**: on Windows `powershell.exe -NoLogo -NoProfile 
   Landlock + seccomp on Linux). The sandbox is the backstop: even a wrongly-approved
   command physically cannot write outside the workspace or reach the network.
 
-### Where Sylor diverges
+### Where Myto diverges
 
 - **No OS-level sandbox for commands — this is the core of your stated concern, and it is
   confirmed (High).** `run_command` is **approval-gated but not confined**. The
@@ -415,7 +415,7 @@ spawns the **real system shell**: on Windows `powershell.exe -NoLogo -NoProfile 
   never allowed."* That is true for **writes** (`resolveSafe`) but **not** for
   **commands** — a command is approval-gated, not sandbox-scoped. The comment overstates
   the guarantee.
-- **Three modes, not four; no `plan` permission mode (High).** Sylor has a "Plan first"
+- **Three modes, not four; no `plan` permission mode (High).** Myto has a "Plan first"
   *approval checkpoint* in the orchestrator (`PlanProposal`/`approvePlan`), which is a
   one-shot halt, not a standing mode that permits exploration while forbidding all
   mutation. There is no `acceptEdits`-vs-`bypassPermissions` distinction beyond
@@ -458,7 +458,7 @@ Exponential backoff with jitter, and honouring the server's `Retry-After` header
 fleet of clients doesn't retry in lockstep, and the wait matches what the server actually
 asked for.
 
-### Where Sylor diverges
+### Where Myto diverges
 
 - **Flat, not exponential; no jitter (Medium-High).** Confirmed. Transient failures wait a
   fixed 60s each, up to 10 times. With `MAX_PARALLEL` lanes that hit a quota together,

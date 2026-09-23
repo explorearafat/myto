@@ -9,7 +9,7 @@ import type { PreviewTarget } from '../../shared/types'
 import type { ToolContext } from './registry'
 
 // A real temp folder stands in for the Cowork workspace.
-const ROOT = mkdtempSync(join(tmpdir(), 'sylor-preview-test-'))
+const ROOT = mkdtempSync(join(tmpdir(), 'myto-preview-test-'))
 
 afterAll(() => {
   try {

@@ -20,14 +20,14 @@ export function Download() {
             data-reveal
             className="font-display font-normal text-[32px] tracking-[-0.02em] text-[#141413] sm:text-[40px]"
           >
-            Download Sylor
+            Download Myto
           </h2>
           <div
             data-reveal
             style={{ transitionDelay: '70ms' }}
             className="mt-4 inline-flex items-center gap-2 rounded-full border border-[#e4e1d8] bg-white px-3.5 py-1.5 text-[13px] font-medium text-[#6b675e]"
           >
-            <span className="h-1.5 w-1.5 rounded-full bg-[#cf5535]" aria-hidden="true" />
+            <span className="h-1.5 w-1.5 rounded-full bg-[#141413]" aria-hidden="true" />
             {RELEASE.version} · {RELEASE.date}
           </div>
         </div>
@@ -39,7 +39,7 @@ export function Download() {
               data-reveal
               className="flex flex-col rounded-2xl border border-[#e4e1d8] bg-white p-7 transition-[border-color,box-shadow] duration-200 hover:border-[#d8d3c8] hover:shadow-[0_18px_44px_-26px_rgba(20,20,19,0.3)]"
             >
-              <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-[#eadfd9] bg-[#faf1ee] text-[#cf5535]">
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-[#e3e1d8] bg-[#f0efe9] text-[#141413]">
                 <Mark name={p.name} className="h-6 w-6" />
               </div>
               <h3 className="mt-5 font-display font-normal text-[22px] tracking-[-0.01em] text-[#141413]">
@@ -65,7 +65,7 @@ export function Download() {
           macOS and Linux are planned.{' '}
           <a
             href={LINKS.downloadPage}
-            className="font-medium text-[#a8442a] no-underline underline decoration-[#e6b8ac] underline-offset-2 transition-colors duration-150 hover:decoration-[#cf5535]"
+            className="font-medium text-[#57544e] no-underline underline decoration-[#d8d5cc] underline-offset-2 transition-colors duration-150 hover:decoration-[#141413]"
           >
             See all platforms and every release
           </a>

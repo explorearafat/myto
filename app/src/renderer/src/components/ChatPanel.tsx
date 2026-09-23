@@ -1,17 +1,32 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useChatStore, type ChatMessageUI, type OutgoingAttachment } from '../store/useChatStore'
+import { usePreviewStore } from '../store/usePreviewStore'
 import { useSessionStore } from '../store/useSessionStore'
 import { useAppStore } from '../store/useAppStore'
 import { useAuthUser } from '../lib/useAuthUser'
 import { Markdown } from './Markdown'
 import { FileCard } from './FileCard'
 import { ToolCard } from './ToolCard'
-import { parseFileBlocks } from '../lib/fileBlocks'
+import { parseFileBlocks, toolHeadline, type ToolSegment } from '../lib/fileBlocks'
+import {
+  startDictation,
+  ttsSpeak,
+  ttsStop,
+  ttsSupported,
+  webSpeechSupported,
+  type SttSession
+} from '../lib/voice'
 import { ModelSelector } from './ModelSelector'
 import { PromptBuilder } from './PromptBuilder'
-import { SylorStar } from './SylorStar'
-import { SylorLogo } from './SylorLogo'
-import type { ApprovalRequest, CoworkPermissionMode, Attachment, TodoItem } from '@shared/types'
+import { MytoMark } from './MytoMark'
+import type {
+  ApprovalRequest,
+  CoworkPermissionMode,
+  Attachment,
+  QuestionRequest,
+  ReasoningEffort,
+  TodoItem
+} from '@shared/types'
 
 /** Human-readable byte size for an attachment chip (e.g. "12.4 KB"). */
 function formatBytes(bytes: number): string {
@@ -144,7 +159,7 @@ function MessageAttachmentChip({ attachment }: { attachment: Attachment }) {
   useEffect(() => {
     if (!isImage) return
     let cancelled = false
-    void window.sylor.attachments.read(attachment.id).then((url) => {
+    void window.myto.attachments.read(attachment.id).then((url) => {
       if (!cancelled) setThumbnailUrl(url)
     })
     return () => {
@@ -384,7 +399,7 @@ function UserMessage({ message, attachments }: MessageProps) {
 /**
  * An assistant turn. Claude-Code-style flat turn: the reply renders directly on
  * the surface — no avatar, no name badge. Only the user's turn keeps a bubble, so
- * the two speakers still read distinctly (user = right-aligned pill, Sylor = flat
+ * the two speakers still read distinctly (user = right-aligned pill, Myto = flat
  * full-width prose on the background). A small `pl-4` gives the prose a little
  * breathing room from the left edge without reintroducing a gutter.
  */
@@ -410,7 +425,7 @@ function StatusLine({ caption }: { caption: string }) {
     <div className="mb-1.5" aria-live="polite">
       <span
         key={caption}
-        className="sylor-thinking sylor-status-in inline-block text-[12px] font-medium"
+        className="myto-thinking myto-status-in inline-block text-[12px] font-medium"
       >
         {caption}
       </span>
@@ -445,7 +460,7 @@ function ApprovalPrompt({ approval }: { approval: ApprovalRequest }) {
           />
         </svg>
         <span>
-          Sylor wants to {isExec ? 'run code' : 'modify a file'} with{' '}
+          Myto wants to {isExec ? 'run code' : 'modify a file'} with{' '}
           <strong>{approval.toolName}</strong>
           {approval.detail ? (
             <>
@@ -483,6 +498,83 @@ function ApprovalPrompt({ approval }: { approval: ApprovalRequest }) {
   )
 }
 
+/**
+ * The mid-reply question card (the `ask_user` tool). Myto asks its own clarifying
+ * questions — one or several at once — each with optional quick-pick options plus a
+ * free-text field. Answering resumes the blocked loop with the answers. Mirrors
+ * {@link ApprovalPrompt}; the same pattern I use when I ask the user before acting.
+ */
+function QuestionPrompt({ question }: { question: QuestionRequest }) {
+  const answerQuestions = useChatStore((s) => s.answerQuestions)
+  const [answers, setAnswers] = useState<string[]>(() => question.questions.map(() => ''))
+  const setAnswer = (i: number, value: string): void =>
+    setAnswers((prev) => prev.map((a, k) => (k === i ? value : a)))
+  const canSubmit = answers.some((a) => a.trim().length > 0)
+
+  return (
+    <div className="my-2 rounded-xl border border-primary/40 bg-primary/5 px-3 py-3">
+      <div className="mb-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-primary">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.3" />
+          <path d="M6.2 6.2a1.9 1.9 0 1 1 2.4 1.8c-.5.2-.7.5-.7 1M8 11.2h.01" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        Myto is asking
+      </div>
+      <div className="space-y-3">
+        {question.questions.map((q, i) => (
+          <div key={i}>
+            {q.header && (
+              <span className="mb-1 inline-block rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted">
+                {q.header}
+              </span>
+            )}
+            <div className="mb-1.5 text-[13px] leading-snug text-text">{q.question}</div>
+            {q.options && q.options.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap gap-1.5">
+                {q.options.map((opt) => {
+                  const active = answers[i] === opt
+                  return (
+                    <button
+                      key={opt}
+                      type="button"
+                      onClick={() => setAnswer(i, opt)}
+                      className={
+                        'rounded-lg border px-2.5 py-1 text-[12px] font-medium transition-colors ' +
+                        (active
+                          ? 'border-primary bg-primary/15 text-primary'
+                          : 'border-border bg-surface text-text hover:bg-surface-2')
+                      }
+                    >
+                      {opt}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+            <input
+              type="text"
+              value={answers[i]}
+              onChange={(e) => setAnswer(i, e.target.value)}
+              placeholder="Type your answer…"
+              className="w-full rounded-lg border border-border bg-bg px-2.5 py-1.5 text-[13px] text-text placeholder:text-muted focus:border-primary focus:outline-none"
+            />
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 flex justify-end">
+        <button
+          type="button"
+          onClick={() => answerQuestions(question.questionId, answers)}
+          disabled={!canSubmit}
+          className="rounded-lg bg-primary px-3 py-1.5 text-[12px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-40"
+        >
+          Send answers
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /** These tools only exist in Cowork, so their presence marks a Cowork turn. */
 const FS_TOOL_NAMES = new Set([
   'write_file',
@@ -505,12 +597,17 @@ const FS_TOOL_NAMES = new Set([
  * survives a session switch (see useChatStore `todos`).
  */
 function PlanPanel({ todos }: { todos: TodoItem[] }) {
+  const [collapsed, setCollapsed] = useState(false)
   if (todos.length === 0) return null
   const done = todos.filter((t) => t.status === 'done').length
   return (
-    <div className="my-2 rounded-xl border border-border/70 bg-surface/40 px-3 py-2.5">
-      <div className="mb-1.5 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-muted">
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+    <div className="w-56 rounded-xl border border-border bg-surface/95 px-2.5 py-2 shadow-lg backdrop-blur-sm">
+      <button
+        type="button"
+        onClick={() => setCollapsed((v) => !v)}
+        className="flex w-full items-center gap-2 text-[10.5px] font-medium uppercase tracking-wide text-muted transition-colors hover:text-text"
+      >
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <path d="M5.5 3.5h7M5.5 8h7M5.5 12.5h7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
           <circle cx="2.5" cy="3.5" r="1.1" fill="currentColor" />
           <circle cx="2.5" cy="8" r="1.1" fill="currentColor" />
@@ -520,44 +617,160 @@ function PlanPanel({ todos }: { todos: TodoItem[] }) {
         <span className="ml-auto font-mono text-[10px] normal-case tracking-normal text-muted">
           {done}/{todos.length}
         </span>
-      </div>
-      <ul className="flex flex-col gap-1">
-        {todos.map((t, i) => (
-          <li key={i} className="flex items-start gap-2 text-[12.5px] leading-snug">
-            <span className="mt-0.5 shrink-0">
-              {t.status === 'done' ? (
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="text-green-500">
-                  <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.3" />
-                  <path d="M5.3 8.2l1.9 1.9 3.5-3.8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              ) : t.status === 'in_progress' ? (
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="sylor-thinking text-primary">
-                  <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.3" />
-                  <circle cx="8" cy="8" r="2.5" fill="currentColor" />
-                </svg>
-              ) : (
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="text-muted">
-                  <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.3" strokeDasharray="2 2" />
-                </svg>
-              )}
-            </span>
-            <span
-              className={
-                t.status === 'done'
-                  ? 'text-muted line-through'
-                  : t.status === 'in_progress'
-                    ? 'font-medium text-text'
-                    : 'text-text'
-              }
-            >
-              {t.title}
-            </span>
-          </li>
-        ))}
-      </ul>
+        <svg
+          width="11"
+          height="11"
+          viewBox="0 0 16 16"
+          fill="none"
+          aria-hidden="true"
+          className={'transition-transform ' + (collapsed ? '' : 'rotate-180')}
+        >
+          <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {!collapsed && (
+        <ul className="mt-1.5 flex max-h-[50vh] flex-col gap-1 overflow-y-auto">
+          {todos.map((t, i) => (
+            <li key={i} className="flex items-start gap-2 text-[11.5px] leading-snug">
+              <span className="mt-0.5 shrink-0">
+                {t.status === 'done' ? (
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="text-green-500">
+                    <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.3" />
+                    <path d="M5.3 8.2l1.9 1.9 3.5-3.8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                ) : t.status === 'in_progress' ? (
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="myto-thinking text-primary">
+                    <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.3" />
+                    <circle cx="8" cy="8" r="2.5" fill="currentColor" />
+                  </svg>
+                ) : (
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="text-muted">
+                    <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.3" strokeDasharray="2 2" />
+                  </svg>
+                )}
+              </span>
+              <span
+                className={
+                  t.status === 'done'
+                    ? 'text-muted line-through'
+                    : t.status === 'in_progress'
+                      ? 'font-medium text-text'
+                      : 'text-text'
+                }
+              >
+                {t.title}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
+
+/**
+ * A Claude-Desktop-style collapsible group of tool steps. A turn's tool round-trips
+ * are folded into ONE quiet line ("Working…" while live, "Worked for N steps" once
+ * done) that the transcript keeps clean; the current action shows in the status line
+ * above. Tap to expand and see each individual step. This is what keeps a long Cowork
+ * run from spilling a raw "Running x / Running y / …" list down the page.
+ */
+function ToolActivityGroup({ tools, cowork }: { tools: ToolSegment[]; cowork: boolean }) {
+  const [expanded, setExpanded] = useState(false)
+  if (tools.length === 0) return null
+  const running = tools.some((t) => t.result === null)
+  const label = running ? 'Working…' : `Worked for ${tools.length} step${tools.length === 1 ? '' : 's'}`
+  return (
+    <div className="my-2">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="flex items-center gap-2 text-[12px] text-muted transition-colors hover:text-text"
+      >
+        <span className="grid shrink-0 place-items-center">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path
+              d="M10.6 3.2a2.6 2.6 0 0 0-3.3 3.3l-4.4 4.4a1 1 0 1 0 1.4 1.4l4.4-4.4a2.6 2.6 0 0 0 3.3-3.3l-1.4 1.4-1.4-.4-.4-1.4 1.4-1.4z"
+              stroke="currentColor"
+              strokeWidth="1.3"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </span>
+        <span className={running ? 'myto-thinking font-medium' : 'font-medium'}>{label}</span>
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 16 16"
+          fill="none"
+          aria-hidden="true"
+          className={'shrink-0 transition-transform ' + (expanded ? 'rotate-180' : '')}
+        >
+          <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {expanded && (
+        <div className="mt-1 border-l border-border/60 pl-3">
+          {tools.map((t, i) => (
+            <ToolCard key={i} tool={t} cowork={cowork} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Format ms as m:ss (or s.s under a minute), Claude-desktop style. */
+function fmtElapsed(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000))
+  const m = Math.floor(totalSec / 60)
+  const s = totalSec % 60
+  return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+/** A rough token estimate from character count (~4 chars/token) — no usage wire needed. */
+function estimateTokens(text: string): number {
+  return Math.max(0, Math.round(text.length / 4))
+}
+
+/**
+ * The Claude-desktop-style meta line under a reply: elapsed time and token count.
+ * While the reply streams it updates live (a 1s tick + the growing content); once
+ * the turn ends it freezes at the final values. Self-contained — it times from its
+ * own mount (which coincides with the reply appearing), so no store plumbing.
+ */
+function MessageMeta({ content, pending }: { content: string; pending: boolean }) {
+  const startRef = useRef<number>(Date.now())
+  const [, forceTick] = useState(0)
+  const frozenRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (!pending) {
+      // Freeze elapsed at the moment streaming ended.
+      if (frozenRef.current === null) frozenRef.current = Date.now() - startRef.current
+      return
+    }
+    const id = setInterval(() => forceTick((n) => n + 1), 1000)
+    return () => clearInterval(id)
+  }, [pending])
+
+  const elapsed = frozenRef.current ?? Date.now() - startRef.current
+  const tokens = estimateTokens(content)
+  return (
+    <div className="mt-1 flex items-center gap-2 text-[11px] tabular-nums text-muted/70">
+      <span>{fmtElapsed(elapsed)}</span>
+      <span aria-hidden="true">·</span>
+      <span>{tokens.toLocaleString()} tokens</span>
+    </div>
+  )
+}
+
+/** One block to render in an assistant reply: prose, a generated file, or a folded tool group. */
+type RenderItem =
+  | { kind: 'prose'; text: string }
+  | { kind: 'file'; file: Extract<ReturnType<typeof parseFileBlocks>[number], { kind: 'file' }> }
+  | { kind: 'toolgroup'; tools: ToolSegment[] }
 
 function AssistantMessage({ message }: { message: ChatMessageUI }) {
   const displayContent = message.content.trimEnd()
@@ -571,6 +784,44 @@ function AssistantMessage({ message }: { message: ChatMessageUI }) {
     () => segments.some((s) => s.kind === 'tool' && FS_TOOL_NAMES.has(s.name ?? '')),
     [segments]
   )
+  // The tool currently running (its result hasn't come back yet), if any. Its
+  // friendly headline — "Listing folder", "Web search" — is what the live status
+  // line shows while it runs, so tool activity appears in the same place as the
+  // Thinking/Writing caption instead of only as a card badge below.
+  const activeToolCaption = useMemo(() => {
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const s = segments[i]
+      if (s.kind === 'tool' && s.name !== 'update_plan' && s.result === null) return toolHeadline(s)
+    }
+    return null
+  }, [segments])
+  // Fold consecutive tool round-trips into one collapsible group (Claude-Desktop
+  // style) so the transcript never becomes a raw "Running x / Running y" list.
+  // update_plan is dropped here — it has no card; the PlanPanel above owns it.
+  const renderItems = useMemo<RenderItem[]>(() => {
+    const items: RenderItem[] = []
+    let group: ToolSegment[] = []
+    const flush = (): void => {
+      if (group.length) {
+        items.push({ kind: 'toolgroup', tools: group })
+        group = []
+      }
+    }
+    for (const seg of segments) {
+      if (seg.kind === 'tool') {
+        if (seg.name === 'update_plan') continue
+        group.push(seg)
+      } else if (seg.kind === 'file') {
+        flush()
+        items.push({ kind: 'file', file: seg })
+      } else {
+        flush()
+        items.push({ kind: 'prose', text: seg.text })
+      }
+    }
+    flush()
+    return items
+  }, [segments])
   return (
     <div className="min-w-0 pl-4">
       {message.error && (
@@ -579,21 +830,31 @@ function AssistantMessage({ message }: { message: ChatMessageUI }) {
         </div>
       )}
 
-      {message.pending && <StatusLine caption={statusCaption(message, displayContent)} />}
+      {message.pending && (
+        <StatusLine caption={activeToolCaption ?? statusCaption(message, displayContent)} />
+      )}
 
-      {message.todos && message.todos.length > 0 && <PlanPanel todos={message.todos} />}
-
-      {segments.map((seg, i) =>
-        seg.kind === 'file' ? (
-          <FileCard key={`f${i}`} file={seg} />
-        ) : seg.kind === 'tool' ? (
-          <ToolCard key={`t${i}`} tool={seg} cowork={coworkTurn} />
+      {renderItems.map((item, i) =>
+        item.kind === 'file' ? (
+          <FileCard key={`f${i}`} file={item.file} />
+        ) : item.kind === 'toolgroup' ? (
+          <ToolActivityGroup key={`g${i}`} tools={item.tools} cowork={coworkTurn} />
         ) : (
-          <Markdown key={`p${i}`} content={seg.text} />
+          // Myto's own reply prose is set in Georgia (serif), distinct from the UI's
+          // sans — the one place the assistant's "voice" is typographically its own.
+          <div key={`p${i}`} className="myto-reply font-serif">
+            <Markdown content={item.text} />
+          </div>
         )
       )}
 
       {message.pendingApproval && <ApprovalPrompt approval={message.pendingApproval} />}
+
+      {message.pendingQuestion && <QuestionPrompt question={message.pendingQuestion} />}
+
+      {(message.pending || displayContent.length > 0) && (
+        <MessageMeta content={displayContent} pending={!!message.pending} />
+      )}
 
       {!message.pending && (displayContent.length > 0 || message.error != null) && (
         <MessageActions message={message} />
@@ -649,7 +910,7 @@ function ThemeToggle() {
 
 /**
  * The main surface's top strip: the plan/billing note centered (inert chrome that
- * mirrors the reference app), the Sylor mascot and theme toggle on the right, and
+ * mirrors the reference app), the Myto mascot and theme toggle on the right, and
  * — only when the rail is collapsed — a control on the left to reopen it.
  */
 function MainTopBar() {
@@ -674,28 +935,14 @@ function MainTopBar() {
         )}
       </div>
 
-      <div className="pointer-events-none absolute inset-x-0 flex justify-center">
-        <span className="text-[12px] text-muted">
-          Free plan ·{' '}
-          <button
-            type="button"
-            title="Upgrade (not available in this build)"
-            className="pointer-events-auto font-medium text-primary transition-opacity hover:opacity-80"
-          >
-            Upgrade
-          </button>
-        </span>
-      </div>
-
       <div className="ml-auto flex items-center gap-1">
-        <SylorLogo size={22} showBubbles={false} className="opacity-80" title="Sylor" />
         <ThemeToggle />
       </div>
     </div>
   )
 }
 
-/** The four real starter leads; "Sylor's choice" picks one of them at random. */
+/** The four real starter leads; "Myto's choice" picks one of them at random. */
 const STARTER_LEADS = [
   'Help me write ',
   'Help me understand ',
@@ -705,7 +952,7 @@ const STARTER_LEADS = [
 
 /**
  * The suggestion pills under the landing composer (Write / Learn / Code / Life
- * stuff / Sylor's choice). Each drops a short lead into the composer and focuses
+ * stuff / Myto's choice). Each drops a short lead into the composer and focuses
  * it — a gentle on-ramp rather than a canned prompt.
  */
 function StarterPills({ onPick }: { onPick: (lead: string) => void }) {
@@ -749,9 +996,9 @@ function StarterPills({ onPick }: { onPick: (lead: string) => void }) {
       )
     },
     {
-      label: "Sylor's choice",
+      label: "Myto's choice",
       lead: null,
-      icon: <SylorStar size={15} />
+      icon: <MytoMark size={15} />
     }
   ]
 
@@ -771,21 +1018,6 @@ function StarterPills({ onPick }: { onPick: (lead: string) => void }) {
         </button>
       ))}
     </div>
-  )
-}
-
-/** An inert, reference-matching pill (e.g. the "Medium" reasoning effort). */
-function InertPill({ label, title }: { label: string; title: string }) {
-  return (
-    <span
-      title={title}
-      className="flex cursor-default items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-[12px] font-medium text-text/80"
-    >
-      {label}
-      <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="text-muted">
-        <path d="M3 4.5L6 7.5l3-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    </span>
   )
 }
 
@@ -826,10 +1058,10 @@ function CoworkPermissionMenu() {
         onClick={() => setOpen((v) => !v)}
         title="Cowork permissions"
         className={
-          'flex items-center gap-1 rounded-[40%] border px-2.5 py-1 text-[12px] font-medium transition-colors ' +
+          'flex items-center gap-1 rounded-[6px] px-2.5 py-1 text-[12px] font-medium transition-colors ' +
           (danger
-            ? 'border-red-500/50 bg-red-500/10 text-red-400 hover:bg-red-500/15'
-            : 'border-border bg-surface text-text/80 hover:bg-surface-2')
+            ? 'bg-red-600 text-white hover:bg-red-500'
+            : 'bg-black text-white hover:bg-neutral-800')
         }
       >
         <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -878,6 +1110,76 @@ function CoworkPermissionMenu() {
   )
 }
 
+/** The reasoning-effort tiers offered in the composer, with one-line hints. */
+const EFFORT_TIERS: { value: ReasoningEffort; label: string; hint: string }[] = [
+  { value: 'low', label: 'Low', hint: 'Fastest — quick, shallow answers' },
+  { value: 'medium', label: 'Medium', hint: 'Balanced speed and depth' },
+  { value: 'high', label: 'High', hint: 'Deeper thinking on hard problems' },
+  { value: 'max', label: 'Max', hint: 'No compromise — the most thorough' }
+]
+
+/**
+ * The reasoning-effort selector: a small popover to pick how hard the model thinks
+ * before answering. The choice persists in settings and is sent to the provider as
+ * `reasoning_effort` (a capable gateway maps it to the model's thinking budget).
+ */
+function EffortMenu() {
+  const effort = useAppStore((s) => s.settings.reasoningEffort)
+  const setEffort = useAppStore((s) => s.setReasoningEffort)
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const current = EFFORT_TIERS.find((t) => t.value === effort) ?? EFFORT_TIERS[1]
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent): void => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title="Reasoning effort — how hard the model thinks"
+        className="flex items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-[12px] font-medium text-text/80 transition-colors hover:bg-surface-2"
+      >
+        {current.label}
+        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="text-muted">
+          <path d="M3 4.5L6 7.5l3-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute bottom-full right-0 z-20 mb-1.5 w-56 rounded-xl border border-border bg-surface p-1 shadow-lg">
+          {EFFORT_TIERS.map((t) => (
+            <button
+              key={t.value}
+              type="button"
+              onClick={() => {
+                void setEffort(t.value)
+                setOpen(false)
+              }}
+              className={
+                'flex w-full flex-col items-start gap-0.5 rounded-lg px-2.5 py-1.5 text-left transition-colors hover:bg-surface-2 ' +
+                (t.value === effort ? 'bg-surface-2' : '')
+              }
+            >
+              <span className="text-[12.5px] font-medium text-text">
+                {t.label}
+                {t.value === effort ? ' ✓' : ''}
+              </span>
+              <span className="text-[11px] text-muted">{t.hint}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ChatPanel() {
   const messages = useChatStore((s) => s.messages)
   const attachments = useChatStore((s) => s.attachments)
@@ -904,7 +1206,7 @@ export function ChatPanel() {
   // The signed-in account's given name, for the greeting — falling back to the OS
   // account name, then a friendly generic.
   const authUser = useAuthUser()
-  const firstName = (authUser?.displayName?.trim() || window.sylor.userName || 'there').split(
+  const firstName = (authUser?.displayName?.trim() || window.myto.userName || 'there').split(
     /\s+/
   )[0]
 
@@ -915,6 +1217,24 @@ export function ChatPanel() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Voice: dictation (mic) + hands-free voice mode + read-aloud. `dictating` is true
+  // while the mic is capturing; `voiceMode` is the hands-free loop (read replies aloud,
+  // then auto-listen); `speaking` is true while a reply is being spoken.
+  const [dictating, setDictating] = useState(false)
+  const [voiceMode, setVoiceMode] = useState(false)
+  const [speaking, setSpeaking] = useState(false)
+  const [voiceError, setVoiceError] = useState('')
+  const sttRef = useRef<SttSession | null>(null)
+  // Composer text captured when dictation started, so partial/final transcripts append
+  // to what was already typed instead of clobbering it.
+  const dictationBaseRef = useRef('')
+  // Whisper is preferred when an OpenAI-compatible gateway is configured; otherwise the
+  // Web Speech API is used. Either way voice is only offered if some path exists.
+  const preferWhisper = useAppStore(
+    (s) => s.settings.activeProvider === 'gateway' && s.settings.gateway.baseUrl.trim().length > 0
+  )
+  const voiceInputAvailable = preferWhisper || webSpeechSupported()
 
   // Group persisted attachments by the user message they were sent with.
   const attachmentsByMessage = useMemo(() => {
@@ -947,13 +1267,22 @@ export function ChatPanel() {
   // Store each dropped/selected file as a pending attachment and stage it. Text
   // files also carry their decoded body for inlining into the model history.
   const stageFiles = async (files: File[]): Promise<void> => {
-    const sid = useChatStore.getState().sessionId
-    if (!sid || files.length === 0) return
+    if (files.length === 0) return
+    // Attachments need a persisted session to hang off. On a fresh landing draft
+    // there's no row yet (created lazily on first send), so create one now — the
+    // act of attaching is a real intent signal, same as sending. This is what lets
+    // the attach button work before the first message. See canAttach below.
+    let sid = useChatStore.getState().sessionId
+    if (sid == null) {
+      await useSessionStore.getState().create()
+      sid = useChatStore.getState().sessionId
+    }
+    if (!sid) return
     for (const file of files) {
       try {
         const data = await fileToBase64(file)
         const mime = file.type || 'application/octet-stream'
-        const attachment = await window.sylor.attachments.add({
+        const attachment = await window.myto.attachments.add({
           sessionId: sid,
           name: file.name,
           mime,
@@ -971,14 +1300,14 @@ export function ChatPanel() {
         }
         setPending((prev) => [...prev, staged])
       } catch (err) {
-        console.error('[sylor] failed to stage attachment:', err)
+        console.error('[myto] failed to stage attachment:', err)
       }
     }
   }
 
   const removePending = (id: string): void => {
     setPending((prev) => prev.filter((p) => p.attachment.id !== id))
-    void window.sylor.attachments.remove(id)
+    void window.myto.attachments.remove(id)
   }
 
   const onFilesPicked = (event: React.ChangeEvent<HTMLInputElement>): void => {
@@ -995,8 +1324,10 @@ export function ChatPanel() {
     void stageFiles(files)
   }
 
-  const submit = async (): Promise<void> => {
-    const text = input
+  // Send a specific piece of text (plus any staged attachments). Shared by the composer's
+  // submit and by hands-free voice mode, which submits a spoken utterance directly rather
+  // than round-tripping through the input state.
+  const submitText = async (text: string): Promise<void> => {
     if ((text.trim().length === 0 && pending.length === 0) || running || !hasModel) return
 
     const outgoing: OutgoingAttachment[] = pending.map((p) => ({
@@ -1017,12 +1348,133 @@ export function ChatPanel() {
     void useSessionStore.getState().autoName(text)
   }
 
+  const submit = (): Promise<void> => submitText(input)
+
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       void submit()
     }
   }
+
+  // Turn a raw voice error into a short, human line for the composer hint.
+  const showVoiceError = (err: unknown): void => {
+    const message = err instanceof Error ? err.message : String(err)
+    const friendly = /permission|denied|notallowed/i.test(message)
+      ? 'Microphone access was blocked. Allow it to use voice.'
+      : /no-gateway|unavailable/i.test(message)
+        ? 'Voice input is not available in this setup.'
+        : `Voice input failed: ${message}`
+    setVoiceError(friendly)
+  }
+
+  /**
+   * Finalise an in-progress dictation: stop capture, get the transcript, and either drop
+   * it into the composer (push-to-talk) or send it straight away (hands-free voice mode).
+   */
+  const finishDictation = async (submitResult: boolean): Promise<void> => {
+    const session = sttRef.current
+    if (!session) return
+    sttRef.current = null
+    setDictating(false)
+    let text = ''
+    try {
+      text = await session.stop()
+    } catch (err) {
+      showVoiceError(err)
+      return
+    }
+    const combined = dictationBaseRef.current
+      ? `${dictationBaseRef.current.trim()} ${text}`.trim()
+      : text.trim()
+    if (submitResult) {
+      if (combined) void submitText(combined)
+    } else {
+      setInput(combined)
+    }
+  }
+
+  /** Start capturing speech. `handsFree` auto-submits on a natural pause. */
+  const beginDictation = async (handsFree: boolean): Promise<void> => {
+    if (sttRef.current) return
+    setVoiceError('')
+    dictationBaseRef.current = handsFree ? '' : input
+    try {
+      const session = await startDictation({
+        preferWhisper,
+        autoStop: handsFree,
+        onPartial: (partial) => {
+          const base = dictationBaseRef.current
+          setInput(base ? `${base.trim()} ${partial}`.trim() : partial)
+        },
+        // Hands-free: a natural pause ends the utterance → finalise and submit it.
+        onEnd: handsFree ? () => void finishDictation(true) : undefined
+      })
+      sttRef.current = session
+      setDictating(true)
+    } catch (err) {
+      showVoiceError(err)
+    }
+  }
+
+  // Push-to-talk mic: click to start, click again to stop and drop the text in the box.
+  const toggleMic = (): void => {
+    if (dictating) void finishDictation(false)
+    else void beginDictation(false)
+  }
+
+  // Hands-free voice mode: reads replies aloud and auto-listens between them. Toggling
+  // off stops any speech and cancels an in-progress listen.
+  const toggleVoiceMode = (): void => {
+    setVoiceError('')
+    if (voiceMode) {
+      setVoiceMode(false)
+      ttsStop()
+      setSpeaking(false)
+      sttRef.current?.cancel()
+      sttRef.current = null
+      setDictating(false)
+      return
+    }
+    setVoiceMode(true)
+    // Start listening right away when idle; otherwise the running-reply effect picks up.
+    if (!running && !dictating) void beginDictation(true)
+  }
+
+  // Drive the hands-free loop: when a reply finishes, speak it aloud and then listen for
+  // the next utterance. Only the running true→false edge acts, so streaming updates to
+  // `messages` don't retrigger it.
+  const prevRunningRef = useRef(running)
+  useEffect(() => {
+    const wasRunning = prevRunningRef.current
+    prevRunningRef.current = running
+    if (!voiceMode || !(wasRunning && !running)) return
+    const last = messages[messages.length - 1]
+    const toSpeak = last && last.role === 'assistant' && !last.error ? last.content : ''
+    void (async () => {
+      if (toSpeak && ttsSupported()) {
+        setSpeaking(true)
+        await ttsSpeak(toSpeak)
+        setSpeaking(false)
+      }
+      // Still hands-free and idle after speaking? Listen for the next turn. `running` is
+      // read fresh from the store because a new turn may have started while speaking.
+      if (voiceMode && !useChatStore.getState().running && !sttRef.current) {
+        void beginDictation(true)
+      }
+    })()
+    // beginDictation/ttsSpeak are stable enough for this edge-triggered effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, voiceMode, messages])
+
+  // Tidy up voice resources when the panel unmounts.
+  useEffect(() => {
+    return () => {
+      ttsStop()
+      sttRef.current?.cancel()
+      sttRef.current = null
+    }
+  }, [])
 
   // Drop a starter lead into the composer and put the caret at its end.
   const prefill = (lead: string): void => {
@@ -1037,8 +1489,24 @@ export function ChatPanel() {
   }
 
   const canSend = (input.trim().length > 0 || pending.length > 0) && hasModel
-  const canAttach = sessionId != null
+  // Attaching is always allowed: stageFiles creates a session lazily if the chat is
+  // still an unsaved draft, so there's no need to send a message first. sessionId is
+  // still read elsewhere; referencing it here keeps the dependency explicit.
+  void sessionId
+  const canAttach = true
   const isEmpty = messages.length === 0
+
+  // The live plan (Cowork): the latest assistant turn that carries a checklist. Shown
+  // as a small floating panel top-right, and auto-hidden while the preview pane is open
+  // so the two don't fight for the same corner.
+  const previewOpen = usePreviewStore((s) => s.open)
+  const planTodos = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const t = messages[i].todos
+      if (t && t.length > 0) return t
+    }
+    return null
+  }, [messages])
 
   // The working folder's leaf name, for the Cowork chip (Windows or POSIX path).
   const folderLabel = workspaceDir.split(/[\\/]/).filter(Boolean).pop() ?? ''
@@ -1083,6 +1551,32 @@ export function ChatPanel() {
         </div>
       )}
 
+      {/* Cowork context row — OUTSIDE and above the composer box: the working
+          folder on the left, the permission tier on the right. Both are solid
+          black chips with a 6px radius. */}
+      {coworkMode && (
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => void pickCoworkWorkspace()}
+            title={workspaceDir || 'Choose a working folder for Cowork'}
+            className="flex items-center gap-1.5 rounded-[6px] bg-black px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:bg-neutral-800"
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M1.5 4.5A1.5 1.5 0 0 1 3 3h3l1.5 1.5H13A1.5 1.5 0 0 1 14.5 6v6A1.5 1.5 0 0 1 13 13.5H3A1.5 1.5 0 0 1 1.5 12V4.5Z"
+                stroke="currentColor"
+                strokeWidth="1.2"
+                strokeLinejoin="round"
+              />
+            </svg>
+            <span className="max-w-[200px] truncate">{folderLabel || 'Choose folder'}</span>
+          </button>
+
+          <CoworkPermissionMenu />
+        </div>
+      )}
+
       <div
         className={
           'rounded-[22px] border bg-surface px-3.5 pb-2 pt-3 shadow-sm transition-colors focus-within:border-primary/50 ' +
@@ -1090,36 +1584,6 @@ export function ChatPanel() {
         }
       >
         <input ref={fileInputRef} type="file" multiple onChange={onFilesPicked} className="hidden" />
-
-        {/* Cowork context row, above the input: working folder on the left,
-            permission tier on the right. */}
-        {coworkMode && (
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <button
-              type="button"
-              onClick={() => void pickCoworkWorkspace()}
-              title={workspaceDir || 'Choose a working folder for Cowork'}
-              className={
-                'flex items-center gap-1.5 rounded-[40%] border px-2.5 py-1 text-[12px] transition-colors ' +
-                (folderLabel
-                  ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15'
-                  : 'border-amber-500/50 bg-amber-500/10 text-amber-500 hover:bg-amber-500/15')
-              }
-            >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path
-                  d="M1.5 4.5A1.5 1.5 0 0 1 3 3h3l1.5 1.5H13A1.5 1.5 0 0 1 14.5 6v6A1.5 1.5 0 0 1 13 13.5H3A1.5 1.5 0 0 1 1.5 12V4.5Z"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              <span className="max-w-[160px] truncate">{folderLabel || 'Choose folder'}</span>
-            </button>
-
-            <CoworkPermissionMenu />
-          </div>
-        )}
 
         {composerMode === 'builder' ? (
           <PromptBuilder
@@ -1212,17 +1676,28 @@ export function ChatPanel() {
 
           <div className="flex items-center gap-1.5">
             <ModelSelector openUp />
-            <InertPill label="Medium" title="Reasoning effort (fixed in this build)" />
+            <EffortMenu />
 
-            <span
-              title="Voice input (not available in this build)"
-              className="grid h-8 w-8 cursor-default place-items-center rounded-full text-muted/70"
-            >
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <rect x="6" y="1.5" width="4" height="8.5" rx="2" stroke="currentColor" strokeWidth="1.3" />
-                <path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-              </svg>
-            </span>
+            {voiceInputAvailable && (
+              <button
+                type="button"
+                onClick={toggleMic}
+                aria-label={dictating ? 'Stop dictation' : 'Dictate a message'}
+                aria-pressed={dictating}
+                title={dictating ? 'Stop and insert what you said' : 'Dictate — speak your message'}
+                className={
+                  'grid h-8 w-8 shrink-0 place-items-center rounded-full border transition-colors ' +
+                  (dictating
+                    ? 'border-primary/60 bg-primary/10 text-primary animate-pulse'
+                    : 'border-transparent text-muted hover:bg-surface-2 hover:text-text')
+                }
+              >
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <rect x="6" y="1.5" width="4" height="8.5" rx="2" stroke="currentColor" strokeWidth="1.3" />
+                  <path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                </svg>
+              </button>
+            )}
 
             {running ? (
               <button
@@ -1244,9 +1719,31 @@ export function ChatPanel() {
                   <path d="M8 13V4M4.5 7.5L8 4l3.5 3.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </button>
+            ) : voiceInputAvailable ? (
+              <button
+                type="button"
+                onClick={toggleVoiceMode}
+                aria-label={voiceMode ? 'Turn off voice mode' : 'Turn on voice mode'}
+                aria-pressed={voiceMode}
+                title={
+                  voiceMode
+                    ? 'Voice mode on — reads replies aloud and listens. Click to turn off.'
+                    : 'Voice mode — hands-free: reads replies aloud and listens for your reply.'
+                }
+                className={
+                  'grid h-8 w-8 shrink-0 place-items-center rounded-full transition-colors ' +
+                  (voiceMode
+                    ? 'bg-primary text-bg ' + (speaking || dictating ? 'animate-pulse' : '')
+                    : 'bg-surface-2 text-muted hover:text-text')
+                }
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M2 8h1.5M5 5v6M8 3v10M11 5.5v5M13.5 8H15" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                </svg>
+              </button>
             ) : (
               <span
-                title="Voice mode (not available in this build)"
+                title="Voice mode (needs a configured model or browser speech support)"
                 className="grid h-8 w-8 cursor-default place-items-center rounded-full bg-surface-2 text-muted/70"
               >
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -1260,7 +1757,18 @@ export function ChatPanel() {
 
       {!hasModel && (
         <p className="mt-2 text-center text-[12px] text-muted">
-          No model configured. Add one on the Sylor website → Authentication page to start chatting.
+          No model configured. Add one on the Myto website → Authentication page to start chatting.
+        </p>
+      )}
+      {(dictating || speaking || voiceError) && (
+        <p className="mt-2 text-center text-[12px] text-muted">
+          {voiceError
+            ? voiceError
+            : speaking
+              ? 'Speaking…'
+              : dictating
+                ? 'Listening… click the mic to finish.'
+                : ''}
         </p>
       )}
     </div>
@@ -1273,7 +1781,7 @@ export function ChatPanel() {
       {isEmpty ? (
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto flex min-h-full max-w-2xl flex-col items-center justify-center px-6 pb-16 pt-8">
-            <SylorStar size={40} className="mb-4" />
+            <MytoMark size={40} className="mb-4" />
             <h1 className="mb-7 font-serif text-[28px] font-normal text-text">
               Hey there, {firstName}
             </h1>
@@ -1284,7 +1792,14 @@ export function ChatPanel() {
           </div>
         </div>
       ) : (
-        <>
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          {/* Floating plan panel, top-right — small, and auto-hidden while the
+              preview pane is open (it takes over that side of the screen). */}
+          {planTodos && !previewOpen && (
+            <div className="pointer-events-auto absolute right-3 top-2 z-10">
+              <PlanPanel todos={planTodos} />
+            </div>
+          )}
           <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
             <div className="mx-auto max-w-3xl space-y-5 px-4 py-5">
               {messages.map((message) => (
@@ -1296,8 +1811,8 @@ export function ChatPanel() {
               ))}
             </div>
           </div>
-          <div className="mx-auto w-full max-w-3xl px-4 pb-4">{renderComposer('Message Sylor…')}</div>
-        </>
+          <div className="mx-auto w-full max-w-3xl px-4 pb-4">{renderComposer('Message Myto…')}</div>
+        </div>
       )}
     </div>
   )

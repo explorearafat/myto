@@ -14,7 +14,7 @@ import type { ToolDef, ToolGate } from './registry'
  * one is gated by {@link fsAvailable} so it is neither advertised nor runnable
  * outside Cowork mode or before a folder is picked. That gate is the trust
  * boundary: switching to Cowork and choosing a folder is the user's explicit
- * opt-in to Sylor reading and writing inside it.
+ * opt-in to Myto reading and writing inside it.
  */
 
 /** Largest file body handed back to the model on a read, in characters. */

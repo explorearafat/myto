@@ -171,7 +171,7 @@ test('Dart: removes // and /// docs, keeps package URIs and strings', () => {
     import 'package:flutter/material.dart';
     import 'dart:async'; // trailing
 
-    const kUrl = 'https://sylor.dev/x';
+    const kUrl = 'https://myto.dev/x';
     const kPath = r'C:\\logs\\//keep';
 
     void main() {
@@ -180,7 +180,7 @@ test('Dart: removes // and /// docs, keeps package URIs and strings', () => {
   `)
   const out = run(src, 'a.dart')
   assert.match(out, /package:flutter\/material\.dart/)
-  assert.match(out, /'https:\/\/sylor\.dev\/x'/)
+  assert.match(out, /'https:\/\/myto\.dev\/x'/)
   assert.match(out, /r'C:\\\\logs\\\\\/\/keep'/)
   assert.match(out, /ignore: prefer_const_constructors/)
   assert.ok(!out.includes('Header comment'))

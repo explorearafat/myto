@@ -6,7 +6,7 @@ import {
   type User
 } from 'firebase/auth'
 import { auth } from '../lib/firebase'
-import { SylorStar } from './SylorStar'
+import { MytoMark } from './MytoMark'
 
 /*
  * Required sign-in gate for the desktop app.
@@ -38,14 +38,14 @@ export function AuthGate({ children }: { children: ReactNode }): React.JSX.Eleme
     setBusy(true)
     setError('')
     try {
-      const result = await window.sylor.auth.signInWithGoogle()
+      const result = await window.myto.auth.signInWithGoogle()
       if (!result.ok) {
         if (result.error) setError(result.error)
         return
       }
       await signInWithCredential(auth, GoogleAuthProvider.credential(result.idToken))
     } catch (err) {
-      console.error('[sylor] sign-in failed:', err)
+      console.error('[myto] sign-in failed:', err)
       setError('Sign-in failed. Please try again.')
     } finally {
       setBusy(false)
@@ -61,22 +61,22 @@ export function AuthGate({ children }: { children: ReactNode }): React.JSX.Eleme
   // browser-preview-shim.ts) can't run Google's loopback sign-in, so the gate
   // would block the very screenshots the shim exists to enable. When it's active,
   // treat the app as signed-in chrome and render straight through.
-  if (window.__sylorPreviewShim) return <>{children}</>
+  if (window.__mytoPreviewShim) return <>{children}</>
 
 
   return (
     <div className="grid min-h-screen place-items-center bg-[#faf9f5] px-6 text-[#141413]">
       <div className="w-full max-w-sm text-center">
         <div className="mx-auto mb-6 flex justify-center">
-          <SylorStar size={40} />
+          <MytoMark size={40} />
         </div>
-        <h1 className="mb-2 text-2xl font-semibold">Sign in to Sylor</h1>
+        <h1 className="mb-2 text-2xl font-semibold">Sign in to Myto</h1>
         <p className="mb-8 text-sm text-[#141413]/60">
-          Sylor opens your browser to sign in with Google, then brings you right back here.
+          Myto opens your browser to sign in with Google, then brings you right back here.
         </p>
 
         {error && (
-          <p className="mb-4 rounded-lg border border-[#cf5535]/30 bg-[#cf5535]/5 px-3 py-2 text-sm text-[#cf5535]">
+          <p className="mb-4 rounded-lg border border-[#141413]/20 bg-[#141413]/[0.04] px-3 py-2 text-sm text-[#141413]/80">
             {error}
           </p>
         )}

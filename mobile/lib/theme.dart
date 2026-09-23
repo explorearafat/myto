@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
-class SylorColors {
-  const SylorColors._();
 
-  static const Color terracotta = Color(0xFFCF5535);
-  static const Color terracottaBright = Color(0xFFE0704F);
+class MytoColors {
+  const MytoColors._();
+
+  // Brand monochrome. Ink is the accent on light surfaces and the mark/dark-tile colour; paper is
+  // the accent on dark surfaces (and the mark drawn on ink). Warm gray sits between them for muted
+  // text and hairline borders.
+  static const Color ink = Color(0xFF181818);
+  static const Color warmGray = Color(0xFFB0A8A0);
+  static const Color paper = Color(0xFFF0F0EC);
 
   static const Color lightBg = Color(0xFFFAF9F5);
   static const Color lightSurface = Color(0xFFFFFFFF);
@@ -20,31 +25,34 @@ class SylorColors {
   static const Color darkBorder = Color(0xFF35322C);
 }
 
-ThemeData sylorLightTheme() => _build(
+ThemeData mytoLightTheme() => _build(
       brightness: Brightness.light,
-      accent: SylorColors.terracotta,
-      bg: SylorColors.lightBg,
-      surface: SylorColors.lightSurface,
-      surface2: SylorColors.lightSurface2,
-      text: SylorColors.lightText,
-      muted: SylorColors.lightMuted,
-      border: SylorColors.lightBorder,
+      accent: MytoColors.ink,
+      onAccent: MytoColors.paper,
+      bg: MytoColors.lightBg,
+      surface: MytoColors.lightSurface,
+      surface2: MytoColors.lightSurface2,
+      text: MytoColors.lightText,
+      muted: MytoColors.lightMuted,
+      border: MytoColors.lightBorder,
     );
 
-ThemeData sylorDarkTheme() => _build(
+ThemeData mytoDarkTheme() => _build(
       brightness: Brightness.dark,
-      accent: SylorColors.terracottaBright,
-      bg: SylorColors.darkBg,
-      surface: SylorColors.darkSurface,
-      surface2: SylorColors.darkSurface2,
-      text: SylorColors.darkText,
-      muted: SylorColors.darkMuted,
-      border: SylorColors.darkBorder,
+      accent: MytoColors.paper,
+      onAccent: MytoColors.ink,
+      bg: MytoColors.darkBg,
+      surface: MytoColors.darkSurface,
+      surface2: MytoColors.darkSurface2,
+      text: MytoColors.darkText,
+      muted: MytoColors.darkMuted,
+      border: MytoColors.darkBorder,
     );
 
 ThemeData _build({
   required Brightness brightness,
   required Color accent,
+  required Color onAccent,
   required Color bg,
   required Color surface,
   required Color surface2,
@@ -55,9 +63,9 @@ ThemeData _build({
   final scheme = ColorScheme(
     brightness: brightness,
     primary: accent,
-    onPrimary: Colors.white,
+    onPrimary: onAccent,
     secondary: accent,
-    onSecondary: Colors.white,
+    onSecondary: onAccent,
     surface: surface,
     onSurface: text,
     surfaceContainerHighest: surface2,
@@ -92,7 +100,7 @@ ThemeData _build({
       contentTextStyle: TextStyle(color: text),
     ),
     extensions: <ThemeExtension<dynamic>>[
-      SylorPalette(
+      MytoPalette(
         bg: bg,
         surface: surface,
         surface2: surface2,
@@ -100,13 +108,14 @@ ThemeData _build({
         muted: muted,
         border: border,
         accent: accent,
+        onAccent: onAccent,
       ),
     ],
   );
 }
 
-class SylorPalette extends ThemeExtension<SylorPalette> {
-  const SylorPalette({
+class MytoPalette extends ThemeExtension<MytoPalette> {
+  const MytoPalette({
     required this.bg,
     required this.surface,
     required this.surface2,
@@ -114,6 +123,7 @@ class SylorPalette extends ThemeExtension<SylorPalette> {
     required this.muted,
     required this.border,
     required this.accent,
+    required this.onAccent,
   });
 
   final Color bg;
@@ -124,8 +134,12 @@ class SylorPalette extends ThemeExtension<SylorPalette> {
   final Color border;
   final Color accent;
 
+  /// A colour that reads on top of [accent] (near-white on the light theme's ink accent, ink on the
+  /// dark theme's near-white accent). Use it for text/icons on accent-filled buttons.
+  final Color onAccent;
+
   @override
-  SylorPalette copyWith({
+  MytoPalette copyWith({
     Color? bg,
     Color? surface,
     Color? surface2,
@@ -133,8 +147,9 @@ class SylorPalette extends ThemeExtension<SylorPalette> {
     Color? muted,
     Color? border,
     Color? accent,
+    Color? onAccent,
   }) =>
-      SylorPalette(
+      MytoPalette(
         bg: bg ?? this.bg,
         surface: surface ?? this.surface,
         surface2: surface2 ?? this.surface2,
@@ -142,12 +157,13 @@ class SylorPalette extends ThemeExtension<SylorPalette> {
         muted: muted ?? this.muted,
         border: border ?? this.border,
         accent: accent ?? this.accent,
+        onAccent: onAccent ?? this.onAccent,
       );
 
   @override
-  SylorPalette lerp(ThemeExtension<SylorPalette>? other, double t) {
-    if (other is! SylorPalette) return this;
-    return SylorPalette(
+  MytoPalette lerp(ThemeExtension<MytoPalette>? other, double t) {
+    if (other is! MytoPalette) return this;
+    return MytoPalette(
       bg: Color.lerp(bg, other.bg, t)!,
       surface: Color.lerp(surface, other.surface, t)!,
       surface2: Color.lerp(surface2, other.surface2, t)!,
@@ -155,10 +171,11 @@ class SylorPalette extends ThemeExtension<SylorPalette> {
       muted: Color.lerp(muted, other.muted, t)!,
       border: Color.lerp(border, other.border, t)!,
       accent: Color.lerp(accent, other.accent, t)!,
+      onAccent: Color.lerp(onAccent, other.onAccent, t)!,
     );
   }
 }
 
-extension SylorThemeX on ThemeData {
-  SylorPalette get palette => extension<SylorPalette>()!;
+extension MytoThemeX on ThemeData {
+  MytoPalette get palette => extension<MytoPalette>()!;
 }

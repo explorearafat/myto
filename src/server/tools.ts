@@ -1,7 +1,7 @@
 // Server-side tool calling for the chat gateway. The user's endpoint is streamed and may speak no
 // native `tool_calls`, so — exactly like the desktop app — tools ride a text protocol:
-// the model emits a fenced ```sylor:tool block, we detect it mid-stream, run the tool, and feed a
-// ```sylor:tool_result block back. Because the loop lives here in the gateway, BOTH the website
+// the model emits a fenced ```myto:tool block, we detect it mid-stream, run the tool, and feed a
+// ```myto:tool_result block back. Because the loop lives here in the gateway, BOTH the website
 // and the mobile app inherit tools for free; each client only has to render the two block kinds.
 //
 // Only READ-ONLY web tools live here (web_fetch / web_search / wiki_search). There is deliberately
@@ -12,7 +12,7 @@
 
 // ── Tool-call parser (mirrors app/src/main/tools/toolParser.ts) ───────────────────────────────
 
-const MARKER = '```sylor:tool';
+const MARKER = '```myto:tool';
 
 export interface ToolCall {
   /** The exact block text to write into the reply for the card. */
@@ -140,12 +140,12 @@ export function fenceFor(text: string): string {
 /** Wrap a tool result as a fenced block the reply carries and each client coalesces onto its card. */
 export function toolResultBlock(name: string, result: string): string {
   const fence = fenceFor(result);
-  return `\n\n${fence}sylor:tool_result ${name}\n${result}\n${fence}\n\n`;
+  return `\n\n${fence}myto:tool_result ${name}\n${result}\n${fence}\n\n`;
 }
 
 // ── HTML → text + fetch helpers ───────────────────────────────────────────────────────────────
 
-const UA = 'SylorChat/0.2 (+https://sylorcode.vercel.app)';
+const UA = 'MytoChat/0.2 (+https://sylorcode.vercel.app)';
 const FETCH_CAP = 6000;
 const FETCH_TIMEOUT_MS = 8000;
 
@@ -477,13 +477,13 @@ export function toolsSystemPrompt(): string {
   return [
     'You can call tools to get real, current information before you answer. To call a tool, write ONE fenced block and then STOP — do not write the result yourself:',
     '',
-    '```sylor:tool',
+    '```myto:tool',
     '{"tool": "<name>", "input": { ... }}',
     '```',
     '',
     'Rules:',
     '- Put the call on a single line of compact JSON between the fences.',
-    '- After the block, output nothing and wait. The result comes back to you as a ```sylor:tool_result block.',
+    '- After the block, output nothing and wait. The result comes back to you as a ```myto:tool_result block.',
     '- Read the result, then either call another tool or write your final answer.',
     '- Call a tool only when it genuinely helps: a current/time-sensitive fact, a page or source the user named, or something you are unsure of. Otherwise just answer directly.',
     '- Never invent a tool result or claim you used a tool you did not.',
@@ -496,7 +496,7 @@ export function toolsSystemPrompt(): string {
 /** Dispatch a parsed call. Never throws: every failure becomes a short message the model recovers from. */
 export async function runTool(call: ToolCall, signal: AbortSignal): Promise<string> {
   if (call.error || !call.name) {
-    return `That tool call did not parse (${call.error ?? 'unknown error'}). Re-issue it as one compact JSON object {"tool": "name", "input": { ... }} inside a sylor:tool block.`;
+    return `That tool call did not parse (${call.error ?? 'unknown error'}). Re-issue it as one compact JSON object {"tool": "name", "input": { ... }} inside a myto:tool block.`;
   }
   const tool = TOOLS[call.name];
   if (!tool) {

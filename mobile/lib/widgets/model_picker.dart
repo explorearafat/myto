@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/byok_config.dart';
 import '../theme.dart';
-import 'sylor_star.dart';
+import 'myto_mark.dart';
 
 Future<String?> showModelPicker(
   BuildContext context, {
@@ -59,10 +59,10 @@ class _ModelPickerSheet extends StatelessWidget {
     );
   }
 
-  Widget _tile(BuildContext context, SylorPalette palette, ByokModel model) {
+  Widget _tile(BuildContext context, MytoPalette palette, ByokModel model) {
     final selected = model.id == selectedId;
     return ListTile(
-      leading: SylorStar(size: 24, color: palette.accent),
+      leading: MytoMark(size: 24, color: palette.accent),
       title: Text(
         model.name.isNotEmpty ? model.name : model.id,
         style: TextStyle(color: palette.text, fontSize: 15, fontWeight: FontWeight.w600),

@@ -88,7 +88,7 @@ describe('usePreviewStore', () => {
 
   it('openExternal sends the current url to the shell', () => {
     const spy = vi.fn()
-    ;(window as unknown as { sylor: { preview: { openExternal: typeof spy } } }).sylor.preview.openExternal =
+    ;(window as unknown as { myto: { preview: { openExternal: typeof spy } } }).myto.preview.openExternal =
       spy
     const { show, openExternal } = usePreviewStore.getState()
     show(urlC)

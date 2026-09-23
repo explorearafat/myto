@@ -42,10 +42,12 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
     permissionMode: 'ask'
   },
   // No connectors until the user adds one (Settings › Connectors). Each is an MCP
-  // server whose tools Sylor can call once connected.
+  // server whose tools Myto can call once connected.
   mcpServers: [],
   // No skills until the user adds one (Settings › Skills).
   skills: [],
   // No plugins until the user installs one (Settings › Plugins).
-  plugins: []
+  plugins: [],
+  // Balanced default; the composer's effort control changes it.
+  reasoningEffort: 'medium'
 }

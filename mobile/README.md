@@ -1,12 +1,12 @@
-# Sylor Mobile
+# Myto Mobile
 
-A Claude-style mobile companion for Sylor, built with Flutter. It signs in with Google or
+A Claude-style mobile companion for Myto, built with Flutter. It signs in with Google or
 GitHub (the same Firebase project as the website), then streams real answers from the live
 **Oraculum** gateway — the exact backend the web `/chat` uses — with conversation history, a
-model picker, and Sylor's warm light/dark theming.
+model picker, and Myto's warm light/dark theming.
 
 > **What's in this folder:** the Dart sources (`lib/`), the `pubspec.yaml`, a smoke test, and a
-> committed `lib/firebase_options.dart` carrying Sylor's *public* Web config. The platform
+> committed `lib/firebase_options.dart` carrying Myto's *public* Web config. The platform
 > folders (`android/`, `ios/`, …) are **not** committed — you generate them once with
 > `flutter create .` (see below). This keeps the repo to just the code that's actually ours.
 
@@ -36,14 +36,14 @@ flutter create --org com.sylor --project-name sylor .
 
 > ⚠️ **Important:** `flutter create .` **overwrites** a handful of files it owns —
 > `lib/main.dart`, `pubspec.yaml`, `analysis_options.yaml`, `.gitignore`, `README.md`, and
-> `test/widget_test.dart`. Restore Sylor's versions immediately (this only reverts tracked
+> `test/widget_test.dart`. Restore Myto's versions immediately (this only reverts tracked
 > files; it leaves the freshly generated `android/`, `ios/`, `.metadata` in place):
 
 ```bash
 git checkout -- mobile/
 ```
 
-Run that from the repo root. All of Sylor's `lib/` sources, the pubspec, and the smoke test are
+Run that from the repo root. All of Myto's `lib/` sources, the pubspec, and the smoke test are
 now back, sitting on top of the new native folders.
 
 ### 2. Install packages
@@ -131,7 +131,7 @@ Flutter way — see <https://docs.flutter.dev/deployment>.
 lib/
   main.dart                  Boot: init Firebase (falls back to guest), load store, runApp.
   app.dart                   MultiProvider + MaterialApp; light/dark by system; sign-in gate.
-  theme.dart                 SylorColors + light/dark ThemeData + SylorPalette (warm paper).
+  theme.dart                 MytoColors + light/dark ThemeData + MytoPalette (warm paper).
   firebase_options.dart      Public Web config; throws on unconfigured platforms → guest mode.
   models/
     oraculum_model.dart      The two facade models (branding only; same real pool server-side).
@@ -141,14 +141,14 @@ lib/
     auth_service.dart        Firebase Google/GitHub + guest mode (degrades gracefully).
     conversation_store.dart  History + active chat, persisted via shared_preferences.
   widgets/
-    sylor_star.dart          The ✻ mark, drawn with a CustomPainter (same geometry as web/app).
-    message_bubble.dart      User bubble (right) / assistant Markdown beside the star (left).
+    myto_mark.dart           The mitochondria mark, drawn with a CustomPainter (same geometry as web/app).
+    message_bubble.dart      User bubble (right) / assistant Markdown beside the mark (left).
     chat_composer.dart       Multiline input; send button becomes a stop button while streaming.
     model_picker.dart        Bottom-sheet model chooser.
     conversation_drawer.dart History list + new chat + account/sign-out.
     typing_indicator.dart    Three pulsing dots before the first token.
   screens/
-    sign_in_screen.dart      Star + Google/GitHub + "Continue without signing in".
+    sign_in_screen.dart      Mark + Google/GitHub + "Continue without signing in".
     chat_screen.dart         The chat surface; drives the gateway and streams the reply in.
 ```
 

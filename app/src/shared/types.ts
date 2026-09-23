@@ -62,7 +62,7 @@ export type Theme = 'light' | 'dark'
 /**
  * A pane in the Settings surface. Settings has no visible top-level entry point
  * anymore (the gear was removed from the UI); instead the model selector's
- * quick-access rows deep-link straight into one of these tabs. Now that Sylor is
+ * quick-access rows deep-link straight into one of these tabs. Now that Myto is
  * a plain chatbot there are only two panes: the model/provider connection and
  * appearance.
  */
@@ -127,7 +127,7 @@ export interface CoworkSettings {
 
 /**
  * How a connector (MCP server) is reached:
- *  - `stdio` → a local process Sylor spawns (command + args), talking over stdin/stdout.
+ *  - `stdio` → a local process Myto spawns (command + args), talking over stdin/stdout.
  *              The classic MCP model: `npx @modelcontextprotocol/server-filesystem …`.
  *  - `http`  → a remote server speaking Streamable HTTP at a URL (the modern web transport).
  *  - `sse`   → a remote server speaking the older HTTP+SSE transport at a URL.
@@ -135,7 +135,7 @@ export interface CoworkSettings {
 export type McpTransport = 'stdio' | 'http' | 'sse'
 
 /**
- * One configured connector — an MCP server that exposes tools Sylor can call.
+ * One configured connector — an MCP server that exposes tools Myto can call.
  * Persisted in settings. A `stdio` server spawns `command`/`args` locally with the
  * given `env`; an `http`/`sse` server connects to `url` (optionally with `headers`,
  * e.g. an Authorization bearer). Disabled servers are kept but never connected.
@@ -147,7 +147,7 @@ export interface McpServerConfig {
   id: string
   /** Human label shown in the UI and used to namespace this server's tools. */
   name: string
-  /** Whether Sylor should connect to it. Off = kept in the list, not connected. */
+  /** Whether Myto should connect to it. Off = kept in the list, not connected. */
   enabled: boolean
   /** The plugin that installed this server, if any. Absent = the user added it directly. */
   source?: string
@@ -258,7 +258,7 @@ export type CoworkPermissionMode = 'ask' | 'autoApprove' | 'bypass'
 export type ToolSideEffect = 'write' | 'exec'
 
 /**
- * Something Sylor wants to show in its own preview pane (Cowork). Raised by the
+ * Something Myto wants to show in its own preview pane (Cowork). Raised by the
  * `preview` tool and carried on a {@link CompletionChunk} so it rides the same
  * stream as the reply; the renderer opens the side pane on it. A `file` target is
  * a working-folder artifact (an HTML page, a PDF, an image, a chart) already
@@ -312,6 +312,33 @@ export interface ApprovalRequest {
   detail: string
 }
 
+/**
+ * One question Myto asks the user mid-turn via the `ask_user` tool. The model writes
+ * these itself when it needs a decision it can't resolve on its own; the renderer shows
+ * a card and the answers flow back so the loop continues. `options` (when present) render
+ * as quick-pick buttons; the user can always type a free-text answer instead.
+ */
+export interface AskQuestion {
+  /** The question text. */
+  question: string
+  /** A short chip/label for the question group (optional, e.g. "Framework"). */
+  header?: string
+  /** Suggested answers rendered as buttons; free text is always allowed too. */
+  options?: string[]
+}
+
+/**
+ * A batch of questions surfaced mid-stream (the `ask_user` tool). Carried on a
+ * {@link CompletionChunk}; the renderer shows a card, the main-process loop blocks until
+ * the user answers via {@link ProvidersApi.answerQuestions}. Myto can ask several at once.
+ */
+export interface QuestionRequest {
+  /** Correlates the prompt with the answers sent back. */
+  questionId: string
+  /** The questions to ask (one or more). */
+  questions: AskQuestion[]
+}
+
 /** The full, persisted provider configuration. */
 export interface ProviderSettings {
   /** The provider used for completions. */
@@ -328,12 +355,18 @@ export interface ProviderSettings {
   tools: ToolSettings
   /** Cowork (agentic mode) preferences — chiefly the working folder. */
   cowork: CoworkSettings
-  /** Configured connectors (MCP servers) whose tools Sylor can call. */
+  /** Configured connectors (MCP servers) whose tools Myto can call. */
   mcpServers: McpServerConfig[]
   /** Skills — reusable instruction packs the model can pull in on demand. */
   skills: SkillConfig[]
   /** Installed plugins — bundles that expand into the skills/connectors above. */
   plugins: PluginConfig[]
+  /**
+   * How hard the model should think before answering — sent to the provider as
+   * `reasoning_effort` (a capable gateway maps it to the model's extended-thinking
+   * budget; others ignore it). Chosen from the composer's effort control.
+   */
+  reasoningEffort: ReasoningEffort
 }
 
 /** A model advertised by a provider's list endpoint. */
@@ -444,10 +477,17 @@ export interface CompletionChunk {
    */
   approval?: ApprovalRequest
   /**
-   * Something Sylor wants to show in its preview pane (Cowork), raised by the
+   * A batch of clarifying questions Myto asked (the `ask_user` tool). Present only on
+   * the chunk that raises them (empty `delta`); the renderer shows a card and replies via
+   * {@link ProvidersApi.answerQuestions}, while the main-process loop blocks awaiting the
+   * answers. Absent on ordinary chunks.
+   */
+  question?: QuestionRequest
+  /**
+   * Something Myto wants to show in its preview pane (Cowork), raised by the
    * `preview` tool. Present only on the chunk that opens it (empty `delta`); the
    * renderer opens/points the side pane at it. Unlike {@link approval} this never
-   * blocks the loop — Sylor keeps working while the pane updates. Absent otherwise.
+   * blocks the loop — Myto keeps working while the pane updates. Absent otherwise.
    */
   preview?: PreviewTarget
   /**
@@ -513,6 +553,12 @@ export interface ProvidersApi {
    * (runs or refuses the tool) as soon as the decision arrives.
    */
   decideApproval: (approvalId: string, decision: ApprovalDecision) => void
+  /**
+   * Answer a {@link QuestionRequest} Myto raised mid-stream (the `ask_user` tool).
+   * `answers` align with the request's `questions` by index. Fire-and-forget: the
+   * blocked loop resumes with the answers as soon as they arrive.
+   */
+  answerQuestions: (questionId: string, answers: string[]) => void
 }
 
 // ---------------------------------------------------------------------------
@@ -673,7 +719,7 @@ export interface CoworkApi {
 }
 
 /**
- * Sylor's preview pane (Cowork). The pane itself is renderer-only — an isolated
+ * Myto's preview pane (Cowork). The pane itself is renderer-only — an isolated
  * `<webview>` the {@link PreviewTarget} stream drives — so this surface is just the
  * one thing the renderer can't do in-process: hand a URL to the OS to open in the
  * user's real browser (the pane's "open externally" control).
@@ -700,8 +746,37 @@ export interface McpApi {
   onStatusChanged: (callback: (statuses: McpServerStatus[]) => void) => () => void
 }
 
-/** The full `window.sylor` API surface exposed by the preload script. */
-export interface SylorApi {
+/** Base64 audio handed to the main process for speech-to-text transcription. */
+export interface VoiceTranscribeInput {
+  /** The recorded clip's bytes, base64-encoded (no data: prefix). */
+  data: string
+  /** The clip's MIME type (e.g. 'audio/webm'), used to name the upload part. */
+  mime: string
+}
+
+/** Result of a Whisper transcription attempt against the configured gateway. */
+export interface VoiceTranscribeResult {
+  ok: boolean
+  /** The recognised text, on success. */
+  text?: string
+  /**
+   * On failure, a short reason. The sentinel 'no-gateway' means no OpenAI-compatible
+   * gateway is configured, so the renderer should fall back to the Web Speech API.
+   */
+  error?: string
+}
+
+/**
+ * Speech-to-text via the configured gateway's Whisper (`/audio/transcriptions`)
+ * endpoint. The renderer records a clip, sends it here, and — on any failure,
+ * including no gateway being configured — falls back to the browser's Web Speech API.
+ */
+export interface VoiceApi {
+  transcribe: (input: VoiceTranscribeInput) => Promise<VoiceTranscribeResult>
+}
+
+/** The full `window.myto` API surface exposed by the preload script. */
+export interface MytoApi {
   window: WindowApi
   /** Host platform string (e.g. 'win32', 'darwin', 'linux'). */
   platform: Platform
@@ -725,10 +800,12 @@ export interface SylorApi {
   files: FilesApi
   /** Cowork (agentic mode): the working-folder picker. */
   cowork: CoworkApi
-  /** Sylor's preview pane: open a preview target in the user's external browser. */
+  /** Myto's preview pane: open a preview target in the user's external browser. */
   preview: PreviewApi
   /** Connectors (MCP servers): live status, (re)connect, and probe. */
   mcp: McpApi
+  /** Voice: speech-to-text via the gateway's Whisper endpoint (Web Speech fallback in the renderer). */
+  voice: VoiceApi
 }
 
 // ---------------------------------------------------------------------------
@@ -746,7 +823,7 @@ export interface Project {
   instructions: string
   /**
    * Long-term memory for this project: a single growing note the engine injects
-   * into every chat filed here and that Sylor appends to via the `remember`
+   * into every chat filed here and that Myto appends to via the `remember`
    * tool. One project = one memory. Empty until something is remembered.
    */
   memory: string

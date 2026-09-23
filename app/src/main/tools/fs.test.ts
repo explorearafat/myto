@@ -15,7 +15,7 @@ import { DEFAULT_PROVIDER_SETTINGS } from '../../shared/defaults'
 import type { ToolContext } from './registry'
 
 // A real temp folder is the Cowork workspace for these tests; each test resets it.
-const ROOT = mkdtempSync(join(tmpdir(), 'sylor-fs-test-'))
+const ROOT = mkdtempSync(join(tmpdir(), 'myto-fs-test-'))
 
 afterAll(() => {
   try {

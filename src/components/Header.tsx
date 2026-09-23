@@ -1,4 +1,4 @@
-import { SylorStar } from './SylorStar';
+import { MytoMark } from './MytoMark';
 import { LINKS } from '../data';
 
 /* Plain anchors — no scroll-spy, no listeners, nothing recomputing on scroll. */
@@ -25,9 +25,9 @@ export function Header({ subpage = false }: HeaderProps) {
     <header className="sticky top-0 z-40 border-b border-[#e9e6dd]/70 bg-[#faf9f5]/80 backdrop-blur-md">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
         <a href={subpage ? '/' : '#top'} className="flex items-center gap-2.5 no-underline">
-          <SylorStar size={22} />
+          <MytoMark size={22} />
           <span className="font-display text-[21px] leading-none tracking-[-0.01em] text-[#141413]">
-            Sylor
+            Myto
           </span>
         </a>
 

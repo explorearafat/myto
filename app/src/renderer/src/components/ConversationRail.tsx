@@ -116,7 +116,7 @@ function NavRow({
 
 /**
  * The left conversation rail — a pixel-faithful shell of the Claude-desktop home:
- * the Sylor wordmark, a New action, a primary nav cluster (Projects, Artifacts,
+ * the Myto wordmark, a New action, a primary nav cluster (Projects, Artifacts,
  * Code, Customize), then the "Chats and tasks" section with date-bucketed recents
  * and inline rename/delete on hover, and a pinned account footer (avatar + name +
  * plan) beside a small icon cluster. Artifacts / Code are inert chrome; Projects
@@ -139,11 +139,14 @@ export function ConversationRail() {
   // by a New Chat. Badging them is what makes background work visible; without it
   // a still-running task read as paused the moment it left the screen.
   const liveSessionIds = useChatStore((s) => s.liveSessionIds)
+  // Cowork toggle, so the rail's "Cowork" row flips the composer into agentic mode.
+  const coworkMode = useChatStore((s) => s.coworkMode)
+  const setCoworkMode = useChatStore((s) => s.setCoworkMode)
 
   // The signed-in Google account, for the footer. Held by AuthGate; surfaced here
   // through a small subscription hook so the rail never imports Firebase directly.
   const authUser = useAuthUser()
-  const fullName = authUser?.displayName?.trim() || window.sylor.userName || 'You'
+  const fullName = authUser?.displayName?.trim() || window.myto.userName || 'You'
   const firstName = fullName.split(/\s+/)[0] || 'You'
   const email = authUser?.email ?? ''
   const photoURL = authUser?.photoURL ?? null
@@ -186,7 +189,7 @@ export function ConversationRail() {
     }
     let cancelled = false
     const handle = setTimeout(() => {
-      void window.sylor.sessions.search(q, activeProjectId).then((rows) => {
+      void window.myto.sessions.search(q, activeProjectId).then((rows) => {
         if (!cancelled) setSearchResults(rows)
       })
     }, 200)
@@ -313,7 +316,7 @@ export function ConversationRail() {
     <div className="flex h-full flex-col border-r border-border bg-bg">
       {/* Brand wordmark — the sidebar header. */}
       <div className="flex items-center px-3 pb-1 pt-2">
-        <span className="font-serif text-[19px] leading-none text-text">Sylor</span>
+        <span className="font-serif text-[19px] leading-none text-text">Myto</span>
       </div>
 
       {/* Fixed top cluster: New · Projects · Artifacts · Code · Customize. */}
@@ -321,7 +324,7 @@ export function ConversationRail() {
         <button
           type="button"
           onClick={startNewChat}
-          className="sylor-press group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-[7px] text-left text-[13px] text-text transition-colors hover:bg-surface-2"
+          className="myto-press group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-[7px] text-left text-[13px] text-text transition-colors hover:bg-surface-2"
         >
           <span className="grid shrink-0 place-items-center text-muted transition-colors group-hover:text-primary">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -449,16 +452,19 @@ export function ConversationRail() {
         <NavRow
           icon={
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M6 5L3 8l3 3M10 5l3 3-3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+              <path
+                d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3L8 4.5h4.5A1.5 1.5 0 0 1 14 6v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12V4.5Z"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinejoin="round"
+              />
+              <path d="M8 8.2v2.6M6.7 9.5h2.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
             </svg>
           }
-          label="Code"
-          inert
-          trailing={
-            <span className="shrink-0 rounded-md bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted">
-              Upgrade
-            </span>
-          }
+          label="Cowork"
+          active={coworkMode}
+          onClick={() => setCoworkMode(true)}
+          title="Cowork — work across a folder on your computer"
         />
         <NavRow
           icon={
@@ -556,7 +562,7 @@ export function ConversationRail() {
           type="button"
           title={email || fullName}
           onClick={() => openSettings()}
-          className="sylor-press flex min-w-0 flex-1 items-center gap-2 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-surface-2"
+          className="myto-press flex min-w-0 flex-1 items-center gap-2 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-surface-2"
         >
           {photoURL && !avatarError ? (
             <img

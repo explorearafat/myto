@@ -12,7 +12,7 @@ set -euo pipefail
 
 SRC="explorearafat/sylor"
 DST="explorearafat/sylor-dist"
-ASSETS=("Sylor-Setup.exe" "sylor.apk")
+ASSETS=("Myto-Setup.exe" "myto.apk")
 
 TAG="${1:-}"
 if [ -z "$TAG" ]; then
@@ -39,11 +39,11 @@ if [ ${#found[@]} -eq 0 ]; then
 fi
 
 if ! gh release view "$TAG" --repo "$DST" >/dev/null 2>&1; then
-  gh release create "$TAG" --repo "$DST" --title "Sylor $TAG" \
-    --notes "Public installers for Sylor $TAG. The app is closed-source; only the built .exe / .apk live here."
+  gh release create "$TAG" --repo "$DST" --title "Myto $TAG" \
+    --notes "Public installers for Myto $TAG. The app is closed-source; only the built .exe / .apk live here."
 fi
 gh release upload "$TAG" --repo "$DST" --clobber "${found[@]}"
 
 echo "Done. Public downloads:"
-echo "  https://github.com/$DST/releases/latest/download/Sylor-Setup.exe"
-echo "  https://github.com/$DST/releases/latest/download/sylor.apk"
+echo "  https://github.com/$DST/releases/latest/download/Myto-Setup.exe"
+echo "  https://github.com/$DST/releases/latest/download/myto.apk"

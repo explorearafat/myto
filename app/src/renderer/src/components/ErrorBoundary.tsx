@@ -35,7 +35,7 @@ export class ErrorBoundary extends Component<Props, State> {
   componentDidCatch(error: Error, info: ErrorInfo): void {
     // Keep the stack in the devtools console — the fallback shows only the
     // message, but a real diagnosis needs the component stack.
-    console.error('[sylor] renderer error:', error, info.componentStack)
+    console.error('[myto] renderer error:', error, info.componentStack)
   }
 
   private retry = (): void => {

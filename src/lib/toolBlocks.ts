@@ -1,5 +1,5 @@
 // Splits an assistant reply into prose runs and tool cards. The gateway writes tool use into the
-// reply as two adjacent fenced blocks — a `sylor:tool` call and a `sylor:tool_result <name>` result
+// reply as two adjacent fenced blocks — a `myto:tool` call and a `myto:tool_result <name>` result
 // (see src/server/tools.ts) — which this coalesces into one ToolSegment so the transcript can render
 // a card while everything else stays ordinary Markdown. Pure; no React here.
 
@@ -26,9 +26,9 @@ const FENCE = /^(`{3,})[ \t]*(.*)$/;
 
 function parseToolInfo(info: string): { kind: 'call' } | { kind: 'result'; name: string | null } | null {
   const trimmed = info.trim();
-  if (trimmed === 'sylor:tool') return { kind: 'call' };
-  if (trimmed === 'sylor:tool_result' || trimmed.startsWith('sylor:tool_result ')) {
-    const name = trimmed.slice('sylor:tool_result'.length).trim();
+  if (trimmed === 'myto:tool') return { kind: 'call' };
+  if (trimmed === 'myto:tool_result' || trimmed.startsWith('myto:tool_result ')) {
+    const name = trimmed.slice('myto:tool_result'.length).trim();
     return { kind: 'result', name: name || null };
   }
   return null;
@@ -110,5 +110,5 @@ export function parseToolBlocks(md: string): ToolBlockSegment[] {
 
 /** True when a reply contains any tool block (so callers can skip the segment path otherwise). */
 export function hasToolBlocks(md: string): boolean {
-  return md.includes('```sylor:tool');
+  return md.includes('```myto:tool');
 }

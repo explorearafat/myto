@@ -2,11 +2,11 @@ import { useEffect, useRef } from 'react';
 
 /*
  * A full-viewport background animation whose "playback" is scrubbed by scroll
- * position — scroll down and the warm blooms drift across the page; scroll up and
+ * position — scroll down and the blooms drift across the page; scroll up and
  * they travel back. It is drawn on a <canvas> (not a real <video>) so it needs no
- * asset, stays smooth (no per-frame video seeking), and uses Sylor's own warm
- * palette — the same terracotta / gold / peach identity as index.css's .hero-aura
- * and .paper-bloom, just alive. It paints the paper base itself and sits behind all
+ * asset, stays smooth (no per-frame video seeking), and uses Myto's own monochrome
+ * palette — the same layered-charcoal identity as index.css's .hero-aura and
+ * .paper-bloom, just alive. It paints the paper base itself and sits behind all
  * content (z-0, pointer-events-none), so text stays readable and clicks pass through.
  *
  * Landing page only (mounted in App.tsx) — /chat and its aesthetic are untouched.
@@ -24,7 +24,7 @@ interface Bloom {
   dy: number;
   /** Radius as a fraction of the larger viewport side. */
   r: number;
-  /** Warm RGB tint. */
+  /** Monochrome charcoal tint. */
   color: [number, number, number];
   /** Peak alpha at the bloom's core. */
   a: number;
@@ -33,10 +33,10 @@ interface Bloom {
 }
 
 const BLOOMS: Bloom[] = [
-  { bx: 0.16, by: 0.1, dx: 0.12, dy: 0.58, r: 0.62, color: [207, 85, 53], a: 0.16, o: 0.0 }, // terracotta
-  { bx: 0.84, by: 0.04, dx: -0.18, dy: 0.44, r: 0.56, color: [230, 162, 60], a: 0.12, o: 1.7 }, // gold
-  { bx: 0.6, by: 0.52, dx: -0.26, dy: -0.34, r: 0.5, color: [232, 131, 106], a: 0.15, o: 3.1 }, // peach
-  { bx: 0.34, by: 0.86, dx: 0.24, dy: -0.52, r: 0.46, color: [180, 72, 44], a: 0.1, o: 4.6 }, // deep terracotta
+  { bx: 0.16, by: 0.1, dx: 0.12, dy: 0.58, r: 0.62, color: [20, 20, 19], a: 0.06, o: 0.0 }, // ink
+  { bx: 0.84, by: 0.04, dx: -0.18, dy: 0.44, r: 0.56, color: [43, 42, 39], a: 0.05, o: 1.7 }, // charcoal
+  { bx: 0.6, by: 0.52, dx: -0.26, dy: -0.34, r: 0.5, color: [20, 20, 19], a: 0.055, o: 3.1 }, // ink
+  { bx: 0.34, by: 0.86, dx: 0.24, dy: -0.52, r: 0.46, color: [43, 42, 39], a: 0.04, o: 4.6 }, // deep charcoal
 ];
 
 function draw(

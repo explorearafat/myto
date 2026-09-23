@@ -58,7 +58,7 @@
 
 /* Keyboard focus only — no decorative outlines on mouse click. */
 :focus-visible {
-  outline: 2px solid #cf5535;
+  outline: 2px solid #141413;
   outline-offset: 2px;
 }
 
@@ -91,7 +91,7 @@
 }
 
 /*
- * Editorial section kicker — a short terracotta bar followed by an uppercase,
+ * Editorial section kicker — a short ink bar followed by an uppercase,
  * wide-tracked label. Used by the marketing pages only (never /chat). The bar
  * inherits the text colour so the on-dark variant recolours both at once.
  * Kept unlayered (like .skip-link / .font-display) so its colour is deliberate.
@@ -104,7 +104,7 @@
   font-weight: 700;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: #b8482c;
+  color: #2b2a27;
 }
 
 .eyebrow::before {
@@ -117,15 +117,15 @@
 }
 
 .eyebrow-on-dark {
-  color: #e8836a;
+  color: #d4d1c9;
 }
 
 /*
- * The hero's cinematic wash — a soft warm bloom (terracotta / gold / peach) that
- * fills the top of the hero and fades down into the paper. Layered radial
- * gradients, lightly blurred, masked at the bottom. Static: nothing repaints on
- * scroll. Marketing hero only; never /chat. The warm palette is deliberate —
- * Sylor's own identity, not the reference page's blue.
+ * The hero's cinematic wash — a soft monochrome bloom (layered charcoal at low
+ * alpha) that gives the top of the hero depth and fades down into the paper.
+ * Layered radial gradients, lightly blurred, masked at the bottom. Static:
+ * nothing repaints on scroll. Marketing hero only; never /chat. Monochrome is
+ * deliberate — Myto's own identity, not the reference page's blue.
  */
 .hero-aura {
   position: absolute;
@@ -135,10 +135,10 @@
   height: 720px;
   pointer-events: none;
   background:
-    radial-gradient(52% 80% at 50% -12%, rgba(207, 85, 53, 0.3), transparent 72%),
-    radial-gradient(44% 66% at 80% -10%, rgba(230, 162, 60, 0.26), transparent 70%),
-    radial-gradient(46% 68% at 18% -10%, rgba(232, 131, 106, 0.3), transparent 72%),
-    radial-gradient(36% 50% at 60% 6%, rgba(180, 72, 44, 0.16), transparent 74%);
+    radial-gradient(52% 80% at 50% -12%, rgba(20, 20, 19, 0.06), transparent 72%),
+    radial-gradient(44% 66% at 80% -10%, rgba(20, 20, 19, 0.05), transparent 70%),
+    radial-gradient(46% 68% at 18% -10%, rgba(20, 20, 19, 0.06), transparent 72%),
+    radial-gradient(36% 50% at 60% 6%, rgba(20, 20, 19, 0.04), transparent 74%);
   filter: blur(7px);
   -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 38%, transparent 92%);
   mask-image: linear-gradient(to bottom, #000 0%, #000 38%, transparent 92%);
@@ -213,7 +213,7 @@
 
 /*
  * Texture: graph-paper ruling on a 28px cell, masked so it fades out instead of
- * stopping at a hard edge, plus a warm bloom for the hero. Static gradients —
+ * stopping at a hard edge, plus a soft bloom for the hero. Static gradients —
  * nothing here repaints while you scroll.
  */
 .paper-grid {
@@ -239,8 +239,8 @@
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(52% 46% at 82% -6%, rgba(231, 100, 77, 0.13), transparent 68%),
-    radial-gradient(46% 40% at 6% 4%, rgba(207, 143, 53, 0.07), transparent 70%);
+    radial-gradient(52% 46% at 82% -6%, rgba(20, 20, 19, 0.05), transparent 68%),
+    radial-gradient(46% 40% at 6% 4%, rgba(20, 20, 19, 0.035), transparent 70%);
 }
 
 /* The one looping animation on the page: a text caret in the hero example. */
@@ -260,7 +260,7 @@
 }
 
 /*
- * The /chat demo. `.thinking-dot` marks the step Sylor is "on"; `.chat-in` eases each
+ * The /chat demo. `.thinking-dot` marks the step Myto is "on"; `.chat-in` eases each
  * freshly mounted line (a thinking step, the answer) in once. Both are one element's own
  * animation — no observer, no scroll coupling — and the reduced-motion block below
  * flattens them to instant via the global animation-duration override.
@@ -283,7 +283,7 @@
   height: 7px;
   flex-shrink: 0;
   border-radius: 9999px;
-  background: #cf5535;
+  background: #141413;
   animation: thinking-pulse 1s ease-in-out infinite;
 }
 

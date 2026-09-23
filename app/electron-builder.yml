@@ -1,6 +1,6 @@
 appId: com.sylor.app
-productName: Sylor
-copyright: Copyright © 2026 Sylor
+productName: Myto
+copyright: Copyright © 2026 Myto
 directories:
   output: release
   buildResources: resources
@@ -21,5 +21,5 @@ nsis:
   uninstallerIcon: resources/icon.ico
   installerHeaderIcon: resources/icon.ico
   # Version-less, space-less name so the public download link is permanent across
-  # releases: github.com/<repo>/releases/latest/download/Sylor-Setup.exe
+  # releases: github.com/<repo>/releases/latest/download/Myto-Setup.exe
   artifactName: ${productName}-Setup.exe

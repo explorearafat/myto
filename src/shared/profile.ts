@@ -1,4 +1,4 @@
-// The per-user profile Sylor keeps so its answers fit the person it's talking to. Stored in
+// The per-user profile Myto keeps so its answers fit the person it's talking to. Stored in
 // Firestore at users/{uid} (client-side, guarded by the rules in firestore.rules) and fed into the
 // chat as lightweight context. Nothing here is secret — it is the user's own descriptive data.
 //
@@ -10,13 +10,13 @@ export interface UserProfile {
   uid: string;
   /** Full name, seeded from the auth provider then editable in onboarding. */
   name: string;
-  /** What Sylor should call them (defaults to the first name). */
+  /** What Myto should call them (defaults to the first name). */
   nickname: string;
   /** Their role, e.g. "Frontend engineer", "Founder", "Student". */
   role: string;
   /** Company or team (optional; empty string when unknown). */
   company: string;
-  /** Anything else they want Sylor to keep in mind (optional). */
+  /** Anything else they want Myto to keep in mind (optional). */
   about: string;
   /** Sign-in email, for the account chip. */
   email: string;

@@ -1,12 +1,12 @@
 /**
  * Browser-preview shim (DEV / non-Electron only).
  *
- * The renderer normally talks to the main process through `window.sylor`, a
+ * The renderer normally talks to the main process through `window.myto`, a
  * bridge exposed by the Electron preload. When the page is opened in a plain
  * browser (e.g. the visual-preview tooling used to screenshot the UI), that
  * bridge does not exist and the app would crash on boot.
  *
- * This module installs an in-memory fake `window.sylor` **only** when the real
+ * This module installs an in-memory fake `window.myto` **only** when the real
  * bridge is absent, so it is a no-op inside the packaged Electron app. It starts
  * from a clean slate — no seed sessions or messages — so the browser preview
  * mirrors a fresh install: an empty chat and empty rail. It touches nothing in
@@ -19,12 +19,12 @@ import type {
   PersistedSession,
   Project,
   SessionSummary,
-  SylorApi
+  MytoApi
 } from '@shared/types'
 
 declare global {
   interface Window {
-    __sylorPreviewShim?: boolean
+    __mytoPreviewShim?: boolean
   }
 }
 
@@ -44,7 +44,7 @@ function installShim(): void {
     session: sessions.find((s) => s.id === id) ?? {
       id,
       title: 'New chat',
-      projectRoot: 'C:/Users/ARAFAT/OneDrive/Desktop/Sylor',
+      projectRoot: 'C:/Users/ARAFAT/OneDrive/Desktop/Myto',
       projectId: null,
       createdAt: now,
       updatedAt: now,
@@ -54,7 +54,7 @@ function installShim(): void {
     attachments: []
   })
 
-  const api: SylorApi = {
+  const api: MytoApi = {
     window: {
       minimize: () => {},
       toggleMaximize: () => {},
@@ -76,7 +76,8 @@ function installShim(): void {
         onChunk({ streamId: 'preview', delta: '', done: true })
         return Promise.resolve(() => {})
       },
-      decideApproval: () => {}
+      decideApproval: () => {},
+      answerQuestions: () => {}
     },
     sessions: {
       list: (projectId) =>
@@ -85,7 +86,7 @@ function installShim(): void {
         const s: SessionSummary = {
           id: `sess-${++counter}`,
           title: 'New chat',
-          projectRoot: 'C:/Users/ARAFAT/OneDrive/Desktop/Sylor',
+          projectRoot: 'C:/Users/ARAFAT/OneDrive/Desktop/Myto',
           projectId: projectId ?? null,
           createdAt: now,
           updatedAt: now,
@@ -207,16 +208,20 @@ function installShim(): void {
       sync: () => Promise.resolve([]),
       test: () => Promise.resolve({ ok: false, error: 'Connectors are unavailable in the browser preview.' }),
       onStatusChanged: () => () => {}
+    },
+    voice: {
+      // No gateway in the preview: force the Web Speech fallback.
+      transcribe: () => Promise.resolve({ ok: false, error: 'no-gateway' })
     }
   }
 
-  ;(window as unknown as { sylor: SylorApi }).sylor = api
-  window.__sylorPreviewShim = true
-  console.info('[sylor] browser-preview shim active (no Electron bridge detected)')
+  ;(window as unknown as { myto: MytoApi }).myto = api
+  window.__mytoPreviewShim = true
+  console.info('[myto] browser-preview shim active (no Electron bridge detected)')
 }
 
 // Guard: only install when the genuine Electron preload bridge is absent.
-if (typeof window !== 'undefined' && !('sylor' in window)) {
+if (typeof window !== 'undefined' && !('myto' in window)) {
   installShim()
 }
 

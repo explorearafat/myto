@@ -74,7 +74,7 @@ function makeTransport(server: McpServerConfig): Transport {
  * exposes N tools" before they commit the config.
  */
 async function testConnector(config: McpServerConfig): Promise<McpTestResult> {
-  const client = new Client({ name: 'sylor', version: '1.0.0' })
+  const client = new Client({ name: 'myto', version: '1.0.0' })
   try {
     const transport = makeTransport(config)
     await withTimeout(client.connect(transport), TEST_TIMEOUT_MS)
@@ -101,7 +101,7 @@ export async function syncConnectors(): Promise<void> {
   try {
     await mcpManager.sync(getSettings().mcpServers)
   } catch (err) {
-    console.error('[sylor] connector sync failed:', err)
+    console.error('[myto] connector sync failed:', err)
   } finally {
     broadcastStatus()
   }

@@ -78,7 +78,7 @@ export function FileCard({ file }: { file: FileSegment }): ReactNode {
   const download = (): void => {
     if (!file.complete) return
     setSaveState('saving')
-    void window.sylor.files
+    void window.myto.files
       .save(basename(file.path), file.code)
       .then((res) => {
         if (res.ok) setSaveState('saved')
@@ -116,7 +116,7 @@ export function FileCard({ file }: { file: FileSegment }): ReactNode {
               {type.badge}
             </span>
           ) : (
-            <span className="sylor-thinking shrink-0 text-[10px] font-medium">Writing…</span>
+            <span className="myto-thinking shrink-0 text-[10px] font-medium">Writing…</span>
           )}
         </button>
 

@@ -117,7 +117,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         withTimeout(getDoc(doc(db, 'users', u.uid)), 12000, 'Profile read').catch((e) => {
           // Offline, rules not deployed, or Firestore not created yet — treat as "no profile" so
           // onboarding shows its form instead of the splash hanging for minutes.
-          console.warn('[sylor] profile read failed — showing onboarding:', e);
+          console.warn('[myto] profile read failed — showing onboarding:', e);
           return null;
         }),
         withTimeout(
@@ -125,7 +125,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           12000,
           'Config read',
         ).catch((e) => {
-          console.warn('[sylor] BYOK config read failed:', e);
+          console.warn('[myto] BYOK config read failed:', e);
           return null;
         }),
       ]);

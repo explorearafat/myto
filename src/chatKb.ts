@@ -27,26 +27,26 @@ export interface ChatAnswer {
 }
 
 /** Generic thinking steps for the fallback and any entry that omits its own. */
-const DEFAULT_STEPS = ['Reading your question', 'Looking through what Sylor does', 'Organizing the answer'];
+const DEFAULT_STEPS = ['Reading your question', 'Looking through what Myto does', 'Organizing the answer'];
 
 export const CHAT_KB: ChatAnswer[] = [
   {
-    id: 'what-is-sylor',
+    id: 'what-is-myto',
     keywords: [
-      'what is sylor',
-      'what does sylor',
-      'what sylor',
-      'about sylor',
+      'what is myto',
+      'what does myto',
+      'what myto',
+      'about myto',
       'tell me about',
       'overview',
       'what can',
       'what is this',
-      'sylor',
+      'myto',
     ],
-    question: 'What is Sylor?',
-    steps: ['Reading your question', 'Summarizing what Sylor is', 'Organizing the answer'],
+    question: 'What is Myto?',
+    steps: ['Reading your question', 'Summarizing what Myto is', 'Organizing the answer'],
     heading: 'A local-first coding workspace',
-    lead: 'Sylor is a local-first AI coding workspace. It reads your project, uses the tools you approve, and turns working ideas into working software — on your own machine.',
+    lead: 'Myto is a local-first AI coding workspace. It reads your project, uses the tools you approve, and turns working ideas into working software — on your own machine.',
     bullets: [
       'Understands a codebase, plans the work, then makes precise edits',
       'Shows every change as a diff before anything is written to disk',
@@ -72,9 +72,9 @@ export const CHAT_KB: ChatAnswer[] = [
       'local first',
     ],
     question: 'Does my code leave my machine?',
-    steps: ['Reading your question', "Checking Sylor's privacy model", 'Organizing the answer'],
+    steps: ['Reading your question', "Checking Myto's privacy model", 'Organizing the answer'],
     heading: 'Your code stays on your machine',
-    lead: 'Sylor works from the project on your disk, so your code stays local. Model requests go wherever you point them.',
+    lead: 'Myto works from the project on your disk, so your code stays local. Model requests go wherever you point them.',
     bullets: [
       'A local Ollama at http://localhost:11434 never leaves your machine',
       'A hosted endpoint receives only the context that a given request needs',
@@ -134,7 +134,7 @@ export const CHAT_KB: ChatAnswer[] = [
       'Commands, network access, and destructive steps ask first',
       'Choose ask-every-time, auto-approve-edits, or fully autonomous',
     ],
-    related: ['workflow', 'privacy', 'what-is-sylor'],
+    related: ['workflow', 'privacy', 'what-is-myto'],
   },
   {
     id: 'cost',
@@ -171,7 +171,7 @@ export const CHAT_KB: ChatAnswer[] = [
     lead: 'Windows 10 and 11, 64-bit, today. macOS and Linux are planned.',
     bullets: [
       'The Windows installer is available now',
-      'macOS and Linux are packaging work, not a rewrite — Sylor runs on Electron',
+      'macOS and Linux are packaging work, not a rewrite — Myto runs on Electron',
       'A browser build opens on any phone if you want to look around',
     ],
     cta: { label: 'Open the download page', href: LINKS.downloadPage, external: false },
@@ -195,7 +195,7 @@ export const CHAT_KB: ChatAnswer[] = [
     lead: 'With a local model, yes. The workspace itself needs no connection.',
     bullets: [
       "Only your chosen provider needs the network, and only if it's remote",
-      'Point Sylor at a local Ollama and the whole loop runs offline',
+      'Point Myto at a local Ollama and the whole loop runs offline',
     ],
     related: ['models', 'privacy'],
   },
@@ -204,7 +204,7 @@ export const CHAT_KB: ChatAnswer[] = [
     keywords: [
       'how does it work',
       'how it works',
-      'how does sylor',
+      'how does myto',
       'workflow',
       'process',
       'steps',
@@ -216,7 +216,7 @@ export const CHAT_KB: ChatAnswer[] = [
       'thinking',
       'reason',
     ],
-    question: 'How does Sylor work through a task?',
+    question: 'How does Myto work through a task?',
     steps: ['Reading your question', 'Tracing the workflow', 'Planning the answer', 'Organizing it'],
     heading: 'Understand, plan, edit, verify',
     lead: 'It moves through a task the way a careful engineer would — understand, plan, edit, then verify.',
@@ -226,7 +226,7 @@ export const CHAT_KB: ChatAnswer[] = [
       'Edit — change several files, one reviewable diff at a time',
       'Verify — run your build and tests, read the errors, and fix until it passes',
     ],
-    related: ['approvals', 'parallel', 'what-is-sylor'],
+    related: ['approvals', 'parallel', 'what-is-myto'],
   },
   {
     id: 'mcp',
@@ -270,7 +270,7 @@ export const CHAT_KB: ChatAnswer[] = [
     question: 'What are skills and slash commands?',
     steps: ['Reading your question', 'Checking skills and commands', 'Organizing the answer'],
     heading: 'Skills and slash commands',
-    lead: 'A folder of Markdown files becomes a set of procedures Sylor can follow on request.',
+    lead: 'A folder of Markdown files becomes a set of procedures Myto can follow on request.',
     bullets: [
       'Skills are plain .md files — reusable steps you write once',
       'A / menu covers built-ins, your saved commands, and anything a plugin adds',
@@ -278,17 +278,17 @@ export const CHAT_KB: ChatAnswer[] = [
     related: ['mcp', 'workflow'],
   },
   {
-    id: 'sylorium',
-    keywords: ['browser', 'sylorium', 'web', 'internet', 'browse', 'website', 'page', 'dom', 'click', 'form'],
-    question: 'What is the Sylorium browser?',
-    steps: ['Reading your question', 'Checking the Sylorium browser', 'Organizing the answer'],
+    id: 'mytorium',
+    keywords: ['browser', 'mytorium', 'web', 'internet', 'browse', 'website', 'page', 'dom', 'click', 'form'],
+    question: 'What is the Mytorium browser?',
+    steps: ['Reading your question', 'Checking the Mytorium browser', 'Organizing the answer'],
     heading: 'A browser with an agent',
-    lead: 'Sylorium is a real browser inside Sylor, with an agent alongside it.',
+    lead: 'Mytorium is a real browser inside Myto, with an agent alongside it.',
     bullets: [
-      'Open a page, then ask about it — Sylor reads the structure and works through the steps',
+      'Open a page, then ask about it — Myto reads the structure and works through the steps',
       'Clicks and forms ask first; payments are blocked outright',
     ],
-    related: ['approvals', 'what-is-sylor'],
+    related: ['approvals', 'what-is-myto'],
   },
   {
     id: 'parallel',
@@ -339,7 +339,7 @@ export const CHAT_KB: ChatAnswer[] = [
     bullets: [
       'Fire hooks on tool events to format, lint, or block a command',
       'Schedule tasks to run on their own',
-      'Drive the same engine from a terminal with sylor -p, and --json for scripts',
+      'Drive the same engine from a terminal with myto -p, and --json for scripts',
     ],
     related: ['parallel', 'workflow'],
   },
@@ -348,7 +348,7 @@ export const CHAT_KB: ChatAnswer[] = [
     keywords: [
       'download',
       'get it',
-      'get sylor',
+      'get myto',
       'install',
       'installer',
       'try',
@@ -358,7 +358,7 @@ export const CHAT_KB: ChatAnswer[] = [
       'obtain',
       'start',
     ],
-    question: 'How do I get Sylor?',
+    question: 'How do I get Myto?',
     steps: ['Reading your question', 'Checking how to install', 'Organizing the answer'],
     heading: 'Getting started',
     lead: 'The Windows installer is ready today — download it, open a project folder, and describe your first task.',
@@ -372,18 +372,18 @@ export const CHAT_KB: ChatAnswer[] = [
   },
 ];
 
-/** Shown when nothing matches — honest that this is a Sylor-only demo. */
+/** Shown when nothing matches — honest that this is a Myto-only demo. */
 export const CHAT_FALLBACK: ChatAnswer = {
   id: 'fallback',
   keywords: [],
   question: '',
   steps: ['Reading your question', 'Looking for a match', 'Organizing what I can help with'],
-  lead: "I'm a demo of Sylor's chat, so I answer questions about Sylor itself. Here are a few things I can walk you through:",
-  related: ['what-is-sylor', 'workflow', 'privacy', 'models', 'get-it'],
+  lead: "I'm a demo of Myto's chat, so I answer questions about Myto itself. Here are a few things I can walk you through:",
+  related: ['what-is-myto', 'workflow', 'privacy', 'models', 'get-it'],
 };
 
 /** Ids for the empty-state prompt chips. */
-export const SUGGESTED: string[] = ['what-is-sylor', 'workflow', 'privacy', 'models', 'approvals', 'get-it'];
+export const SUGGESTED: string[] = ['what-is-myto', 'workflow', 'privacy', 'models', 'approvals', 'get-it'];
 
 const BY_ID = new Map<string, ChatAnswer>(
   [...CHAT_KB, CHAT_FALLBACK].map((a) => [a.id, a]),

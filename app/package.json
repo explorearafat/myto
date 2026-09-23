@@ -1,8 +1,8 @@
 {
-  "name": "sylor",
+  "name": "myto",
   "version": "0.4.0",
-  "description": "Sylor — a premium desktop AI coding workspace",
-  "author": "Sylor",
+  "description": "Myto — a premium desktop AI coding workspace",
+  "author": "Myto",
   "license": "MIT",
   "main": "./out/main/index.js",
   "exports": {

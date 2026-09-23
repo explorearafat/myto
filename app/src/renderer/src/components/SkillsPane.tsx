@@ -180,14 +180,14 @@ export function SkillsPane() {
     <div className="space-y-5">
       {!toolsEnabled && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3.5 py-3 text-[12px] leading-relaxed text-amber-500">
-          Tool use is turned off, so skills won't be offered to Sylor. Turn it on in Settings →
+          Tool use is turned off, so skills won't be offered to Myto. Turn it on in Settings →
           Tools to use your skills.
         </div>
       )}
 
       <p className="text-[12px] leading-relaxed text-muted">
         Skills are reusable instruction packs. Give one a clear description of when it applies and
-        a detailed playbook; Sylor pulls in the full instructions on its own when a task matches —
+        a detailed playbook; Myto pulls in the full instructions on its own when a task matches —
         so your conventions and know-how travel with it, without cluttering every chat.
       </p>
 

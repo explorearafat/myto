@@ -26,13 +26,13 @@ import { createSession, listSessions, loadSession } from '@main/db/sessions'
  * `:memory:`) so migrations and cascades behave like production. The clock is
  * injected everywhere, so tests drive ordering deterministically.
  */
-const ROOT = '/proj/sylor'
+const ROOT = '/proj/myto'
 let dir: string
 let n = 5000
 const tick = (): number => (n += 1000)
 
 beforeAll(() => {
-  dir = mkdtempSync(join(tmpdir(), 'sylor-proj-'))
+  dir = mkdtempSync(join(tmpdir(), 'myto-proj-'))
 })
 
 afterAll(() => {

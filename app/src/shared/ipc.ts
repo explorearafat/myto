@@ -92,12 +92,14 @@ export const IpcChannel = {
   // Cowork permission prompts: the renderer's answer to a mid-stream approval request.
   /** Renderer → main (send): answer an ApprovalRequest by id (allow / allow_always / deny). */
   ProvidersApprovalDecision: 'providers:approval-decision',
+  /** Renderer → main (send): answer a QuestionRequest (the ask_user tool) by id. */
+  ProvidersQuestionAnswer: 'providers:question-answer',
 
-  // Sylor's preview pane: open a preview target in the user's external browser.
+  // Myto's preview pane: open a preview target in the user's external browser.
   /** Renderer → main (send): open a preview URL (file:// or http(s)) in the default browser. */
   PreviewOpenExternal: 'preview:open-external',
 
-  // Connectors (MCP servers): manage and probe the servers whose tools Sylor can call.
+  // Connectors (MCP servers): manage and probe the servers whose tools Myto can call.
   /** Renderer → main (invoke): current live status of every configured connector. */
   McpStatus: 'mcp:status',
   /** Renderer → main (invoke): (re)connect to all enabled connectors, then return statuses. */
@@ -105,7 +107,11 @@ export const IpcChannel = {
   /** Renderer → main (invoke): probe one connector config without saving it; resolves ok/error + tool count. */
   McpTest: 'mcp:test',
   /** Main → renderer: connector statuses changed (a connect/disconnect settled). */
-  McpStatusChanged: 'mcp:status-changed'
+  McpStatusChanged: 'mcp:status-changed',
+
+  // Voice: speech-to-text.
+  /** Renderer → main (invoke): transcribe a recorded audio clip via the gateway's Whisper endpoint. */
+  VoiceTranscribe: 'voice:transcribe'
 } as const
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel]

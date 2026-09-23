@@ -132,7 +132,7 @@ export function setProjectMemory(id: string, memory: string, now: number): void 
  * Append a note to a project's long-term memory as a new bullet line, returning
  * the resulting memory text. No-op returning the current memory when `note` is
  * blank or the project is unknown. Kept append-only (never rewrites prior
- * memory) so what Sylor has learned accumulates rather than being overwritten.
+ * memory) so what Myto has learned accumulates rather than being overwritten.
  */
 export function appendProjectMemory(id: string, note: string, now: number): string {
   const trimmed = note.trim()

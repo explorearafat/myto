@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * profile-run.mjs — a where-does-the-time-go model for a long Sylor build run.
+ * profile-run.mjs — a where-does-the-time-go model for a long Myto build run.
  *
  * A live 5–7 hour run against a real provider cannot be executed here, so this
  * models the run instead. Everything structural is taken VERBATIM from the code:
@@ -157,7 +157,7 @@ function simulate(sc, { logSteps = 0 } = {}) {
 
 // ─── Report ────────────────────────────────────────────────────────────────────
 console.log('\n════════════════════════════════════════════════════════════════════')
-console.log(' Sylor long-run time model  —  where the wall-clock goes')
+console.log(' Myto long-run time model  —  where the wall-clock goes')
 console.log('════════════════════════════════════════════════════════════════════')
 console.log(` Structural inputs (from source): TOTAL_STEPS=${TOTAL_STEPS}, fold@${MAX_CONTEXT_CHARS / 1000}k, keep ${RECENT_KEEP_CHARS / 1000}k,`)
 console.log(`   pacing gap ${MIN_REQUEST_GAP_MS}ms/call, 429 backoff ${RETRY_DELAY_MS / 1000}s ×≤${MAX_RETRY_ATTEMPTS}, MAX_REWORK=${MAX_REWORK}`)

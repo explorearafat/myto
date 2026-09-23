@@ -12,6 +12,7 @@ import {
   decodeEntities,
   htmlToText,
   parseDuckDuckGo,
+  parseDuckDuckGoLite,
   formatSearchResults,
   formatWiki,
   webFetchTool,
@@ -134,17 +135,69 @@ describe('webFetchTool', () => {
   })
 })
 
+describe('parseDuckDuckGoLite', () => {
+  const html = `
+    <table>
+      <tr><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Flite.dev%2Fa" class='result-link'>Lite <b>One</b></a></td></tr>
+      <tr><td class="result-snippet">Lite snippet one.</td></tr>
+      <tr><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Flite.dev%2Fb" class='result-link'>Lite Two</a></td></tr>
+      <tr><td class="result-snippet">Lite snippet two.</td></tr>
+    </table>`
+  it('extracts href-before-class links, decoded urls, and snippets', () => {
+    const r = parseDuckDuckGoLite(html)
+    expect(r).toHaveLength(2)
+    expect(r[0]).toEqual({ title: 'Lite One', url: 'https://lite.dev/a', snippet: 'Lite snippet one.' })
+    expect(r[1].url).toBe('https://lite.dev/b')
+  })
+  it('respects the limit', () => {
+    expect(parseDuckDuckGoLite(html, 1)).toHaveLength(1)
+  })
+})
+
 describe('webSearchTool', () => {
   it('needs a query', async () => {
     expect(await webSearchTool.run({}, ctx)).toMatch(/needs a JSON input/)
+    expect(httpFetch).not.toHaveBeenCalled()
   })
-  it('formats parsed results', async () => {
+  it('formats results from the first (POST) attempt', async () => {
     httpFetch.mockResolvedValue(
       fakeResponse('<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fx.dev">X</a>')
     )
     const out = await webSearchTool.run({ query: 'x' }, ctx)
     expect(out).toContain('1. X')
     expect(out).toContain('https://x.dev')
+    // The first attempt already yielded results, so no fallback fetch was needed.
+    expect(httpFetch).toHaveBeenCalledTimes(1)
+  })
+  it('falls back to the Lite endpoint when the html endpoint is empty', async () => {
+    httpFetch
+      .mockResolvedValueOnce(fakeResponse('<html>no results</html>')) // POST html
+      .mockResolvedValueOnce(fakeResponse('<html>no results</html>')) // GET html
+      .mockResolvedValueOnce(
+        fakeResponse(
+          '<a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Flite.dev" class=\'result-link\'>Lite Hit</a>'
+        )
+      ) // GET lite
+    const out = await webSearchTool.run({ query: 'x' }, ctx)
+    expect(out).toContain('1. Lite Hit')
+    expect(out).toContain('https://lite.dev')
+    expect(httpFetch).toHaveBeenCalledTimes(3)
+  })
+  it('skips a throwing attempt and still succeeds on a later one', async () => {
+    httpFetch
+      .mockRejectedValueOnce(new Error('network blip')) // POST html throws
+      .mockResolvedValueOnce(
+        fakeResponse('<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fy.dev">Y</a>')
+      ) // GET html succeeds
+    const out = await webSearchTool.run({ query: 'x' }, ctx)
+    expect(out).toContain('1. Y')
+  })
+  it('suggests a next move when every endpoint returns nothing', async () => {
+    httpFetch.mockResolvedValue(fakeResponse('<html>nothing here</html>'))
+    const out = await webSearchTool.run({ query: 'zzz' }, ctx)
+    expect(out).toMatch(/No web results/)
+    expect(out).toMatch(/wiki_search/)
+    expect(httpFetch).toHaveBeenCalledTimes(3)
   })
 })
 

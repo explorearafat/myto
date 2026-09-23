@@ -1,5 +1,5 @@
 name: sylor
-description: "Sylor — a local-first AI coding workspace. The mobile chat companion."
+description: "Myto — a local-first AI coding workspace. The mobile chat companion."
 publish_to: "none"
 version: 0.4.0+8
 
@@ -44,13 +44,14 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 
-# App launcher icon — the universal Sylor star (#cf5535) on warm paper. Regenerate the source
-# PNGs with `python scripts/build-launcher-icon.py`; CI then runs `dart run flutter_launcher_icons`
-# after `flutter create` to stamp them over the default Flutter icon.
+# App launcher icon — the monochrome Myto mitochondria mark (near-white #F0F0EC) on charcoal
+# #181818. Regenerate the source PNGs with `python scripts/build-launcher-icon.py`; CI then runs
+# `dart run flutter_launcher_icons` after `flutter create` to stamp them over the default Flutter
+# icon.
 flutter_launcher_icons:
   android: true
   ios: false
-  image_path: "assets/icon/sylor_icon.png"
-  adaptive_icon_background: "#FAF9F5"
-  adaptive_icon_foreground: "assets/icon/sylor_icon_foreground.png"
+  image_path: "assets/icon/myto_icon.png"
+  adaptive_icon_background: "#181818"
+  adaptive_icon_foreground: "assets/icon/myto_icon_foreground.png"
   min_sdk_android: 23

@@ -84,7 +84,7 @@ class _ChatComposerState extends State<ChatComposer> {
                   decoration: InputDecoration(
                     isCollapsed: true,
                     border: InputBorder.none,
-                    hintText: 'Message Sylor…',
+                    hintText: 'Message Myto…',
                     hintStyle: TextStyle(color: palette.muted),
                     contentPadding: const EdgeInsets.symmetric(vertical: 10),
                   ),
@@ -104,13 +104,13 @@ class _ChatComposerState extends State<ChatComposer> {
     );
   }
 
-  Widget _button(SylorPalette palette, bool canSend) {
+  Widget _button(MytoPalette palette, bool canSend) {
     if (widget.streaming) {
       return _circle(
         const ValueKey('stop'),
         palette.accent,
         Icons.stop_rounded,
-        Colors.white,
+        palette.onAccent,
         widget.onStop,
         'Stop',
       );
@@ -119,7 +119,7 @@ class _ChatComposerState extends State<ChatComposer> {
       ValueKey(canSend ? 'send' : 'idle'),
       canSend ? palette.accent : palette.surface2,
       Icons.arrow_upward_rounded,
-      canSend ? Colors.white : palette.muted,
+      canSend ? palette.onAccent : palette.muted,
       canSend ? _submit : null,
       'Send',
     );

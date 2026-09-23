@@ -4,7 +4,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 
 import '../models/chat.dart';
 import '../theme.dart';
-import 'sylor_star.dart';
+import 'myto_mark.dart';
 import 'tool_card.dart';
 import 'typing_indicator.dart';
 
@@ -86,7 +86,7 @@ class MessageBubble extends StatelessWidget {
 
   /// The assistant body: plain Markdown, or — when the reply carries tool blocks — an interleaved
   /// column of Markdown prose and tool cards (the gateway writes the tool round-trips inline).
-  Widget _content(BuildContext context, SylorPalette palette) {
+  Widget _content(BuildContext context, MytoPalette palette) {
     final text = message.content;
     if (text.trim().isEmpty) {
       return MarkdownBody(data: '…', selectable: true, styleSheet: _markdownStyle(palette));
@@ -113,7 +113,7 @@ class MessageBubble extends StatelessWidget {
     );
   }
 
-  MarkdownStyleSheet _markdownStyle(SylorPalette palette) {
+  MarkdownStyleSheet _markdownStyle(MytoPalette palette) {
     final base = TextStyle(color: palette.text, fontSize: 15, height: 1.5);
     return MarkdownStyleSheet(
       p: base,
@@ -188,7 +188,7 @@ class _CopyButton extends StatelessWidget {
   const _CopyButton({required this.text, required this.palette});
 
   final String text;
-  final SylorPalette palette;
+  final MytoPalette palette;
 
   @override
   Widget build(BuildContext context) {
