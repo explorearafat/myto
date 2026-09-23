@@ -45,9 +45,9 @@ The chat (/chat) is a separate document styled like a full chat app — a left s
 
 - Download page: /download
 - Chat: /chat
-- Download (Windows, direct): https://github.com/explorearafat/sylor-dist/releases/latest/download/Myto-Setup.exe
-- Download (Android, direct): https://github.com/explorearafat/sylor-dist/releases/latest/download/myto.apk
-- All releases: https://github.com/explorearafat/sylor-dist/releases/latest
+- Download (Windows, direct): https://github.com/explorearafat/myto-dist/releases/latest/download/Myto-Setup.exe
+- Download (Android, direct): https://github.com/explorearafat/myto-dist/releases/latest/download/myto.apk
+- All releases: https://github.com/explorearafat/myto-dist/releases/latest
 - Try in browser: https://mytocode.vercel.app
 
 ## Reading guidance

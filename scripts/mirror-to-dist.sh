@@ -10,8 +10,8 @@
 # clobber. Only installer artifacts are copied — never source.
 set -euo pipefail
 
-SRC="explorearafat/sylor"
-DST="explorearafat/sylor-dist"
+SRC="explorearafat/myto"
+DST="explorearafat/myto-dist"
 ASSETS=("Myto-Setup.exe" "myto.apk")
 
 TAG="${1:-}"

@@ -5,17 +5,17 @@
 export const LINKS = {
   // Myto is closed-source. The source repo is private, and private-repo release
   // assets are not anonymously downloadable — so every public download points at
-  // the `sylor-dist` mirror, which holds only the built installers, never source.
+  // the `myto-dist` mirror, which holds only the built installers, never source.
   /** Direct Windows installer (public downloads mirror). */
-  download: 'https://github.com/explorearafat/sylor-dist/releases/latest/download/Myto-Setup.exe',
+  download: 'https://github.com/explorearafat/myto-dist/releases/latest/download/Myto-Setup.exe',
   /** Native Android APK (public downloads mirror). */
-  androidApk: 'https://github.com/explorearafat/sylor-dist/releases/latest/download/myto.apk',
+  androidApk: 'https://github.com/explorearafat/myto-dist/releases/latest/download/myto.apk',
   /** The platform chooser — where the header/footer Download links point. */
   downloadPage: '/download',
   /** The Myto chat — a full chat interface, client-side, that answers questions about Myto. */
   chatPage: '/chat',
   /** All published installers (downloads mirror — no source). */
-  releases: 'https://github.com/explorearafat/sylor-dist/releases/latest',
+  releases: 'https://github.com/explorearafat/myto-dist/releases/latest',
   /** Live web build — try it with zero install. */
   web: 'https://mytocode.vercel.app',
 };
@@ -25,8 +25,8 @@ export const LINKS = {
  * new tag ships, or the download page will quietly understate the version.
  */
 export const RELEASE = {
-  version: 'v0.2.3',
-  date: '20 September 2026',
+  version: 'v0.5.0',
+  date: '23 September 2026',
   size: '131 MB',
 };
 
