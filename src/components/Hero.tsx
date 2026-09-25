@@ -21,32 +21,28 @@ export function Hero() {
             Myto reads your project, edits with your approval, and runs your build — with the
             model you choose, running locally or on your own endpoint.
           </p>
+        </div>
 
-          <div
-            data-reveal
-            style={{ transitionDelay: '170ms' }}
-            className="mt-10 flex flex-col items-start gap-5"
+        {/* Logo mark + single download call-to-action, centered on the page below the intro. */}
+        <div
+          data-reveal
+          style={{ transitionDelay: '170ms' }}
+          className="mt-14 flex flex-col items-center gap-5"
+        >
+          {/* Logo only — no wordmark. */}
+          <MytoMark size={64} />
+          {/* Borderless — just text and a glyph, quiet hover. The header keeps the solid pill. */}
+          <a
+            href={LINKS.downloadPage}
+            className="group inline-flex items-center gap-2.5 text-[17px] font-medium text-[#141413] no-underline transition-opacity duration-150 hover:opacity-70"
           >
-            {/* A medium-big brand lockup sits above the single download call-to-action. */}
-            <div className="flex items-center gap-3">
-              <MytoMark size={56} />
-              <span className="font-display font-normal text-[44px] leading-none tracking-[-0.02em] text-[#141413]">
-                Myto
-              </span>
-            </div>
-            {/* Borderless — just text and a glyph, quiet hover. The header keeps the solid pill. */}
-            <a
-              href={LINKS.downloadPage}
-              className="group inline-flex items-center gap-2.5 text-[17px] font-medium text-[#141413] no-underline transition-opacity duration-150 hover:opacity-70"
-            >
-              <Download
-                className="h-[19px] w-[19px] transition-transform duration-150 group-hover:translate-y-0.5"
-                strokeWidth={1.9}
-                aria-hidden="true"
-              />
-              Download
-            </a>
-          </div>
+            <Download
+              className="h-[19px] w-[19px] transition-transform duration-150 group-hover:translate-y-0.5"
+              strokeWidth={1.9}
+              aria-hidden="true"
+            />
+            Download
+          </a>
         </div>
       </div>
     </section>
