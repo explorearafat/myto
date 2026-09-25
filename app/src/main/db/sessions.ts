@@ -1,5 +1,6 @@
 import type {
   Attachment,
+  ChatMode,
   PersistedMessage,
   PersistedSession,
   SessionSummary
@@ -54,16 +55,17 @@ export function createSession(
   projectRoot: string,
   title: string,
   now: number,
-  projectId: string | null = null
+  projectId: string | null = null,
+  mode: ChatMode = 'chat'
 ): SessionSummary {
   const id = nextSessionId(now)
   getDb()
     .prepare(
-      `INSERT INTO sessions (id, title, project_root, project_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO sessions (id, title, project_root, project_id, created_at, updated_at, mode)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(id, title, projectRoot, projectId, now, now)
-  return { id, title, projectRoot, projectId, createdAt: now, updatedAt: now, messageCount: 0 }
+    .run(id, title, projectRoot, projectId, now, now, mode)
+  return { id, title, projectRoot, projectId, createdAt: now, updatedAt: now, messageCount: 0, mode }
 }
 
 /**
@@ -78,7 +80,7 @@ export function listSessions(projectId?: string | null): SessionSummary[] {
   // Only a concrete project id filters; null/undefined list every chat globally.
   const byProject = typeof projectId === 'string'
   const stmt = getDb().prepare(
-    `SELECT s.id, s.title, s.project_root, s.project_id, s.created_at, s.updated_at,
+    `SELECT s.id, s.title, s.project_root, s.project_id, s.created_at, s.updated_at, s.mode,
             (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count
      FROM sessions s
      ${byProject ? 'WHERE s.project_id = ?' : ''}
@@ -91,6 +93,7 @@ export function listSessions(projectId?: string | null): SessionSummary[] {
     project_id: string | null
     created_at: number
     updated_at: number
+    mode: ChatMode
     message_count: number
   }>
   return rows.map((r) => ({
@@ -100,7 +103,8 @@ export function listSessions(projectId?: string | null): SessionSummary[] {
     projectId: r.project_id,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
-    messageCount: r.message_count
+    messageCount: r.message_count,
+    mode: r.mode
   }))
 }
 
@@ -120,7 +124,7 @@ export function searchSessions(query: string, projectId?: string | null): Sessio
   // Only a concrete project id filters; null/undefined search all chats globally.
   const byProject = typeof projectId === 'string'
   const stmt = getDb().prepare(
-    `SELECT s.id, s.title, s.project_root, s.project_id, s.created_at, s.updated_at,
+    `SELECT s.id, s.title, s.project_root, s.project_id, s.created_at, s.updated_at, s.mode,
             (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count
      FROM sessions s
      WHERE ${byProject ? 's.project_id = ? AND ' : ''}(
@@ -141,6 +145,7 @@ export function searchSessions(query: string, projectId?: string | null): Sessio
     project_id: string | null
     created_at: number
     updated_at: number
+    mode: ChatMode
     message_count: number
   }>
   return rows.map((r) => ({
@@ -150,7 +155,8 @@ export function searchSessions(query: string, projectId?: string | null): Sessio
     projectId: r.project_id,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
-    messageCount: r.message_count
+    messageCount: r.message_count,
+    mode: r.mode
   }))
 }
 
@@ -232,7 +238,7 @@ export function touch(id: string, now: number): void {
 export function loadSession(id: string): PersistedSession | null {
   const s = getDb()
     .prepare(
-      `SELECT id, title, project_root, project_id, created_at, updated_at FROM sessions WHERE id = ?`
+      `SELECT id, title, project_root, project_id, created_at, updated_at, mode FROM sessions WHERE id = ?`
     )
     .get(id) as
     | {
@@ -242,6 +248,7 @@ export function loadSession(id: string): PersistedSession | null {
         project_id: string | null
         created_at: number
         updated_at: number
+        mode: ChatMode
       }
     | undefined
   if (!s) return null
@@ -302,7 +309,8 @@ export function loadSession(id: string): PersistedSession | null {
     projectId: s.project_id,
     createdAt: s.created_at,
     updatedAt: s.updated_at,
-    messageCount: messages.length
+    messageCount: messages.length,
+    mode: s.mode
   }
   return { session, messages, attachments }
 }
@@ -364,4 +372,33 @@ export function resetMessageForRegenerate(messageId: string): void {
       `UPDATE messages SET content = '', error = NULL, feedback = NULL, flagged = 0 WHERE id = ?`
     )
     .run(messageId)
+}
+
+/**
+ * The 0-based per-session `seq` of a message, or null if the id isn't in this
+ * session. Used by the rewind (#1) machinery to turn a message id into the cut
+ * point (`truncateSessionAfter`) and to bucket file snapshots by turn.
+ */
+export function getMessageSeq(sessionId: string, messageId: string): number | null {
+  const row = getDb()
+    .prepare(`SELECT seq FROM messages WHERE session_id = ? AND id = ?`)
+    .get(sessionId, messageId) as { seq: number } | undefined
+  return row?.seq ?? null
+}
+
+/**
+ * Discard every chat turn after `seq` in a session (keeps the anchor message at
+ * `seq` itself — the cut is `seq > ?`). Also clears any `tool_ops` past the cut so
+ * the row set stays consistent. Returns the number of messages removed. Bumps
+ * updatedAt. Part of the rewind (#1) flow; the file replay is done separately in
+ * `rewind.ts` before this truncation.
+ */
+export function truncateSessionAfter(sessionId: string, seq: number, now: number): number {
+  const db = getDb()
+  const info = db
+    .prepare(`DELETE FROM messages WHERE session_id = ? AND seq > ?`)
+    .run(sessionId, seq)
+  db.prepare(`DELETE FROM tool_ops WHERE session_id = ? AND seq > ?`).run(sessionId, seq)
+  touch(sessionId, now)
+  return Number(info.changes ?? 0)
 }

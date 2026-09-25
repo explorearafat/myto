@@ -46,6 +46,7 @@ class ChatClient {
     required String apiKey,
     required String authSchema,
     required String authHeaderName,
+    String? reasoningEffort,
   }) async* {
     _aborted = false;
     final client = http.Client();
@@ -63,6 +64,9 @@ class ChatClient {
         'apiKey': apiKey,
         'authSchema': authSchema,
         'authHeaderName': authHeaderName,
+        // Opt-in reasoning effort — only sent when the composer selected a level. Absent means
+        // the gateway forwards nothing (unchanged body), so non-reasoning models never see it.
+        if (reasoningEffort != null) 'reasoningEffort': reasoningEffort,
       });
 
       final http.StreamedResponse response;

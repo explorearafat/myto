@@ -2,8 +2,10 @@ import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panel
 import { ConversationRail } from '@renderer/components/ConversationRail'
 import { ChatPanel } from '@renderer/components/ChatPanel'
 import { PreviewPane } from '@renderer/components/PreviewPane'
+import { TerminalPane } from '@renderer/components/TerminalPane'
 import { useAppStore } from '@renderer/store/useAppStore'
 import { usePreviewStore } from '@renderer/store/usePreviewStore'
+import { useTerminalStore } from '@renderer/store/useTerminalStore'
 
 /**
  * A thin, hoverable resize separator. Hover/drag styling is driven by the
@@ -25,8 +27,13 @@ function Handle() {
 export function AppLayout() {
   const root = useDefaultLayout({ id: 'myto.root' })
   const railOpen = useAppStore((s) => s.railOpen)
-  // Myto's preview pane opens on the right when the `preview` tool shows something.
+  // The right-hand side pane. Myto's preview (its little browser) and the Terminal
+  // (its command transcript) share one slot and are mutually exclusive — the chat
+  // stream closes one when it opens the other. Terminal wins any tie so a command
+  // that lands at the same moment as a preview is never hidden behind it.
   const previewOpen = usePreviewStore((s) => s.open)
+  const terminalOpen = useTerminalStore((s) => s.open)
+  const sidePane = terminalOpen ? 'terminal' : previewOpen ? 'preview' : null
 
   return (
     <Group
@@ -49,11 +56,11 @@ export function AppLayout() {
         <ChatPanel />
       </Panel>
 
-      {previewOpen && (
+      {sidePane && (
         <>
           <Handle />
-          <Panel id="preview" defaultSize="40" minSize="24" maxSize="60">
-            <PreviewPane />
+          <Panel id="side" defaultSize="40" minSize="24" maxSize="60">
+            {sidePane === 'terminal' ? <TerminalPane /> : <PreviewPane />}
           </Panel>
         </>
       )}

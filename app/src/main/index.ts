@@ -13,10 +13,14 @@ import { registerCoworkIpc } from './cowork-ipc'
 import { registerPreviewIpc } from './preview-ipc'
 import { registerMcpIpc, syncConnectors, disposeConnectors } from './mcp-ipc'
 import { registerVoiceIpc } from './voice-ipc'
+import { registerScreenshotIpc } from './screenshot-ipc'
+import { registerScheduledTasksIpc } from './scheduled-tasks-ipc'
+import { registerTerminalIpc } from './terminal-ipc'
 import { syncSkills } from './skills/manager'
 import { closeDb, setDbPath } from './db/db'
 import { reconcileInterruptedRuns } from './db/sessions'
 import { setUserDataDir, getSettings, setSettingsSavedListener } from './settings'
+import { setUserMemoryDir } from './user-memory'
 
 /** Registers window-control IPC handlers used by the custom title bar. */
 function registerWindowControls(): void {
@@ -100,6 +104,7 @@ app.whenReady().then(() => {
   // read so caches populate from the right place.
   migrateLegacyUserData()
   setUserDataDir(app.getPath('userData'))
+  setUserMemoryDir(app.getPath('userData'))
   setDbPath(join(app.getPath('userData'), 'sylor.db'))
 
   // Tag any assistant turn left empty by a reply that died with the previous
@@ -124,6 +129,9 @@ app.whenReady().then(() => {
   registerPreviewIpc()
   registerMcpIpc()
   registerVoiceIpc()
+  registerScreenshotIpc()
+  registerScheduledTasksIpc()
+  registerTerminalIpc()
 
   createWindow()
 

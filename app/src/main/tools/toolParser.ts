@@ -24,6 +24,28 @@
 /** The info-line marker that opens a tool-call block (always exactly 3 backticks). */
 const MARKER = '```myto:tool'
 
+/*
+ * Native-markup fallback. Some models ignore the fenced protocol above and instead
+ * emit their *native* tool-call markup straight into the token stream:
+ *
+ *     <invoke name="run_command">
+ *       <parameter name="command">npm run build</parameter>
+ *     </invoke>
+ *
+ * It arrives dressed up in ways the fenced parser never sees: an `antml:` / `antml`
+ * namespace prefix on every tag, and stray `| DSML |` token-pollution wedged in
+ * around the angle brackets. Left alone this leaks into the chat as raw text and the
+ * call never runs. We detect it, strip the noise, and fold it into the SAME
+ * {@link ToolCall} shape (with a synthesised canonical `` ```myto:tool `` block) so
+ * everything downstream — the reply loop, the renderer's cards — is none the wiser.
+ */
+/** Matches the START of a native invoke tag (namespace-tolerant), anywhere in a line. */
+const INVOKE_OPEN = /<\s*(?:antml[:.]?)?invoke\b/i
+/** Matches a native invoke CLOSE tag (namespace-tolerant). */
+const INVOKE_CLOSE = /<\/\s*(?:antml[:.]?)?invoke\s*>/i
+/** The literal openers whose partial tails must be held back mid-stream. */
+const INVOKE_OPENERS = ['<invoke', '<invoke']
+
 /** A completed tool call detected in the stream. */
 export interface ToolCall {
   /** The exact block text (```` ```myto:tool … ``` ````) to write into the reply for the card. */
@@ -53,6 +75,13 @@ export interface ToolCallParser {
    * model wrote is silently lost.
    */
   flush(): string
+  /**
+   * True while a tool/invoke block is open — its opener has arrived but its closing
+   * fence/tag has not. Check it *before* {@link flush} to tell a stream cut off
+   * mid tool call (leftover is a never-closable block) from one that ended on benign
+   * trailing prose.
+   */
+  readonly holdingBlock: boolean
 }
 
 /**
@@ -144,38 +173,165 @@ function extractToolBlock(buf: string): { consumed: number; call: ToolCall } | n
   return { consumed, call: { block, ...parseToolBody(body) } }
 }
 
+/**
+ * Remove `| DSML |` token-pollution from a run of text. The pipe-delimited token
+ * is so distinctive it never occurs in real prose or code, so stripping it globally
+ * is safe; done every push so noise wedged inside a held invoke block is gone by the
+ * time its closing tag arrives. The bare-pipe pass runs first so `<|DSML|invoke`
+ * collapses cleanly to `<invoke` rather than losing its `<`.
+ */
+function stripDsmlNoise(s: string): string {
+  return s.replace(/<\|\s*DSML\s*\|>/gi, '').replace(/\|\s*DSML\s*\|/gi, '')
+}
+
+/**
+ * Length of the trailing suffix of `s` that is a nonempty proper prefix of a native
+ * invoke opener (`<invoke` / `<invoke`) — text that could still grow into a real
+ * tag next delta, so it is held rather than shown. A lone trailing `<` is held one
+ * tick and released the moment the next char rules the tag out, exactly like the
+ * fenced held-prefix and the status stripper's held `<`.
+ */
+function heldInvokePrefix(s: string): number {
+  const lower = s.toLowerCase()
+  let best = 0
+  for (const opener of INVOKE_OPENERS) {
+    const maxK = Math.min(s.length, opener.length - 1)
+    for (let k = maxK; k > best; k--) {
+      if (lower.endsWith(opener.slice(0, k))) {
+        best = k
+        break
+      }
+    }
+  }
+  return best
+}
+
+/** Coerce a native `<parameter>` value: JSON for object/array literals, else raw. */
+function coerceParamValue(raw: string): unknown {
+  const trimmed = raw.trim()
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      return JSON.parse(trimmed)
+    } catch {
+      return trimmed // malformed structure — hand the tool the raw text
+    }
+  }
+  return trimmed
+}
+
+/**
+ * Parse a complete native invoke block into the canonical {@link ToolCall}, or null
+ * when it carries no usable tool name (a false positive we release as plain text
+ * rather than an errored call — the reply loop aborts the turn on ANY detected call,
+ * so emitting an error here would wedge on prose that merely looked like a tag).
+ * Exported for tests and callers holding a whole block already.
+ */
+export function parseInvokeBlock(raw: string): ToolCall | null {
+  const cleaned = stripDsmlNoise(raw)
+  const open = /<\s*(?:antml[:.]?)?invoke\b([^>]*)>/i.exec(cleaned)
+  if (!open) return null
+  const nameAttr =
+    /\bname\s*=\s*"([^"]*)"/i.exec(open[1]) ?? /\bname\s*=\s*'([^']*)'/i.exec(open[1])
+  const name = nameAttr ? nameAttr[1].trim() : ''
+  if (!name) return null
+
+  const input: Record<string, unknown> = {}
+  const paramRe =
+    /<\s*(?:antml[:.]?)?parameter\b[^>]*?\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/\s*(?:antml[:.]?)?parameter\s*>/gi
+  for (let m = paramRe.exec(cleaned); m; m = paramRe.exec(cleaned)) {
+    input[m[1].trim()] = coerceParamValue(m[2])
+  }
+
+  // Fold into the canonical fenced shape so downstream code is format-agnostic.
+  return { block: toolCallBlock(name, input), name, input, error: null }
+}
+
+/**
+ * Build the canonical ```myto:tool block from a name + input. The single source of
+ * truth for that wire shape, reused by the native-markup fallback
+ * ({@link parseInvokeBlock}) and by the native function-calling path (#15,
+ * provider-ipc.ts) — so a call from ANY origin (fenced text, `<invoke>` markup, or a
+ * provider's structured tool_calls) records identically in history and renders on
+ * the same card.
+ */
+export function toolCallBlock(name: string, input: unknown): string {
+  return `${MARKER}\n${JSON.stringify({ tool: name, input })}\n\`\`\``
+}
+
+/**
+ * From a buffer that starts at a native invoke opener, extract the whole block once
+ * its `</invoke>` has arrived. Returns null while still open (hold everything);
+ * `call` is null for a tag with no tool name, with `raw` carrying the verbatim text
+ * to release as prose.
+ */
+function extractInvokeBlock(buf: string): { consumed: number; call: ToolCall | null; raw: string } | null {
+  const close = INVOKE_CLOSE.exec(buf)
+  if (!close) return null // not closed yet — hold everything
+  const end = close.index + close[0].length
+  const raw = buf.slice(0, end)
+  let consumed = end
+  if (buf[consumed] === '\n') consumed++
+  return { consumed, call: parseInvokeBlock(raw), raw }
+}
+
 export function createToolCallParser(): ToolCallParser {
-  // Un-emitted tail: prose about to be released, a partial opening fence, or a
-  // tool block whose closing fence has not arrived.
+  // Un-emitted tail: prose about to be released, a partial opening fence or invoke
+  // tag, or a tool block whose closing fence/tag has not arrived.
   let buffer = ''
   let inTool = false
+  let inInvoke = false
 
   return {
     push(delta: string): ToolParseResult {
-      buffer += delta
+      // Strip token-pollution across the whole held buffer every push, so noise
+      // wedged inside an invoke block is cleaned by the time its close tag lands.
+      buffer = stripDsmlNoise(buffer + delta)
       let text = ''
 
       for (;;) {
-        if (!inTool) {
-          const idx = lineStartIndexOf(buffer, MARKER)
-          if (idx === -1) {
-            const hold = heldToolPrefix(buffer)
+        if (!inTool && !inInvoke) {
+          const fenceIdx = lineStartIndexOf(buffer, MARKER)
+          const invMatch = INVOKE_OPEN.exec(buffer)
+          const invIdx = invMatch ? invMatch.index : -1
+
+          if (fenceIdx === -1 && invIdx === -1) {
+            // Nothing detected: release safe prose, hold any partial opener tail.
+            const hold = Math.max(heldToolPrefix(buffer), heldInvokePrefix(buffer))
             text += buffer.slice(0, buffer.length - hold)
             buffer = buffer.slice(buffer.length - hold)
             return { text, call: null }
           }
-          // Release the prose before the fence; keep the fence onward.
+
+          // Enter whichever opener comes first; release the prose before it.
+          const useFence = fenceIdx !== -1 && (invIdx === -1 || fenceIdx <= invIdx)
+          const idx = useFence ? fenceIdx : invIdx
           text += buffer.slice(0, idx)
           buffer = buffer.slice(idx)
-          inTool = true
+          if (useFence) inTool = true
+          else inInvoke = true
         }
 
-        const found = extractToolBlock(buffer)
+        if (inTool) {
+          const found = extractToolBlock(buffer)
+          if (!found) return { text, call: null } // still open — hold the block
+          buffer = buffer.slice(found.consumed)
+          inTool = false
+          // A single delta rarely carries two calls, but the loop aborts on the
+          // first, so returning it here is enough; the caller stops the stream.
+          return { text, call: found.call }
+        }
+
+        // inInvoke: native `<invoke>` markup.
+        const found = extractInvokeBlock(buffer)
         if (!found) return { text, call: null } // still open — hold the block
         buffer = buffer.slice(found.consumed)
-        inTool = false
-        // A single delta rarely carries two calls, but the loop aborts on the
-        // first, so returning it here is enough; the caller stops the stream.
+        inInvoke = false
+        if (!found.call) {
+          // No tool name — a false positive. Release verbatim so a stray `<invoke`
+          // in prose can never wedge the reply loop, and keep scanning.
+          text += found.raw
+          continue
+        }
         return { text, call: found.call }
       }
     },
@@ -184,7 +340,11 @@ export function createToolCallParser(): ToolCallParser {
       const rest = buffer
       buffer = ''
       inTool = false
+      inInvoke = false
       return rest
+    },
+    get holdingBlock(): boolean {
+      return inTool || inInvoke
     }
   }
 }

@@ -10,7 +10,7 @@ import { modelInfo } from '@main/providers/provider'
 import { OllamaProvider } from '@main/providers/ollama'
 import { GatewayProvider } from '@main/providers/gateway'
 import { pickAdapter, openAiAdapter, anthropicAdapter } from '@main/providers/adapters'
-import type { GatewayConfig } from '@shared/types'
+import type { CompletionOptions, GatewayConfig, NativeToolCall } from '@shared/types'
 
 describe('http helpers', () => {
   it('normalises base URLs by trimming trailing slashes and whitespace', () => {
@@ -683,7 +683,9 @@ describe('GatewayProvider — Anthropic endpoint (auto-detected)', () => {
     const body = sentBody(fetchMock)
     expect(body.system).toBe('You are Myto.\n\nBe concise.')
     expect(body.messages).toEqual([{ role: 'user', content: 'hi' }])
-    expect(body.max_tokens).toBe(4096)
+    // Anthropic requires max_tokens; the default is the "effectively infinite output"
+    // ceiling (32000), sent when no explicit maxTokens cap is requested.
+    expect(body.max_tokens).toBe(32000)
     expect(body.stream).toBe(true)
     expect(body.reasoning_effort).toBeUndefined()
   })
@@ -793,5 +795,191 @@ describe('GatewayProvider — Anthropic endpoint (auto-detected)', () => {
     const text = await provider.getCompletion('claude-3-5-sonnet-20241022', [{ role: 'user', content: 'hi' }])
     expect(text).toBe('one two')
     expect(sentBody(fetchMock).stream).toBe(true)
+  })
+})
+
+// ── #15 Native function-calling (opt-in; text protocol stays the default) ─────
+// These drive real (canned) SSE through `streamCompletion` and assert the gateway
+// reassembles a tool call whose id / name / JSON arguments are split across many
+// lines into ONE `toolCall` chunk — the single structural change #15 required
+// (stateless-per-line parse → stateful per-stream parser). The request-body checks
+// prove the schemas ride the wire only when tools are actually passed, so the flag
+// stays a no-op when off.
+describe('GatewayProvider — native function-calling (#15)', () => {
+  const fetchMock = vi.fn()
+  const openAiConfig: GatewayConfig = {
+    baseUrl: 'https://api.example.com/v1',
+    apiKey: 'secret-key',
+    authSchema: 'bearer',
+    authHeaderName: 'Authorization'
+  }
+  const anthropicConfig: GatewayConfig = {
+    baseUrl: 'https://api.anthropic.com',
+    apiKey: 'sk-ant-key',
+    authSchema: 'bearer',
+    authHeaderName: 'Authorization'
+  }
+  const weatherTool = {
+    name: 'get_weather',
+    description: 'Look up the weather for a city.',
+    parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] }
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockReset()
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  /** `data: <json>\n` for one SSE frame. */
+  function sse(obj: unknown): string {
+    return `data: ${JSON.stringify(obj)}\n`
+  }
+
+  /** A real SSE Response from pre-encoded `data:` lines (this block's local copy). */
+  function sseResponse(lines: string[]): Response {
+    return streamedResponse(lines, 'text/event-stream')
+  }
+
+  /** Drive a canned SSE response through streamCompletion, capturing every chunk shape. */
+  async function collect(
+    res: Response,
+    config: GatewayConfig,
+    options?: CompletionOptions
+  ): Promise<{ text: string; toolCalls: NativeToolCall[]; done: boolean }> {
+    fetchMock.mockResolvedValue(res)
+    const provider = new GatewayProvider(config)
+    let text = ''
+    const toolCalls: NativeToolCall[] = []
+    let done = false
+    await provider.streamCompletion(
+      'model-x',
+      [{ role: 'user', content: 'weather in NYC?' }],
+      (c) => {
+        if (c.delta) text += c.delta
+        if (c.toolCall) toolCalls.push(c.toolCall)
+        if (c.done) done = true
+      },
+      undefined,
+      options
+    )
+    return { text, toolCalls, done }
+  }
+  // __NATIVE_TESTS__
+
+  it('reports native-tool support (both wire adapters can carry function-calling)', () => {
+    expect(new GatewayProvider(openAiConfig).supportsNativeTools()).toBe(true)
+    expect(new GatewayProvider(anthropicConfig).supportsNativeTools()).toBe(true)
+  })
+
+  it('injects OpenAI tools + tool_choice into the body only when tools are passed', async () => {
+    await collect(sseResponse(['data: [DONE]\n']), openAiConfig, { tools: [weatherTool] })
+    const body = sentBody(fetchMock)
+    expect(body.tools).toEqual([
+      {
+        type: 'function',
+        function: { name: 'get_weather', description: weatherTool.description, parameters: weatherTool.parameters }
+      }
+    ])
+    expect(body.tool_choice).toBe('auto')
+  })
+
+  it('never puts a tools key on the OpenAI wire when none are passed (off-by-default no-op)', async () => {
+    await collect(sseResponse(['data: {"choices":[{"delta":{"content":"hi"}}]}\n', 'data: [DONE]\n']), openAiConfig)
+    const body = sentBody(fetchMock)
+    expect('tools' in body).toBe(false)
+    expect('tool_choice' in body).toBe(false)
+  })
+
+  it('reassembles an OpenAI tool call whose id/name/arguments span many SSE lines', async () => {
+    const { text, toolCalls, done } = await collect(
+      sseResponse([
+        sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_abc', type: 'function', function: { name: 'get_weather', arguments: '' } }] } }] }),
+        sse({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"ci' } }] } }] }),
+        sse({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'ty":"NYC"}' } }] } }] }),
+        sse({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+        'data: [DONE]\n'
+      ]),
+      openAiConfig,
+      { tools: [weatherTool] }
+    )
+    expect(toolCalls).toEqual([{ id: 'call_abc', name: 'get_weather', argsJson: '{"city":"NYC"}' }])
+    expect(text).toBe('') // a tool call carries no reply text
+    expect(done).toBe(true)
+  })
+
+  // __NATIVE_TESTS_2__
+
+  it('still emits an OpenAI call that ends at [DONE] without a finish_reason marker', async () => {
+    // Some proxies drop finish_reason; the parser must release the pending call at
+    // stream end rather than swallowing it, and never double-emit it.
+    const { toolCalls, done } = await collect(
+      sseResponse([
+        sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_x', function: { name: 'get_weather', arguments: '{"city":"LA"}' } }] } }] }),
+        'data: [DONE]\n'
+      ]),
+      openAiConfig,
+      { tools: [weatherTool] }
+    )
+    expect(toolCalls).toEqual([{ id: 'call_x', name: 'get_weather', argsJson: '{"city":"LA"}' }])
+    expect(done).toBe(true)
+  })
+
+  it('leaves the OpenAI text path untouched when tools are advertised but the model just talks', async () => {
+    const { text, toolCalls, done } = await collect(
+      sseResponse(['data: {"choices":[{"delta":{"content":"Sunny."}}]}\n', 'data: [DONE]\n']),
+      openAiConfig,
+      { tools: [weatherTool] }
+    )
+    expect(text).toBe('Sunny.')
+    expect(toolCalls).toEqual([])
+    expect(done).toBe(true)
+  })
+
+  it('injects Anthropic tools with input_schema (not OpenAI nested function) when passed', async () => {
+    await collect(streamedResponse(['data: {"type":"message_stop"}\n'], 'text/event-stream'), anthropicConfig, {
+      tools: [weatherTool]
+    })
+    const body = sentBody(fetchMock)
+    expect(body.tools).toEqual([
+      { name: 'get_weather', description: weatherTool.description, input_schema: weatherTool.parameters }
+    ])
+  })
+
+  it('reassembles an Anthropic tool_use block from start / input_json_delta / stop', async () => {
+    const { text, toolCalls, done } = await collect(
+      streamedResponse(
+        [
+          sse({ type: 'message_start', message: { id: 'msg_1' } }),
+          sse({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: 'get_weather' } }),
+          sse({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"ci' } }),
+          sse({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'ty":"NYC"}' } }),
+          sse({ type: 'content_block_stop', index: 0 }),
+          sse({ type: 'message_delta', delta: { stop_reason: 'tool_use' } }),
+          sse({ type: 'message_stop' })
+        ],
+        'text/event-stream'
+      ),
+      anthropicConfig,
+      { tools: [weatherTool] }
+    )
+    expect(toolCalls).toEqual([{ id: 'toolu_1', name: 'get_weather', argsJson: '{"city":"NYC"}' }])
+    expect(text).toBe('')
+    expect(done).toBe(true)
+  })
+
+  it('releases a truncated Anthropic tool_use block via flush (no content_block_stop)', async () => {
+    const { toolCalls } = await collect(
+      streamedResponse(
+        [
+          sse({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_2', name: 'get_weather' } }),
+          sse({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"city":"SF"}' } })
+        ],
+        'text/event-stream'
+      ),
+      anthropicConfig,
+      { tools: [weatherTool] }
+    )
+    expect(toolCalls).toEqual([{ id: 'toolu_2', name: 'get_weather', argsJson: '{"city":"SF"}' }])
   })
 })

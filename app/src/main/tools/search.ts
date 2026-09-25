@@ -77,6 +77,42 @@ async function* walk(root: string): AsyncGenerator<{ abs: string; rel: string }>
   }
 }
 
+/**
+ * List workspace files whose relative path matches `query` (case-insensitive
+ * substring), ranked so basename hits come before mid-path hits and shorter paths
+ * before longer ones. Powers the composer's `@file` mention popover (#7): it reuses
+ * the same sandboxed {@link walk} + {@link SKIP_DIRS} the search tools use, so it can
+ * only ever surface files inside the working folder. An empty query returns the first
+ * files walked (a useful "just opened @" listing). Never throws — a bad root or a
+ * mid-walk read error yields whatever was collected so far.
+ */
+export async function listWorkspaceFiles(root: string, query: string, limit = 20): Promise<string[]> {
+  const needle = query.trim().toLowerCase()
+  const scored: { rel: string; rank: number }[] = []
+  try {
+    for await (const { rel } of walk(root)) {
+      if (needle === '') {
+        scored.push({ rel, rank: 0 })
+      } else {
+        const lower = rel.toLowerCase()
+        const base = (rel.split('/').pop() ?? rel).toLowerCase()
+        const inBase = base.includes(needle)
+        const inPath = lower.includes(needle)
+        if (!inBase && !inPath) continue
+        // Basename match ranks above a match buried in the directory portion.
+        scored.push({ rel, rank: inBase ? 0 : 1 })
+      }
+      // Collect a healthy multiple of `limit` before ranking so the sort has real
+      // candidates to order, but still bound the work on a huge tree.
+      if (scored.length >= limit * 8) break
+    }
+  } catch {
+    // fall through with whatever we gathered
+  }
+  scored.sort((a, b) => a.rank - b.rank || a.rel.length - b.rel.length || a.rel.localeCompare(b.rel))
+  return scored.slice(0, limit).map((s) => s.rel)
+}
+
 /** Read a trimmed string field out of a tool input, or null. */
 function readField(input: unknown, key: string): string | null {
   const raw = input && typeof input === 'object' ? (input as Record<string, unknown>)[key] : undefined

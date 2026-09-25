@@ -101,6 +101,34 @@ function parseToolInfo(info: string): { kind: 'call' } | { kind: 'result'; name:
   return null
 }
 
+/**
+ * Pull the string value of a JSON key out of a possibly-incomplete body by hand,
+ * honouring `\n`/`\r`/`\t`/`\"` escapes. Used by the lenient recovery below so a
+ * tool call whose closing brace/fence has NOT streamed in yet still yields its
+ * `path`/`content` — letting the card show the live filename and a growing +N
+ * before the JSON is well-formed. Returns undefined when the key isn't present
+ * (or its value hasn't started); a value still mid-stream comes back truncated,
+ * which is exactly what we want to display. Order-agnostic: matches anywhere.
+ */
+function extractJsonString(body: string, key: string): string | undefined {
+  const m = new RegExp(`"${key}"\\s*:\\s*"`).exec(body)
+  if (!m) return undefined
+  let out = ''
+  for (let k = m.index + m[0].length; k < body.length; k++) {
+    const ch = body[k]
+    if (ch === '\\') {
+      const next = body[k + 1]
+      if (next === undefined) break
+      out += next === 'n' ? '\n' : next === 'r' ? '\r' : next === 't' ? '\t' : next
+      k++
+      continue
+    }
+    if (ch === '"') return out
+    out += ch
+  }
+  return out
+}
+
 /** Parse a call block's JSON body into `{name, input}`; keep the raw body if it won't parse. */
 function parseCallBody(body: string): { name: string | null; input: unknown } {
   const trimmed = body.trim()
@@ -111,7 +139,20 @@ function parseCallBody(body: string): { name: string | null; input: unknown } {
       return { name, input: 'input' in obj ? obj.input : undefined }
     }
   } catch {
-    // fall through: hand back the raw text so the card can still show something
+    // fall through: try a lenient recovery, then hand back the raw text.
+  }
+  // Streaming: the JSON is still arriving (unclosed brace/fence) so JSON.parse fails.
+  // If we can already see the tool name, recover it plus whatever string args have
+  // streamed so far, so the card shows the real filename and a live +N instead of
+  // waiting for the block to close. Once it closes, the exact parse above wins.
+  const toolMatch = /"tool"\s*:\s*"([^"]+)"/.exec(trimmed)
+  if (toolMatch) {
+    const input: Record<string, string> = {}
+    for (const key of ['path', 'content', 'old', 'new'] as const) {
+      const value = extractJsonString(trimmed, key)
+      if (value !== undefined) input[key] = value
+    }
+    return { name: toolMatch[1].trim() || null, input }
   }
   return { name: null, input: trimmed || undefined }
 }
@@ -208,6 +249,15 @@ export function parseFileBlocks(md: string): Segment[] {
   return segments
 }
 
+/**
+ * Count lines the way the diff badges do (see ToolCard `diffCounts`): an empty
+ * string is 0 lines, otherwise the newline-split length. Shared so a generated
+ * file card's `+N −N` and a tool card's agree on what "a line" is.
+ */
+export function countLines(s: string): number {
+  return s === '' ? 0 : s.split('\n').length
+}
+
 /** Last path segment of a file path (e.g. `templates/index.html` → `index.html`). */
 export function basename(path: string): string {
   const norm = path.replace(/\\/g, '/').replace(/\/+$/, '')
@@ -249,6 +299,10 @@ export function toolHeadline(tool: ToolSegment): string {
     case 'run_command': {
       const cmd = typeof input.command === 'string' ? input.command : ''
       return cmd ? `Running ${cmd.length > 40 ? `${cmd.slice(0, 40)}…` : cmd}` : 'Running command'
+    }
+    case 'run_dev_server': {
+      const cmd = typeof input.command === 'string' ? input.command : ''
+      return cmd ? `Starting server: ${cmd.length > 32 ? `${cmd.slice(0, 32)}…` : cmd}` : 'Starting dev server'
     }
     case 'search_code': {
       const query = typeof input.query === 'string' ? input.query : ''

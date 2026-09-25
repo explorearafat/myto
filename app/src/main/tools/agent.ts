@@ -43,3 +43,56 @@ export const spawnAgentTool: ToolDef = {
     }
   }
 }
+
+/** Upper bound on fan-out so one call can't spawn an unbounded swarm of nested loops. */
+const MAX_PARALLEL_TASKS = 5
+
+/** Read a `tasks` string[] out of a tool input, trimming blanks; empty when absent/invalid. */
+function readTasks(input: unknown): string[] {
+  const raw = input && typeof input === 'object' ? (input as Record<string, unknown>).tasks : undefined
+  if (!Array.isArray(raw)) return []
+  return raw.filter((t): t is string => typeof t === 'string').map((t) => t.trim()).filter(Boolean)
+}
+
+/** A one-line label for a sub-task's digest heading (first non-empty line, capped). */
+function taskLabel(task: string): string {
+  const firstLine = task.split('\n').find((l) => l.trim()) ?? task
+  const t = firstLine.trim()
+  return t.length > 80 ? `${t.slice(0, 79)}…` : t
+}
+
+export const spawnAgentsTool: ToolDef = {
+  name: 'spawn_agents',
+  description:
+    'Delegate SEVERAL independent read-only research sub-tasks at once and get back all their findings together. Same read-only sub-agent as spawn_agent, but the tasks run IN PARALLEL — use it when a job splits into independent investigations (e.g. ["map the auth flow", "list every API route", "summarize the DB schema"]) so you get every digest in one round-trip instead of one at a time. Each sub-agent works in its own context; you do the actual writing/running yourself with the combined findings.',
+  usage: '{"tasks": ["Summarize how routing works.", "List all React contexts and what each provides."]}',
+  available: agentAvailable,
+  async run(input, ctx) {
+    if (!ctx.delegate) {
+      return 'Sub-agents are not available in this context.'
+    }
+    const tasks = readTasks(input)
+    if (tasks.length === 0) {
+      return 'spawn_agents needs a non-empty "tasks" array of strings, e.g. {"tasks": ["investigate X", "investigate Y"]}.'
+    }
+    if (tasks.length > MAX_PARALLEL_TASKS) {
+      return `spawn_agents accepts at most ${MAX_PARALLEL_TASKS} tasks at once (got ${tasks.length}). Split the work into fewer, broader sub-tasks.`
+    }
+    const delegate = ctx.delegate
+    // One failing sub-agent must not sink the batch: each result is captured
+    // independently and labelled, success or failure, so the model still gets
+    // whatever findings did come back.
+    const digests = await Promise.all(
+      tasks.map(async (task, i) => {
+        const heading = `### Sub-agent ${i + 1}: ${taskLabel(task)}`
+        try {
+          const report = await delegate(task)
+          return `${heading}\n${report.trim() || '(no findings)'}`
+        } catch (err) {
+          return `${heading}\n(failed: ${err instanceof Error ? err.message : String(err)})`
+        }
+      })
+    )
+    return digests.join('\n\n')
+  }
+}

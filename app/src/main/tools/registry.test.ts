@@ -60,16 +60,25 @@ describe('TOOLS catalogue', () => {
       'ask_user',
       'delete_file',
       'edit_file',
+      'edit_notebook',
       'find_files',
+      'git',
+      'git_commit',
+      'git_diff',
+      'git_log',
+      'git_status',
       'install_connector',
       'install_skill',
       'list_dir',
       'preview',
       'read_file',
+      'remember',
       'run_code',
       'run_command',
+      'run_dev_server',
       'search_code',
       'spawn_agent',
+      'spawn_agents',
       'update_plan',
       'web_fetch',
       'web_search',
@@ -133,11 +142,13 @@ describe('toolsSystemPrompt', () => {
     const p = toolsSystemPrompt(gate(settings(true)))!
     expect(p).toContain('```myto:tool')
     expect(p).toContain('web_search')
-    expect(p).not.toContain('run_code')
-    expect(p).not.toContain('write_file')
+    // The guidance prose names run_code (to steer the model away from it for running
+    // projects), so assert on the tool-list line specifically, not any mention.
+    expect(p).not.toContain('- run_code —')
+    expect(p).not.toContain('- write_file —')
   })
   it('lists run_code when enabled', () => {
-    expect(toolsSystemPrompt(gate(settings(true, true)))!).toContain('run_code')
+    expect(toolsSystemPrompt(gate(settings(true, true)))!).toContain('- run_code —')
   })
   it('lists the filesystem tools in cowork mode with a folder', () => {
     const p = toolsSystemPrompt(coworkGate(settings(true)))!

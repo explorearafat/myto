@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionSummary } from '@shared/types'
-import { cleanModelTitle, deriveTitle, useSessionStore } from './useSessionStore'
+import { deriveTitle, useSessionStore } from './useSessionStore'
 import { useChatStore } from './useChatStore'
 
 // A SessionSummary with the fields the store touches; overridable per test.
@@ -13,6 +13,7 @@ function summary(overrides: Partial<SessionSummary> = {}): SessionSummary {
     createdAt: 0,
     updatedAt: 0,
     messageCount: 0,
+    mode: 'chat',
     ...overrides
   }
 }
@@ -69,84 +70,30 @@ describe('deriveTitle (instant heuristic)', () => {
   })
 })
 
-describe('cleanModelTitle (sanitize a model reply)', () => {
-  it('strips surrounding straight and curly quotes', () => {
-    expect(cleanModelTitle('"Todo App Builder"')).toBe('Todo App Builder')
-    expect(cleanModelTitle('“Fancy Quotes”')).toBe('Fancy Quotes')
-    expect(cleanModelTitle("'Single Quoted'")).toBe('Single Quoted')
-  })
-
-  it('strips a leading "Title:"/"Session:" label', () => {
-    expect(cleanModelTitle('Title: Todo App')).toBe('Todo App')
-    expect(cleanModelTitle('Session - Auth Flow')).toBe('Auth Flow')
-  })
-
-  it('drops trailing punctuation', () => {
-    expect(cleanModelTitle('Todo App.')).toBe('Todo App')
-    expect(cleanModelTitle('Build the Dashboard!')).toBe('Build the Dashboard')
-  })
-
-  it('keeps only the first non-empty line', () => {
-    expect(cleanModelTitle('Todo App\n\nHere is why...')).toBe('Todo App')
-  })
-
-  it('returns empty for an empty or whitespace-only reply (keep the heuristic)', () => {
-    expect(cleanModelTitle('')).toBe('')
-    expect(cleanModelTitle('   \n ')).toBe('')
-  })
-
-  it('clips an over-long AI title like the heuristic', () => {
-    const out = cleanModelTitle(
-      'A Ridiculously Long Title That No Sensible Model Would Ever Emit Here'
-    )
-    expect(out.endsWith('…')).toBe(true)
-    expect(out.length).toBeLessThanOrEqual(49)
-  })
-})
-
-describe('autoName (heuristic first, AI refinement)', () => {
-  it('sets the heuristic immediately, then refines with the AI title', async () => {
+describe('autoName (fixed title from the first message)', () => {
+  it('titles the session from the first message and never calls the model', async () => {
     wireRenameRoundTrip()
-    window.myto.providers.getCompletion = vi
-      .fn()
-      .mockResolvedValue({ ok: true, content: 'Build A Todo App' })
     seedActive('New session')
 
     await useSessionStore.getState().autoName('build a todo app in react')
 
     const rename = vi.mocked(window.myto.sessions.rename)
-    expect(rename).toHaveBeenNthCalledWith(1, 'sess-1', 'build a todo app in react')
-    expect(rename).toHaveBeenNthCalledWith(2, 'sess-1', 'Build A Todo App')
-  })
-
-  it('keeps the heuristic when the provider is unreachable (empty reply)', async () => {
-    wireRenameRoundTrip()
-    window.myto.providers.getCompletion = vi.fn().mockResolvedValue({ ok: false, content: '' })
-    seedActive('New session')
-
-    await useSessionStore.getState().autoName('build a todo app')
-
-    const rename = vi.mocked(window.myto.sessions.rename)
     expect(rename).toHaveBeenCalledTimes(1)
-    expect(rename).toHaveBeenCalledWith('sess-1', 'build a todo app')
+    expect(rename).toHaveBeenCalledWith('sess-1', 'build a todo app in react')
+    // No AI re-title pass — the name is set once from the first message and left fixed.
+    expect(vi.mocked(window.myto.providers.getCompletion)).not.toHaveBeenCalled()
   })
 
-  it('keeps the heuristic when the AI title equals it (no redundant rename)', async () => {
+  it('uses only the first line of a multi-line prompt', async () => {
     wireRenameRoundTrip()
-    window.myto.providers.getCompletion = vi
-      .fn()
-      .mockResolvedValue({ ok: true, content: 'build a todo app' })
     seedActive('New session')
 
-    await useSessionStore.getState().autoName('build a todo app')
+    await useSessionStore.getState().autoName('Fix the login bug\nmore detail here')
 
-    expect(vi.mocked(window.myto.sessions.rename)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(window.myto.sessions.rename)).toHaveBeenCalledWith('sess-1', 'Fix the login bug')
   })
 
   it('never touches a session that already carries a real title', async () => {
-    window.myto.providers.getCompletion = vi
-      .fn()
-      .mockResolvedValue({ ok: true, content: 'Something' })
     seedActive('User Named This')
 
     await useSessionStore.getState().autoName('build a todo app')
@@ -162,23 +109,6 @@ describe('autoName (heuristic first, AI refinement)', () => {
     await useSessionStore.getState().autoName('   \n  ')
 
     expect(vi.mocked(window.myto.sessions.rename)).not.toHaveBeenCalled()
-  })
-
-  it('does not clobber a manual rename that lands while the AI call is in flight', async () => {
-    wireRenameRoundTrip()
-    // Simulate the user renaming the session during the awaited AI round-trip.
-    window.myto.providers.getCompletion = vi.fn(async () => {
-      useSessionStore.setState({ sessions: [summary({ title: 'User Renamed' })] })
-      return { ok: true, content: 'Ai Suggested Title' }
-    })
-    seedActive('New session')
-
-    await useSessionStore.getState().autoName('build a todo app')
-
-    // Only the heuristic rename ran; the AI pass backed off because the title
-    // no longer matched what it had set.
-    const titles = vi.mocked(window.myto.sessions.rename).mock.calls.map((c) => c[1])
-    expect(titles).toEqual(['build a todo app'])
   })
 })
 

@@ -43,6 +43,10 @@ export const IpcChannel = {
   SessionsSetFeedback: 'sessions:set-feedback',
   /** Renderer → main (send): reset an assistant message for Rewrite/regenerate. */
   SessionsResetMessage: 'sessions:reset-message',
+  /** Renderer → main (invoke): rewind a session's files + chat to a message (#1). */
+  SessionsRewind: 'sessions:rewind',
+  /** Renderer → main (invoke): the pre-change bytes for a file card's overwrite diff (#5). */
+  SessionsSnapshotBefore: 'sessions:snapshot-before',
 
   // Projects (chat-first redesign)
   /** Renderer → main (invoke): list all projects with chat counts. */
@@ -88,6 +92,8 @@ export const IpcChannel = {
   // Cowork (agentic mode): pick the working folder the filesystem tools are scoped to.
   /** Renderer → main (invoke): open a folder picker; resolves the chosen path or null. */
   CoworkPickWorkspace: 'cowork:pick-workspace',
+  /** Renderer → main (invoke): list workspace-relative paths matching an `@file` query. */
+  CoworkListFiles: 'cowork:list-files',
 
   // Cowork permission prompts: the renderer's answer to a mid-stream approval request.
   /** Renderer → main (send): answer an ApprovalRequest by id (allow / allow_always / deny). */
@@ -111,7 +117,42 @@ export const IpcChannel = {
 
   // Voice: speech-to-text.
   /** Renderer → main (invoke): transcribe a recorded audio clip via the gateway's Whisper endpoint. */
-  VoiceTranscribe: 'voice:transcribe'
+  VoiceTranscribe: 'voice:transcribe',
+
+  // Screenshot (#11): capture the primary display so the user can drop a screenshot into chat.
+  /** Renderer → main (invoke): grab the primary screen; resolves a PNG data URL or null. */
+  ScreenshotCapture: 'screenshot:capture',
+
+  // Scheduled tasks (#12): durable prompts the main-process scheduler fires on a cron.
+  /** Renderer → main (invoke): list every persisted scheduled task. */
+  ScheduledTasksList: 'scheduled-tasks:list',
+  /** Renderer → main (invoke): create a task (computes its next_run_at). */
+  ScheduledTasksCreate: 'scheduled-tasks:create',
+  /** Renderer → main (invoke): patch a task's fields (recomputes next_run_at). */
+  ScheduledTasksUpdate: 'scheduled-tasks:update',
+  /** Renderer → main (invoke): delete a task by id. */
+  ScheduledTasksRemove: 'scheduled-tasks:remove',
+  /** Renderer → main (invoke): fire a task immediately ("Run now"). */
+  ScheduledTasksRunNow: 'scheduled-tasks:run-now',
+  /** Main → renderer: a task came due (or Run now) — open a fresh run with its prompt. */
+  ScheduledTaskFire: 'scheduled-tasks:fire',
+
+  // Interactive terminal (#2): a real PTY (node-pty) per session, driven by an xterm.js
+  // frontend. The PTY lives in main keyed by sessionId and survives frontend remounts
+  // (tab switch, preview taking the shared slot); a rolling output buffer is replayed on
+  // re-attach so scrollback is preserved without a second layout slot.
+  /** Renderer → main (invoke): spawn (or re-attach to) the session's PTY; resolves the replay buffer. */
+  TerminalSpawn: 'terminal:spawn',
+  /** Renderer → main (send): write keystrokes / pasted text to the session's PTY. */
+  TerminalWrite: 'terminal:write',
+  /** Renderer → main (send): resize the session's PTY to cols×rows. */
+  TerminalResize: 'terminal:resize',
+  /** Renderer → main (send): kill the session's PTY (explicit user action / restart). */
+  TerminalKill: 'terminal:kill',
+  /** Main → renderer: a chunk of PTY output for a session. */
+  TerminalData: 'terminal:data',
+  /** Main → renderer: a session's PTY exited (carries the exit code). */
+  TerminalExit: 'terminal:exit'
 } as const
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel]

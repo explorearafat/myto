@@ -9,6 +9,12 @@ files:
   - package.json
 asarUnpack:
   - resources/**
+  # node-pty (#2 interactive terminal) ships a native .node addon + a ConPTY helper
+  # exe that cannot be require()'d from inside the asar archive — unpack it so the
+  # packaged app loads it from app.asar.unpacked, the failure that only bites outside `dev`.
+  - node_modules/@lydell/node-pty/**
+  - node_modules/@lydell/node-pty-*/**
+  - '**/*.node'
 win:
   target:
     - nsis

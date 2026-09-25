@@ -25,7 +25,10 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
   modelId: '',
   ui: {
     // Warm light is the default; the dark toggle overrides it.
-    theme: 'light'
+    theme: 'light',
+    // Plain chat is the starting mode; a new chat then remembers whichever mode
+    // the user last switched to (Task 7).
+    lastMode: 'chat'
   },
   tools: {
     // Read-only web tools (fetch/search/wiki) are on out of the box; running code
@@ -39,7 +42,19 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
     workspaceDir: '',
     // Ask before every side-effecting tool by default — the safe tier. The user
     // can raise it to auto-approve edits or bypass permissions from the composer.
-    permissionMode: 'ask'
+    permissionMode: 'ask',
+    // No verify command by default — the verify gate (#16) is opt-in; set e.g.
+    // `npm test` to make Cowork prove its work before declaring a task done.
+    verifyCommand: '',
+    // Plan mode (#8) off by default — a run acts immediately rather than stopping
+    // for plan approval before the first write.
+    planMode: false,
+    // No lifecycle hooks by default (#9) — both are an arbitrary-exec surface.
+    hooks: { preToolUse: '', postToolUse: '' },
+    // Interactive terminal (#2) locked by default — the real PTY shell runs commands
+    // with no per-call approval, so the Shell tab shows a consent panel until the
+    // user opts in once here.
+    terminalConsent: false
   },
   // No connectors until the user adds one (Settings › Connectors). Each is an MCP
   // server whose tools Myto can call once connected.
@@ -49,5 +64,10 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
   // No plugins until the user installs one (Settings › Plugins).
   plugins: [],
   // Balanced default; the composer's effort control changes it.
-  reasoningEffort: 'medium'
+  reasoningEffort: 'medium',
+  // Myto's normal writing voice; the output-style picker (#13) changes it.
+  outputStyle: 'default',
+  // Text-protocol tool calling by default (#15); native function-calling is an
+  // opt-in for capable backends and never changes behaviour while off.
+  nativeTools: false
 }

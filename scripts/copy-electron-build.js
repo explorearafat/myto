@@ -11,7 +11,7 @@
  * from a package.json script on Windows and macOS. Root package.json is "type": "module", so
  * this file is ESM. Plain node:fs, no deps, no network.
  *
- * Set SYLOR_ALLOW_MISSING_ELECTRON=1 for a web-only build: warn and exit 0 instead of failing.
+ * Set MYTO_ALLOW_MISSING_ELECTRON=1 for a web-only build: warn and exit 0 instead of failing.
  */
 import { copyFile, mkdir, readdir, stat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
@@ -57,7 +57,7 @@ async function main() {
 
   if (!found.length) {
     const where = SOURCE_DIRS.map(rel).join(' or ')
-    if (process.env.SYLOR_ALLOW_MISSING_ELECTRON === '1') {
+    if (process.env.MYTO_ALLOW_MISSING_ELECTRON === '1') {
       console.warn('[copy-electron-build] no installer in ' + where + ' - skipped (web-only build).')
       return
     }
@@ -65,7 +65,7 @@ async function main() {
       '[copy-electron-build] no .exe installer found in ' + where + '.\n' +
         'Run npm run build:electron first (npm --prefix app run dist:win), which writes\n' +
         'app/release/Myto-Setup.exe via electron-builder.\n' +
-        'For a web-only build, set SYLOR_ALLOW_MISSING_ELECTRON=1.'
+        'For a web-only build, set MYTO_ALLOW_MISSING_ELECTRON=1.'
     )
   }
 

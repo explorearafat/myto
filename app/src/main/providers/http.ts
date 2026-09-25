@@ -13,7 +13,11 @@ export class TimeoutError extends Error {
  */
 export class StallError extends Error {
   constructor(ms: number) {
-    super(`Stream stalled — no data for ${ms}ms`)
+    super(
+      `The model stopped responding — the stream stalled with no new data for ${Math.round(
+        ms / 1000
+      )}s. It may have hit an output limit or dropped upstream. Use Rewrite (↻) below to try again.`
+    )
     this.name = 'StallError'
   }
 }
@@ -50,12 +54,20 @@ export function normaliseBaseUrl(url: string): string {
 export const COMPLETION_TIMEOUT_MS = 600_000
 
 /**
- * No-progress window for a streaming response body. Two minutes of total silence
- * *after* tokens started flowing means the generation died upstream; waiting
- * longer only delays the report. Reset by every chunk, so a long-but-alive
- * stream is never cut off.
+ * No-progress window for a streaming response body. Sixty seconds of total
+ * silence *after* tokens started flowing means the generation died upstream;
+ * waiting longer only leaves the app looking frozen with no way to tell whether
+ * it is still working. Reset by every non-empty `data:` frame, so a long-but-
+ * alive stream is never cut off — only a genuinely silent one is aborted.
+ *
+ * Kept in step with the renderer's alarm threshold
+ * (`renderer/src/lib/liveness.ts` STALL_ALARM_MS = 60s): the amber "may have
+ * stalled" note and the automatic stop land at the same moment, so a hung model
+ * stream ends itself (→ StallError + Rewrite) instead of hanging indefinitely.
+ * Long-running *tools* are not covered here (they have no active stream); they
+ * enforce their own deadlines (COMMAND_TIMEOUT_MS / GIT_TIMEOUT_MS).
  */
-export const STREAM_STALL_MS = 120_000
+export const STREAM_STALL_MS = 60_000
 
 interface FetchOptions {
   method?: 'GET' | 'POST'

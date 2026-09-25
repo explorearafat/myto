@@ -58,7 +58,7 @@ const api: MytoApi = {
   },
   sessions: {
     list: (projectId) => ipcRenderer.invoke(IpcChannel.SessionsList, projectId),
-    create: (projectId) => ipcRenderer.invoke(IpcChannel.SessionsCreate, projectId),
+    create: (projectId, mode) => ipcRenderer.invoke(IpcChannel.SessionsCreate, projectId, mode),
     load: (id) => ipcRenderer.invoke(IpcChannel.SessionsLoad, id),
     rename: (id, title) => ipcRenderer.invoke(IpcChannel.SessionsRename, id, title),
     remove: (id) => ipcRenderer.invoke(IpcChannel.SessionsRemove, id),
@@ -70,7 +70,11 @@ const api: MytoApi = {
     setFeedback: (sessionId, id, feedback, flagged) =>
       ipcRenderer.send(IpcChannel.SessionsSetFeedback, sessionId, id, feedback, flagged),
     resetMessage: (sessionId, id) =>
-      ipcRenderer.send(IpcChannel.SessionsResetMessage, sessionId, id)
+      ipcRenderer.send(IpcChannel.SessionsResetMessage, sessionId, id),
+    rewind: (sessionId, afterMsgId) =>
+      ipcRenderer.invoke(IpcChannel.SessionsRewind, sessionId, afterMsgId),
+    snapshotBefore: (sessionId, after) =>
+      ipcRenderer.invoke(IpcChannel.SessionsSnapshotBefore, sessionId, after)
   },
   projects: {
     list: () => ipcRenderer.invoke(IpcChannel.ProjectsList),
@@ -101,7 +105,8 @@ const api: MytoApi = {
     save: (name, content) => ipcRenderer.invoke(IpcChannel.FilesSave, name, content)
   },
   cowork: {
-    pickWorkspace: () => ipcRenderer.invoke(IpcChannel.CoworkPickWorkspace)
+    pickWorkspace: () => ipcRenderer.invoke(IpcChannel.CoworkPickWorkspace),
+    listFiles: (query: string) => ipcRenderer.invoke(IpcChannel.CoworkListFiles, query)
   },
   preview: {
     openExternal: (url) => ipcRenderer.send(IpcChannel.PreviewOpenExternal, url)
@@ -121,6 +126,48 @@ const api: MytoApi = {
   },
   voice: {
     transcribe: (input) => ipcRenderer.invoke(IpcChannel.VoiceTranscribe, input)
+  },
+  screenshot: {
+    capture: () => ipcRenderer.invoke(IpcChannel.ScreenshotCapture)
+  },
+  scheduledTasks: {
+    list: () => ipcRenderer.invoke(IpcChannel.ScheduledTasksList),
+    create: (input) => ipcRenderer.invoke(IpcChannel.ScheduledTasksCreate, input),
+    update: (id, input) => ipcRenderer.invoke(IpcChannel.ScheduledTasksUpdate, id, input),
+    remove: (id) => ipcRenderer.invoke(IpcChannel.ScheduledTasksRemove, id),
+    runNow: (id) => ipcRenderer.invoke(IpcChannel.ScheduledTasksRunNow, id),
+    onFire: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, fire: Parameters<typeof callback>[0]) =>
+        callback(fire)
+      ipcRenderer.on(IpcChannel.ScheduledTaskFire, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.ScheduledTaskFire, listener)
+      }
+    }
+  },
+  terminal: {
+    spawn: (sessionId, cwd, cols, rows) =>
+      ipcRenderer.invoke(IpcChannel.TerminalSpawn, sessionId, cwd, cols, rows),
+    write: (sessionId, data) => ipcRenderer.send(IpcChannel.TerminalWrite, sessionId, data),
+    resize: (sessionId, cols, rows) =>
+      ipcRenderer.send(IpcChannel.TerminalResize, sessionId, cols, rows),
+    kill: (sessionId) => ipcRenderer.send(IpcChannel.TerminalKill, sessionId),
+    onData: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, evt: Parameters<typeof callback>[0]) =>
+        callback(evt)
+      ipcRenderer.on(IpcChannel.TerminalData, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.TerminalData, listener)
+      }
+    },
+    onExit: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, evt: Parameters<typeof callback>[0]) =>
+        callback(evt)
+      ipcRenderer.on(IpcChannel.TerminalExit, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.TerminalExit, listener)
+      }
+    }
   }
 }
 

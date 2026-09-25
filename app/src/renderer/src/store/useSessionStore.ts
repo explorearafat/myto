@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { StoreApi } from 'zustand'
-import type { ChatMessage, SessionSummary } from '@shared/types'
+import type { RewindResult, SessionSummary } from '@shared/types'
 import { useChatStore } from './useChatStore'
 
 /** The placeholder title new sessions are created with (see main/session-ipc.ts). */
@@ -9,24 +9,9 @@ const DEFAULT_SESSION_TITLE = 'New session'
 /** Longest title, in characters, before it's clipped with an ellipsis. */
 const MAX_TITLE_LEN = 48
 
-/** Most of the first prompt we feed the titler — a title needs the gist, not an essay. */
-const TITLE_INPUT_CAP = 2000
-
-/**
- * Instructions for the one-shot title model. Deliberately strict: models love to
- * answer with "Sure! Here's a title:" or wrap the thing in quotes, and any of
- * that leaking into the sidebar looks broken. {@link cleanModelTitle} is the
- * safety net that catches what the prompt doesn't.
- */
-const TITLE_SYSTEM =
-  "You generate a short title for a conversation from the user's first message. " +
-  'Reply with ONLY the title: 3–6 words, Title Case, no surrounding quotes, no ' +
-  'trailing punctuation, no preamble or explanation.'
-
 /**
  * Collapse whitespace and clip to {@link MAX_TITLE_LEN} at a word boundary,
- * suffixing an ellipsis when it overflows. Shared by the heuristic and the
- * AI-title cleaner so both titles are bounded identically.
+ * suffixing an ellipsis when it overflows.
  */
 function clip(text: string): string {
   const collapsed = text.replace(/\s+/g, ' ').trim()
@@ -40,10 +25,10 @@ function clip(text: string): string {
 
 /**
  * Derive a session title from the first user prompt (Claude-Desktop style): the
- * first non-empty line, whitespace-collapsed and clipped. This is the instant,
- * always-available title; {@link cleanModelTitle} refines it when the model is
- * reachable. Returns '' when the prompt has no usable text (e.g. an
- * attachment-only turn), so the caller can skip renaming.
+ * first non-empty line, whitespace-collapsed and clipped. This is the session's
+ * final title — set once from the first message and then left fixed. Returns ''
+ * when the prompt has no usable text (e.g. an attachment-only turn), so the caller
+ * can skip renaming.
  */
 export function deriveTitle(prompt: string): string {
   const firstLine = prompt
@@ -52,47 +37,6 @@ export function deriveTitle(prompt: string): string {
     .find((line) => line.length > 0)
   if (!firstLine) return ''
   return clip(firstLine)
-}
-
-/**
- * Turn a raw model reply into a usable title, or '' when it's unusable. Keeps
- * only the first non-empty line, strips a leading "Title:"/"Session:" label and
- * surrounding quotes (straight or curly), and clips to length. Returning ''
- * means "keep the heuristic" — so a refusal, an empty reply, or a chatty
- * preamble never makes the title worse.
- */
-export function cleanModelTitle(raw: string): string {
-  const firstLine = raw
-    .split('\n')
-    .map((line) => line.trim())
-    .find((line) => line.length > 0)
-  if (!firstLine) return ''
-  const stripped = firstLine
-    .replace(/^(?:title|session|conversation)\s*[:\-–—]\s*/i, '')
-    .replace(/^["'“”‘’`]+/, '')
-    .replace(/["'“”‘’`.!?:,;\s]+$/, '')
-    .trim()
-  if (!stripped) return ''
-  return clip(stripped)
-}
-
-/**
- * Ask the active provider for a concise title summarizing the first prompt.
- * Returns '' on any failure — offline, provider error, empty/garbage reply — so
- * the caller safely falls back to the heuristic title. Never throws.
- */
-async function suggestAiTitle(prompt: string): Promise<string> {
-  try {
-    const messages: ChatMessage[] = [
-      { role: 'system', content: TITLE_SYSTEM },
-      { role: 'user', content: prompt.slice(0, TITLE_INPUT_CAP) }
-    ]
-    const res = await window.myto.providers.getCompletion({ messages })
-    if (!res.ok || !res.content) return ''
-    return cleanModelTitle(res.content)
-  } catch {
-    return ''
-  }
 }
 
 /**
@@ -178,17 +122,24 @@ export interface SessionState {
   /** Rename a session (optimistic; re-sorts by the bumped updatedAt). */
   rename: (id: string, title: string) => Promise<void>
   /**
-   * Auto-title the active session from its first user prompt, mirroring Claude
-   * Desktop. Sets a heuristic title instantly (first line, clipped), then refines
-   * it with a one-shot AI summary of the prompt when the provider is reachable —
-   * offline or on any error the heuristic simply stands. Only touches a session
-   * still on its default ('New session') title, and the AI pass backs off if the
-   * user renamed meanwhile, so a manual rename is never clobbered. No-op when the
-   * derived title is empty (attachment-only turn) or no session is active.
+   * Auto-title the active session from its first user prompt (Claude-Desktop
+   * style): the title is derived once from the first message — first line,
+   * clipped — and then left fixed. There is deliberately NO AI re-titling pass; it
+   * used to rename the session after the fact, which read as the title "changing
+   * on its own". Only touches a session still on its default ('New session')
+   * title, so a manual rename is never clobbered. No-op when the derived title is
+   * empty (attachment-only turn) or no session is active.
    */
   autoName: (prompt: string) => Promise<void>
   /** Delete a session; if it was active, reselect or create a replacement. */
   remove: (id: string) => Promise<void>
+  /**
+   * Rewind (#1 "restore to here"): roll the active session's Cowork file changes
+   * and chat back to just after `afterMsgId`, then reload so the truncation +
+   * restored files show. Returns the main process's summary (or null when there's
+   * no active session). Destructive — the caller confirms first.
+   */
+  rewind: (afterMsgId: string) => Promise<RewindResult | null>
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -258,8 +209,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   create: async () => {
-    // New chats are filed under the project the rail is scoped to (or none).
-    const summary = await window.myto.sessions.create(get().activeProjectId)
+    // New chats are filed under the project the rail is scoped to (or none), and
+    // fixed to the mode the composer's Chat/Cowork toggle is currently on — a
+    // session never mixes the two, so the mode is captured once here at creation.
+    const mode = useChatStore.getState().coworkMode ? 'cowork' : 'chat'
+    const summary = await window.myto.sessions.create(get().activeProjectId, mode)
     useChatStore.getState().resetTo(summary.id, summary.projectId)
     set({ activeSessionId: summary.id })
     await get().refresh()
@@ -271,27 +225,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   autoName: async (prompt) => {
-    const heuristic = deriveTitle(prompt)
-    if (!heuristic) return
+    const title = deriveTitle(prompt)
+    if (!title) return
     const { activeSessionId, sessions } = get()
     if (!activeSessionId) return
     const active = sessions.find((s) => s.id === activeSessionId)
     // Only title a fresh, still-default session; never overwrite a real title.
     if (!active || active.title !== DEFAULT_SESSION_TITLE) return
 
-    // Set the heuristic title at once, so the sidebar never lingers on 'New
-    // session' while the model thinks — and so an offline run still gets a title.
-    await get().rename(activeSessionId, heuristic)
-
-    // Then refine it with an AI summary in the background. Offline/error-safe: a
-    // failure returns '' and the heuristic stands. Never clobber a rename the
-    // user made in the meantime — the title must still be exactly the heuristic
-    // we just set (a manual rename changes it, so we back off).
-    const aiTitle = await suggestAiTitle(prompt)
-    if (!aiTitle || aiTitle === heuristic) return
-    const current = get().sessions.find((s) => s.id === activeSessionId)
-    if (!current || current.title !== heuristic) return
-    await get().rename(activeSessionId, aiTitle)
+    // The title is taken from the first message and then left fixed. No AI
+    // re-title pass follows — that used to change the name after the fact, which
+    // is exactly the "session name auto-changes" behaviour we're removing.
+    await get().rename(activeSessionId, title)
   },
 
   remove: async (id) => {
@@ -311,5 +256,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     } else {
       await get().refresh()
     }
+  },
+
+  rewind: async (afterMsgId) => {
+    const { activeSessionId } = get()
+    if (!activeSessionId) return null
+    // Stop any live run first — restoring files under a working run would race it.
+    useChatStore.getState().cancelSession(activeSessionId)
+    const result = await window.myto.sessions.rewind(activeSessionId, afterMsgId)
+    // Reload from disk so the truncated transcript + restored file state render.
+    await loadInto(activeSessionId, set, get)
+    return result
   }
 }))

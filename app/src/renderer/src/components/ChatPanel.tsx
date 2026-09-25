@@ -1,13 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useChatStore, type ChatMessageUI, type OutgoingAttachment } from '../store/useChatStore'
+import { useChatStore, type ChatMessageUI, type OutgoingAttachment, type ThinkingPhase } from '../store/useChatStore'
 import { usePreviewStore } from '../store/usePreviewStore'
+import { useTerminalStore } from '../store/useTerminalStore'
 import { useSessionStore } from '../store/useSessionStore'
 import { useAppStore } from '../store/useAppStore'
 import { useAuthUser } from '../lib/useAuthUser'
 import { Markdown } from './Markdown'
 import { FileCard } from './FileCard'
 import { ToolCard } from './ToolCard'
-import { parseFileBlocks, toolHeadline, type ToolSegment } from '../lib/fileBlocks'
+import { parseFileBlocks, toolHeadline, countLines, type ToolSegment } from '../lib/fileBlocks'
+import { livenessNote, STALL_ALARM_MS } from '../lib/liveness'
 import {
   startDictation,
   ttsSpeak,
@@ -19,10 +21,19 @@ import {
 import { ModelSelector } from './ModelSelector'
 import { PromptBuilder } from './PromptBuilder'
 import { MytoMark } from './MytoMark'
+import {
+  matchSlashCommands,
+  detectTrigger,
+  parseSlashInput,
+  applyCompletion,
+  type SlashCommand,
+  type TriggerToken
+} from '../lib/commands'
 import type {
   ApprovalRequest,
   CoworkPermissionMode,
   Attachment,
+  OutputStyle,
   QuestionRequest,
   ReasoningEffort,
   TodoItem
@@ -377,9 +388,31 @@ interface MessageProps {
 /** A user turn: right-aligned bubble with its attachments. */
 function UserMessage({ message, attachments }: MessageProps) {
   const displayContent = message.content.trimEnd()
+  const coworkMode = useChatStore((s) => s.coworkMode)
+  const running = useChatStore((s) => s.running)
+  const sessionId = useChatStore((s) => s.sessionId)
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+
   if (displayContent.length === 0 && attachments.length === 0) return null
+
+  // "Restore to here" (#1 rewind): undo this turn's (and every later turn's) file
+  // changes and drop the chat after it. Only meaningful in a persisted Cowork
+  // session, and never mid-run or on an unsaved draft.
+  const canRewind = coworkMode && sessionId != null && !running && !message.pending
+
+  const doRewind = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      await useSessionStore.getState().rewind(message.id)
+    } finally {
+      setBusy(false)
+      setConfirming(false)
+    }
+  }
+
   return (
-    <div className="flex flex-col items-end gap-1.5">
+    <div className="group flex flex-col items-end gap-1.5">
       {attachments.length > 0 && (
         <div className="flex flex-wrap justify-end gap-1.5">
           {attachments.map((a) => (
@@ -388,8 +421,53 @@ function UserMessage({ message, attachments }: MessageProps) {
         </div>
       )}
       {displayContent.length > 0 && (
-        <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-surface-2 px-3.5 py-2">
-          <ClampedUserText text={displayContent} />
+        <div className="flex max-w-[85%] items-start gap-1.5">
+          {canRewind && (
+            <div className="mt-1 flex shrink-0 items-center">
+              {confirming ? (
+                <div className="flex items-center gap-1 rounded-lg border border-border bg-bg px-1.5 py-1 shadow-sm">
+                  <button
+                    type="button"
+                    onClick={() => void doRewind()}
+                    disabled={busy}
+                    className="rounded-md px-2 py-0.5 text-[11px] font-medium text-rose-500 transition-colors hover:bg-rose-500/10 disabled:opacity-40"
+                    title="Restore files and chat to this point"
+                  >
+                    {busy ? 'Restoring…' : 'Restore'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirming(false)}
+                    disabled={busy}
+                    className="rounded-md px-2 py-0.5 text-[11px] font-medium text-muted transition-colors hover:text-text disabled:opacity-40"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirming(true)}
+                  aria-label="Restore to here"
+                  title="Restore files and chat to this point (discards later turns)"
+                  className="grid h-6 w-6 place-items-center rounded-md text-muted opacity-0 transition-opacity hover:bg-surface-2 hover:text-text group-hover:opacity-100"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path
+                      d="M3.5 8a4.5 4.5 0 1 0 1.32-3.18M3.5 3v2.2h2.2"
+                      stroke="currentColor"
+                      strokeWidth="1.3"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              )}
+            </div>
+          )}
+          <div className="min-w-0 rounded-2xl rounded-br-sm bg-surface-2 px-3.5 py-2">
+            <ClampedUserText text={displayContent} />
+          </div>
         </div>
       )}
     </div>
@@ -441,6 +519,48 @@ function StatusLine({ caption }: { caption: string }) {
 function ApprovalPrompt({ approval }: { approval: ApprovalRequest }) {
   const decideApproval = useChatStore((s) => s.decideApproval)
   const isExec = approval.sideEffect === 'exec'
+
+  // Plan-mode gate (#8): approve the drafted plan (shown just above as the live
+  // checklist) before Myto makes any changes, rather than a single tool call.
+  if (approval.plan) {
+    return (
+      <div className="my-2 rounded-xl border border-primary/40 bg-primary/5 px-3 py-2.5">
+        <div className="mb-2 flex items-start gap-2 text-[12.5px] leading-snug text-text">
+          <svg
+            width="15"
+            height="15"
+            viewBox="0 0 16 16"
+            fill="none"
+            aria-hidden="true"
+            className="mt-0.5 shrink-0 text-primary"
+          >
+            <path d="M3 3.5h10M3 8h10M3 12.5h6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          </svg>
+          <span>
+            Myto has a plan ready (above). Approve it to start making changes, or keep planning to
+            have it revise first.
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            onClick={() => decideApproval(approval.approvalId, 'allow')}
+            className="rounded-md bg-primary px-2.5 py-1 text-[12px] font-medium text-bg transition-opacity hover:opacity-90"
+          >
+            Approve &amp; proceed
+          </button>
+          <button
+            type="button"
+            onClick={() => decideApproval(approval.approvalId, 'deny')}
+            className="rounded-md border border-border bg-surface px-2.5 py-1 text-[12px] font-medium text-muted transition-colors hover:bg-surface-2 hover:text-text"
+          >
+            Keep planning
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="my-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2.5">
       <div className="mb-2 flex items-start gap-2 text-[12.5px] leading-snug text-text">
@@ -587,6 +707,7 @@ const FS_TOOL_NAMES = new Set([
   'search_code',
   'find_files',
   'run_command',
+  'run_dev_server',
   'spawn_agent'
 ])
 
@@ -669,19 +790,20 @@ function PlanPanel({ todos }: { todos: TodoItem[] }) {
 }
 
 /**
- * A Claude-Desktop-style collapsible group of tool steps. A turn's tool round-trips
- * are folded into ONE quiet line ("Working…" while live, "Worked for N steps" once
- * done) that the transcript keeps clean; the current action shows in the status line
- * above. Tap to expand and see each individual step. This is what keeps a long Cowork
- * run from spilling a raw "Running x / Running y / …" list down the page.
+ * A collapsible "thinking" block — one phase of the model's reasoning, slotted into
+ * the transcript where it happened (see {@link ThinkingPhase}). Collapsed to a single
+ * line whose label counts the reasoning's tokens ("Thinking · N tokens" while live and
+ * blinking, "Thought for N tokens" once sealed); tap to reveal the raw chain-of-thought.
+ * A reply can show several of these — a Cowork run reasons afresh before each tool step.
  */
-function ToolActivityGroup({ tools, cowork }: { tools: ToolSegment[]; cowork: boolean }) {
+function ThinkingBlock({ phase, live }: { phase: ThinkingPhase; live: boolean }) {
   const [expanded, setExpanded] = useState(false)
-  if (tools.length === 0) return null
-  const running = tools.some((t) => t.result === null)
-  const label = running ? 'Working…' : `Worked for ${tools.length} step${tools.length === 1 ? '' : 's'}`
+  const tokens = estimateTokens(phase.text)
+  const label = live
+    ? `Thinking · ${tokens.toLocaleString()} tokens`
+    : `Thought for ${tokens.toLocaleString()} tokens`
   return (
-    <div className="my-2">
+    <div className="myto-step-in my-2">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
@@ -689,16 +811,24 @@ function ToolActivityGroup({ tools, cowork }: { tools: ToolSegment[]; cowork: bo
         className="flex items-center gap-2 text-[12px] text-muted transition-colors hover:text-text"
       >
         <span className="grid shrink-0 place-items-center">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 16 16"
+            fill="none"
+            aria-hidden="true"
+            className={live ? 'myto-blink' : ''}
+          >
             <path
-              d="M10.6 3.2a2.6 2.6 0 0 0-3.3 3.3l-4.4 4.4a1 1 0 1 0 1.4 1.4l4.4-4.4a2.6 2.6 0 0 0 3.3-3.3l-1.4 1.4-1.4-.4-.4-1.4 1.4-1.4z"
+              d="M8 1.75c-2.6 0-4.5 1.9-4.5 4.2 0 1.5.8 2.6 1.7 3.4.5.5.8 1 .8 1.7v.2h4v-.2c0-.7.3-1.2.8-1.7.9-.8 1.7-1.9 1.7-3.4 0-2.3-1.9-4.2-4.5-4.2Z"
               stroke="currentColor"
               strokeWidth="1.3"
               strokeLinejoin="round"
             />
+            <path d="M6.25 14h3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
           </svg>
         </span>
-        <span className={running ? 'myto-thinking font-medium' : 'font-medium'}>{label}</span>
+        <span className={live ? 'myto-thinking font-medium' : 'font-medium'}>{label}</span>
         <svg
           width="12"
           height="12"
@@ -710,11 +840,9 @@ function ToolActivityGroup({ tools, cowork }: { tools: ToolSegment[]; cowork: bo
           <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
-      {expanded && (
-        <div className="mt-1 border-l border-border/60 pl-3">
-          {tools.map((t, i) => (
-            <ToolCard key={i} tool={t} cowork={cowork} />
-          ))}
+      {expanded && phase.text && (
+        <div className="mt-1 whitespace-pre-wrap border-l border-border/60 pl-3 text-[12px] leading-relaxed text-muted">
+          {phase.text}
         </div>
       )}
     </div>
@@ -739,8 +867,25 @@ function estimateTokens(text: string): number {
  * While the reply streams it updates live (a 1s tick + the growing content); once
  * the turn ends it freezes at the final values. Self-contained — it times from its
  * own mount (which coincides with the reply appearing), so no store plumbing.
+ *
+ * While streaming it also owns the liveness readout: the elapsed clock alone keeps
+ * climbing even after the model goes silent, which reads as "still working" when the
+ * stream is dead. `activityAt` is the last time the run actually produced output (set
+ * in useChatStore); once the gap grows past a threshold we append an honest note
+ * ("still working · no new output for Ns" → "…may have stalled") so a hung run is
+ * unmistakable. A truly dead stream is aborted by the 60s guard (in step with the
+ * "may have stalled" threshold) and becomes an error + Rewrite at that same moment.
  */
-function MessageMeta({ content, pending }: { content: string; pending: boolean }) {
+function MessageMeta({
+  content,
+  pending,
+  activityAt
+}: {
+  content: string
+  pending: boolean
+  /** `Date.now()` of the run's last real output; drives the stall note while pending. */
+  activityAt?: number
+}) {
   const startRef = useRef<number>(Date.now())
   const [, forceTick] = useState(0)
   const frozenRef = useRef<number | null>(null)
@@ -757,22 +902,43 @@ function MessageMeta({ content, pending }: { content: string; pending: boolean }
 
   const elapsed = frozenRef.current ?? Date.now() - startRef.current
   const tokens = estimateTokens(content)
+  // Idle since the last real output. The 1s tick above re-runs this each second, and
+  // a fresh chunk lands a new `activityAt` via the store, so the note clears the
+  // instant output resumes. Only meaningful while pending and once we've seen output.
+  const note = pending && activityAt ? livenessNote(Date.now() - activityAt) : null
+  const alarming = pending && activityAt ? Date.now() - activityAt >= STALL_ALARM_MS : false
   return (
     <div className="mt-1 flex items-center gap-2 text-[11px] tabular-nums text-muted/70">
       <span>{fmtElapsed(elapsed)}</span>
       <span aria-hidden="true">·</span>
       <span>{tokens.toLocaleString()} tokens</span>
+      {note && (
+        <>
+          <span aria-hidden="true">·</span>
+          <span className={alarming ? 'text-amber-500' : 'text-muted'} aria-live="polite">
+            {note}
+          </span>
+        </>
+      )}
     </div>
   )
 }
 
-/** One block to render in an assistant reply: prose, a generated file, or a folded tool group. */
+/** One block to render in an assistant reply: prose, a generated file, a tool step, or a thinking phase. */
 type RenderItem =
   | { kind: 'prose'; text: string }
   | { kind: 'file'; file: Extract<ReturnType<typeof parseFileBlocks>[number], { kind: 'file' }> }
-  | { kind: 'toolgroup'; tools: ToolSegment[] }
+  | { kind: 'tool'; tool: ToolSegment }
+  | { kind: 'think'; phase: ThinkingPhase }
 
-function AssistantMessage({ message }: { message: ChatMessageUI }) {
+function AssistantMessage({
+  message,
+  prevFileLines
+}: {
+  message: ChatMessageUI
+  /** Per-file-card previous same-path line counts (for the Cowork `−N`), in card order. */
+  prevFileLines?: (number | null)[]
+}) {
   const displayContent = message.content.trimEnd()
   // Split the reply into prose and generated-file blocks so files render as
   // downloadable cards while everything else stays ordinary Markdown. A reply with
@@ -795,33 +961,42 @@ function AssistantMessage({ message }: { message: ChatMessageUI }) {
     }
     return null
   }, [segments])
-  // Fold consecutive tool round-trips into one collapsible group (Claude-Desktop
-  // style) so the transcript never becomes a raw "Running x / Running y" list.
-  // update_plan is dropped here — it has no card; the PlanPanel above owns it.
-  const renderItems = useMemo<RenderItem[]>(() => {
+  // Interleave the reply's prose/file/tool segments with its thinking phases,
+  // sliced by each phase's content offset (the phases sit on turn boundaries, so a
+  // slice never splits a fence — see useChatStore/provider-ipc). Each tool step now
+  // renders on its own real-time line (no "Worked for N steps" fold); update_plan is
+  // dropped here — it has no card; the PlanPanel above owns it.
+  const flat = useMemo<RenderItem[]>(() => {
     const items: RenderItem[] = []
-    let group: ToolSegment[] = []
-    const flush = (): void => {
-      if (group.length) {
-        items.push({ kind: 'toolgroup', tools: group })
-        group = []
+    const pushContent = (text: string): void => {
+      if (!text) return
+      for (const seg of parseFileBlocks(text)) {
+        if (seg.kind === 'tool') {
+          if (seg.name === 'update_plan') continue
+          items.push({ kind: 'tool', tool: seg })
+        } else if (seg.kind === 'file') {
+          items.push({ kind: 'file', file: seg })
+        } else {
+          items.push({ kind: 'prose', text: seg.text })
+        }
       }
     }
-    for (const seg of segments) {
-      if (seg.kind === 'tool') {
-        if (seg.name === 'update_plan') continue
-        group.push(seg)
-      } else if (seg.kind === 'file') {
-        flush()
-        items.push({ kind: 'file', file: seg })
-      } else {
-        flush()
-        items.push({ kind: 'prose', text: seg.text })
-      }
+    const phases = message.thinking ?? []
+    if (phases.length === 0) {
+      pushContent(displayContent)
+      return items
     }
-    flush()
+    const len = displayContent.length
+    let cursor = 0
+    for (const phase of phases) {
+      const at = Math.max(cursor, Math.min(phase.at, len))
+      pushContent(displayContent.slice(cursor, at))
+      items.push({ kind: 'think', phase })
+      cursor = at
+    }
+    pushContent(displayContent.slice(cursor))
     return items
-  }, [segments])
+  }, [displayContent, message.thinking])
   return (
     <div className="min-w-0 pl-4">
       {message.error && (
@@ -834,26 +1009,41 @@ function AssistantMessage({ message }: { message: ChatMessageUI }) {
         <StatusLine caption={activeToolCaption ?? statusCaption(message, displayContent)} />
       )}
 
-      {renderItems.map((item, i) =>
-        item.kind === 'file' ? (
-          <FileCard key={`f${i}`} file={item.file} />
-        ) : item.kind === 'toolgroup' ? (
-          <ToolActivityGroup key={`g${i}`} tools={item.tools} cowork={coworkTurn} />
-        ) : (
+      {(() => {
+        // Walk the render items, handing each file card its previous same-path line
+        // count by occurrence order. A plain counter (not the map index) keeps the
+        // pairing correct even with tool/think items and prose interleaved.
+        let fileIdx = 0
+        return flat.map((item, i) => {
+          if (item.kind === 'file') {
+            const prev = prevFileLines ? prevFileLines[fileIdx] : null
+            fileIdx++
+            return <FileCard key={`f${i}`} file={item.file} cowork={coworkTurn} prevLines={prev} />
+          }
+          if (item.kind === 'tool') {
+            return <ToolCard key={`t${i}`} tool={item.tool} cowork={coworkTurn} />
+          }
+          if (item.kind === 'think') {
+            return (
+              <ThinkingBlock key={`k${i}`} phase={item.phase} live={!item.phase.done && !!message.pending} />
+            )
+          }
           // Myto's own reply prose is set in Georgia (serif), distinct from the UI's
           // sans — the one place the assistant's "voice" is typographically its own.
-          <div key={`p${i}`} className="myto-reply font-serif">
-            <Markdown content={item.text} />
-          </div>
-        )
-      )}
+          return (
+            <div key={`p${i}`} className="myto-reply font-serif">
+              <Markdown content={item.text} />
+            </div>
+          )
+        })
+      })()}
 
       {message.pendingApproval && <ApprovalPrompt approval={message.pendingApproval} />}
 
       {message.pendingQuestion && <QuestionPrompt question={message.pendingQuestion} />}
 
       {(message.pending || displayContent.length > 0) && (
-        <MessageMeta content={displayContent} pending={!!message.pending} />
+        <MessageMeta content={displayContent} pending={!!message.pending} activityAt={message.activityAt} />
       )}
 
       {!message.pending && (displayContent.length > 0 || message.error != null) && (
@@ -864,58 +1054,60 @@ function AssistantMessage({ message }: { message: ChatMessageUI }) {
 }
 
 /** Dispatches to the user/assistant layout. */
-function Message({ message, attachments }: MessageProps) {
+function Message({
+  message,
+  attachments,
+  prevFileLines
+}: MessageProps & { prevFileLines?: (number | null)[] }) {
   return message.role === 'user' ? (
     <UserMessage message={message} attachments={attachments} />
   ) : (
-    <AssistantMessage message={message} />
-  )
-}
-
-/** Theme toggle: sun in light, moon in dark. */
-function ThemeToggle() {
-  const theme = useAppStore((s) => s.theme)
-  const setTheme = useAppStore((s) => s.setTheme)
-  return (
-    <button
-      type="button"
-      aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-      title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
-      onClick={() => void setTheme(theme === 'dark' ? 'light' : 'dark')}
-      className="grid h-7 w-7 place-items-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-text"
-    >
-      {theme === 'dark' ? (
-        <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-          <path
-            d="M16 11.5A6.5 6.5 0 0 1 8.5 4a6.5 6.5 0 1 0 7.5 7.5Z"
-            stroke="currentColor"
-            strokeWidth="1.4"
-            strokeLinejoin="round"
-          />
-        </svg>
-      ) : (
-        <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-          <circle cx="10" cy="10" r="3.5" stroke="currentColor" strokeWidth="1.4" />
-          <path
-            d="M10 2v2M10 16v2M2 10h2M16 10h2M4.2 4.2l1.4 1.4M14.4 14.4l1.4 1.4M15.8 4.2l-1.4 1.4M5.6 14.4l-1.4 1.4"
-            stroke="currentColor"
-            strokeWidth="1.4"
-            strokeLinecap="round"
-          />
-        </svg>
-      )}
-    </button>
+    <AssistantMessage message={message} prevFileLines={prevFileLines} />
   )
 }
 
 /**
- * The main surface's top strip: the plan/billing note centered (inert chrome that
- * mirrors the reference app), the Myto mascot and theme toggle on the right, and
- * — only when the rail is collapsed — a control on the left to reopen it.
+ * The main surface's top strip. On the right: Prompt DNA (the structured-prompt
+ * builder toggle) and the two side-pane toggles — Terminal and Preview. On the
+ * left, only when the rail is collapsed, a control to reopen it. (The old dark-mode
+ * toggle moved to Customize › Appearance; theme still follows the OS by default.)
  */
 function MainTopBar() {
   const railOpen = useAppStore((s) => s.railOpen)
   const toggleRail = useAppStore((s) => s.toggleRail)
+  // Prompt DNA: flips the composer between the plain textarea and the structured
+  // PromptBuilder. `composerMode` is global store state, so the button lives here in
+  // the top bar (Task 3) while the builder it controls renders down in the composer.
+  const composerMode = useChatStore((s) => s.composerMode)
+  const setComposerMode = useChatStore((s) => s.setComposerMode)
+  // The two right-hand side panes. Opening one closes the other so the toggles stay
+  // honest (AppLayout renders a single slot with terminal precedence).
+  const previewOpen = usePreviewStore((s) => s.open)
+  const revealPreview = usePreviewStore((s) => s.reveal)
+  const closePreview = usePreviewStore((s) => s.close)
+  const terminalOpen = useTerminalStore((s) => s.open)
+  const showTerminal = useTerminalStore((s) => s.show)
+  const closeTerminal = useTerminalStore((s) => s.close)
+
+  const dnaActive = composerMode === 'builder'
+  const dnaLabel = dnaActive ? 'Back to plain text' : 'Prompt DNA — build a structured prompt'
+  const togglePreview = (): void => {
+    if (previewOpen) closePreview()
+    else {
+      revealPreview()
+      closeTerminal()
+    }
+  }
+  const toggleTerminal = (): void => {
+    if (terminalOpen) closeTerminal()
+    else {
+      showTerminal()
+      closePreview()
+    }
+  }
+  const topIcon = (active: boolean): string =>
+    'grid h-7 w-7 place-items-center rounded-md transition-colors ' +
+    (active ? 'bg-surface-2 text-text' : 'text-muted hover:bg-surface-2 hover:text-text')
   return (
     <div className="relative flex h-11 shrink-0 items-center px-3">
       <div className="flex items-center">
@@ -936,7 +1128,46 @@ function MainTopBar() {
       </div>
 
       <div className="ml-auto flex items-center gap-1">
-        <ThemeToggle />
+        <button
+          type="button"
+          aria-label={dnaLabel}
+          aria-pressed={dnaActive}
+          title={dnaLabel}
+          onClick={() => setComposerMode(dnaActive ? 'text' : 'builder')}
+          className={topIcon(dnaActive)}
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M5 2c0 3 6 3 6 6s-6 3-6 6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            <path d="M11 2c0 3-6 3-6 6s6 3 6 6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            <path d="M5.6 4.5h4.8M4.7 8h6.6M5.6 11.5h4.8" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          aria-label={terminalOpen ? 'Hide terminal' : 'Show terminal'}
+          aria-pressed={terminalOpen}
+          title="Terminal — Cowork command output"
+          onClick={toggleTerminal}
+          className={topIcon(terminalOpen)}
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+            <path d="M4.5 6.5 6.5 8l-2 1.5M8 9.5h3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          aria-label={previewOpen ? 'Hide preview' : 'Show preview'}
+          aria-pressed={previewOpen}
+          title="Preview — Myto's in-app browser"
+          onClick={togglePreview}
+          className={topIcon(previewOpen)}
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+            <path d="M2 5.7h12" stroke="currentColor" strokeWidth="1.3" />
+          </svg>
+        </button>
       </div>
     </div>
   )
@@ -1036,6 +1267,8 @@ const PERMISSION_MODES: { value: CoworkPermissionMode; label: string; hint: stri
 function CoworkPermissionMenu() {
   const mode = useAppStore((s) => s.settings.cowork.permissionMode)
   const setMode = useAppStore((s) => s.setCoworkPermissionMode)
+  const planMode = useAppStore((s) => s.settings.cowork.planMode)
+  const setPlanMode = useAppStore((s) => s.setCoworkPlanMode)
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const current = PERMISSION_MODES.find((m) => m.value === mode) ?? PERMISSION_MODES[0]
@@ -1053,15 +1286,15 @@ function CoworkPermissionMenu() {
   const danger = mode === 'bypass'
   return (
     <div ref={ref} className="relative">
+      {/* Minimal trigger — plain text, no background / border / container — so it
+          sits quietly in the composer's bottom-left control row. */}
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        title="Cowork permissions"
+        title="Cowork permissions & plan mode"
         className={
-          'flex items-center gap-1 rounded-[6px] px-2.5 py-1 text-[12px] font-medium transition-colors ' +
-          (danger
-            ? 'bg-red-600 text-white hover:bg-red-500'
-            : 'bg-black text-white hover:bg-neutral-800')
+          'flex items-center gap-1 rounded-md px-1 py-1 text-[11px] font-medium transition-colors ' +
+          (danger ? 'text-red-500 hover:text-red-400' : 'text-muted hover:text-text')
         }
       >
         <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -1072,13 +1305,40 @@ function CoworkPermissionMenu() {
             strokeLinejoin="round"
           />
         </svg>
-        {current.label}
-        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="text-muted">
+        <span>{current.label}</span>
+        {planMode && <span className="text-primary">· Plan</span>}
+        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
           <path d="M3 4.5L6 7.5l3-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
       {open && (
-        <div className="absolute bottom-full right-0 z-20 mb-1.5 w-60 rounded-xl border border-border bg-surface p-1 shadow-lg">
+        <div className="absolute bottom-full left-0 z-20 mb-1.5 w-64 rounded-xl border border-border bg-surface p-1 shadow-lg">
+          {/* Plan mode toggle — moved in from the old standalone button. Toggling
+              keeps the menu open so the change is visible before you dismiss it. */}
+          <button
+            type="button"
+            onClick={() => void setPlanMode(!planMode)}
+            className="flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors hover:bg-surface-2"
+          >
+            <span className="flex flex-col items-start gap-0.5">
+              <span className="text-[12.5px] font-medium text-text">Plan mode</span>
+              <span className="text-[11px] text-muted">Outline a plan, wait for approval before editing</span>
+            </span>
+            <span
+              className={
+                'shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ' +
+                (planMode ? 'bg-primary text-bg' : 'bg-surface-2 text-muted')
+              }
+            >
+              {planMode ? 'On' : 'Off'}
+            </span>
+          </button>
+
+          <div className="my-1 h-px bg-border" />
+          <div className="px-2.5 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
+            Permissions
+          </div>
+
           {PERMISSION_MODES.map((m) => (
             <button
               key={m.value}
@@ -1180,6 +1440,75 @@ function EffortMenu() {
   )
 }
 
+const STYLE_OPTIONS: { value: OutputStyle; label: string; hint: string }[] = [
+  { value: 'default', label: 'Default', hint: 'Myto’s normal voice' },
+  { value: 'concise', label: 'Concise', hint: 'Short — result first, minimal prose' },
+  { value: 'explanatory', label: 'Explanatory', hint: 'Narrates the “why” and trade-offs' },
+  { value: 'learning', label: 'Learning', hint: 'Collaborative — leaves spots for you' }
+]
+
+/**
+ * The response-style selector (#13): a small popover mirroring {@link EffortMenu}
+ * to pick Myto's writing voice. The choice persists globally and is injected as a
+ * system directive on every turn; `default` adds none. Also settable in Settings.
+ */
+function StyleMenu() {
+  const style = useAppStore((s) => s.settings.outputStyle)
+  const setStyle = useAppStore((s) => s.setOutputStyle)
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const current = STYLE_OPTIONS.find((t) => t.value === style) ?? STYLE_OPTIONS[0]
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent): void => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title="Response style — how Myto writes back"
+        className="flex items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-[12px] font-medium text-text/80 transition-colors hover:bg-surface-2"
+      >
+        {style === 'default' ? 'Style' : current.label}
+        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="text-muted">
+          <path d="M3 4.5L6 7.5l3-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute bottom-full right-0 z-20 mb-1.5 w-56 rounded-xl border border-border bg-surface p-1 shadow-lg">
+          {STYLE_OPTIONS.map((t) => (
+            <button
+              key={t.value}
+              type="button"
+              onClick={() => {
+                void setStyle(t.value)
+                setOpen(false)
+              }}
+              className={
+                'flex w-full flex-col items-start gap-0.5 rounded-lg px-2.5 py-1.5 text-left transition-colors hover:bg-surface-2 ' +
+                (t.value === style ? 'bg-surface-2' : '')
+              }
+            >
+              <span className="text-[12.5px] font-medium text-text">
+                {t.label}
+                {t.value === style ? ' ✓' : ''}
+              </span>
+              <span className="text-[11px] text-muted">{t.hint}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ChatPanel() {
   const messages = useChatStore((s) => s.messages)
   const attachments = useChatStore((s) => s.attachments)
@@ -1197,6 +1526,12 @@ export function ChatPanel() {
   // Cowork's working folder (persisted in settings) + the picker that arms it.
   const workspaceDir = useAppStore((s) => s.settings.cowork.workspaceDir)
   const pickCoworkWorkspace = useAppStore((s) => s.pickCoworkWorkspace)
+  // Slash-command targets (#6): plan-mode + verify-command settings and the Settings
+  // panel opener. Read planMode so `/plan` can report the state it toggled to.
+  const planMode = useAppStore((s) => s.settings.cowork.planMode)
+  const setCoworkPlanMode = useAppStore((s) => s.setCoworkPlanMode)
+  const setCoworkVerifyCommand = useAppStore((s) => s.setCoworkVerifyCommand)
+  const openSettings = useAppStore((s) => s.openSettings)
 
   // A model must be configured on the account before chat can send. The store's
   // modelId mirrors the account's Firestore config (and is cached in settings.json
@@ -1217,6 +1552,13 @@ export function ChatPanel() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Composer autocomplete (#6 slash commands + #7 @file mentions): the live trigger
+  // parsed from the caret, the async-loaded file matches for a mention, and the
+  // highlighted row. `null` trigger = popover closed.
+  const [trigger, setTrigger] = useState<TriggerToken | null>(null)
+  const [mentionFiles, setMentionFiles] = useState<string[]>([])
+  const [activeIdx, setActiveIdx] = useState(0)
 
   // Voice: dictation (mic) + hands-free voice mode + read-aloud. `dictating` is true
   // while the mic is capturing; `voiceMode` is the hands-free loop (read replies aloud,
@@ -1247,6 +1589,28 @@ export function ChatPanel() {
     }
     return map
   }, [attachments])
+
+  // For each assistant message, the previous same-path line count of every file
+  // card it renders (in card order) — what the Cowork `+N −N` badge diffs against.
+  // Walked once across the whole transcript so a file rewritten in a later turn
+  // still diffs against the version from an earlier one; a fresh path → null (−0).
+  const prevFileLinesByMessage = useMemo(() => {
+    const lastLines = new Map<string, number>()
+    const byMessage = new Map<string, (number | null)[]>()
+    for (const m of messages) {
+      // Only assistant turns carry file cards; the `` ``` `` guard skips prose-only
+      // turns so a long transcript isn't re-parsed line-by-line every token.
+      if (m.role !== 'assistant' || !m.content.includes('```')) continue
+      const perMsg: (number | null)[] = []
+      for (const seg of parseFileBlocks(m.content.trimEnd())) {
+        if (seg.kind !== 'file') continue
+        perMsg.push(lastLines.has(seg.path) ? (lastLines.get(seg.path) as number) : null)
+        lastLines.set(seg.path, countLines(seg.code))
+      }
+      if (perMsg.length) byMessage.set(m.id, perMsg)
+    }
+    return byMessage
+  }, [messages])
 
   // Auto-scroll to the newest content as it streams in.
   useLayoutEffect(() => {
@@ -1324,10 +1688,174 @@ export function ChatPanel() {
     void stageFiles(files)
   }
 
+  // Paste an image straight from the clipboard (#11): a screenshot copied with the OS
+  // grab tool, or "copy image" from a browser, arrives as a file item on the paste
+  // event. Hand any image blobs to the same stageFiles path drag-drop uses; leave
+  // text pastes to the textarea's default handling untouched.
+  const onPaste = (event: React.ClipboardEvent): void => {
+    const items = event.clipboardData?.items
+    if (!items) return
+    const images: File[] = []
+    for (const item of Array.from(items)) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        const file = item.getAsFile()
+        if (file) images.push(file)
+      }
+    }
+    if (images.length === 0) return
+    // We consumed the paste as an attachment; don't also let the raw bytes land as
+    // garbage text in the textarea.
+    event.preventDefault()
+    void stageFiles(images)
+  }
+
+  // Screenshot button (#11): capture the primary display via the main process and
+  // stage it like any other image. Reads the whole screen — user-initiated only,
+  // never automatic. No-op (with a console note) if capture is unavailable/denied.
+  const captureScreenshot = async (): Promise<void> => {
+    try {
+      const shot = await window.myto.screenshot.capture()
+      if (!shot) {
+        console.info('[myto] screenshot unavailable — paste one instead (Ctrl/Cmd+V)')
+        return
+      }
+      const bytes = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0))
+      const file = new File([bytes], shot.name, { type: shot.mime })
+      await stageFiles([file])
+    } catch (err) {
+      console.error('[myto] screenshot capture failed:', err)
+    }
+  }
+
+  // ---- Composer autocomplete (#6 slash commands + #7 @file mentions) ----------
+
+  const closeMenu = (): void => {
+    setTrigger(null)
+    setMentionFiles([])
+    setActiveIdx(0)
+  }
+
+  // Textarea change: update the text and re-derive the active trigger from the caret.
+  // Only the plain-text composer autocompletes; the Prompt DNA builder has no textarea.
+  const onChangeText = (value: string, caret: number): void => {
+    setInput(value)
+    const t = composerMode === 'builder' ? null : detectTrigger(value, caret)
+    setTrigger(t)
+    setActiveIdx(0)
+    if (!t || t.kind !== 'mention') setMentionFiles([])
+  }
+
+  // Run a chosen slash command. These are renderer-side effects — clear the chat,
+  // flip modes, jump into Settings — resolved here where the stores are in scope.
+  const runSlashCommand = (cmd: SlashCommand, arg: string): void => {
+    closeMenu()
+    switch (cmd.id) {
+      case 'help':
+        // Re-open the full catalogue: leave a bare "/" so the popover lists everything.
+        setInput('/')
+        setTrigger({ kind: 'slash', query: '', start: 0, end: 1 })
+        requestAnimationFrame(() => {
+          const el = textareaRef.current
+          if (el) {
+            el.focus()
+            el.setSelectionRange(1, 1)
+          }
+        })
+        return
+      case 'clear':
+        setInput('')
+        void useSessionStore.getState().newDraft()
+        return
+      case 'cowork':
+        setInput('')
+        setCoworkMode(true)
+        return
+      case 'chat':
+        setInput('')
+        setCoworkMode(false)
+        return
+      case 'plan':
+        // Plan mode only means anything in Cowork, so arm Cowork alongside it.
+        setInput('')
+        if (!coworkMode) setCoworkMode(true)
+        void setCoworkPlanMode(!planMode)
+        return
+      case 'verify':
+        // With an argument, set the verify command directly; without one, reveal it in Settings.
+        setInput('')
+        if (arg) void setCoworkVerifyCommand(arg)
+        else openSettings('tools')
+        return
+      case 'model':
+        setInput('')
+        openSettings('model')
+        return
+      case 'style':
+        setInput('')
+        openSettings('tools')
+        return
+      case 'install':
+        setInput('')
+        openSettings('plugins')
+        return
+    }
+  }
+
+  // Accept the highlighted popover row: a slash command runs; a file mention splices
+  // its `@path` into the text at the trigger range.
+  const acceptCompletion = (index: number): void => {
+    if (!trigger) return
+    if (trigger.kind === 'slash') {
+      const cmd = matchSlashCommands(trigger.query)[index]
+      if (cmd) runSlashCommand(cmd, '')
+      return
+    }
+    const path = mentionFiles[index]
+    if (!path) return
+    const { text, caret } = applyCompletion(input, trigger, `@${path}`)
+    setInput(text)
+    closeMenu()
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (el) {
+        el.focus()
+        el.setSelectionRange(caret, caret)
+      }
+    })
+  }
+
+  // Load workspace file matches whenever a mention trigger is active. The main-process
+  // lister is sandboxed to the Cowork folder and returns [] when none is set, so this
+  // simply shows nothing outside a Cowork sandbox.
+  useEffect(() => {
+    if (!trigger || trigger.kind !== 'mention') return
+    let cancelled = false
+    void window.myto.cowork.listFiles(trigger.query).then((files) => {
+      if (!cancelled) setMentionFiles(files)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [trigger])
+
+  const slashItems = trigger?.kind === 'slash' ? matchSlashCommands(trigger.query) : []
+  const menuCount =
+    trigger?.kind === 'slash' ? slashItems.length : trigger?.kind === 'mention' ? mentionFiles.length : 0
+  const menuOpen = trigger !== null && menuCount > 0
+
   // Send a specific piece of text (plus any staged attachments). Shared by the composer's
   // submit and by hands-free voice mode, which submits a spoken utterance directly rather
   // than round-tripping through the input state.
   const submitText = async (text: string): Promise<void> => {
+    // Fast path: a whole slash command typed and sent without touching the popover.
+    // Resolve it as an action instead of sending it as a message.
+    if (composerMode !== 'builder') {
+      const parsed = parseSlashInput(text)
+      if (parsed) {
+        runSlashCommand(parsed.command, parsed.arg)
+        return
+      }
+    }
     if ((text.trim().length === 0 && pending.length === 0) || running || !hasModel) return
 
     const outgoing: OutgoingAttachment[] = pending.map((p) => ({
@@ -1351,6 +1879,29 @@ export function ChatPanel() {
   const submit = (): Promise<void> => submitText(input)
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
+    // The autocomplete popover claims the nav keys before submit/newline handling.
+    if (menuOpen) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault()
+        setActiveIdx((i) => (i + 1) % menuCount)
+        return
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault()
+        setActiveIdx((i) => (i - 1 + menuCount) % menuCount)
+        return
+      }
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        event.preventDefault()
+        acceptCompletion(activeIdx)
+        return
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeMenu()
+        return
+      }
+    }
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       void submit()
@@ -1511,20 +2062,13 @@ export function ChatPanel() {
   // The working folder's leaf name, for the Cowork chip (Windows or POSIX path).
   const folderLabel = workspaceDir.split(/[\\/]/).filter(Boolean).pop() ?? ''
 
-  // Switch to Cowork; if no folder is chosen yet, open the picker straight away so
-  // the file tools have somewhere to work.
-  const enableCowork = (): void => {
-    setCoworkMode(true)
-    if (!workspaceDir.trim()) void pickCoworkWorkspace()
-  }
-
   /**
    * The composer card — reused by the landing hero and the pinned bottom bar. A
-   * big rounded field with a control row beneath it: attach + Chat/Cowork on the
-   * left; model, reasoning effort, mic and send on the right. The Chat/Cowork
-   * toggle is live — Cowork switches the turn into agentic mode over the chosen
-   * working folder. The effort pill and the mic/voice controls remain inert chrome
-   * that mirrors the reference app; attach, the model picker and send are wired up.
+   * big rounded field with a control row beneath it: attach on the left; model,
+   * reasoning effort, mic and send on the right. The Chat/Cowork toggle now lives in
+   * the left rail (above New) and Prompt DNA in the top bar; the mic/voice controls
+   * remain inert chrome that mirrors the reference app; attach, the model picker and
+   * send are wired up.
    */
   const renderComposer = (placeholder: string): ReactNode => (
     <div
@@ -1551,11 +2095,23 @@ export function ChatPanel() {
         </div>
       )}
 
-      {/* Cowork context row — OUTSIDE and above the composer box: the working
-          folder on the left, the permission tier on the right. Both are solid
-          black chips with a 6px radius. */}
-      {coworkMode && (
-        <div className="mb-2 flex items-center justify-between gap-2">
+      {/* Plan-mode banner (#8): a persistent reminder, shown only while plan mode is
+          armed, that Myto will plan and wait for approval before touching the folder. */}
+      {coworkMode && planMode && (
+        <div className="mb-2 flex items-start gap-1.5 rounded-[6px] border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-[11.5px] leading-snug text-primary">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="mt-0.5 shrink-0">
+            <path d="M3 3.5h10M3 8h10M3 12.5h6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          </svg>
+          <span>Plan mode — Myto will research, outline a plan, and wait for your approval before editing.</span>
+        </div>
+      )}
+
+      {/* Working-folder chip — shown ABOVE the composer only before the first
+          message is sent; once the chat is under way it's hidden to keep the
+          composer clean. Plan mode + the permission tier now live inside the
+          permission control at the composer's bottom-left. */}
+      {coworkMode && isEmpty && (
+        <div className="mb-2 flex items-center">
           <button
             type="button"
             onClick={() => void pickCoworkWorkspace()}
@@ -1572,17 +2128,69 @@ export function ChatPanel() {
             </svg>
             <span className="max-w-[200px] truncate">{folderLabel || 'Choose folder'}</span>
           </button>
-
-          <CoworkPermissionMenu />
         </div>
       )}
 
       <div
         className={
-          'rounded-[22px] border bg-surface px-3.5 pb-2 pt-3 shadow-sm transition-colors focus-within:border-primary/50 ' +
+          'relative rounded-[22px] border bg-surface px-3.5 pb-2 pt-3 shadow-sm transition-colors focus-within:border-primary/50 ' +
           (dragging ? 'border-primary' : 'border-border')
         }
       >
+        {/* Composer autocomplete popover (#6 slash commands / #7 @file mentions).
+            Anchored above the field; mouse-down (not click) so the textarea keeps
+            focus through the selection. */}
+        {menuOpen && (
+          <div className="absolute bottom-full left-0 right-0 z-30 mb-2 max-h-64 overflow-y-auto rounded-xl border border-border bg-surface p-1 shadow-lg">
+            {trigger?.kind === 'slash'
+              ? slashItems.map((c, i) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onMouseDown={(e) => {
+                      e.preventDefault()
+                      acceptCompletion(i)
+                    }}
+                    onMouseEnter={() => setActiveIdx(i)}
+                    className={
+                      'flex w-full items-baseline gap-2 rounded-lg px-2.5 py-1.5 text-left ' +
+                      (i === activeIdx ? 'bg-surface-2' : '')
+                    }
+                  >
+                    <span
+                      className={
+                        'font-mono text-[12.5px] font-medium ' + (c.danger ? 'text-red-500' : 'text-text')
+                      }
+                    >
+                      /{c.name}
+                    </span>
+                    {c.arg && <span className="font-mono text-[11px] text-muted">&lt;{c.arg}&gt;</span>}
+                    <span className="ml-auto truncate pl-2 text-[11px] text-muted">{c.hint}</span>
+                  </button>
+                ))
+              : mentionFiles.map((path, i) => (
+                  <button
+                    key={path}
+                    type="button"
+                    onMouseDown={(e) => {
+                      e.preventDefault()
+                      acceptCompletion(i)
+                    }}
+                    onMouseEnter={() => setActiveIdx(i)}
+                    className={
+                      'flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left ' +
+                      (i === activeIdx ? 'bg-surface-2' : '')
+                    }
+                  >
+                    <span className="shrink-0 truncate font-mono text-[12px] text-text">
+                      {path.split('/').pop()}
+                    </span>
+                    <span className="ml-auto truncate pl-2 text-[11px] text-muted">{path}</span>
+                  </button>
+                ))}
+          </div>
+        )}
+
         <input ref={fileInputRef} type="file" multiple onChange={onFilesPicked} className="hidden" />
 
         {composerMode === 'builder' ? (
@@ -1600,8 +2208,9 @@ export function ChatPanel() {
             ref={textareaRef}
             rows={1}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => onChangeText(e.target.value, e.target.selectionStart ?? e.target.value.length)}
             onKeyDown={onKeyDown}
+            onPaste={onPaste}
             placeholder={
               dragging
                 ? 'Drop files to attach…'
@@ -1617,23 +2226,6 @@ export function ChatPanel() {
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              aria-label={composerMode === 'builder' ? 'Back to plain text' : 'Build a structured prompt'}
-              title={composerMode === 'builder' ? 'Back to plain text' : 'Prompt DNA — build a structured prompt'}
-              onClick={() => setComposerMode(composerMode === 'builder' ? 'text' : 'builder')}
-              className={
-                'grid h-8 w-8 shrink-0 place-items-center rounded-full border transition-colors ' +
-                (composerMode === 'builder'
-                  ? 'border-primary/60 bg-primary/10 text-primary'
-                  : 'border-border text-muted hover:bg-surface-2 hover:text-text')
-              }
-            >
-              <span className="text-[15px] leading-none" aria-hidden="true">
-                🧬
-              </span>
-            </button>
-
-            <button
-              type="button"
               aria-label="Attach files"
               title={canAttach ? 'Attach files' : 'Send a message first to attach files'}
               disabled={!canAttach}
@@ -1644,39 +2236,33 @@ export function ChatPanel() {
                 <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
               </svg>
             </button>
+            <button
+              type="button"
+              aria-label="Attach a screenshot"
+              title="Capture a screenshot of your screen and attach it"
+              onClick={() => void captureScreenshot()}
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-border text-muted transition-colors hover:bg-surface-2 hover:text-text"
+            >
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path
+                  d="M5.5 3.5l.9-1.3h3.2l.9 1.3H13a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h2.5z"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                  strokeLinejoin="round"
+                />
+                <circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.2" />
+              </svg>
+            </button>
 
-            {/* Chat / Cowork mode toggle. Cowork gives the model filesystem tools
-                scoped to the chosen working folder + a larger agentic budget. */}
-            <div className="flex items-center rounded-full border border-border bg-surface p-0.5 text-[12px]">
-              <button
-                type="button"
-                onClick={() => setCoworkMode(false)}
-                aria-pressed={!coworkMode}
-                className={
-                  'rounded-full px-2.5 py-1 font-medium transition-colors ' +
-                  (!coworkMode ? 'bg-surface-2 text-text' : 'text-muted hover:text-text')
-                }
-              >
-                Chat
-              </button>
-              <button
-                type="button"
-                onClick={enableCowork}
-                aria-pressed={coworkMode}
-                title="Cowork — work across a folder on your computer"
-                className={
-                  'rounded-full px-2.5 py-1 font-medium transition-colors ' +
-                  (coworkMode ? 'bg-surface-2 text-text' : 'text-muted hover:text-text')
-                }
-              >
-                Cowork
-              </button>
-            </div>
+            {/* Cowork permission tier + plan-mode toggle — a quiet, chrome-less
+                control at the bottom-left of the composer (Cowork only). */}
+            {coworkMode && <CoworkPermissionMenu />}
           </div>
 
           <div className="flex items-center gap-1.5">
             <ModelSelector openUp />
             <EffortMenu />
+            <StyleMenu />
 
             {voiceInputAvailable && (
               <button
@@ -1807,6 +2393,7 @@ export function ChatPanel() {
                   key={message.id}
                   message={message}
                   attachments={attachmentsByMessage.get(message.id) ?? []}
+                  prevFileLines={prevFileLinesByMessage.get(message.id)}
                 />
               ))}
             </div>

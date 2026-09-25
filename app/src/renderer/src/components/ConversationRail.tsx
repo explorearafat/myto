@@ -139,9 +139,16 @@ export function ConversationRail() {
   // by a New Chat. Badging them is what makes background work visible; without it
   // a still-running task read as paused the moment it left the screen.
   const liveSessionIds = useChatStore((s) => s.liveSessionIds)
-  // Cowork toggle, so the rail's "Cowork" row flips the composer into agentic mode.
+  // Chat/Cowork mode toggle — moved out of the composer into the rail (Task 5).
   const coworkMode = useChatStore((s) => s.coworkMode)
   const setCoworkMode = useChatStore((s) => s.setCoworkMode)
+  // A saved conversation's mode is fixed (Task 6): once it has a row, the toggle
+  // locks so Chat and Cowork turns never mix in one thread.
+  const chatSessionId = useChatStore((s) => s.sessionId)
+  // Cowork needs a working folder; picking one arms its filesystem tools. Mirrors
+  // the composer's `enableCowork` so switching from the rail behaves identically.
+  const workspaceDir = useAppStore((s) => s.settings.cowork.workspaceDir)
+  const pickCoworkWorkspace = useAppStore((s) => s.pickCoworkWorkspace)
 
   // The signed-in Google account, for the footer. Held by AuthGate; surfaced here
   // through a small subscription hook so the rail never imports Firebase directly.
@@ -174,6 +181,13 @@ export function ConversationRail() {
   }
   const startNewChat = (): void => {
     void newDraft()
+  }
+  // The mode toggle above "New". A saved chat's mode is fixed, so it locks once
+  // the open conversation has a row; a fresh draft (no id yet) stays switchable.
+  const modeLocked = chatSessionId !== null
+  const enableCowork = (): void => {
+    setCoworkMode(true)
+    if (!workspaceDir.trim()) void pickCoworkWorkspace()
   }
 
   // Backend search results for a non-blank query. `null` means "not searching" —
@@ -281,6 +295,35 @@ export function ConversationRail() {
               >
                 {s.title}
               </span>
+              {/* Mode tag (Task 6): a compact glyph beside every name marks whether the
+                  session is a Chat or a Cowork thread — its mode is fixed for life, so
+                  opening it always restores that mode. Icon-only to stay quiet in the
+                  narrow rail; the label rides the tooltip + aria-label. */}
+              <span
+                title={s.mode === 'cowork' ? 'Cowork session' : 'Chat session'}
+                aria-label={s.mode === 'cowork' ? 'Cowork session' : 'Chat session'}
+                className="grid shrink-0 place-items-center text-muted/70"
+              >
+                {s.mode === 'cowork' ? (
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path
+                      d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3L8 4.5h4.5A1.5 1.5 0 0 1 14 6v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12V4.5Z"
+                      stroke="currentColor"
+                      strokeWidth="1.3"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                ) : (
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path
+                      d="M2.5 4.5A1.5 1.5 0 0 1 4 3h8a1.5 1.5 0 0 1 1.5 1.5V10A1.5 1.5 0 0 1 12 11.5H6l-3 2.5V11.5H4A1.5 1.5 0 0 1 2.5 10V4.5Z"
+                      stroke="currentColor"
+                      strokeWidth="1.3"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                )}
+              </span>
             </div>
           </button>
         )}
@@ -321,6 +364,71 @@ export function ConversationRail() {
 
       {/* Fixed top cluster: New · Projects · Artifacts · Code · Customize. */}
       <div className="px-2 pt-1">
+        {/* Chat / Cowork mode — the whole conversation's working mode, lifted out of
+            the composer. A new chat opens in the last-used mode (Task 7); once it is
+            saved the mode is fixed (Task 6), so the toggle locks. Ultra-low-opacity
+            track so it reads as chrome, not a primary action. */}
+        <div
+          role="group"
+          aria-label="Conversation mode"
+          className="mb-1 flex items-center gap-0.5 rounded-lg bg-surface-2/40 p-0.5"
+        >
+          <button
+            type="button"
+            onClick={() => setCoworkMode(false)}
+            disabled={modeLocked}
+            aria-pressed={!coworkMode}
+            title={
+              modeLocked
+                ? "This chat's mode is fixed — start a new chat to switch"
+                : 'Chat — a normal conversation'
+            }
+            className={
+              'flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-[12px] font-medium transition-colors disabled:cursor-not-allowed ' +
+              (!coworkMode
+                ? 'bg-surface text-text shadow-sm'
+                : 'text-muted hover:text-text disabled:hover:text-muted')
+            }
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M2.5 4.5A1.5 1.5 0 0 1 4 3h8a1.5 1.5 0 0 1 1.5 1.5V10A1.5 1.5 0 0 1 12 11.5H6l-3 2.5V11.5H4A1.5 1.5 0 0 1 2.5 10V4.5Z"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinejoin="round"
+              />
+            </svg>
+            Chat
+          </button>
+          <button
+            type="button"
+            onClick={enableCowork}
+            disabled={modeLocked}
+            aria-pressed={coworkMode}
+            title={
+              modeLocked
+                ? "This chat's mode is fixed — start a new chat to switch"
+                : 'Cowork — work across a folder on your computer'
+            }
+            className={
+              'flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-[12px] font-medium transition-colors disabled:cursor-not-allowed ' +
+              (coworkMode
+                ? 'bg-surface text-text shadow-sm'
+                : 'text-muted hover:text-text disabled:hover:text-muted')
+            }
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3L8 4.5h4.5A1.5 1.5 0 0 1 14 6v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12V4.5Z"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinejoin="round"
+              />
+              <path d="M8 8.2v2.6M6.7 9.5h2.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            </svg>
+            Cowork
+          </button>
+        </div>
         <button
           type="button"
           onClick={startNewChat}
@@ -448,23 +556,6 @@ export function ConversationRail() {
           }
           label="Artifacts"
           inert
-        />
-        <NavRow
-          icon={
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path
-                d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3L8 4.5h4.5A1.5 1.5 0 0 1 14 6v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12V4.5Z"
-                stroke="currentColor"
-                strokeWidth="1.3"
-                strokeLinejoin="round"
-              />
-              <path d="M8 8.2v2.6M6.7 9.5h2.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-            </svg>
-          }
-          label="Cowork"
-          active={coworkMode}
-          onClick={() => setCoworkMode(true)}
-          title="Cowork — work across a folder on your computer"
         />
         <NavRow
           icon={

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { searchCodeTool, findFilesTool, globToRegExp } from './search'
+import { searchCodeTool, findFilesTool, globToRegExp, listWorkspaceFiles } from './search'
 import { DEFAULT_PROVIDER_SETTINGS } from '../../shared/defaults'
 import type { ToolContext, ToolGate } from './registry'
 
@@ -92,3 +92,29 @@ describe('findFilesTool', () => {
     expect(await findFilesTool.run({}, ctx())).toMatch(/needs a "pattern"/i)
   })
 })
+
+describe('listWorkspaceFiles (@file mention lister)', () => {
+  it('returns workspace-relative paths matching the query, skipping node_modules', async () => {
+    const hits = await listWorkspaceFiles(dir, 'app')
+    expect(hits).toContain('src/app.ts')
+    expect(hits.some((p) => p.includes('node_modules'))).toBe(false)
+  })
+
+  it('ranks a basename hit above a match buried in the directory portion', async () => {
+    // "src" appears in the *path* of every src/* file, but util.ts's basename does
+    // not contain it — so a file actually named to match should still sort first.
+    const hits = await listWorkspaceFiles(dir, 'util')
+    expect(hits[0]).toBe('src/util.ts')
+  })
+
+  it('lists files for an empty query and honours the limit', async () => {
+    const hits = await listWorkspaceFiles(dir, '', 2)
+    expect(hits.length).toBeLessThanOrEqual(2)
+    expect(hits.length).toBeGreaterThan(0)
+  })
+
+  it('returns nothing for a query that matches no path', async () => {
+    expect(await listWorkspaceFiles(dir, 'zzz-nonexistent')).toEqual([])
+  })
+})
+

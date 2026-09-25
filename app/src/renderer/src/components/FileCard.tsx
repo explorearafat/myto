@@ -1,14 +1,22 @@
-import { useState, type ReactNode } from 'react'
-import { basename, type FileSegment } from '../lib/fileBlocks'
+import { useEffect, useState, type ReactNode } from 'react'
+import { basename, countLines, type FileSegment } from '../lib/fileBlocks'
 import { fileTypeFor, FileIcon } from '../lib/fileTypes'
 import { CodeBody } from './Markdown'
+import { DiffView } from './DiffView'
+import { useChatStore } from '../store/useChatStore'
 
 /**
- * Renders one generated file as a downloadable card — the deliverable UX the
+ * Renders one generated file as a card in the transcript — the deliverable UX the
  * desktop app shows in place of a bare fenced code block. The header carries the
  * language's real brand logo, the file path, and a type badge (e.g. `HTML`); the
- * body (collapsed by default) is the syntax-highlighted source; and each card has
- * its own Download button that writes just that file via a native Save As.
+ * body (collapsed by default) is the syntax-highlighted source.
+ *
+ * In a Cowork turn the file has already been written to the working folder, so
+ * Copy/Download are pointless noise — instead the header shows a git-style
+ * `+added −removed` line count (added = this version's lines; removed = the
+ * previous same-path card's lines, or 0 for a fresh write), mirroring the tool
+ * cards' diff badge. In ordinary chat the file lives nowhere on disk, so the card
+ * keeps its Copy and Download (Save As) buttons.
  *
  * While the file is still streaming in (`complete: false`), the card shows a
  * shimmering "Writing…" and disables Download until the closing fence arrives —
@@ -59,14 +67,49 @@ function CheckIcon(): ReactNode {
   )
 }
 
-export function FileCard({ file }: { file: FileSegment }): ReactNode {
+export function FileCard({
+  file,
+  cowork = false,
+  prevLines
+}: {
+  file: FileSegment
+  /** True inside a Cowork turn: the file is already on disk, so show a diff badge, not Copy/Download. */
+  cowork?: boolean
+  /** Line count of the previous same-path card (for the `−N`), or null/undefined for a fresh write. */
+  prevLines?: number | null
+}): ReactNode {
   const [expanded, setExpanded] = useState(false)
   const [copied, setCopied] = useState(false)
   const [saveState, setSaveState] = useState<SaveState>('idle')
+  const sessionId = useChatStore((s) => s.sessionId)
+  // In a Cowork turn an overwrite has a diff base in file_snapshots; fetch it lazily
+  // on expand so the body shows a real old→new diff (#5) instead of the full source.
+  const [snapBefore, setSnapBefore] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!cowork || !expanded || !file.complete || file.code === '' || sessionId == null) {
+      setSnapBefore(null)
+      return
+    }
+    let alive = true
+    void window.myto.sessions.snapshotBefore(sessionId, file.code).then((b) => {
+      if (alive) setSnapBefore(b)
+    })
+    return () => {
+      alive = false
+    }
+  }, [cowork, expanded, file.complete, file.code, sessionId])
 
   const type = fileTypeFor(file.path)
   // The model's info-line language wins (it chose it); fall back to the mapping.
   const hljsLang = file.lang || type.hljs
+
+  // Git-style diff counts for the Cowork badge: this version's lines as additions,
+  // the previous same-path card's lines as removals (0 → a fresh write shows +N −0).
+  // Once the snapshot's pre-change bytes load, they override prevLines with the
+  // authoritative removed count (an on-disk overwrite the transcript never saw).
+  const added = countLines(file.code)
+  const removed = snapBefore != null ? countLines(snapBefore) : (prevLines ?? 0)
 
   const copy = (): void => {
     void navigator.clipboard.writeText(file.code).then(() => {
@@ -120,36 +163,51 @@ export function FileCard({ file }: { file: FileSegment }): ReactNode {
           )}
         </button>
 
-        <CardButton label={copied ? 'Copied' : 'Copy'} onClick={copy}>
-          {copied ? (
-            <CheckIcon />
-          ) : (
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <rect x="5" y="5" width="8.5" height="8.5" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
-              <path
-                d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"
-                stroke="currentColor"
-                strokeWidth="1.3"
-              />
-            </svg>
-          )}
-        </CardButton>
+        {cowork ? (
+          // Cowork: the file is already written to the folder — show a diff badge
+          // (matches the tool cards) instead of the pointless Copy/Download.
+          <span className="shrink-0 font-mono text-[11px]">
+            <span className="text-green-500">+{added}</span>{' '}
+            <span className="text-red-500">-{removed}</span>
+          </span>
+        ) : (
+          <>
+            <CardButton label={copied ? 'Copied' : 'Copy'} onClick={copy}>
+              {copied ? (
+                <CheckIcon />
+              ) : (
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <rect x="5" y="5" width="8.5" height="8.5" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+                  <path
+                    d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"
+                    stroke="currentColor"
+                    strokeWidth="1.3"
+                  />
+                </svg>
+              )}
+            </CardButton>
 
-        <CardButton label={downloadLabel} onClick={download} disabled={!file.complete || saveState === 'saving'}>
-          {saveState === 'saved' ? (
-            <CheckIcon />
-          ) : (
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path
-                d="M8 2v7.5M8 9.5L5 6.5M8 9.5l3-3M2.5 11v1.5A1.5 1.5 0 0 0 4 14h8a1.5 1.5 0 0 0 1.5-1.5V11"
-                stroke="currentColor"
-                strokeWidth="1.3"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          )}
-        </CardButton>
+            <CardButton
+              label={downloadLabel}
+              onClick={download}
+              disabled={!file.complete || saveState === 'saving'}
+            >
+              {saveState === 'saved' ? (
+                <CheckIcon />
+              ) : (
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path
+                    d="M8 2v7.5M8 9.5L5 6.5M8 9.5l3-3M2.5 11v1.5A1.5 1.5 0 0 0 4 14h8a1.5 1.5 0 0 0 1.5-1.5V11"
+                    stroke="currentColor"
+                    strokeWidth="1.3"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              )}
+            </CardButton>
+          </>
+        )}
 
         <CardButton label={expanded ? 'Collapse' : 'Expand'} onClick={() => setExpanded((v) => !v)}>
           <svg
@@ -173,7 +231,11 @@ export function FileCard({ file }: { file: FileSegment }): ReactNode {
 
       {expanded && (
         <div className="border-t border-border/70">
-          <CodeBody code={file.code} lang={hljsLang} />
+          {cowork && snapBefore != null && snapBefore !== file.code ? (
+            <DiffView oldText={snapBefore} newText={file.code} />
+          ) : (
+            <CodeBody code={file.code} lang={hljsLang} />
+          )}
         </div>
       )}
     </div>

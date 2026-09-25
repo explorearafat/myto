@@ -17,7 +17,7 @@
 //
 // The adapters are PURE (no I/O), so they unit-test trivially.
 
-import type { ChatMessage, CompletionOptions, GatewayConfig, ModelInfo } from '../../shared/types'
+import type { ChatMessage, CompletionOptions, GatewayConfig, ModelInfo, NativeToolCall } from '../../shared/types'
 import { modelInfo } from './provider'
 
 /** One parsed SSE `data:` line, normalised across formats. All fields optional. */
@@ -26,8 +26,28 @@ export interface StreamEvent {
   delta?: string
   /** Out-of-band chain-of-thought (a reasoning model's "thinking"); never reply text. */
   reasoning?: string
+  /**
+   * A fully-assembled native tool call (#15). Present only on the terminal line of a
+   * `tool_calls` / `tool_use` block, once its id + name + streamed JSON arguments have
+   * all arrived. The reply loop turns it into a ```myto:tool block and aborts the turn.
+   */
+  toolCall?: NativeToolCall
   /** True on the format's terminal event (OpenAI `[DONE]`; Anthropic has no sentinel). */
   done?: boolean
+}
+
+/**
+ * A stateful, per-stream parser for one response. Unlike {@link WireAdapter.parseStreamData}
+ * (stateless, one line seen in isolation), a parser instance lives for the whole stream so it
+ * can assemble a native tool call whose id / name / JSON arguments arrive split across many SSE
+ * lines (#15). {@link WireAdapter.createParser} mints a fresh one per request, so concurrent
+ * streams sharing the module-level adapter singleton never cross-contaminate.
+ */
+export interface StreamParser {
+  /** Feed one SSE `data:` payload; get the event to forward now, or null to ignore it. */
+  push(data: string): StreamEvent | null
+  /** End of stream: emit any tool call assembled but not yet released by a terminal line. */
+  flush(): StreamEvent | null
 }
 
 /**
@@ -60,6 +80,21 @@ export interface WireAdapter {
   parseModels(json: unknown): ModelInfo[]
   /** A minimal 1-token request body for the Test Connection probe. */
   pingBody(modelId: string): Record<string, unknown>
+  /**
+   * Whether this format can carry native (structured) function-calling (#15). When
+   * true, {@link buildBody} honours `options.tools` and {@link createParser} assembles
+   * the streamed tool call. Both current adapters support it; the flag exists so a
+   * future format can opt out without breaking the shared loop.
+   */
+  supportsNativeTools: boolean
+  /**
+   * Mint a fresh stateful {@link StreamParser} for one response (#15). Callers use
+   * this INSTEAD of {@link parseStreamData} on the native-tools path — it forwards the
+   * same ordinary content/reasoning/done events AND assembles a tool call spread over
+   * many SSE lines. One instance per request (never shared) so concurrent streams stay
+   * isolated even though the adapter itself is a module-level singleton.
+   */
+  createParser(): StreamParser
 }
 
 // ── OpenAI-compatible adapter ────────────────────────────────────────────────
@@ -114,9 +149,39 @@ interface OpenAiBufferedResponse {
   choices?: Array<{ message?: { content?: string } }>
   error?: { message?: string }
 }
+/** One streamed fragment of an OpenAI `delta.tool_calls[]` entry (#15). */
+interface OpenAiToolCallFragment {
+  /** Which parallel call this fragment belongs to; only index 0 is assembled (one call/turn). */
+  index?: number
+  /** The call id — present on the first fragment only. */
+  id?: string
+  type?: string
+  /** `name` lands on the first fragment; `arguments` streams as JSON string fragments. */
+  function?: { name?: string; arguments?: string }
+}
 interface OpenAiStreamChunk {
-  choices?: Array<{ delta?: { content?: string; reasoning?: string } }>
+  choices?: Array<{
+    delta?: { content?: string; reasoning?: string; tool_calls?: OpenAiToolCallFragment[] }
+    finish_reason?: string | null
+  }>
   error?: { message?: string }
+}
+
+/**
+ * Extract the ordinary (content + reasoning) part of an already-parsed OpenAI stream
+ * chunk. Shared by the legacy stateless {@link openAiAdapter.parseStreamData} and the
+ * stateful native-tools parser; knows nothing about tool calls, so a chunk carrying only
+ * a tool-call fragment yields an empty event (harmless — the provider forwards no text).
+ */
+function parseOpenAiEvent(parsed: OpenAiStreamChunk): StreamEvent {
+  const event: StreamEvent = {}
+  // Reasoning models stream chain-of-thought in `delta.reasoning` while
+  // `delta.content` stays empty; forward it out-of-band, never as reply text.
+  const reasoning = parsed.choices?.[0]?.delta?.reasoning
+  if (reasoning) event.reasoning = reasoning
+  const delta = parsed.choices?.[0]?.delta?.content
+  if (delta) event.delta = delta
+  return event
 }
 
 export const openAiAdapter: WireAdapter = {
@@ -132,8 +197,25 @@ export const openAiAdapter: WireAdapter = {
   },
 
   buildBody(modelId, messages, options) {
-    return { model: modelId, stream: true, messages: toOpenAiMessages(messages), ...openAiSamplingBody(options) }
+    const body: Record<string, unknown> = {
+      model: modelId,
+      stream: true,
+      messages: toOpenAiMessages(messages),
+      ...openAiSamplingBody(options)
+    }
+    // Native tools (#15): advertise the schemas and let the model choose. Absent when
+    // the caller passes none (the text-protocol path), so this stays a no-op off-flag.
+    if (options?.tools && options.tools.length) {
+      body.tools = options.tools.map((t) => ({
+        type: 'function',
+        function: { name: t.name, description: t.description, parameters: t.parameters }
+      }))
+      body.tool_choice = 'auto'
+    }
+    return body
   },
+
+  supportsNativeTools: true,
 
   parseStreamData(data) {
     if (data === '[DONE]') return { done: true }
@@ -144,14 +226,57 @@ export const openAiAdapter: WireAdapter = {
       return null
     }
     if (parsed.error?.message) throw new Error(parsed.error.message)
-    const event: StreamEvent = {}
-    // Reasoning models stream chain-of-thought in `delta.reasoning` while
-    // `delta.content` stays empty; forward it out-of-band, never as reply text.
-    const reasoning = parsed.choices?.[0]?.delta?.reasoning
-    if (reasoning) event.reasoning = reasoning
-    const delta = parsed.choices?.[0]?.delta?.content
-    if (delta) event.delta = delta
-    return event
+    return parseOpenAiEvent(parsed)
+  },
+
+  createParser() {
+    // Assemble one streamed tool call (index 0 — the loop runs one call per turn) from
+    // its fragments: the id + name land on the first `delta.tool_calls` fragment, the
+    // JSON `arguments` arrive split across many. Emit on `finish_reason: 'tool_calls'`,
+    // with flush() as a safety net for a stream that ends without that marker.
+    let id = ''
+    let name = ''
+    let args = ''
+    let seen = false
+    const take = (): StreamEvent | null => {
+      if (!seen || !name) return null
+      seen = false
+      const call: NativeToolCall = { id: id || `call_${Date.now().toString(36)}`, name, argsJson: args || '{}' }
+      return { toolCall: call }
+    }
+    return {
+      push(data: string): StreamEvent | null {
+        if (data === '[DONE]') {
+          // Normally finish_reason already released the call; the combined shape only
+          // matters for a stream that jumps straight to [DONE] with a call pending.
+          const call = take()
+          return call ? { ...call, done: true } : { done: true }
+        }
+        let parsed: OpenAiStreamChunk
+        try {
+          parsed = JSON.parse(data) as OpenAiStreamChunk
+        } catch {
+          return null
+        }
+        if (parsed.error?.message) throw new Error(parsed.error.message)
+        const choice = parsed.choices?.[0]
+        for (const frag of choice?.delta?.tool_calls ?? []) {
+          if (typeof frag.index === 'number' && frag.index !== 0) continue
+          seen = true
+          if (frag.id) id = frag.id
+          if (frag.function?.name) name = frag.function.name
+          if (typeof frag.function?.arguments === 'string') args += frag.function.arguments
+        }
+        if (choice?.finish_reason === 'tool_calls') {
+          const call = take()
+          if (call) return call
+        }
+        return parseOpenAiEvent(parsed)
+      },
+      flush(): StreamEvent | null {
+        return take()
+      }
+    }
   },
 
   parseBuffered(json) {
@@ -182,12 +307,14 @@ const ANTHROPIC_VERSION = '2023-06-01'
 
 /**
  * Anthropic requires `max_tokens`. The interactive stream currently passes no cap
- * (only `reasoningEffort`), so this default is what most turns use. 4096 is
- * accepted by *every* Claude model (including the Claude 3 family, which caps
- * there), so it can never 400 for being too high; the `max` tier lifts it via
- * `options.maxTokens` when a caller sets one.
+ * (only `reasoningEffort`), so this default is what most turns use. It is kept high
+ * so a long reply — or a Cowork turn writing a whole file — never truncates mid-work;
+ * that was the "effectively infinite output" ask. 32000 sits inside the output ceiling
+ * of the current Claude models the app targets (Claude 4/5 class). The older Claude 3
+ * family caps lower and would 400 at this value; a caller can still override per-turn
+ * via `options.maxTokens` (the `max` tier) when talking to such a model.
  */
-const ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
+const ANTHROPIC_DEFAULT_MAX_TOKENS = 32000
 
 /**
  * Join a path onto a base that may or may not already end in `/v1`. `…/v1` +
@@ -225,8 +352,32 @@ interface AnthropicBufferedResponse {
 }
 interface AnthropicStreamEvent {
   type?: string
-  delta?: { type?: string; text?: string; thinking?: string }
+  index?: number
+  /** On `content_block_start`: the block being opened (a `tool_use` block carries id + name). */
+  content_block?: { type?: string; id?: string; name?: string }
+  delta?: { type?: string; text?: string; thinking?: string; partial_json?: string }
   error?: { message?: string }
+}
+
+/**
+ * Extract the ordinary (text + reasoning + terminal) part of an already-parsed Anthropic
+ * stream event. Shared by the legacy stateless {@link anthropicAdapter.parseStreamData} and
+ * the stateful native-tools parser; knows nothing about `tool_use` blocks, so those yield null.
+ */
+function parseAnthropicEvent(parsed: AnthropicStreamEvent): StreamEvent | null {
+  // An `error` event carries the failure in-band (e.g. overloaded, invalid request).
+  if (parsed.type === 'error') throw new Error(parsed.error?.message ?? 'Anthropic stream error')
+  if (parsed.type === 'message_stop') return { done: true }
+  if (parsed.type === 'content_block_delta') {
+    if (parsed.delta?.type === 'text_delta' && parsed.delta.text) return { delta: parsed.delta.text }
+    // Extended-thinking output arrives as `thinking_delta`; surface it as
+    // out-of-band reasoning, never as reply text.
+    if (parsed.delta?.type === 'thinking_delta' && parsed.delta.thinking) {
+      return { reasoning: parsed.delta.thinking }
+    }
+  }
+  // message_start / content_block_start / content_block_stop / message_delta / ping — nothing to emit.
+  return null
 }
 
 export const anthropicAdapter: WireAdapter = {
@@ -264,8 +415,19 @@ export const anthropicAdapter: WireAdapter = {
     if (!options?.reasoningEffort && typeof options?.temperature === 'number') {
       body.temperature = options.temperature
     }
+    // Native tools (#15): Anthropic wants `input_schema`, not OpenAI's nested `function`.
+    // Absent when the caller passes none, so the text-protocol path is untouched.
+    if (options?.tools && options.tools.length) {
+      body.tools = options.tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.parameters
+      }))
+    }
     return body
   },
+
+  supportsNativeTools: true,
 
   parseStreamData(data) {
     let parsed: AnthropicStreamEvent
@@ -274,19 +436,48 @@ export const anthropicAdapter: WireAdapter = {
     } catch {
       return null
     }
-    // An `error` event carries the failure in-band (e.g. overloaded, invalid request).
-    if (parsed.type === 'error') throw new Error(parsed.error?.message ?? 'Anthropic stream error')
-    if (parsed.type === 'message_stop') return { done: true }
-    if (parsed.type === 'content_block_delta') {
-      if (parsed.delta?.type === 'text_delta' && parsed.delta.text) return { delta: parsed.delta.text }
-      // Extended-thinking output arrives as `thinking_delta`; surface it as
-      // out-of-band reasoning, never as reply text.
-      if (parsed.delta?.type === 'thinking_delta' && parsed.delta.thinking) {
-        return { reasoning: parsed.delta.thinking }
+    return parseAnthropicEvent(parsed)
+  },
+
+  createParser() {
+    // Assemble a `tool_use` content block: id + name arrive on content_block_start, the
+    // input JSON streams as `input_json_delta.partial_json`, and the block closes on
+    // content_block_stop (where we emit). flush() covers a stream truncated mid-block.
+    let id = ''
+    let name = ''
+    let json = ''
+    let inTool = false
+    const emit = (): StreamEvent => {
+      inTool = false
+      const call: NativeToolCall = { id: id || `toolu_${Date.now().toString(36)}`, name, argsJson: json || '{}' }
+      return { toolCall: call }
+    }
+    return {
+      push(data: string): StreamEvent | null {
+        let parsed: AnthropicStreamEvent
+        try {
+          parsed = JSON.parse(data) as AnthropicStreamEvent
+        } catch {
+          return null
+        }
+        if (parsed.type === 'content_block_start' && parsed.content_block?.type === 'tool_use') {
+          inTool = true
+          id = parsed.content_block.id ?? ''
+          name = parsed.content_block.name ?? ''
+          json = ''
+          return null
+        }
+        if (parsed.type === 'content_block_delta' && parsed.delta?.type === 'input_json_delta') {
+          if (typeof parsed.delta.partial_json === 'string') json += parsed.delta.partial_json
+          return null
+        }
+        if (parsed.type === 'content_block_stop' && inTool && name) return emit()
+        return parseAnthropicEvent(parsed)
+      },
+      flush(): StreamEvent | null {
+        return inTool && name ? emit() : null
       }
     }
-    // message_start / content_block_start / content_block_stop / message_delta / ping — nothing to emit.
-    return null
   },
 
   parseBuffered(json) {

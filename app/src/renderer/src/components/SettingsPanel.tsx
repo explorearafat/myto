@@ -1,12 +1,20 @@
 import { useState, type ReactNode } from 'react'
-import type { Theme } from '@shared/types'
+import type { OutputStyle, Theme } from '@shared/types'
 import { useAppStore } from '@renderer/store/useAppStore'
 import { ConnectorsPane } from '@renderer/components/ConnectorsPane'
 import { SkillsPane } from '@renderer/components/SkillsPane'
 import { PluginsPane } from '@renderer/components/PluginsPane'
+import { ScheduledTasksPane } from '@renderer/components/ScheduledTasksPane'
 
 /** The Settings window's left-rail categories. */
-type SettingsCategory = 'appearance' | 'model' | 'tools' | 'connectors' | 'skills' | 'plugins'
+type SettingsCategory =
+  | 'appearance'
+  | 'model'
+  | 'tools'
+  | 'connectors'
+  | 'skills'
+  | 'plugins'
+  | 'scheduled'
 
 /** Title + one-line subtitle shown in each category pane's header. */
 const CATEGORY_META: Record<SettingsCategory, { label: string; subtitle: string }> = {
@@ -24,6 +32,10 @@ const CATEGORY_META: Record<SettingsCategory, { label: string; subtitle: string 
   plugins: {
     label: 'Plugins',
     subtitle: 'Bundles that install skills and connectors together in one step.'
+  },
+  scheduled: {
+    label: 'Scheduled',
+    subtitle: 'Prompts Myto runs on a schedule, each in its own fresh session.'
   }
 }
 
@@ -92,6 +104,13 @@ function CategoryIcon({ id }: { id: SettingsCategory }): ReactNode {
           <path d="M11.25 9v4.5M9 11.25h4.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
         </svg>
       )
+    case 'scheduled':
+      return (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeWidth="1.3" />
+          <path d="M8 4.75V8l2.25 1.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )
   }
 }
 
@@ -101,6 +120,7 @@ const CATEGORY_ORDER: SettingsCategory[] = [
   'connectors',
   'skills',
   'plugins',
+  'scheduled',
   'appearance'
 ]
 
@@ -200,10 +220,24 @@ const ON_OFF = [
   { id: 'off', label: 'Off' }
 ] as const
 
+/** The assistant's writing-voice presets (#13); `default` adds no directive. */
+const OUTPUT_STYLE_OPTIONS: ReadonlyArray<{ id: OutputStyle; label: string }> = [
+  { id: 'default', label: 'Default' },
+  { id: 'concise', label: 'Concise' },
+  { id: 'explanatory', label: 'Explanatory' },
+  { id: 'learning', label: 'Learning' }
+]
+
 /** Tools pane: the master tool-use switch and the gated code-execution opt-in. */
 function ToolsPane() {
   const tools = useAppStore((s) => s.settings.tools)
   const setTools = useAppStore((s) => s.setTools)
+  const outputStyle = useAppStore((s) => s.settings.outputStyle)
+  const setOutputStyle = useAppStore((s) => s.setOutputStyle)
+  const nativeTools = useAppStore((s) => s.settings.nativeTools)
+  const setNativeTools = useAppStore((s) => s.setNativeTools)
+  const terminalConsent = useAppStore((s) => s.settings.cowork.terminalConsent)
+  const setTerminalConsent = useAppStore((s) => s.setCoworkTerminalConsent)
   return (
     <div className="divide-y divide-border">
       <SettingRow
@@ -226,6 +260,39 @@ function ToolsPane() {
           value={tools.codeExecution ? 'on' : 'off'}
           options={ON_OFF}
           onChange={(v) => void setTools({ codeExecution: v === 'on' })}
+        />
+      </SettingRow>
+      <SettingRow
+        title="Response style"
+        description="How Myto writes back to you. Concise keeps it short; Explanatory narrates the “why” as it works; Learning leaves clearly-marked spots for you to fill in. Applies in both Chat and Cowork."
+      >
+        <Segmented
+          ariaLabel="Response style"
+          value={outputStyle}
+          options={OUTPUT_STYLE_OPTIONS}
+          onChange={(v) => void setOutputStyle(v)}
+        />
+      </SettingRow>
+      <SettingRow
+        title="Native function-calling"
+        description="Use the provider's own tool-calling API instead of Myto's text protocol, when the endpoint supports it (OpenAI- or Anthropic-shaped gateways). Off by default; falls back to the text protocol automatically when unsupported."
+      >
+        <Segmented
+          ariaLabel="Native function-calling"
+          value={nativeTools ? 'on' : 'off'}
+          options={ON_OFF}
+          onChange={(v) => void setNativeTools(v === 'on')}
+        />
+      </SettingRow>
+      <SettingRow
+        title="Interactive shell"
+        description="Enable the Shell tab in Cowork's Terminal pane — a real shell you type into, scoped to the working folder. Commands run directly on your machine with no per-command approval, so only enable it if you trust that access. Off by default."
+      >
+        <Segmented
+          ariaLabel="Interactive shell"
+          value={terminalConsent ? 'on' : 'off'}
+          options={ON_OFF}
+          onChange={(v) => void setTerminalConsent(v === 'on')}
         />
       </SettingRow>
     </div>
@@ -403,6 +470,7 @@ export function SettingsPanel() {
               {category === 'connectors' && <ConnectorsPane />}
               {category === 'skills' && <SkillsPane />}
               {category === 'plugins' && <PluginsPane />}
+              {category === 'scheduled' && <ScheduledTasksPane />}
             </div>
           </div>
         </div>

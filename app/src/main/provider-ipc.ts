@@ -7,10 +7,13 @@ import type {
   QuestionRequest,
   ChatMessage,
   ChatMode,
+  CommandRun,
   CompletionRequest,
   CompletionResult,
+  FileSnapshot,
   GatewayConfig,
   ListModelsResult,
+  NativeToolCall,
   OllamaConfig,
   PreviewTarget,
   ProviderKind,
@@ -28,12 +31,17 @@ import {
   reasoningCaption,
   COWORK_SYSTEM_PROMPT,
   FILE_PROTOCOL_SYSTEM_PROMPT,
+  outputStylePrompt,
+  PLAN_MODE_SYSTEM_PROMPT,
   STATUS_SYSTEM_PROMPT
 } from './status'
-import { availableTools, lookupTool, runTool, toolsSystemPrompt, type ToolGate } from './tools/registry'
+import { availableTools, lookupTool, runTool, toolSchemas, toolsSystemPrompt, type ToolGate } from './tools/registry'
 import { ensureMytoDir, readJournal, recordGoal, recordToolAction } from './cowork-memory'
+import { readUserMemory } from './user-memory'
+import { insertFileSnapshot } from './db/snapshots'
 import { approvalDetail, requiresApproval } from './tools/approvals'
-import { createToolCallParser, toolResultBlock, type ToolCall } from './tools/toolParser'
+import { createToolCallParser, toolCallBlock, toolResultBlock, type ToolCall } from './tools/toolParser'
+import { executeArgv, formatRunResult, resolveShell } from './tools/runCode'
 
 /**
  * How often, at most, to refresh the status caption from a reasoning model's
@@ -56,14 +64,17 @@ const MAX_TOOL_TURNS = 6
 /**
  * The tool-round ceiling in Cowork mode. Real agentic work — scaffold a project,
  * read and write many files, install deps, run and fix a build — routinely needs
- * dozens of round-trips, so a small cap (it was 16) made Cowork give up before it
- * could finish anything substantial. This is now a high HARD ceiling that only
- * bounds a genuinely runaway loop; in-loop context compaction (below) keeps the
- * message history from growing without limit as the turns add up, and a stall guard
- * ends the loop early if the model stops making progress. The final turn still
- * withholds tools so the reply never ends mid-loop.
+ * dozens of round-trips, so a small cap made Cowork give up before it could finish
+ * anything substantial. The ask was "effectively infinite steps to build a project",
+ * so this is now a very high HARD ceiling that only trips a genuinely runaway loop;
+ * real work terminates long before it via the model deciding it's done. Two things
+ * keep an unbounded loop safe: in-loop context compaction (below) stops the message
+ * history growing without limit as turns pile up, and the stall guards
+ * ({@link MAX_REPEAT_CALLS} / {@link MAX_EXPLORE_WITHOUT_BUILD}) end the loop early
+ * when the model stops making progress. The final turn still withholds tools so the
+ * reply never ends mid-loop.
  */
-const MAX_TOOL_TURNS_COWORK = 60
+const MAX_TOOL_TURNS_COWORK = 1000
 
 /**
  * When the running message history (system prompts + the growing tool round-trips)
@@ -88,6 +99,17 @@ const COMPACT_KEEP_RECENT = 6
  * on a call that isn't advancing the task. It is fed a nudge before the final count.
  */
 const MAX_REPEAT_CALLS = 3
+
+/**
+ * Programmatic verify gate (#16). When the user set `cowork.verifyCommand` (a build/
+ * test/lint line), the loop refuses to call a Cowork run "done" until that command
+ * exits 0: a non-zero exit is fed back as a user turn so the model can fix it and the
+ * command runs again. Bounded so a persistently failing command can't loop forever —
+ * after this many rounds the run ends anyway with the last failure on record.
+ */
+const MAX_VERIFY_ROUNDS = 3
+/** How long a single verify command may run before it is killed (builds/tests are slow). */
+const VERIFY_TIMEOUT_MS = 180_000
 
 /** Read-only "look at the project" tools — churning on these without building is the
  *  classic weak-model stall (see the progress guard in the Cowork loop). */
@@ -183,6 +205,9 @@ export function registerProviderIpc(): void {
         question?: QuestionRequest
         preview?: PreviewTarget
         todos?: TodoItem[]
+        command?: CommandRun
+        thinking?: string
+        thinkingReset?: boolean
       }): void => {
         if (!sender.isDestroyed()) {
           sender.send(IpcChannel.ProvidersStreamChunk, { streamId, ...chunk })
@@ -199,6 +224,34 @@ export function registerProviderIpc(): void {
         send({ delta: '', done: false, todos })
       }
 
+      /** Forward a command the `run_command` tool ran to the renderer's Terminal pane (Cowork). */
+      const onCommand = (run: CommandRun): void => {
+        send({ delta: '', done: false, command: run })
+      }
+
+      /**
+       * Persist a before/after capture from a Cowork mutation tool (#1 checkpoints /
+       * rewind). Keyed by the session + the user message this run answers + a per-run
+       * id, so a later "restore to here" can replay the run's file changes in reverse.
+       * Only persists when the caller supplied a sessionId (Cowork); best-effort — a DB
+       * fault must never break the live reply, so it is swallowed.
+       */
+      const snapRunId = `run-${streamId}`
+      const onFileSnapshot = (snapshot: FileSnapshot): void => {
+        if (!request.sessionId) return
+        try {
+          insertFileSnapshot({
+            ...snapshot,
+            sessionId: request.sessionId,
+            afterMsgId: request.afterMsgId ?? null,
+            runId: snapRunId,
+            createdAt: Date.now()
+          })
+        } catch {
+          // A snapshot only powers rewind; never let a DB hiccup break the run.
+        }
+      }
+
       /**
        * Raise an approval prompt for a side-effecting Cowork tool and wait for the
        * user's answer. Resolves to their decision, or 'deny' if the stream is
@@ -207,7 +260,8 @@ export function registerProviderIpc(): void {
       const requestApproval = (
         toolName: string,
         sideEffect: ToolSideEffect,
-        detail: string
+        detail: string,
+        plan = false
       ): Promise<ApprovalDecision> =>
         new Promise<ApprovalDecision>((resolve) => {
           if (controller.signal.aborted) {
@@ -223,7 +277,11 @@ export function registerProviderIpc(): void {
           }
           pendingApprovals.set(approvalId, settle)
           controller.signal.addEventListener('abort', onAbort, { once: true })
-          send({ delta: '', done: false, approval: { approvalId, toolName, sideEffect, detail } })
+          send({
+            delta: '',
+            done: false,
+            approval: { approvalId, toolName, sideEffect, detail, ...(plan ? { plan: true } : {}) }
+          })
         })
 
       /**
@@ -278,17 +336,34 @@ export function registerProviderIpc(): void {
         const workspaceDir = settings.cowork.workspaceDir.trim() || null
         const gate: ToolGate = { settings, mode, workspaceDir }
         const toolsPrompt = toolsSystemPrompt(gate)
+        // Native function-calling (#15): opt-in AND the endpoint's wire format must support
+        // it. When on, we advertise structured tool schemas and read the model's structured
+        // tool call instead of the ```myto:tool text protocol; when off (the default) or the
+        // backend can't carry it, nothing changes. Only meaningful when tools exist at all.
+        const useNativeTools =
+          !!toolsPrompt && settings.nativeTools && (provider.supportsNativeTools?.() ?? false)
+        const nativeSchemas = useNativeTools ? toolSchemas(gate) : []
         const maxToolTurns = mode === 'cowork' ? MAX_TOOL_TURNS_COWORK : MAX_TOOL_TURNS
 
-        // Cowork project memory (.sylor/journal.md): read what earlier turns already
+        // Cowork project memory (.myto/journal.md): read what earlier turns already
         // did in this folder so this turn continues instead of repeating. Best-effort.
         let coworkMemory = ''
         if (mode === 'cowork' && workspaceDir) {
           ensureMytoDir(workspaceDir)
           coworkMemory = readJournal(workspaceDir)
         }
+        // Global (user-level) memory: cross-project facts/preferences the user saved,
+        // injected in EVERY mode (chat and cowork) so they always apply. Best-effort.
+        const userMemory = readUserMemory()
         // Permission tier for side-effecting tools; only consulted in Cowork.
         const permissionMode = settings.cowork.permissionMode
+        // Output style (#13): the persisted global voice preference, resolved to its
+        // system instruction once ('' for 'default') and injected into baseSystem below.
+        const outputStyleInstruction = outputStylePrompt(settings.outputStyle)
+        // Plan mode (#8): a Cowork-only gate. When on, the agent must research + draft a
+        // plan and win the user's approval before the first write/exec tool. Injects the
+        // plan directive into baseSystem and arms the one-time plan gate in the loop below.
+        const planActive = mode === 'cowork' && settings.cowork.planMode
 
         /**
          * Run a focused read-only sub-task in a nested agent (the `spawn_agent` tool).
@@ -298,6 +373,63 @@ export function registerProviderIpc(): void {
          */
         const delegate = (task: string): Promise<string> =>
           runNestedAgent(provider, modelId, gate, task, controller.signal)
+
+        /**
+         * User-configured lifecycle hooks (#9). PreToolUse runs a shell command BEFORE
+         * each tool; a non-zero exit VETOES the call — its output is fed back to the model
+         * as the tool result, exactly like a permission denial. PostToolUse runs AFTER and
+         * is observational — its output is surfaced as a status line, never merged into the
+         * result. Both are the user's OWN commands (Settings › Cowork › Hooks), so this is
+         * an arbitrary-exec surface: it is gated to Cowork, runs inside the working folder,
+         * is bounded by a timeout, and passes the tool name/input/result as env vars. A
+         * missing or blank command is a no-op (the closure is left undefined).
+         */
+        const HOOK_TIMEOUT_MS = 30_000
+        const runHook = async (
+          command: string,
+          call: ToolCall,
+          resultText: string | null
+        ): Promise<{ exitCode: number | null; output: string }> => {
+          const spec = resolveShell()
+          const env: NodeJS.ProcessEnv = {
+            ...process.env,
+            MYTO_TOOL_NAME: call.name ?? '',
+            MYTO_TOOL_INPUT: JSON.stringify(call.input ?? null),
+            ...(resultText != null ? { MYTO_TOOL_RESULT: resultText } : {})
+          }
+          const r = await executeArgv(spec.cmd, [spec.flag, command], controller.signal, {
+            cwd: workspaceDir ?? undefined,
+            env,
+            timeoutMs: HOOK_TIMEOUT_MS
+          })
+          const output =
+            [r.stdout, r.stderr].map((s) => s.trimEnd()).filter(Boolean).join('\n') || (r.spawnError ?? '')
+          return { exitCode: r.spawnError ? null : r.exitCode, output }
+        }
+
+        const preHookCmd = mode === 'cowork' ? settings.cowork.hooks.preToolUse.trim() : ''
+        const preToolUse = preHookCmd
+          ? async (call: ToolCall): Promise<{ block?: string } | void> => {
+              send({ delta: '', done: false, status: 'Running pre-tool hook' })
+              const { exitCode, output } = await runHook(preHookCmd, call, null)
+              if (exitCode !== 0) {
+                return {
+                  block: `A PreToolUse hook blocked "${call.name ?? 'tool'}" (exit ${exitCode ?? 'n/a'}).${
+                    output ? `\n${output}` : ''
+                  }\nDo not retry it; continue without it or tell the user what you need to proceed.`
+                }
+              }
+              return
+            }
+          : undefined
+
+        const postHookCmd = mode === 'cowork' ? settings.cowork.hooks.postToolUse.trim() : ''
+        const postToolUse = postHookCmd
+          ? async (call: ToolCall, result: string): Promise<void> => {
+              const { output } = await runHook(postHookCmd, call, result)
+              if (output) send({ delta: '', done: false, status: `Post-tool hook: ${output.slice(0, 200)}` })
+            }
+          : undefined
 
         /**
          * Stream one model turn into the reply. Forwards <status> captions and
@@ -329,13 +461,29 @@ export function registerProviderIpc(): void {
           else controller.signal.addEventListener('abort', onOuterAbort, { once: true })
 
           const stripper = createStatusStripper()
-          const toolParser = parseTools ? createToolCallParser() : null
+          // Native mode reads the structured tool call from the chunk stream, so the
+          // text-protocol fence parser stays off; otherwise it watches the prose.
+          const toolParser = parseTools && !useNativeTools ? createToolCallParser() : null
           let reasoningText = ''
           let contentStarted = false
           let captionFromReasoning = false
           let lastReasoningEmit = 0
+          // Whether this turn's thinking phase has already been closed (a fresh
+          // <status>-derived caption is transient, but the raw chain-of-thought is a
+          // discrete block that must be closed exactly once — see closeThinking).
+          let thinkingClosed = false
           let visible = ''
           let pendingCall: ToolCall | null = null
+
+          // Close this turn's thinking phase (if one is open): send a final snapshot
+          // then a reset so the renderer's block stops blinking and the NEXT turn's
+          // reasoning opens a fresh block instead of overwriting this one. Idempotent.
+          const closeThinking = (): void => {
+            if (!reasoningText || thinkingClosed) return
+            thinkingClosed = true
+            send({ delta: '', done: false, thinking: reasoningText })
+            send({ delta: '', done: false, thinkingReset: true })
+          }
 
           // Route status-stripped text through the tool parser (when on): forward
           // the prose it releases, and capture the first complete tool call, ending
@@ -362,18 +510,44 @@ export function registerProviderIpc(): void {
             delta: string
             done: boolean
             reasoning?: string
+            toolCall?: NativeToolCall
           }): void => {
             if (pendingCall) return // call already found — ignore the tail
+            // Native function-calling (#15): the gateway assembled a structured tool call.
+            // Synthesize the SAME ```myto:tool block the text protocol produces so history,
+            // the transcript card, and the loop stay format-agnostic, then end the turn
+            // exactly like the text path does on a complete fence.
+            if (parseTools && chunk.toolCall) {
+              let input: unknown = {}
+              let parseErr: string | null = null
+              const argsJson = chunk.toolCall.argsJson?.trim()
+              if (argsJson) {
+                try {
+                  input = JSON.parse(argsJson)
+                } catch (e) {
+                  parseErr = `invalid JSON arguments (${e instanceof Error ? e.message : String(e)})`
+                }
+              }
+              const name = chunk.toolCall.name
+              pendingCall = {
+                block: toolCallBlock(name, parseErr ? {} : input),
+                name,
+                input: parseErr ? {} : input,
+                error: parseErr
+              }
+              iter.abort()
+              return
+            }
             if (chunk.reasoning && !contentStarted) {
               reasoningText += chunk.reasoning
               const now = Date.now()
               if (now - lastReasoningEmit >= REASONING_CAPTION_MS) {
+                lastReasoningEmit = now
+                // Forward the growing thought itself (renderer counts its tokens and
+                // shows it when expanded) plus a short caption for the status line.
                 const caption = reasoningCaption(reasoningText)
-                if (caption) {
-                  lastReasoningEmit = now
-                  captionFromReasoning = true
-                  send({ delta: '', done: false, status: caption })
-                }
+                if (caption) captionFromReasoning = true
+                send({ delta: '', done: false, thinking: reasoningText, ...(caption ? { status: caption } : {}) })
               }
             }
             if (chunk.delta) {
@@ -386,6 +560,8 @@ export function registerProviderIpc(): void {
                 if (!contentStarted) {
                   contentStarted = true
                   if (captionFromReasoning) send({ delta: '', done: false, status: '' })
+                  // Visible text has begun — seal the thinking block that preceded it.
+                  closeThinking()
                 }
                 emitText(text)
               }
@@ -395,28 +571,49 @@ export function registerProviderIpc(): void {
 
           try {
             await provider.streamCompletion(modelId, turnHistory, onProviderChunk, iter.signal, {
-              reasoningEffort: settings.reasoningEffort
+              reasoningEffort: settings.reasoningEffort,
+              // Advertise the tool schemas only on a tool-enabled native turn; the closing
+              // turn (parseTools=false) and the text protocol never send them.
+              ...(parseTools && useNativeTools ? { tools: nativeSchemas } : {})
             })
           } catch (err) {
             controller.signal.removeEventListener('abort', onOuterAbort)
             if (controller.signal.aborted) return { visible, call: null } // user cancel
-            if (pendingCall) return { visible, call: pendingCall } // ended early for a tool
+            if (pendingCall) {
+              closeThinking()
+              return { visible, call: pendingCall } // ended early for a tool
+            }
             return { visible, call: null, error: toErrorMessage(err) }
           }
           controller.signal.removeEventListener('abort', onOuterAbort)
 
           // Natural end: flush the status stripper's tail through the tool parser,
-          // then release anything the tool parser was still holding (a truncated or
-          // never-closed fence) as plain text so nothing the model wrote is lost.
+          // then deal with anything the tool parser was still holding.
           const tail = stripper.flush()
           if (tail) emitText(tail)
           if (toolParser && !pendingCall) {
+            // A held partial-opener (a lone fence/`<` tail) is benign trailing prose and
+            // is released as text. But a leftover that is a *mid-tool-call* block — the
+            // stream was cut off (token limit / dropped upstream) before its closing
+            // fence — must NOT be forwarded verbatim: the renderer would bake it into a
+            // tool card stuck on "Preparing…" forever (the close never comes). Drop the
+            // partial invocation (nothing ran) and surface a clear truncation notice.
+            const openBlock = toolParser.holdingBlock
             const leftover = toolParser.flush()
-            if (leftover) {
+            if (openBlock) {
+              const notice =
+                "\n\n⚠️ The model's reply was cut off in the middle of a tool call (it likely hit the output-token limit), so the action didn't run. Send \"continue\" to resume."
+              visible += notice
+              send({ delta: notice, done: false })
+            } else if (leftover) {
               visible += leftover
               send({ delta: leftover, done: false })
             }
           }
+          // A turn can reason then emit ONLY a tool call (no visible text), which
+          // never trips the content-start close above; seal it here so the phase
+          // doesn't stay open and get overwritten by the next turn's reasoning.
+          closeThinking()
           return { visible, call: pendingCall }
         }
 
@@ -426,10 +623,30 @@ export function registerProviderIpc(): void {
         const baseSystem: ChatMessage[] = [
           { role: 'system', content: STATUS_SYSTEM_PROMPT },
           { role: 'system', content: FILE_PROTOCOL_SYSTEM_PROMPT },
+          // Output style (#13): the user's chosen voice (concise/explanatory/learning),
+          // applied in every mode. 'default' yields '' → the turn is omitted entirely.
+          ...(outputStyleInstruction
+            ? [{ role: 'system' as const, content: outputStyleInstruction }]
+            : []),
+          // Global user memory applies in every mode; kept in the compaction-protected
+          // head so long runs never forget the user's standing preferences.
+          ...(userMemory
+            ? [
+                {
+                  role: 'system' as const,
+                  content:
+                    'USER MEMORY — durable facts and preferences you saved about this user, across all projects. Apply them unless the current request overrides them:\n\n' +
+                    userMemory
+                }
+              ]
+            : []),
           // Cowork turns the assistant into a goal-driven agent over the folder.
           ...(mode === 'cowork'
             ? [{ role: 'system' as const, content: COWORK_SYSTEM_PROMPT }]
             : []),
+          // Plan mode (#8): plan-first directive, right after the Cowork agent prompt so
+          // it overrides the "ACT, don't narrate" bias until the user approves the plan.
+          ...(planActive ? [{ role: 'system' as const, content: PLAN_MODE_SYSTEM_PROMPT }] : []),
           // Inject the project journal so the agent continues rather than repeats.
           ...(coworkMemory
             ? [
@@ -456,7 +673,9 @@ export function registerProviderIpc(): void {
         // the model sees its own call and the result it got back.
         const history: ChatMessage[] = [
           ...baseSystem,
-          { role: 'system', content: toolsPrompt },
+          // Native mode omits the text-protocol instructions entirely (the model gets the
+          // tool schemas out-of-band); the text path still teaches the ```myto:tool fence.
+          ...(useNativeTools ? [] : [{ role: 'system' as const, content: toolsPrompt }]),
           ...convo
         ]
 
@@ -492,6 +711,15 @@ export function registerProviderIpc(): void {
         let buildsMade = 0
         let exploreStreak = 0
 
+        // Verify gate state (#16): how many times the verify command has run this reply,
+        // and whether it has passed (so a later natural-done doesn't re-run it needlessly).
+        let verifyRounds = 0
+        let verifyPassed = false
+
+        // Plan-mode gate state (#8): whether the user has approved the drafted plan this
+        // reply. Until then the FIRST side-effecting tool is held for plan approval.
+        let planApproved = false
+
         for (let turn = 0; turn < maxToolTurns; turn++) {
           // Keep the running history inside the context window on long tasks: once it
           // grows past the threshold, fold the older middle into a short summary so the
@@ -509,6 +737,44 @@ export function registerProviderIpc(): void {
             return
           }
           if (!call) {
+            // #16 Programmatic verify gate. Before accepting "done" in Cowork, run the
+            // user's verify command (build/test/lint). Exit 0 → the run really is done;
+            // non-zero → feed the failure back as a user turn and loop so the tools stay
+            // live for a fix. Bounded by MAX_VERIFY_ROUNDS (and the turn budget); an empty
+            // command, or a command that already passed this reply, is a no-op.
+            const verifyCmd =
+              mode === 'cowork' && workspaceDir ? settings.cowork.verifyCommand.trim() : ''
+            if (verifyCmd && !verifyPassed && verifyRounds < MAX_VERIFY_ROUNDS) {
+              verifyRounds++
+              send({ delta: '', done: false, status: `Verifying: ${verifyCmd}` })
+              const spec = resolveShell()
+              const vr = await executeArgv(spec.cmd, [spec.flag, verifyCmd], controller.signal, {
+                cwd: workspaceDir ?? undefined,
+                timeoutMs: VERIFY_TIMEOUT_MS
+              })
+              if (controller.signal.aborted) return
+              const report = formatRunResult('bash', vr, VERIFY_TIMEOUT_MS)
+              // Mirror to the Terminal pane like any other command.
+              onCommand({
+                command: verifyCmd,
+                output: report,
+                exitCode: vr.exitCode ?? null,
+                cwd: workspaceDir ?? undefined
+              })
+              if (!vr.spawnError && vr.exitCode === 0) {
+                verifyPassed = true
+                send({ delta: '', done: true })
+                return
+              }
+              // Failed — surface it and continue so the model can fix the cause.
+              history.push({
+                role: 'user',
+                content: `${goalReminder}The verify command \`${verifyCmd}\` did not pass (exit ${
+                  vr.exitCode ?? 'n/a'
+                }). Fix the underlying problem, then it will run again automatically:\n\n${report}`
+              })
+              continue
+            }
             send({ delta: '', done: true })
             return
           }
@@ -536,9 +802,36 @@ export function registerProviderIpc(): void {
           // Permission gate: side-effecting tools in Cowork may need the user's OK,
           // unless already granted "always" for this run.
           const sideEffect = call.name ? lookupTool(call.name)?.sideEffect : undefined
+
+          // Plan-mode gate (#8): in Cowork with plan mode on, the agent researches
+          // read-only and drafts a plan (update_plan); the FIRST time it reaches for a
+          // write/exec tool we stop and ask the user to approve the plan. Approve →
+          // proceed; "Keep planning" → feed the revise request back and loop with tools
+          // live, re-gating next time. When the plan is approved on THIS call, we skip the
+          // per-call permission prompt for it (below) so the user isn't asked twice in a row
+          // about the same action; later side-effecting calls still follow the permission tier.
+          let planJustApproved = false
+          if (planActive && !planApproved && sideEffect) {
+            send({ delta: '', done: false, status: 'Plan ready — waiting for your approval' })
+            const decision = await requestApproval(toolName, sideEffect, approvalDetail(call), true)
+            if (controller.signal.aborted) return
+            if (decision === 'deny') {
+              const revise =
+                'The user reviewed the plan and wants changes before anything is written or run. Revise the plan with update_plan to reflect what they want, and do not call a write/edit/delete/exec tool until they approve.'
+              send({ delta: toolResultBlock(toolName, revise), done: false })
+              const assistantTurn = (visible.trimEnd() ? `${visible.trimEnd()}\n` : '') + call.block
+              history.push({ role: 'assistant', content: assistantTurn })
+              history.push({ role: 'user', content: `${revise}\n\n${goalReminder}` })
+              continue
+            }
+            planApproved = true
+            planJustApproved = true
+          }
+
           let result: string
           if (
             mode === 'cowork' &&
+            !planJustApproved &&
             requiresApproval(permissionMode, sideEffect) &&
             !(sideEffect && grantedAlways.has(sideEffect))
           ) {
@@ -553,9 +846,31 @@ export function registerProviderIpc(): void {
             result =
               decision === 'deny'
                 ? `The user denied permission to run "${toolName}". Do not retry it; continue without it, or tell the user what you would need to proceed.`
-                : await runTool(call, { ...gate, signal: controller.signal, onPreview, onPlan, delegate, askUser })
+                : await runTool(call, {
+                    ...gate,
+                    signal: controller.signal,
+                    onPreview,
+                    onPlan,
+                    onCommand,
+                    onFileSnapshot,
+                    delegate,
+                    askUser,
+                    preToolUse,
+                    postToolUse
+                  })
           } else {
-            result = await runTool(call, { ...gate, signal: controller.signal, onPreview, onPlan, delegate, askUser })
+            result = await runTool(call, {
+                    ...gate,
+                    signal: controller.signal,
+                    onPreview,
+                    onPlan,
+                    onCommand,
+                    onFileSnapshot,
+                    delegate,
+                    askUser,
+                    preToolUse,
+                    postToolUse
+                  })
           }
           if (controller.signal.aborted) return
           send({ delta: toolResultBlock(toolName, result), done: false })
@@ -793,7 +1108,7 @@ const NESTED_AGENT_MAX_TURNS = 8
 /** Cap on the digest a sub-agent hands back, so one delegation can't bloat the main context. */
 const NESTED_DIGEST_CAP = 6000
 /** Tools a sub-agent must never touch: side effects, and the UI/meta tools that make no headless sense. */
-const SUBAGENT_EXCLUDED = new Set(['preview', 'update_plan', 'spawn_agent', 'ask_user'])
+const SUBAGENT_EXCLUDED = new Set(['preview', 'update_plan', 'spawn_agent', 'spawn_agents', 'ask_user'])
 
 /**
  * Run a delegated read-only sub-task to completion and return its findings as a

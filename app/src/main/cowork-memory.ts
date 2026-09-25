@@ -3,9 +3,9 @@ import { join } from 'node:path'
 import type { ToolCall } from './tools/toolParser'
 
 /*
- * Cowork project memory — the `.sylor/` folder.
+ * Cowork project memory — the `.myto/` folder.
  *
- * Just like Claude Code keeps a `.claude/` directory, Myto keeps a `.sylor/` folder
+ * Just like Claude Code keeps a `.claude/` directory, Myto keeps a `.myto/` folder
  * inside the working folder to give a Cowork run MEMORY across turns. Without it, each
  * new message starts a fresh tool loop that only sees the chat text — so the agent
  * re-explores, re-scaffolds, and repeats work it already did. With it, the main process
@@ -14,12 +14,21 @@ import type { ToolCall } from './tools/toolParser'
  * agent reads "here is what you already did in this folder" and continues instead of
  * restarting.
  *
+ * The folder was named `.sylor/` before the Myto rebrand; a legacy `.sylor/journal.md`
+ * is migrated into `.myto/` on first touch and still read as a fallback, so an in-flight
+ * project keeps its history seamlessly.
+ *
  * Everything here is best-effort and failure-isolated: a read/write problem never breaks
  * a turn (the loop just runs without memory that time).
  */
 
-/** The `.sylor` directory inside a working folder. */
+/** The `.myto` directory inside a working folder. */
 function mytoDir(workspaceDir: string): string {
+  return join(workspaceDir, '.myto')
+}
+
+/** The pre-rebrand `.sylor` directory — read for back-compat, never freshly created. */
+function legacyDir(workspaceDir: string): string {
   return join(workspaceDir, '.sylor')
 }
 
@@ -28,14 +37,21 @@ function journalPath(workspaceDir: string): string {
   return join(mytoDir(workspaceDir), 'journal.md')
 }
 
+/** The pre-rebrand journal file, migrated from and read as a fallback. */
+function legacyJournalPath(workspaceDir: string): string {
+  return join(legacyDir(workspaceDir), 'journal.md')
+}
+
 /** Keep the injected journal bounded so a long project can't blow up the prompt. */
 const JOURNAL_READ_CAP = 8000
 /** Trim the file on disk once it grows past this (keep the recent tail). */
 const JOURNAL_MAX_BYTES = 40_000
 
 /**
- * Ensure `.sylor/` exists with a small explainer, so the folder is discoverable and
+ * Ensure `.myto/` exists with a small explainer, so the folder is discoverable and
  * the journal has a home. Idempotent; safe to call at the start of every Cowork turn.
+ * On first creation, a pre-rebrand `.sylor/journal.md` is copied in so history carries
+ * over without a gap.
  */
 export function ensureMytoDir(workspaceDir: string): void {
   try {
@@ -44,9 +60,20 @@ export function ensureMytoDir(workspaceDir: string): void {
       mkdirSync(dir, { recursive: true })
       writeFileSync(
         join(dir, 'README.md'),
-        '# .sylor\n\nMyto keeps its working memory for this project here — a journal of what it has\ndone across sessions, so it continues your work instead of repeating it. Safe to keep\nin version control or to delete (Myto will start a fresh journal).\n',
+        '# .myto\n\nMyto keeps its working memory for this project here — a journal of what it has\ndone across sessions, so it continues your work instead of repeating it. Safe to keep\nin version control or to delete (Myto will start a fresh journal).\n',
         'utf8'
       )
+      // Back-compat: seed the new journal from the legacy `.sylor/journal.md` so an
+      // in-flight project's history isn't lost at the rebrand boundary.
+      try {
+        const legacy = legacyJournalPath(workspaceDir)
+        const dest = journalPath(workspaceDir)
+        if (existsSync(legacy) && !existsSync(dest)) {
+          writeFileSync(dest, readFileSync(legacy, 'utf8'), 'utf8')
+        }
+      } catch {
+        /* migration is best-effort */
+      }
     }
   } catch {
     /* best-effort */
@@ -55,11 +82,24 @@ export function ensureMytoDir(workspaceDir: string): void {
 
 /**
  * Read the project journal for injection into the next turn, capped to its recent tail.
- * Returns '' when there is no journal yet (a brand-new folder).
+ * Reads the current `.myto/journal.md`, falling back to the legacy `.sylor/journal.md`
+ * when a project hasn't been touched since the rebrand. Returns '' when neither exists.
  */
 export function readJournal(workspaceDir: string): string {
   try {
-    const text = readFileSync(journalPath(workspaceDir), 'utf8').trim()
+    let text = ''
+    try {
+      text = readFileSync(journalPath(workspaceDir), 'utf8').trim()
+    } catch {
+      text = ''
+    }
+    if (!text) {
+      try {
+        text = readFileSync(legacyJournalPath(workspaceDir), 'utf8').trim()
+      } catch {
+        text = ''
+      }
+    }
     if (!text) return ''
     return text.length > JOURNAL_READ_CAP ? `…(earlier entries trimmed)\n${text.slice(-JOURNAL_READ_CAP)}` : text
   } catch {
@@ -93,6 +133,20 @@ export function recordGoal(workspaceDir: string, goal: string): void {
   if (!g) return
   const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
   append(workspaceDir, `\n## ${stamp} — goal\n${g.length > 500 ? `${g.slice(0, 500)}…` : g}`)
+}
+
+/**
+ * Record a durable, model-authored note into the project journal — the `remember` tool's
+ * `project` scope. Unlike the automatic action log, this is something the agent explicitly
+ * chose to remember for next time (a decision, a convention, a gotcha). Best-effort.
+ * Returns true when something was written.
+ */
+export function recordNote(workspaceDir: string, note: string): boolean {
+  const n = note.trim()
+  if (!workspaceDir.trim() || !n) return false
+  const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
+  append(workspaceDir, `- (${stamp}) note: ${n.length > 500 ? `${n.slice(0, 500)}…` : n}`)
+  return true
 }
 
 /**

@@ -12,7 +12,8 @@ function loadedSession(id: string, messages: PersistedMessage[] = []): Persisted
       projectId: null,
       createdAt: 0,
       updatedAt: 0,
-      messageCount: messages.length
+      messageCount: messages.length,
+      mode: 'chat'
     },
     messages,
     attachments: []

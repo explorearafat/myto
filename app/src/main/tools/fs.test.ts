@@ -12,6 +12,7 @@ import {
   deleteFileTool
 } from './fs'
 import { DEFAULT_PROVIDER_SETTINGS } from '../../shared/defaults'
+import type { FileSnapshot } from '../../shared/types'
 import type { ToolContext } from './registry'
 
 // A real temp folder is the Cowork workspace for these tests; each test resets it.
@@ -166,3 +167,60 @@ describe('delete_file', () => {
     expect(await deleteFileTool.run({ path: '.' }, ctx())).toMatch(/refusing to delete the working folder/i)
   })
 })
+
+describe('onFileSnapshot capture (#1 checkpoints)', () => {
+  // A ctx that records every snapshot the mutation tools emit.
+  const captureCtx = (): { ctx: ToolContext; snaps: FileSnapshot[] } => {
+    const snaps: FileSnapshot[] = []
+    return {
+      snaps,
+      ctx: { ...ctx(), onFileSnapshot: (s) => snaps.push(s) }
+    }
+  }
+
+  it('write_file emits a create snapshot (before=null, existed=false)', async () => {
+    const { ctx: c, snaps } = captureCtx()
+    await writeFileTool.run({ path: 'new.txt', content: 'hello' }, c)
+    expect(snaps).toHaveLength(1)
+    expect(snaps[0]).toMatchObject({
+      path: resolve(ROOT, 'new.txt'),
+      before: null,
+      after: 'hello',
+      kind: 'write',
+      existed: false
+    })
+  })
+
+  it('write_file emits an overwrite snapshot with the prior bytes (existed=true)', async () => {
+    writeFileSync(join(ROOT, 'x.txt'), 'old')
+    const { ctx: c, snaps } = captureCtx()
+    await writeFileTool.run({ path: 'x.txt', content: 'new' }, c)
+    expect(snaps[0]).toMatchObject({ before: 'old', after: 'new', kind: 'write', existed: true })
+  })
+
+  it('edit_file emits an edit snapshot carrying before + after', async () => {
+    writeFileSync(join(ROOT, 'a.txt'), 'the quick brown fox')
+    const { ctx: c, snaps } = captureCtx()
+    await editFileTool.run({ path: 'a.txt', old: 'quick', new: 'slow' }, c)
+    expect(snaps[0]).toMatchObject({
+      before: 'the quick brown fox',
+      after: 'the slow brown fox',
+      kind: 'edit',
+      existed: true
+    })
+  })
+
+  it('delete_file emits a delete snapshot (after=null) with the prior bytes', async () => {
+    writeFileSync(join(ROOT, 'gone.txt'), 'bye')
+    const { ctx: c, snaps } = captureCtx()
+    await deleteFileTool.run({ path: 'gone.txt' }, c)
+    expect(snaps[0]).toMatchObject({ before: 'bye', after: null, kind: 'delete', existed: true })
+  })
+
+  it('does not emit a snapshot when the write is refused (outside the workspace)', async () => {
+    const { ctx: c, snaps } = captureCtx()
+    await writeFileTool.run({ path: '../escape.txt', content: 'x' }, c)
+    expect(snaps).toHaveLength(0)
+  })
+})
+

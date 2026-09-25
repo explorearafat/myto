@@ -53,6 +53,21 @@ export function resolveInterpreter(language: string): InterpreterSpec | null {
   return INTERPRETERS[language.toLowerCase()] ?? null
 }
 
+/**
+ * The platform's native shell for running a whole command line (build, tests,
+ * install, a dev server) — `cmd.exe /c` on Windows, `bash -c` on Unix. This is what
+ * `run_command`/`run_dev_server` use instead of `resolveInterpreter('bash')`: bash
+ * is frequently NOT on a Windows machine's PATH, so pinning to bash there made every
+ * `npm …` command fail to spawn. cmd.exe is always present on Windows (via ComSpec),
+ * so `npm`, `node`, `python`, git, etc. resolve exactly as they do in a normal
+ * terminal. Never returns null — every supported OS has one of these.
+ */
+export function resolveShell(): InterpreterSpec {
+  return process.platform === 'win32'
+    ? { cmd: process.env.ComSpec || 'cmd.exe', flag: '/c' }
+    : { cmd: 'bash', flag: '-c' }
+}
+
 /** Outcome of one execution. */
 export interface RunResult {
   stdout: string
@@ -71,17 +86,42 @@ export async function executeCode(
   cwd?: string,
   timeoutMs: number = RUN_TIMEOUT_MS
 ): Promise<RunResult> {
+  return executeArgv(spec.cmd, [spec.flag, code], signal, {
+    // The JS path runs the bundled Node via ELECTRON_RUN_AS_NODE; everything else
+    // inherits the normal environment.
+    env: spec.electronNode ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : process.env,
+    cwd,
+    timeoutMs
+  })
+}
+
+/**
+ * Spawn an executable with an explicit argument VECTOR (no shell) and capture its
+ * output under the same timeout + size-cap discipline as {@link executeCode}. This
+ * is what tools that build their own command from structured input use — the git
+ * tools especially: passing argv directly means a commit message or a path with
+ * spaces, quotes, or shell metacharacters can never be re-interpreted by a shell,
+ * so there is nothing to escape and nothing to inject. {@link executeCode} is now a
+ * thin wrapper over this that runs a shell/interpreter with a single code string.
+ */
+export async function executeArgv(
+  cmd: string,
+  args: string[],
+  signal: AbortSignal,
+  opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}
+): Promise<RunResult> {
+  const timeoutMs = opts.timeoutMs ?? RUN_TIMEOUT_MS
   return new Promise<RunResult>((resolve) => {
     let stdout = ''
     let stderr = ''
     let timedOut = false
     let settled = false
 
-    const child = spawn(spec.cmd, [spec.flag, code], {
-      env: spec.electronNode ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : process.env,
-      // In Cowork the snippet runs inside the working folder, so files it writes
-      // (a generated PDF, image, spreadsheet…) land there via a relative path.
-      ...(cwd ? { cwd } : {}),
+    const child = spawn(cmd, args, {
+      env: opts.env ?? process.env,
+      // In Cowork the command runs inside the working folder, so files it writes
+      // (or the repo it acts on) resolve there via a relative path.
+      ...(opts.cwd ? { cwd: opts.cwd } : {}),
       windowsHide: true
     })
 

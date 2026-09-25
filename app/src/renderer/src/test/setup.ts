@@ -45,7 +45,8 @@ const mytoMock: MytoApi = {
       projectId: null,
       createdAt: 0,
       updatedAt: 0,
-      messageCount: 0
+      messageCount: 0,
+      mode: 'chat'
     }),
     load: vi.fn().mockResolvedValue({
       session: {
@@ -55,7 +56,8 @@ const mytoMock: MytoApi = {
         projectId: null,
         createdAt: 0,
         updatedAt: 0,
-        messageCount: 0
+        messageCount: 0,
+        mode: 'chat'
       },
       messages: [],
       attachments: []
@@ -66,7 +68,11 @@ const mytoMock: MytoApi = {
     search: vi.fn().mockResolvedValue([]),
     appendMessage: vi.fn(),
     setFeedback: vi.fn(),
-    resetMessage: vi.fn()
+    resetMessage: vi.fn(),
+    rewind: vi
+      .fn()
+      .mockResolvedValue({ ok: true, filesRestored: 0, filesDeleted: 0, messagesRemoved: 0 }),
+    snapshotBefore: vi.fn().mockResolvedValue(null)
   },
   projects: {
     list: vi.fn().mockResolvedValue([]),
@@ -116,7 +122,8 @@ const mytoMock: MytoApi = {
     save: vi.fn().mockResolvedValue({ ok: false, canceled: true })
   },
   cowork: {
-    pickWorkspace: vi.fn().mockResolvedValue(null)
+    pickWorkspace: vi.fn().mockResolvedValue(null),
+    listFiles: vi.fn().mockResolvedValue([])
   },
   preview: {
     openExternal: vi.fn()
@@ -129,6 +136,25 @@ const mytoMock: MytoApi = {
   },
   voice: {
     transcribe: vi.fn().mockResolvedValue({ ok: false, error: 'no-gateway' })
+  },
+  screenshot: {
+    capture: vi.fn().mockResolvedValue(null)
+  },
+  scheduledTasks: {
+    list: vi.fn().mockResolvedValue([]),
+    create: vi.fn().mockResolvedValue(null),
+    update: vi.fn().mockResolvedValue(null),
+    remove: vi.fn().mockResolvedValue(undefined),
+    runNow: vi.fn().mockResolvedValue(undefined),
+    onFire: vi.fn().mockReturnValue(() => {})
+  },
+  terminal: {
+    spawn: vi.fn().mockResolvedValue({ ok: false, buffer: '' }),
+    write: vi.fn(),
+    resize: vi.fn(),
+    kill: vi.fn(),
+    onData: vi.fn().mockReturnValue(() => {}),
+    onExit: vi.fn().mockReturnValue(() => {})
   }
 }
 

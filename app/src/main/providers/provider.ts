@@ -38,6 +38,15 @@ export interface Provider {
     signal?: AbortSignal,
     options?: CompletionOptions
   ): Promise<void>
+  /**
+   * Whether this provider can carry native (structured) function-calling for the
+   * active endpoint (#15). Optional: only {@link GatewayProvider} implements it
+   * (delegating to its wire adapter), so callers read
+   * `provider.supportsNativeTools?.() ?? false` and Ollama (which omits it) yields
+   * the safe `false`. The Cowork reply loop consults this before opting a turn into
+   * the native tool path; when false it uses the ```myto:tool text protocol.
+   */
+  supportsNativeTools?(): boolean
 }
 
 /** Convenience: build a {@link ModelInfo} from an id, deriving a display name. */

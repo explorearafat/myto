@@ -15,9 +15,11 @@ import * as electron from 'electron'
 import { DEFAULT_PROVIDER_SETTINGS } from '../shared/defaults'
 import type {
   AuthSchema,
+  ChatMode,
   CoworkPermissionMode,
   McpServerConfig,
   McpTransport,
+  OutputStyle,
   PluginConfig,
   ProviderKind,
   ProviderSettings,
@@ -122,9 +124,11 @@ function readJsonFile<T>(path: string): T | undefined {
 const VALID_PROVIDERS: ProviderKind[] = ['ollama', 'gateway']
 const VALID_SCHEMAS: AuthSchema[] = ['none', 'bearer', 'header']
 const VALID_THEMES: Theme[] = ['light', 'dark']
+const VALID_MODES: ChatMode[] = ['chat', 'cowork']
 const VALID_PERMISSION_MODES: CoworkPermissionMode[] = ['ask', 'autoApprove', 'bypass']
 const VALID_TRANSPORTS: McpTransport[] = ['stdio', 'http', 'sse']
 const VALID_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'max']
+const VALID_OUTPUT_STYLES: OutputStyle[] = ['default', 'concise', 'explanatory', 'learning']
 
 /** A string→string record, keeping only string values (env / headers hygiene). */
 function stringRecord(raw: unknown): Record<string, string> | undefined {
@@ -225,6 +229,7 @@ export function normalise(raw: unknown): ProviderSettings {
   const ui = (o.ui ?? {}) as Partial<ProviderSettings['ui']>
   const tools = (o.tools ?? {}) as Partial<ProviderSettings['tools']>
   const cowork = (o.cowork ?? {}) as Partial<ProviderSettings['cowork']>
+  const coworkHooks = (cowork.hooks ?? {}) as Partial<ProviderSettings['cowork']['hooks']>
 
   const activeProvider =
     o.activeProvider && VALID_PROVIDERS.includes(o.activeProvider)
@@ -235,6 +240,7 @@ export function normalise(raw: unknown): ProviderSettings {
       ? gateway.authSchema
       : d.gateway.authSchema
   const theme = ui.theme && VALID_THEMES.includes(ui.theme) ? ui.theme : d.ui.theme
+  const lastMode = ui.lastMode && VALID_MODES.includes(ui.lastMode) ? ui.lastMode : d.ui.lastMode
 
   return {
     activeProvider,
@@ -253,7 +259,8 @@ export function normalise(raw: unknown): ProviderSettings {
     modelName: typeof o.modelName === 'string' ? o.modelName : d.modelName,
     modelId: typeof o.modelId === 'string' ? o.modelId : d.modelId,
     ui: {
-      theme
+      theme,
+      lastMode
     },
     tools: {
       enabled: typeof tools.enabled === 'boolean' ? tools.enabled : d.tools.enabled,
@@ -265,7 +272,24 @@ export function normalise(raw: unknown): ProviderSettings {
         typeof cowork.workspaceDir === 'string' ? cowork.workspaceDir : d.cowork.workspaceDir,
       permissionMode: VALID_PERMISSION_MODES.includes(cowork.permissionMode as CoworkPermissionMode)
         ? (cowork.permissionMode as CoworkPermissionMode)
-        : d.cowork.permissionMode
+        : d.cowork.permissionMode,
+      verifyCommand:
+        typeof cowork.verifyCommand === 'string' ? cowork.verifyCommand : d.cowork.verifyCommand,
+      planMode: typeof cowork.planMode === 'boolean' ? cowork.planMode : d.cowork.planMode,
+      hooks: {
+        preToolUse:
+          typeof coworkHooks.preToolUse === 'string'
+            ? coworkHooks.preToolUse
+            : d.cowork.hooks.preToolUse,
+        postToolUse:
+          typeof coworkHooks.postToolUse === 'string'
+            ? coworkHooks.postToolUse
+            : d.cowork.hooks.postToolUse
+      },
+      terminalConsent:
+        typeof cowork.terminalConsent === 'boolean'
+          ? cowork.terminalConsent
+          : d.cowork.terminalConsent
     },
     mcpServers: Array.isArray(o.mcpServers)
       ? o.mcpServers.map(normaliseMcpServer).filter((s): s is McpServerConfig => s !== null)
@@ -278,7 +302,11 @@ export function normalise(raw: unknown): ProviderSettings {
       : d.plugins,
     reasoningEffort: VALID_EFFORTS.includes(o.reasoningEffort as ReasoningEffort)
       ? (o.reasoningEffort as ReasoningEffort)
-      : d.reasoningEffort
+      : d.reasoningEffort,
+    outputStyle: VALID_OUTPUT_STYLES.includes(o.outputStyle as OutputStyle)
+      ? (o.outputStyle as OutputStyle)
+      : d.outputStyle,
+    nativeTools: typeof o.nativeTools === 'boolean' ? o.nativeTools : d.nativeTools
   }
 }
 

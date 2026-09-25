@@ -126,7 +126,15 @@ export const writeFileTool: ToolDef = {
     if (content == null) return 'write_file needs a "content" string, e.g. {"path": "notes.md", "content": "…"}.'
     try {
       await mkdir(dirname(r.abs), { recursive: true })
+      // Capture the prior bytes (if any) BEFORE overwriting, so the write is rewindable.
+      let before: string | null = null
+      try {
+        before = await readFile(r.abs, 'utf8')
+      } catch {
+        before = null // new file — nothing to restore to on rewind (delete instead)
+      }
       await writeFile(r.abs, content, 'utf8')
+      ctx.onFileSnapshot?.({ path: r.abs, before, after: content, kind: 'write', existed: before !== null })
       return `Wrote ${content.length} character${content.length === 1 ? '' : 's'} to ${r.rel}.`
     } catch (err) {
       return `write_file failed for "${r.rel}": ${toErrorMessage(err)}`
@@ -161,6 +169,7 @@ export const editFileTool: ToolDef = {
       }
       const after = all ? before.split(oldText).join(newText) : before.replace(oldText, newText)
       await writeFile(r.abs, after, 'utf8')
+      ctx.onFileSnapshot?.({ path: r.abs, before, after, kind: 'edit', existed: true })
       const n = all ? count : 1
       return `Edited ${r.rel} (${n} replacement${n === 1 ? '' : 's'}).`
     } catch (err) {
@@ -184,7 +193,16 @@ export const deleteFileTool: ToolDef = {
       return 'delete_file: refusing to delete the working folder itself.'
     }
     try {
+      // Capture the prior bytes before removal so a delete is rewindable (best-effort:
+      // a directory or non-text/unreadable target snapshots without a body).
+      let before: string | null = null
+      try {
+        before = await readFile(r.abs, 'utf8')
+      } catch {
+        before = null
+      }
       await rm(r.abs, { recursive: true, force: false })
+      ctx.onFileSnapshot?.({ path: r.abs, before, after: null, kind: 'delete', existed: true })
       return `Deleted ${r.rel}.`
     } catch (err) {
       return `delete_file failed for "${r.rel}": ${toErrorMessage(err)}`

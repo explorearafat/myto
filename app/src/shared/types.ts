@@ -79,6 +79,17 @@ export type SettingsTab = 'appearance' | 'model' | 'tools' | 'connectors' | 'ski
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'max'
 
 /**
+ * The voice/verbosity the assistant writes in (#13 output styles), mirroring Claude
+ * Code's output styles. Turned into a system-prompt directive (see main/status.ts):
+ *  - `default`     → Myto's normal balance (no extra directive).
+ *  - `concise`     → short, direct answers; minimal preamble.
+ *  - `explanatory` → adds brief "insight" asides explaining the why behind choices.
+ *  - `learning`    → collaborative, teaching tone that invites the user to try steps.
+ * Persisted globally like {@link ReasoningEffort}; chosen from Settings / the composer.
+ */
+export type OutputStyle = 'default' | 'concise' | 'explanatory' | 'learning'
+
+/**
  * Which way a chat turn runs:
  *  - `chat`   → the ordinary assistant: answers, may call the read-only web tools.
  *  - `cowork` → the agentic mode (Claude-Cowork style). The model works toward a
@@ -94,6 +105,13 @@ export type ChatMode = 'chat' | 'cowork'
 export interface UiSettings {
   /** Active color theme; applied via `<html data-theme>`. */
   theme: Theme
+  /**
+   * The Chat/Cowork mode last used, so a brand-new chat opens in the same mode the
+   * user was last working in (rather than always resetting to Chat). Seeded into
+   * {@link ChatState.coworkMode} when a fresh draft is created. A per-session `mode`
+   * (see {@link SessionSummary.mode}) still pins each saved chat to its own mode.
+   */
+  lastMode: ChatMode
 }
 
 /**
@@ -123,6 +141,45 @@ export interface CoworkSettings {
   workspaceDir: string
   /** How side-effecting tools (writes / code) are permissioned in Cowork. */
   permissionMode: CoworkPermissionMode
+  /**
+   * A shell command Cowork runs to VERIFY its work before it declares a task done
+   * (#16 verify gate) — e.g. `npm test`, `npm run typecheck`, `pytest`. When set,
+   * the agentic loop runs it at the natural end of a run: exit 0 → done; a non-zero
+   * exit feeds the output back as a turn so the model fixes what it broke, bounded
+   * by a small retry cap. Empty string (the default) disables the gate entirely.
+   */
+  verifyCommand: string
+  /**
+   * Plan mode (#8): when on, a Cowork run must first produce a plan (via
+   * `update_plan`) and STOP for the user's approval before it runs any
+   * side-effecting (write/exec) tool. Orthogonal to {@link permissionMode} — a
+   * distinct "think before you touch anything" gate, off by default.
+   */
+  planMode: boolean
+  /**
+   * User-configured lifecycle hooks (#9): shell commands run around every tool
+   * call in Cowork. `preToolUse` runs before a tool (a non-empty stdout blocks the
+   * call, feeding that text back to the model); `postToolUse` runs after. Both are
+   * an arbitrary-exec surface, so they only run in Cowork and respect the same
+   * cancel signal + timeout as `run_command`. Empty/absent = no hook.
+   */
+  hooks: CoworkHooks
+  /**
+   * Interactive-terminal consent (#2): the real PTY shell (node-pty + xterm.js) runs
+   * commands with NO per-call approval — it bypasses the {@link permissionMode} gate
+   * entirely and is scoped only to the working folder's cwd. So the Shell tab stays
+   * locked behind this explicit, sticky opt-in: false (the default) shows a consent
+   * panel instead of a shell; the user flips it once to accept an unrestricted shell.
+   */
+  terminalConsent: boolean
+}
+
+/** Pre/Post tool-use hook commands (#9). Empty string = that hook is disabled. */
+export interface CoworkHooks {
+  /** Command run before each tool; non-empty stdout blocks the call with that text. */
+  preToolUse: string
+  /** Command run after each tool completes; its output is surfaced as a status line. */
+  postToolUse: string
 }
 
 /**
@@ -310,6 +367,13 @@ export interface ApprovalRequest {
   sideEffect: ToolSideEffect
   /** A short human detail, e.g. the target path or 'python code'. May be empty. */
   detail: string
+  /**
+   * Plan-mode gate (#8): when true this prompt approves the agent's DRAFTED PLAN
+   * before any write/exec runs, not a single tool. The renderer shows plan-approval
+   * wording (Approve & proceed / Keep planning) and `sideEffect`/`toolName` are only
+   * placeholders. Absent for ordinary per-tool approvals.
+   */
+  plan?: boolean
 }
 
 /**
@@ -367,6 +431,20 @@ export interface ProviderSettings {
    * budget; others ignore it). Chosen from the composer's effort control.
    */
   reasoningEffort: ReasoningEffort
+  /**
+   * The assistant's writing voice (#13). Applied as a system-prompt directive on
+   * every turn (chat + cowork). Persisted globally; `default` adds no directive.
+   */
+  outputStyle: OutputStyle
+  /**
+   * Use native provider function-calling (#15) instead of the ```myto:tool text
+   * protocol, when the active provider/model supports it (an OpenAI- or
+   * Anthropic-shaped gateway). Opt-in and OFF by default: with it off, Myto uses
+   * the text protocol exactly as before, so existing chats and persistence are
+   * untouched. When on and unsupported by the backend, the loop falls back to the
+   * text protocol automatically.
+   */
+  nativeTools: boolean
 }
 
 /** A model advertised by a provider's list endpoint. */
@@ -417,6 +495,40 @@ export interface ChatImage {
   dataBase64: string
 }
 
+/**
+ * A completed NATIVE (provider) tool call assembled from a streaming response (#15).
+ * The gateway's per-stream parser accumulates the provider's tool-call fragments —
+ * OpenAI `delta.tool_calls[].function.arguments`, Anthropic `input_json_delta` —
+ * into one of these and forwards it on a {@link CompletionChunk.toolCall}. The reply
+ * loop turns it into the SAME canonical ```myto:tool block a text-protocol call
+ * produces, so the assistant turn, its card, and DB persistence are identical
+ * whichever path ran. Internal to the main process — never crosses IPC.
+ */
+export interface NativeToolCall {
+  /** Provider id for the call (OpenAI `tool_calls[].id`, Anthropic tool_use block id). Best-effort; may be ''. */
+  id: string
+  /** The tool name the model chose (matches a {@link NativeToolSchema.name}). */
+  name: string
+  /** Raw JSON string of the call's arguments; the loop parses it into the call's `input`. */
+  argsJson: string
+}
+
+/**
+ * One tool advertised to a native-function-calling backend (#15). Built from the
+ * tool registry (`toolSchemas`); the wire adapter injects it into the request body
+ * in the provider's own shape (OpenAI `tools[].function`, Anthropic
+ * `tools[].input_schema`). Sent only when native tools are on AND the backend
+ * supports them; otherwise the ```myto:tool text protocol carries the catalogue.
+ */
+export interface NativeToolSchema {
+  /** Unique tool name (matches {@link ToolDef.name}). */
+  name: string
+  /** One-line description shown to the model (the text prompt's line, incl. the usage hint). */
+  description: string
+  /** JSON-Schema object describing the tool's `input`. */
+  parameters: Record<string, unknown>
+}
+
 /** Input to a (non-streaming or streaming) completion call. */
 export interface CompletionRequest {
   /** Provider to use; defaults to the active provider when omitted. */
@@ -431,6 +543,14 @@ export interface CompletionRequest {
    * caller keeps its exact behaviour.
    */
   mode?: ChatMode
+  /**
+   * The session this turn belongs to, and the id of the user message it answers.
+   * Optional and Cowork-only in practice: they key the file_snapshots the mutation
+   * tools capture (#1 checkpoints/rewind) so a later "restore to here" can replay
+   * them. Omitted by every non-Cowork caller, in which case no snapshots are keyed.
+   */
+  sessionId?: string
+  afterMsgId?: string
 }
 
 /** Result of a non-streaming completion. */
@@ -496,6 +616,114 @@ export interface CompletionChunk {
    * checklist above the reply. Non-blocking like {@link preview}. Absent otherwise.
    */
   todos?: TodoItem[]
+  /**
+   * A shell command Myto just ran and its output (Cowork), raised by the
+   * `run_command` tool. Present only on the chunk that reports it (empty `delta`);
+   * the renderer appends it to the Terminal pane. Non-blocking like {@link preview}.
+   * Absent otherwise.
+   */
+  command?: CommandRun
+  /**
+   * Raw chain-of-thought accumulated so far for the CURRENT thinking phase (Cowork
+   * and chat with a reasoning model). Unlike {@link reasoning} — the per-delta scrap
+   * that only becomes a status caption — this is the full snapshot the renderer shows
+   * in a live, collapsible "Thinking" block (blinking while active, with a token
+   * count). Carried out-of-band on its own chunk (empty `delta`); each snapshot
+   * REPLACES the phase's text. Absent on ordinary text chunks and on non-reasoning
+   * models (which never think out loud — we never fabricate it).
+   */
+  thinking?: string
+  /**
+   * Closes the current thinking phase (its block stops blinking and is considered
+   * final). Emitted when visible reply text begins, at the natural end of a turn,
+   * and on early return / abort so a tool-only turn still ends its phase. A fresh
+   * {@link thinking} snapshot after a reset opens a NEW phase — which is how one run
+   * shows several interleaved thinking blocks. Absent otherwise.
+   */
+  thinkingReset?: boolean
+  /**
+   * A completed NATIVE (provider) tool call assembled from the stream (#15). Present
+   * only on the chunk that completes it (empty `delta`), and only when the turn opted
+   * into native function-calling. The main-process reply loop turns it into the same
+   * canonical ```myto:tool block a text call produces and never forwards it onward —
+   * so, unlike the fields above, it stays inside main. Absent on every text-protocol
+   * turn (native tools off or unsupported by the backend).
+   */
+  toolCall?: NativeToolCall
+}
+
+/**
+ * One shell command Cowork ran, plus the output it produced — streamed to the
+ * renderer's Terminal pane so the user can watch builds/tests/installs run. The
+ * `output` is already size-capped upstream (see main/tools/runCode.ts OUTPUT_CAP).
+ */
+export interface CommandRun {
+  /**
+   * A stable id for this run, so the Terminal pane can UPSERT it: a long-lived
+   * process (a dev server) streams several updates under one id and they replace the
+   * same row in place rather than piling up. Absent for legacy/one-shot appends,
+   * which are always appended.
+   */
+  id?: string
+  /** The command line as the model issued it (e.g. "npm test"). */
+  command: string
+  /** Combined stdout/stderr the command produced (or the spawn error, if it failed to start). */
+  output: string
+  /** Process exit code when the runner reported one; null on a spawn failure / timeout. */
+  exitCode?: number | null
+  /** The working folder the command ran in, shown in the Terminal pane header. */
+  cwd?: string
+}
+
+/** What kind of mutation a {@link FileSnapshot} captured. */
+export type FileSnapshotKind = 'write' | 'edit' | 'delete'
+
+/**
+ * A before/after capture of one file a Cowork mutation tool touched (#1 checkpoints
+ * / rewind). Emitted by the write/edit/delete tools via `ctx.onFileSnapshot` and
+ * persisted to the `file_snapshots` table, keyed by session + the user message the
+ * run answers + the run id. Rewind replays these in reverse to restore an earlier
+ * state; the diff viewer (#5) reads `before`/`after` to render a real diff.
+ */
+export interface FileSnapshot {
+  /** Absolute path of the file that was written/edited/deleted. */
+  path: string
+  /** The file's bytes BEFORE the change; null when the file did not exist. */
+  before: string | null
+  /** The file's bytes AFTER the change; null for a delete. */
+  after: string | null
+  /** Which mutation produced this snapshot. */
+  kind: FileSnapshotKind
+  /** Whether the file existed before the change (drives rewind's "delete vs restore"). */
+  existed: boolean
+}
+
+/** A persisted {@link FileSnapshot} row (adds the persistence keys + id). */
+export interface PersistedFileSnapshot extends FileSnapshot {
+  id: number
+  sessionId: string
+  /** The user message the run answered (null for snapshots written before a first message). */
+  afterMsgId: string | null
+  runId: string
+  createdAt: number
+}
+
+/**
+ * Outcome of a rewind (#1 checkpoints / "restore to here"): a summary of what the
+ * reverse replay changed, or — with `ok: false` — why it was a no-op (e.g. the
+ * target message id was unknown). Purely informational; the renderer surfaces it
+ * as a short toast after the confirm.
+ */
+export interface RewindResult {
+  ok: boolean
+  /** Files whose pre-change bytes were written back. */
+  filesRestored: number
+  /** Files removed because they did not exist at the restore point. */
+  filesDeleted: number
+  /** Chat turns discarded (everything after the target message). */
+  messagesRemoved: number
+  /** Present only when `ok` is false — why nothing was done. */
+  reason?: string
 }
 
 /**
@@ -519,6 +747,14 @@ export interface CompletionOptions {
    * Best-effort: forwarded as `max_tokens` (gateway) / `num_predict` (Ollama).
    */
   maxTokens?: number
+  /**
+   * Native function-calling tool schemas to advertise this turn (#15). Set only on
+   * the Cowork reply loop's request when native tools are on AND the backend
+   * supports them; the wire adapter injects them in the provider's own shape
+   * (OpenAI `tools[].function`, Anthropic `tools[].input_schema`). Unset on every
+   * other call, so the text-protocol path is completely unaffected.
+   */
+  tools?: NativeToolSchema[]
 }
 
 export interface ProvidersApi {
@@ -578,6 +814,13 @@ export interface SessionSummary {
   updatedAt: number
   /** Number of chat messages stored, for the list preview. */
   messageCount: number
+  /**
+   * The chat mode this session is fixed to (Chat vs Cowork). Set once when the row
+   * is created (from the composer's toggle) and never changed — a session never
+   * mixes Chat and Cowork turns. Opening a session restores this mode; the sidebar
+   * tags each row with it. Defaults to `'chat'` for rows created before this column.
+   */
+  mode: ChatMode
 }
 
 /** A persisted chat message (mirrors the terminal fields of {@link ChatMessage}). */
@@ -642,8 +885,12 @@ export interface PersistedSession {
 export interface SessionsApi {
   /** All sessions for the active project root, newest first. Filter by project. */
   list: (projectId?: string | null) => Promise<SessionSummary[]>
-  /** Create a fresh session (optionally filed under a project) and return it. */
-  create: (projectId?: string | null) => Promise<SessionSummary>
+  /**
+   * Create a fresh session (optionally filed under a project) and return it. The
+   * `mode` fixes the new chat to Chat or Cowork (defaults to `'chat'`); it's taken
+   * from the composer's toggle on the lazy first-send.
+   */
+  create: (projectId?: string | null, mode?: ChatMode) => Promise<SessionSummary>
   /** Load a session's full contents for rehydration. */
   load: (id: string) => Promise<PersistedSession>
   /** Rename a session (bumps updatedAt). */
@@ -674,6 +921,22 @@ export interface SessionsApi {
    * its content/feedback so a reload shows only the regenerated result. Local-only.
    */
   resetMessage: (sessionId: string, id: string) => void
+  /**
+   * Rewind (#1 checkpoints) the session to just after `afterMsgId`: replay the
+   * Cowork file snapshots recorded on or after that turn in reverse (restoring each
+   * file's pre-change bytes, or deleting files that didn't exist), then discard the
+   * chat turns that followed. Returns a summary of what changed. Destructive — the
+   * renderer confirms first.
+   */
+  rewind: (sessionId: string, afterMsgId: string) => Promise<RewindResult>
+  /**
+   * The pre-change bytes for a file card's overwrite diff (#5): given the exact
+   * *after* content a Cowork write card is showing, return the previous content of
+   * the same write from `file_snapshots` (content-addressed, so a card's relative
+   * path needn't match the snapshot's absolute one). `null` when it was a fresh
+   * create or no snapshot exists — the card then shows an all-additions view.
+   */
+  snapshotBefore: (sessionId: string, after: string) => Promise<string | null>
 }
 
 /** Result of a browser-mediated sign-in: the relayed Google ID token, or why it failed. */
@@ -716,6 +979,12 @@ export interface FilesApi {
 export interface CoworkApi {
   /** Open a native folder picker; resolves the chosen absolute path, or null if cancelled. */
   pickWorkspace: () => Promise<string | null>
+  /**
+   * List workspace-relative paths matching an `@file` mention query (case-insensitive
+   * substring, basename hits ranked first). Resolves an empty array when no working
+   * folder is set, so the composer popover simply shows nothing off-sandbox.
+   */
+  listFiles: (query: string) => Promise<string[]>
 }
 
 /**
@@ -775,6 +1044,160 @@ export interface VoiceApi {
   transcribe: (input: VoiceTranscribeInput) => Promise<VoiceTranscribeResult>
 }
 
+/** A captured screenshot, ready to be turned into a File and staged as an attachment. */
+export interface ScreenshotResult {
+  /** Base64-encoded PNG bytes (no data-URL prefix). */
+  data: string
+  /** Always `image/png`. */
+  mime: string
+  /** A suggested filename (e.g. `screenshot-2026-09-24-1712.png`). */
+  name: string
+}
+
+/**
+ * Screenshot capture (#11). Grabs the primary display's full-resolution image so the
+ * user can attach what's on screen without leaving the app. Main-process only (uses
+ * Electron's `desktopCapturer`); resolves `null` when capture is unavailable or denied
+ * (e.g. macOS screen-recording permission not granted). This reads the whole screen —
+ * an explicit, user-initiated action behind a button, never automatic.
+ */
+export interface ScreenshotApi {
+  capture: () => Promise<ScreenshotResult | null>
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled tasks (#12)
+// ---------------------------------------------------------------------------
+
+/**
+ * A durable scheduled task: a stored prompt the scheduler enqueues on a cron
+ * cadence, opening a fresh chat each time it fires (bound to no session). Persisted
+ * in the `scheduled_tasks` table (v7). `cron` is a standard 5-field expression
+ * (`min hour dom month dow`) evaluated in local time; `nextRunAt` is recomputed
+ * from it whenever the task is created, edited, or fires.
+ */
+export interface ScheduledTask {
+  id: string
+  /** Human label shown in the task list (defaults to a slice of the prompt). */
+  name: string
+  /** The prompt submitted to a fresh run when the task fires. */
+  prompt: string
+  /** Standard 5-field cron (`min hour dom month dow`), local time. */
+  cron: string
+  /** Whether the scheduler considers this task for firing. */
+  enabled: boolean
+  /** Chat vs Cowork the fired run opens in. */
+  mode: ChatMode
+  /** Epoch ms the task was created. */
+  createdAt: number
+  /** Epoch ms the task was last edited. */
+  updatedAt: number
+  /** Epoch ms the task last fired, or null if it never has. */
+  lastRunAt: number | null
+  /** Epoch ms the task is next due, or null when disabled / uncomputable. */
+  nextRunAt: number | null
+}
+
+/** The editable fields when creating or updating a {@link ScheduledTask}. */
+export interface ScheduledTaskInput {
+  name: string
+  prompt: string
+  cron: string
+  enabled: boolean
+  mode: ChatMode
+}
+
+/**
+ * A task-fire event pushed main → renderer when a scheduled task comes due (or the
+ * user hits "Run now"). The renderer opens a fresh session in `mode` and submits
+ * `prompt`. Carries only what the run needs — never the whole task row.
+ */
+export interface ScheduledTaskFire {
+  taskId: string
+  name: string
+  prompt: string
+  mode: ChatMode
+}
+
+/**
+ * Scheduled tasks (#12): CRUD over the durable task list plus a fire subscription.
+ * The renderer edits tasks through {@link create}/{@link update}/{@link remove};
+ * the main-process scheduler computes each task's `nextRunAt` and, when due, pushes
+ * a {@link ScheduledTaskFire} the renderer turns into a fresh run. {@link runNow}
+ * fires a task immediately without waiting for its schedule.
+ */
+export interface ScheduledTasksApi {
+  /** List every persisted task, most-recently-updated first. */
+  list: () => Promise<ScheduledTask[]>
+  /** Create a task; its `nextRunAt` is computed from the cron. */
+  create: (input: ScheduledTaskInput) => Promise<ScheduledTask>
+  /** Patch a task's editable fields; recomputes `nextRunAt`. Resolves null if unknown. */
+  update: (id: string, input: Partial<ScheduledTaskInput>) => Promise<ScheduledTask | null>
+  /** Delete a task by id. */
+  remove: (id: string) => Promise<void>
+  /** Fire a task now (the "Run now" control); resolves once the fire is dispatched. */
+  runNow: (id: string) => Promise<void>
+  /** Subscribe to task fires (main → renderer). Returns an unsubscribe fn. */
+  onFire: (callback: (fire: ScheduledTaskFire) => void) => () => void
+}
+
+/** The outcome of spawning (or re-attaching to) a session's interactive PTY (#2). */
+export interface TerminalSpawnResult {
+  /** True when a live PTY is available (spawned now or already running). */
+  ok: boolean
+  /**
+   * The rolling output buffer to replay into a freshly-mounted xterm so scrollback
+   * survives a frontend remount. Empty for a brand-new PTY; the accumulated bytes
+   * when re-attaching to one that was already running.
+   */
+  buffer: string
+  /** Why the spawn failed (e.g. node-pty unavailable), when `ok` is false. */
+  error?: string
+}
+
+/** One chunk of PTY output pushed from main to the renderer (#2). */
+export interface TerminalDataEvent {
+  /** The session whose PTY produced this output. */
+  sessionId: string
+  /** The raw bytes (already decoded to a string) to feed into xterm. */
+  data: string
+}
+
+/** A session's PTY exiting, pushed from main to the renderer (#2). */
+export interface TerminalExitEvent {
+  /** The session whose PTY exited. */
+  sessionId: string
+  /** The process exit code (0 = clean). */
+  exitCode: number
+}
+
+/**
+ * Interactive terminal (#2): a real PTY per session (node-pty), driven by an
+ * xterm.js frontend. The PTY lives in the main process keyed by sessionId and
+ * survives frontend remounts — {@link spawn} either starts one or re-attaches to a
+ * running one, returning the rolling buffer to replay. Keystrokes go through
+ * {@link write}; {@link resize} keeps the PTY's dimensions in step with the visible
+ * grid; {@link kill} ends it (explicit restart / cleanup). Output and exit arrive
+ * over the {@link onData}/{@link onExit} subscriptions.
+ *
+ * Unlike the per-call tool approval model, this shell runs commands unrestricted
+ * (cwd-scoped only), so the frontend gates it behind {@link CoworkSettings.terminalConsent}.
+ */
+export interface TerminalApi {
+  /** Spawn or re-attach the session's PTY at `cwd`, sized `cols`×`rows`; resolves the replay buffer. */
+  spawn: (sessionId: string, cwd: string, cols: number, rows: number) => Promise<TerminalSpawnResult>
+  /** Write keystrokes / pasted text to the session's PTY. */
+  write: (sessionId: string, data: string) => void
+  /** Resize the session's PTY to `cols`×`rows` (follows the xterm fit addon). */
+  resize: (sessionId: string, cols: number, rows: number) => void
+  /** Kill the session's PTY (explicit user action — restart / cleanup). */
+  kill: (sessionId: string) => void
+  /** Subscribe to PTY output (main → renderer). Returns an unsubscribe fn. */
+  onData: (callback: (event: TerminalDataEvent) => void) => () => void
+  /** Subscribe to PTY exits (main → renderer). Returns an unsubscribe fn. */
+  onExit: (callback: (event: TerminalExitEvent) => void) => () => void
+}
+
 /** The full `window.myto` API surface exposed by the preload script. */
 export interface MytoApi {
   window: WindowApi
@@ -806,6 +1229,12 @@ export interface MytoApi {
   mcp: McpApi
   /** Voice: speech-to-text via the gateway's Whisper endpoint (Web Speech fallback in the renderer). */
   voice: VoiceApi
+  /** Screenshot capture (#11): grab the primary display to attach to a message. */
+  screenshot: ScreenshotApi
+  /** Scheduled tasks (#12): CRUD over durable tasks + the fire subscription. */
+  scheduledTasks: ScheduledTasksApi
+  /** Interactive terminal (#2): a real PTY per session (spawn/write/resize/kill + data/exit). */
+  terminal: TerminalApi
 }
 
 // ---------------------------------------------------------------------------

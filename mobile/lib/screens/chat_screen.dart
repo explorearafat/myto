@@ -13,8 +13,10 @@ import '../theme.dart';
 import '../widgets/chat_composer.dart';
 import '../widgets/chat_empty_state.dart';
 import '../widgets/conversation_drawer.dart';
+import '../widgets/effort_picker.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/model_picker.dart';
+import '../widgets/myto_mark.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -32,6 +34,10 @@ class _ChatScreenState extends State<ChatScreen> {
   StreamSubscription<ChatEvent>? _sub;
   bool _streaming = false;
   ChatMessage? _pending;
+
+  // Reasoning-effort selection from the composer chip. 'auto' → send nothing (model default);
+  // low/medium/high → forwarded to the gateway as `reasoningEffort`.
+  String _effort = 'auto';
 
   // Streaming tokens arrive far faster than the screen needs to repaint. We append
   // each token straight into the message model (cheap) and only rebuild on a throttle,
@@ -88,6 +94,7 @@ class _ChatScreenState extends State<ChatScreen> {
           apiKey: cfg.apiKey,
           authSchema: cfg.authSchema,
           authHeaderName: cfg.authHeaderName,
+          reasoningEffort: _effort == 'auto' ? null : _effort,
         )
         .listen(
       (event) {
@@ -122,10 +129,9 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
-  void _useStarter(String prompt) {
-    _composer.text = prompt;
-    _composer.selection = TextSelection.collapsed(offset: prompt.length);
-    _composerFocus.requestFocus();
+  Future<void> _pickEffort() async {
+    final chosen = await showEffortPicker(context, selected: _effort);
+    if (chosen != null && chosen != _effort) setState(() => _effort = chosen);
   }
 
   void _finish() {
@@ -250,30 +256,17 @@ class _ChatScreenState extends State<ChatScreen> {
       key: _scaffoldKey,
       drawer: ConversationDrawer(onSelect: _openConversation, onNewChat: _newChat),
       appBar: AppBar(
-        title: InkWell(
-          borderRadius: BorderRadius.circular(8),
-          onTap: _pickModel,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  modelLabel(),
-                  style: TextStyle(color: palette.text, fontSize: 16, fontWeight: FontWeight.w600),
-                ),
-                Icon(Icons.expand_more_rounded, color: palette.muted, size: 20),
-              ],
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            MytoMark(size: 22, color: palette.text),
+            const SizedBox(width: 8),
+            Text(
+              'Myto',
+              style: TextStyle(color: palette.text, fontSize: 18, fontWeight: FontWeight.w600),
             ),
-          ),
+          ],
         ),
-        actions: [
-          IconButton(
-            icon: Icon(Icons.edit_square, color: palette.text, size: 22),
-            tooltip: 'New chat',
-            onPressed: _newChat,
-          ),
-        ],
       ),
       body: Column(
         children: [
@@ -281,7 +274,7 @@ class _ChatScreenState extends State<ChatScreen> {
             child: !configured
                 ? _SetupPrompt(palette: palette)
                 : messages.isEmpty
-                ? ChatEmptyState(onStarter: _useStarter, firstName: _firstName(auth))
+                ? ChatEmptyState(firstName: _firstName(auth))
                 : ListView.builder(
                     controller: _scroll,
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
@@ -312,6 +305,11 @@ class _ChatScreenState extends State<ChatScreen> {
               onSend: _send,
               onStop: _stop,
               streaming: _streaming,
+              modelLabel: modelLabel(),
+              onPickModel: _pickModel,
+              effortLabel: effortLabel(_effort),
+              onPickEffort: _pickEffort,
+              onNewChat: _newChat,
             ),
         ],
       ),

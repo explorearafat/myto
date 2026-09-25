@@ -24,9 +24,10 @@ class ConversationDrawer extends StatelessWidget {
       backgroundColor: palette.bg,
       child: SafeArea(
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 14, 12, 6),
+              padding: const EdgeInsets.fromLTRB(16, 14, 8, 6),
               child: Row(
                 children: [
                   MytoMark(size: 24, color: palette.accent),
@@ -39,12 +40,41 @@ class ConversationDrawer extends StatelessWidget {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
+                  const Spacer(),
+                  IconButton(
+                    icon: Icon(Icons.add_rounded, size: 22, color: palette.muted),
+                    tooltip: 'New chat',
+                    onPressed: onNewChat,
+                  ),
                 ],
               ),
             ),
+            const SizedBox(height: 4),
+            // Nav rows — icon + label, no border, no background (like Claude's left rail).
+            // Only "Chats" exists on mobile today; the rest honestly say they aren't here yet.
+            _navItem(context, palette, Icons.forum_outlined, 'Chats',
+                active: true, onTap: () => Navigator.of(context).maybePop()),
+            _navItem(context, palette, Icons.folder_outlined, 'Projects',
+                onTap: () => _comingSoon(context, 'Projects')),
+            _navItem(context, palette, Icons.terminal_rounded, 'Cowork',
+                onTap: () => _comingSoon(context, 'Cowork')),
+            _navItem(context, palette, Icons.widgets_outlined, 'Artifacts',
+                onTap: () => _comingSoon(context, 'Artifacts')),
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              child: _NewChatButton(onTap: onNewChat, palette: palette),
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+              child: Divider(height: 1, color: palette.border),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 16, 8),
+              child: Text(
+                'Recents',
+                style: TextStyle(
+                  color: palette.muted,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.4,
+                ),
+              ),
             ),
             Expanded(
               child: store.conversations.isEmpty
@@ -61,6 +91,44 @@ class ConversationDrawer extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _navItem(
+    BuildContext context,
+    MytoPalette palette,
+    IconData icon,
+    String label, {
+    bool active = false,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+        child: Row(
+          children: [
+            Icon(icon, size: 20, color: active ? palette.accent : palette.muted),
+            const SizedBox(width: 14),
+            Text(
+              label,
+              style: TextStyle(
+                color: active ? palette.text : palette.text.withValues(alpha: 0.86),
+                fontSize: 15,
+                fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _comingSoon(BuildContext context, String feature) {
+    final messenger = ScaffoldMessenger.of(context);
+    Navigator.of(context).maybePop();
+    messenger.showSnackBar(
+      SnackBar(content: Text('$feature isn\'t on mobile yet — use the desktop app.')),
     );
   }
 
@@ -179,41 +247,5 @@ class ConversationDrawer extends StatelessWidget {
   String _initial(String name) {
     final t = name.trim();
     return t.isEmpty ? '?' : t.substring(0, 1).toUpperCase();
-  }
-}
-
-class _NewChatButton extends StatelessWidget {
-  const _NewChatButton({required this.onTap, required this.palette});
-
-  final VoidCallback onTap;
-  final MytoPalette palette;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: palette.surface,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: palette.border),
-          ),
-          child: Row(
-            children: [
-              Icon(Icons.add_rounded, size: 20, color: palette.accent),
-              const SizedBox(width: 10),
-              Text(
-                'New chat',
-                style: TextStyle(color: palette.text, fontSize: 14, fontWeight: FontWeight.w600),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 }

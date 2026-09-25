@@ -38,7 +38,7 @@ export function __setDbPathForTest(path: string): void {
 }
 
 /** Current schema version; bump + extend {@link migrate} for additive changes. */
-export const SCHEMA_VERSION = 9
+export const SCHEMA_VERSION = 11
 
 /**
  * Open the database once (lazily), applying pragmas and running migrations. All
@@ -274,6 +274,45 @@ function migrate(handle: DatabaseSync): void {
     handle.exec(`ALTER TABLE tool_ops ADD COLUMN agent_role TEXT`)
     handle.exec(`ALTER TABLE tool_ops ADD COLUMN started_at INTEGER`)
     handle.exec(`ALTER TABLE tool_ops ADD COLUMN ended_at INTEGER`)
+  }
+
+  if (current < 10) {
+    // Per-session chat mode (Chat vs Cowork). A session is fixed to one mode at
+    // creation and never mixes the two, so opening it restores the right toolset
+    // and the sidebar can tag each row. NOT NULL DEFAULT 'chat' upgrades every
+    // pre-existing row to a plain chat — the mode they were all created in before
+    // Cowork sessions were distinguished. (Unrelated to the `mode` column on
+    // scheduled_tasks from v7.)
+    handle.exec(`ALTER TABLE sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'`)
+  }
+
+  if (current < 11) {
+    // File snapshots (checkpoint / rewind, #1). Every mutation tool (write, edit,
+    // delete) records the file's bytes BEFORE and AFTER the change, keyed by the
+    // session + the user-message the run answers + the run id. Rewind replays these
+    // in reverse from newest down to a chosen point, restoring `before_content`
+    // (or deleting files whose `existed` was 0). `kind` distinguishes the op so a
+    // rewind knows whether the pre-image is "no file" vs empty. Standalone-ish:
+    // session_id CASCADE cleans rows when a chat is deleted; after_msg_id is a
+    // plain column (like attachments.message_id — not an FK — since snapshots are
+    // written fire-and-forget from the tool loop and must never block on a race
+    // with the message append).
+    handle.exec(`
+      CREATE TABLE IF NOT EXISTS file_snapshots (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id     TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        after_msg_id   TEXT,
+        run_id         TEXT NOT NULL,
+        path           TEXT NOT NULL,
+        before_content TEXT,
+        after_content  TEXT,
+        kind           TEXT NOT NULL,
+        existed        INTEGER NOT NULL,
+        created_at     INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_snapshots_session ON file_snapshots(session_id, id);
+    `)
   }
 
   handle.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)

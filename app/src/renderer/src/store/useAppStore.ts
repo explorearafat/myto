@@ -1,11 +1,14 @@
 import { create } from 'zustand'
 import type {
+  CoworkHooks,
   CoworkPermissionMode,
+  ChatMode,
   EnvStatus,
   McpServerConfig,
   McpServerStatus,
   McpTestResult,
   ModelInfo,
+  OutputStyle,
   ProviderKind,
   ProviderSettings,
   ReasoningEffort,
@@ -62,6 +65,13 @@ export interface AppState {
   model: string
   /** Active color theme, mirrored to `<html data-theme>`. */
   theme: Theme
+  /**
+   * The mode (Chat vs Cowork) the user last switched to — the default a brand-new
+   * chat opens in (Task 7). Mirrors `settings.ui.lastMode`; useChatStore reads it
+   * when seeding a fresh draft and writes it back through {@link setLastMode} on
+   * every toggle.
+   */
+  lastMode: ChatMode
   /** Whether the left conversation rail is expanded. */
   railOpen: boolean
 
@@ -77,6 +87,8 @@ export interface AppState {
   toggleRail: () => void
   /** Switch theme, apply it to the DOM, and persist it in settings. */
   setTheme: (theme: Theme) => Promise<void>
+  /** Record the last-used chat mode (persisted); new drafts open in it (Task 7). */
+  setLastMode: (mode: ChatMode) => Promise<void>
   /** Patch the tool settings (enable/disable tools, code execution) and persist. */
   setTools: (patch: Partial<ToolSettings>) => Promise<void>
   /**
@@ -87,8 +99,20 @@ export interface AppState {
   pickCoworkWorkspace: () => Promise<string | null>
   /** Set Cowork's permission tier (ask / autoApprove / bypass) and persist it. */
   setCoworkPermissionMode: (mode: CoworkPermissionMode) => Promise<void>
+  /** Set the verify command Cowork runs before declaring a task done (#16); '' disables it. */
+  setCoworkVerifyCommand: (cmd: string) => Promise<void>
+  /** Toggle Cowork plan mode — plan + approval before the first write (#8). */
+  setCoworkPlanMode: (on: boolean) => Promise<void>
+  /** Patch Cowork's pre/post tool-use hook commands (#9) and persist. */
+  setCoworkHooks: (patch: Partial<CoworkHooks>) => Promise<void>
+  /** Toggle the interactive-shell consent (#2) — arms the unrestricted PTY shell tab. */
+  setCoworkTerminalConsent: (on: boolean) => Promise<void>
   /** Set the reasoning-effort tier (sent to the provider as reasoning_effort) and persist. */
   setReasoningEffort: (effort: ReasoningEffort) => Promise<void>
+  /** Set the assistant's writing voice / output style (#13) and persist. */
+  setOutputStyle: (style: OutputStyle) => Promise<void>
+  /** Toggle native provider function-calling (#15) and persist. */
+  setNativeTools: (on: boolean) => Promise<void>
 
   // ── Connectors (MCP) ──
   /** Live status of every configured connector, keyed by server id (main-process pushed). */
@@ -166,6 +190,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   envStatus: envForProvider(DEFAULT_PROVIDER_SETTINGS.activeProvider),
   model: DEFAULT_PROVIDER_SETTINGS.modelName,
   theme: DEFAULT_PROVIDER_SETTINGS.ui.theme,
+  lastMode: DEFAULT_PROVIDER_SETTINGS.ui.lastMode,
   railOpen: true,
   mcpStatuses: [],
 
@@ -182,6 +207,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ theme })
     const { settings } = get()
     await get().saveSettings({ ...settings, ui: { ...settings.ui, theme } })
+  },
+
+  setLastMode: async (lastMode) => {
+    // Skip a redundant write when the mode hasn't actually changed (the toggle
+    // fires on every click, including re-selecting the current mode).
+    if (get().lastMode === lastMode) return
+    set({ lastMode })
+    const { settings } = get()
+    await get().saveSettings({ ...settings, ui: { ...settings.ui, lastMode } })
   },
 
   setTools: async (patch) => {
@@ -202,9 +236,42 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().saveSettings({ ...settings, cowork: { ...settings.cowork, permissionMode: mode } })
   },
 
+  setCoworkVerifyCommand: async (cmd) => {
+    const { settings } = get()
+    await get().saveSettings({ ...settings, cowork: { ...settings.cowork, verifyCommand: cmd } })
+  },
+
+  setCoworkPlanMode: async (on) => {
+    const { settings } = get()
+    await get().saveSettings({ ...settings, cowork: { ...settings.cowork, planMode: on } })
+  },
+
+  setCoworkHooks: async (patch) => {
+    const { settings } = get()
+    await get().saveSettings({
+      ...settings,
+      cowork: { ...settings.cowork, hooks: { ...settings.cowork.hooks, ...patch } }
+    })
+  },
+
+  setCoworkTerminalConsent: async (on) => {
+    const { settings } = get()
+    await get().saveSettings({ ...settings, cowork: { ...settings.cowork, terminalConsent: on } })
+  },
+
   setReasoningEffort: async (effort) => {
     const { settings } = get()
     await get().saveSettings({ ...settings, reasoningEffort: effort })
+  },
+
+  setOutputStyle: async (style) => {
+    const { settings } = get()
+    await get().saveSettings({ ...settings, outputStyle: style })
+  },
+
+  setNativeTools: async (on) => {
+    const { settings } = get()
+    await get().saveSettings({ ...settings, nativeTools: on })
   },
 
   saveConnector: async (config) => {
@@ -290,7 +357,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       settingsLoaded: true,
       envStatus: envForProvider(settings.activeProvider),
       model: settings.modelName || settings.modelId,
-      theme: settings.ui.theme
+      theme: settings.ui.theme,
+      lastMode: settings.ui.lastMode
     })
     // The model list is sourced from the account's Firestore config (see
     // applyByokConfig), not a provider list endpoint, so nothing to fetch here.
@@ -303,7 +371,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       settings: saved,
       envStatus: envForProvider(saved.activeProvider),
       model: saved.modelName || saved.modelId,
-      theme: saved.ui.theme
+      theme: saved.ui.theme,
+      lastMode: saved.ui.lastMode
     })
   },
 

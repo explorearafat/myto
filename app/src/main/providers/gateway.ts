@@ -6,7 +6,7 @@ import type {
   ListModelsResult,
   TestConnectionResult
 } from '../../shared/types'
-import { pickAdapter, type WireAdapter } from './adapters'
+import { pickAdapter, type StreamEvent, type WireAdapter } from './adapters'
 import { collectCompletion } from './collect'
 import {
   COMPLETION_TIMEOUT_MS,
@@ -43,6 +43,15 @@ export class GatewayProvider implements Provider {
 
   private authHeaders(): Record<string, string> {
     return this.adapter.authHeaders(this.config)
+  }
+
+  /**
+   * Whether this endpoint's wire format can carry native function-calling (#15).
+   * Delegates to the adapter; the reply loop consults it (behind the `nativeTools`
+   * opt-in) before advertising tool schemas instead of the ```myto:tool text protocol.
+   */
+  supportsNativeTools(): boolean {
+    return this.adapter.supportsNativeTools
   }
 
   async listModels(): Promise<ListModelsResult> {
@@ -198,25 +207,28 @@ export class GatewayProvider implements Provider {
       return
     }
 
-    await readSse(
-      res.body,
-      (data) => {
-        // The adapter maps this format's SSE payload onto a normalised event
-        // (delta / reasoning / done), or null to ignore it, and throws on an
-        // in-band error frame so it surfaces instead of going silent.
-        const event = this.adapter.parseStreamData(data)
-        if (!event) return
-        // Reasoning is forwarded out-of-band (empty delta) so the funnel can show a
-        // live "thinking" caption; it must never join the reply text. Emit it
-        // before the content delta, matching the pre-adapter ordering.
-        if (event.reasoning) onChunk({ delta: '', done: false, reasoning: event.reasoning })
-        if (event.delta) onChunk({ delta: event.delta, done: false })
-        if (event.done) onChunk({ delta: '', done: true })
-      },
-      // Progress is *any* byte, including a keep-alive comment line — the point
-      // is that the connection is still producing, not that it produced content.
-      guard.touch
-    )
+    // One stateful parser per response so a native tool call (#15) can be assembled
+    // from fragments spread across many SSE lines without leaking state between the
+    // concurrent streams that share this module-level adapter singleton. With no tool
+    // call in the stream it forwards the same delta / reasoning / done events the old
+    // per-line parse did, so the text-protocol path is byte-for-byte unchanged.
+    const parser = this.adapter.createParser()
+    const emit = (event: StreamEvent | null): void => {
+      if (!event) return
+      // Reasoning is forwarded out-of-band (empty delta) so the funnel can show a
+      // live "thinking" caption; it must never join the reply text. Emit it before
+      // the content delta, matching the pre-adapter ordering.
+      if (event.reasoning) onChunk({ delta: '', done: false, reasoning: event.reasoning })
+      if (event.delta) onChunk({ delta: event.delta, done: false })
+      // A fully-assembled native tool call — forwarded internally only (it never
+      // crosses IPC); the reply loop turns it into a ```myto:tool block and aborts.
+      if (event.toolCall) onChunk({ delta: '', done: false, toolCall: event.toolCall })
+      if (event.done) onChunk({ delta: '', done: true })
+    }
+    await readSse(res.body, (data) => emit(parser.push(data)), guard.touch)
+    // A stream that ended without the terminal marker that normally releases a tool
+    // call (a truncated or [DONE]-less stream) still surfaces the pending call here.
+    emit(parser.flush())
     onChunk({ delta: '', done: true })
   }
 }
@@ -252,13 +264,23 @@ async function readSse(
     for (;;) {
       const { value, done } = await reader.read()
       if (done) break
-      onProgress?.()
       buffer += decoder.decode(value, { stream: true })
       let newline: number
       while ((newline = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, newline).trim()
         buffer = buffer.slice(newline + 1)
-        if (line.startsWith('data:')) onData(line.slice(5).trim())
+        if (line.startsWith('data:')) {
+          const payload = line.slice(5).trim()
+          // Re-arm the stall guard only on a real data frame. A dead upstream can keep
+          // the socket "warm" with SSE keep-alive comments (`:`-prefixed lines) or
+          // blank/empty `data:` heartbeats that carry no tokens; counting those as
+          // progress let a generation that died mid-stream (e.g. mid tool call) hang
+          // indefinitely instead of failing in STREAM_STALL_MS. A non-empty data frame —
+          // including every fragment of a long file the model is still writing — is real
+          // forward progress and keeps a genuinely-alive stream armed.
+          if (payload) onProgress?.()
+          onData(payload)
+        }
       }
     }
   } finally {

@@ -48,7 +48,8 @@ function installShim(): void {
       projectId: null,
       createdAt: now,
       updatedAt: now,
-      messageCount: 0
+      messageCount: 0,
+      mode: 'chat'
     },
     messages: [],
     attachments: []
@@ -82,7 +83,7 @@ function installShim(): void {
     sessions: {
       list: (projectId) =>
         Promise.resolve(sessions.filter((s) => projectId == null || s.projectId === projectId)),
-      create: (projectId) => {
+      create: (projectId, mode) => {
         const s: SessionSummary = {
           id: `sess-${++counter}`,
           title: 'New chat',
@@ -90,7 +91,8 @@ function installShim(): void {
           projectId: projectId ?? null,
           createdAt: now,
           updatedAt: now,
-          messageCount: 0
+          messageCount: 0,
+          mode: mode ?? 'chat'
         }
         sessions.unshift(s)
         return Promise.resolve(s)
@@ -114,7 +116,10 @@ function installShim(): void {
       },
       appendMessage: () => {},
       setFeedback: () => {},
-      resetMessage: () => {}
+      resetMessage: () => {},
+      rewind: () =>
+        Promise.resolve({ ok: true, filesRestored: 0, filesDeleted: 0, messagesRemoved: 0 }),
+      snapshotBefore: () => Promise.resolve(null)
     },
     projects: {
       list: () => Promise.resolve([...projects]),
@@ -196,7 +201,9 @@ function installShim(): void {
     },
     cowork: {
       // The browser preview has no native folder dialog; report "cancelled".
-      pickWorkspace: () => Promise.resolve(null)
+      pickWorkspace: () => Promise.resolve(null),
+      // No workspace sandbox in the browser preview, so no files to mention.
+      listFiles: () => Promise.resolve([])
     },
     preview: {
       // No OS shell in the browser preview; opening externally is a no-op.
@@ -212,6 +219,28 @@ function installShim(): void {
     voice: {
       // No gateway in the preview: force the Web Speech fallback.
       transcribe: () => Promise.resolve({ ok: false, error: 'no-gateway' })
+    },
+    screenshot: {
+      // No desktopCapturer in the browser preview.
+      capture: () => Promise.resolve(null)
+    },
+    scheduledTasks: {
+      // No scheduler in the browser preview: an empty, inert task list.
+      list: () => Promise.resolve([]),
+      create: () => Promise.resolve(null as never),
+      update: () => Promise.resolve(null),
+      remove: () => Promise.resolve(),
+      runNow: () => Promise.resolve(),
+      onFire: () => () => {}
+    },
+    terminal: {
+      // No PTY in the browser preview: spawn reports unavailable, the rest no-op.
+      spawn: () => Promise.resolve({ ok: false, buffer: '' }),
+      write: () => {},
+      resize: () => {},
+      kill: () => {},
+      onData: () => () => {},
+      onExit: () => () => {}
     }
   }
 

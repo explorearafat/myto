@@ -32,7 +32,12 @@ class ConversationStore extends ChangeNotifier {
         /* corrupt store — start empty rather than crash */
       }
     }
-    _active = _conversations.isNotEmpty ? _conversations.first : Conversation.create();
+    // Always open on a fresh draft, never resume the last chat. Previous chats stay in the
+    // drawer's Recents; the app launches on a clean "New chat". Seed the draft's model from the
+    // most-recent chat so the composer's model chip still shows a sensible default.
+    _active = Conversation.create(
+      modelId: _conversations.isNotEmpty ? _conversations.first.modelId : null,
+    );
     notifyListeners();
   }
 

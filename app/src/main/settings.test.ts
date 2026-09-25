@@ -37,7 +37,7 @@ describe('normalise — provider selection', () => {
   })
 })
 
-describe('normalise — theme (the only UI preference)', () => {
+describe('normalise — ui preferences (theme + lastMode)', () => {
   it('defaults to the baseline theme when absent or invalid', () => {
     expect(normalise({}).ui.theme).toBe(BASE.ui.theme)
     expect(normalise({ ui: { theme: 'neon' } }).ui.theme).toBe(BASE.ui.theme)
@@ -48,11 +48,18 @@ describe('normalise — theme (the only UI preference)', () => {
     expect(normalise({ ui: { theme: 'light' } }).ui.theme).toBe('light')
   })
 
+  it('defaults to the baseline mode when absent or invalid, keeps a valid one', () => {
+    expect(normalise({}).ui.lastMode).toBe(BASE.ui.lastMode)
+    expect(normalise({ ui: { lastMode: 'nonsense' } }).ui.lastMode).toBe(BASE.ui.lastMode)
+    expect(normalise({ ui: { lastMode: 'cowork' } }).ui.lastMode).toBe('cowork')
+    expect(normalise({ ui: { lastMode: 'chat' } }).ui.lastMode).toBe('chat')
+  })
+
   it('carries no agentic ui fields through (plain chatbot)', () => {
     const ui = normalise({
       ui: { theme: 'dark', fullAccess: true, mode: 'code', effort: 'max', workspaceRoot: '/x' }
     }).ui
-    expect(ui).toEqual({ theme: 'dark' })
+    expect(ui).toEqual({ theme: 'dark', lastMode: 'chat' })
   })
 })
 
@@ -189,6 +196,47 @@ describe('normalise — plugins', () => {
   })
 })
 
+describe('normalise — cowork power fields (verify / plan / hooks)', () => {
+  it('defaults the new cowork fields when absent', () => {
+    const c = normalise({}).cowork
+    expect(c.verifyCommand).toBe(BASE.cowork.verifyCommand)
+    expect(c.planMode).toBe(BASE.cowork.planMode)
+    expect(c.hooks).toEqual(BASE.cowork.hooks)
+  })
+
+  it('keeps a valid verify command and plan-mode flag', () => {
+    const c = normalise({ cowork: { verifyCommand: 'npm test', planMode: true } }).cowork
+    expect(c.verifyCommand).toBe('npm test')
+    expect(c.planMode).toBe(true)
+  })
+
+  it('drops non-string / non-boolean values back to defaults', () => {
+    const c = normalise({ cowork: { verifyCommand: 42, planMode: 'yes' } }).cowork
+    expect(c.verifyCommand).toBe(BASE.cowork.verifyCommand)
+    expect(c.planMode).toBe(BASE.cowork.planMode)
+  })
+
+  it('normalises hook commands, keeping strings and dropping the rest', () => {
+    const c = normalise({ cowork: { hooks: { preToolUse: 'echo pre', postToolUse: 5 } } }).cowork
+    expect(c.hooks.preToolUse).toBe('echo pre')
+    expect(c.hooks.postToolUse).toBe(BASE.cowork.hooks.postToolUse)
+  })
+})
+
+describe('normalise — output style + native tools', () => {
+  it('defaults output style when absent or invalid, keeps a valid one', () => {
+    expect(normalise({}).outputStyle).toBe(BASE.outputStyle)
+    expect(normalise({ outputStyle: 'shouty' }).outputStyle).toBe(BASE.outputStyle)
+    expect(normalise({ outputStyle: 'concise' }).outputStyle).toBe('concise')
+  })
+
+  it('defaults nativeTools to off and keeps a boolean', () => {
+    expect(normalise({}).nativeTools).toBe(false)
+    expect(normalise({ nativeTools: true }).nativeTools).toBe(true)
+    expect(normalise({ nativeTools: 'yes' }).nativeTools).toBe(BASE.nativeTools)
+  })
+})
+
 // The on-disk round-trip through the stubbed userData path: a save normalises and
 // persists, and a fresh read (cache cleared) returns exactly the saved shape.
 describe('saveSettings / getSettings round-trip', () => {
@@ -203,7 +251,7 @@ describe('saveSettings / getSettings round-trip', () => {
       activeProvider: 'gateway',
       modelId: 'gpt-4o-mini',
       modelName: 'GPT-4o mini',
-      ui: { theme: 'dark' }
+      ui: { theme: 'dark', lastMode: 'chat' }
     })
     expect(saved.activeProvider).toBe('gateway')
     expect(saved.ui.theme).toBe('dark')
@@ -219,7 +267,7 @@ describe('saveSettings / getSettings round-trip', () => {
   it('notifies the saved-listener with the normalised value', () => {
     const seen: string[] = []
     setSettingsSavedListener((s) => seen.push(s.ui.theme))
-    saveSettings({ ...BASE, ui: { theme: 'light' } })
+    saveSettings({ ...BASE, ui: { theme: 'light', lastMode: 'chat' } })
     expect(seen).toContain('light')
     setSettingsSavedListener(null)
   })

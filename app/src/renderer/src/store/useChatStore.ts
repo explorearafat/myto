@@ -6,6 +6,7 @@ import type {
   ChatImage,
   ChatMessage,
   ChatMode,
+  CommandRun,
   PersistedSession,
   PreviewTarget,
   QuestionRequest,
@@ -14,6 +15,8 @@ import type {
 import type { PromptBlock } from '@shared/types/prompt-builder'
 import { takeReveal } from '../lib/reveal'
 import { usePreviewStore } from './usePreviewStore'
+import { useTerminalStore } from './useTerminalStore'
+import { useAppStore } from './useAppStore'
 
 /**
  * How often (ms) buffered stream deltas are flushed into the rendered message.
@@ -38,6 +41,22 @@ const DELTA_FLUSH_MS = 66
  * SQLite upsert.
  */
 const ASSISTANT_PERSIST_MS = 1000
+
+/**
+ * One "thinking" phase of a reply — a contiguous run of the model's reasoning
+ * (chain-of-thought) captured before some visible output. `at` is the offset into
+ * the reply's flushed content where this phase belongs (so the renderer can slot
+ * the collapsible Thinking block between the prose/tool/file segments that surround
+ * it); `text` is the reasoning itself (token-counted, shown when expanded); `done`
+ * flips true once the phase is sealed (the model began visible output or the turn
+ * ended) so the block stops animating. A single reply can hold several phases — a
+ * Cowork run reasons afresh before each tool round-trip. Transient — never persisted.
+ */
+export interface ThinkingPhase {
+  at: number
+  text: string
+  done: boolean
+}
 
 /** A chat message as rendered in the UI (adds id + streaming/error metadata). */
 export interface ChatMessageUI {
@@ -78,6 +97,21 @@ export interface ChatMessageUI {
    * kept after it ends so the finished plan stays visible. Transient — never persisted.
    */
   todos?: TodoItem[]
+  /**
+   * The reply's thinking phases (see {@link ThinkingPhase}) — the model's reasoning
+   * captured as it streamed, interleaved with the visible output by offset. Grows as
+   * the run reasons; kept after it ends so the finished "Thought for N tokens" blocks
+   * stay collapsible. Transient — never persisted or transmitted.
+   */
+  thinking?: ThinkingPhase[]
+  /**
+   * `Date.now()` of the last time this run produced real output — any streamed delta,
+   * status caption, reasoning, tool step, or plan update. Drives the streaming
+   * liveness note (see lib/liveness.ts + MessageMeta): the elapsed clock keeps
+   * climbing while the stream is silent, so this is what tells a live run from a hung
+   * one. Set only on the in-flight turn; never persisted or transmitted.
+   */
+  activityAt?: number
 }
 
 /**
@@ -127,12 +161,25 @@ interface LiveRun {
    * so switching back to a background run re-attaches to its live checklist.
    */
   todos?: TodoItem[]
+  /**
+   * The run's thinking phases (see {@link ThinkingPhase}), held here — like
+   * `content`/`todos` — so switching back to a background run re-attaches to its
+   * live, still-growing reasoning blocks rather than a stale snapshot.
+   */
+  thinking?: ThinkingPhase[]
   /** Cancels the main-process stream and detaches its chunk listener. */
   disposer: () => void
   /** Un-flushed delta text, drained by the flush timer. */
   buffer: string
   /** Pending flush timer id, or null when idle. */
   flushTimer: ReturnType<typeof setTimeout> | null
+  /**
+   * `Date.now()` of the last real output from this run (delta / status / reasoning /
+   * tool step / plan). Seeded when the run starts and bumped on every meaningful
+   * chunk; the on-screen turn mirrors it as `activityAt` so the liveness note can
+   * tell a live run from a stalled one (see lib/liveness.ts).
+   */
+  lastActivityAt: number
   /**
    * `Date.now()` of the last time the streaming prose was checkpointed to the DB,
    * or 0 before the first checkpoint. Throttles the mid-run persistence in
@@ -379,7 +426,9 @@ function projectLiveRun(
       status: run.status,
       pendingApproval: run.pendingApproval,
       pendingQuestion: run.pendingQuestion,
-      todos: run.todos
+      todos: run.todos,
+      thinking: run.thinking,
+      activityAt: run.lastActivityAt
     }
   } else {
     messages.push({
@@ -390,7 +439,9 @@ function projectLiveRun(
       status: run.status,
       pendingApproval: run.pendingApproval,
       pendingQuestion: run.pendingQuestion,
-      todos: run.todos
+      todos: run.todos,
+      thinking: run.thinking,
+      activityAt: run.lastActivityAt
     })
   }
 
@@ -437,7 +488,8 @@ export const useChatStore = create<ChatState>((set, get) => {
     ownerSessionId: string | null,
     assistantId: string,
     history: ChatMessage[],
-    mode: ChatMode
+    mode: ChatMode,
+    afterMsgId: string | null
   ): void => {
     const runId = nextRunId()
 
@@ -450,6 +502,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       buffer: '',
       flushTimer: null,
       lastPersist: 0,
+      lastActivityAt: Date.now(),
       settled: false
     }
 
@@ -508,13 +561,52 @@ export const useChatStore = create<ChatState>((set, get) => {
       if (isVisible()) {
         set((state) => ({
           messages: state.messages.map((m) =>
-            m.id === assistantId ? { ...m, content: m.content + leadText } : m
+            m.id === assistantId
+              ? { ...m, content: m.content + leadText, activityAt: run.lastActivityAt }
+              : m
           )
         }))
       }
     }
     const scheduleFlush = (): void => {
       if (run.flushTimer == null) run.flushTimer = setTimeout(flush, DELTA_FLUSH_MS)
+    }
+
+    /**
+     * Open or grow the current thinking phase with the model's latest reasoning
+     * snapshot. The producer sends a monotonically growing `text`, so an in-flight
+     * phase (the last one, not yet `done`) is updated in place; a phase is opened
+     * only when none is live — anchored at the current flushed-content offset so the
+     * renderer slots the block right where the reasoning happened.
+     */
+    const setThinking = (text: string): void => {
+      const phases = run.thinking ?? (run.thinking = [])
+      const last = phases[phases.length - 1]
+      if (last && !last.done) last.text = text
+      else phases.push({ at: run.content.length + run.buffer.length, text, done: false })
+      if (isVisible()) {
+        const snapshot = phases.map((p) => ({ ...p }))
+        set((state) => ({
+          messages: state.messages.map((m) =>
+            m.id === assistantId ? { ...m, thinking: snapshot, activityAt: run.lastActivityAt } : m
+          )
+        }))
+      }
+    }
+
+    /** Seal the current thinking phase so its block stops animating (turn boundary). */
+    const resetThinking = (): void => {
+      const phases = run.thinking
+      if (!phases || phases.length === 0) return
+      const last = phases[phases.length - 1]
+      if (last.done) return
+      last.done = true
+      if (isVisible()) {
+        const snapshot = phases.map((p) => ({ ...p }))
+        set((state) => ({
+          messages: state.messages.map((m) => (m.id === assistantId ? { ...m, thinking: snapshot } : m))
+        }))
+      }
     }
 
     /** Finalize a completed reply: persist, detach, and clear the run. */
@@ -598,7 +690,9 @@ export const useChatStore = create<ChatState>((set, get) => {
       run.status = status
       if (isVisible()) {
         set((state) => ({
-          messages: state.messages.map((m) => (m.id === assistantId ? { ...m, status } : m))
+          messages: state.messages.map((m) =>
+            m.id === assistantId ? { ...m, status, activityAt: run.lastActivityAt } : m
+          )
         }))
       }
     }
@@ -640,7 +734,9 @@ export const useChatStore = create<ChatState>((set, get) => {
       run.todos = todos
       if (isVisible()) {
         set((state) => ({
-          messages: state.messages.map((m) => (m.id === assistantId ? { ...m, todos } : m))
+          messages: state.messages.map((m) =>
+            m.id === assistantId ? { ...m, todos, activityAt: run.lastActivityAt } : m
+          )
         }))
       }
     }
@@ -654,19 +750,53 @@ export const useChatStore = create<ChatState>((set, get) => {
       question?: QuestionRequest
       preview?: PreviewTarget
       todos?: TodoItem[]
+      command?: CommandRun
+      thinking?: string
+      thinkingReset?: boolean
     }): void => {
+      // Any chunk that carries real output is a sign of life — stamp the run so the
+      // liveness note (MessageMeta) measures silence from the last actual progress,
+      // not from mount. `done` alone is the turn ending, not progress; skip it.
+      if (
+        chunk.delta ||
+        chunk.status !== undefined ||
+        chunk.thinking !== undefined ||
+        chunk.thinkingReset ||
+        chunk.todos ||
+        chunk.command ||
+        chunk.preview ||
+        chunk.approval ||
+        chunk.question
+      ) {
+        run.lastActivityAt = Date.now()
+      }
       // `!== undefined`, not truthiness: an empty-string status is a deliberate
       // signal to clear the caption (the main process sends it when a reasoning
       // model's derived "thinking" snippet gives way to real reply text) and hand
       // the line back to the renderer's own "Writing"/"Thinking" fallback.
       if (chunk.status !== undefined) setStatus(chunk.status)
+      // The model's raw reasoning grew (reasoning models) — open/extend the live
+      // thinking block; a reset seals it at the turn boundary (see main/status.ts).
+      if (chunk.thinking !== undefined) setThinking(chunk.thinking)
+      if (chunk.thinkingReset) resetThinking()
       // A side-effecting Cowork tool is awaiting the user's OK — raise the prompt.
       if (chunk.approval) setApproval(chunk.approval)
       // Myto asked the user clarifying questions (ask_user) — raise the question card.
       if (chunk.question) setQuestion(chunk.question)
       // Myto opened something in its preview pane — drive the (global) pane. Not
       // scoped to this run: the pane is a standalone surface, like a browser window.
-      if (chunk.preview) usePreviewStore.getState().show(chunk.preview)
+      // Closing the terminal keeps the two right-hand panes from stacking.
+      if (chunk.preview) {
+        usePreviewStore.getState().show(chunk.preview)
+        useTerminalStore.getState().close()
+      }
+      // Myto ran a shell command — append it to the Terminal pane and bring that pane
+      // to the front. The two right-hand panes are mutually exclusive, so closing the
+      // preview here (rather than inside either store) keeps them from stacking.
+      if (chunk.command) {
+        useTerminalStore.getState().append(chunk.command)
+        usePreviewStore.getState().close()
+      }
       // Myto published/updated its working plan — pin the live checklist on this turn.
       if (chunk.todos) setTodos(chunk.todos)
       if (chunk.delta) {
@@ -682,10 +812,22 @@ export const useChatStore = create<ChatState>((set, get) => {
     // Kick off the stream. `streamCompletion` is async and resolves its disposer on
     // a later microtask; store it on the run, or invoke it at once if the run has
     // already settled (a cancel/completion beat the resolution — see LiveRun.settled).
-    void window.myto.providers.streamCompletion({ messages: history, mode }, onChunk).then((dispose) => {
-      if (run.settled) dispose()
-      else run.disposer = dispose
-    })
+    // sessionId + afterMsgId key the file_snapshots this run records (#1 rewind);
+    // both are Cowork-only on the main side and harmless in chat.
+    void window.myto.providers
+      .streamCompletion(
+        {
+          messages: history,
+          mode,
+          ...(ownerSessionId ? { sessionId: ownerSessionId } : {}),
+          ...(afterMsgId ? { afterMsgId } : {})
+        },
+        onChunk
+      )
+      .then((dispose) => {
+        if (run.settled) dispose()
+        else run.disposer = dispose
+      })
 
     if (ownerSessionId) liveRuns.set(ownerSessionId, run)
     syncLiveSessions()
@@ -803,7 +945,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           content: userContentForModel,
           ...(images.length > 0 ? { images } : {})
         }
-        startRun(owner, assistantId, [...historyBase, userTurn], mode)
+        startRun(owner, assistantId, [...historyBase, userTurn], mode, userMsg.id)
       })
     },
 
@@ -909,7 +1051,13 @@ export const useChatStore = create<ChatState>((set, get) => {
       // Clear the persisted copy so a reload shows only the regenerated result.
       if (sessionId) window.myto.sessions.resetMessage(sessionId, messageId)
 
-      startRun(sessionId, messageId, history, get().coworkMode ? 'cowork' : 'chat')
+      // The user turn this reply answers (last user row before the assistant slot) —
+      // keys the file_snapshots a Cowork regenerate records, so a later rewind targets
+      // the right turn.
+      const answersMsgId =
+        [...messages.slice(0, idx)].reverse().find((m) => m.role === 'user')?.id ?? null
+
+      startRun(sessionId, messageId, history, get().coworkMode ? 'cowork' : 'chat', answersMsgId)
     },
 
     applyLoaded: (loaded) => {
@@ -921,6 +1069,11 @@ export const useChatStore = create<ChatState>((set, get) => {
       set({
         sessionId: loaded.session.id,
         projectId: loaded.session.projectId,
+        // A session is fixed to one mode at creation (Task 6): restore it so the
+        // right toolset is armed and the nav toggle reflects it. Set directly (not
+        // via setCoworkMode) so merely opening an old chat never changes the
+        // last-used mode that new drafts default to.
+        coworkMode: loaded.session.mode === 'cowork',
         attachments,
         ...projectLiveRun({ messages }, loaded.session.id)
       })
@@ -929,9 +1082,17 @@ export const useChatStore = create<ChatState>((set, get) => {
     resetTo: (sessionId, projectId = null) => {
       // A fresh session starts empty; it has no live run to re-attach to, but we
       // still route through projectLiveRun for a single, consistent projection.
+      //
+      // A brand-new draft (no id yet) opens in the last-used mode (Task 7). When
+      // binding to a freshly-created row instead, coworkMode is already
+      // authoritative — create() persisted the row with it — so it's left as-is,
+      // never remixing a session's fixed mode.
+      const coworkMode =
+        sessionId === null ? useAppStore.getState().lastMode === 'cowork' : get().coworkMode
       set({
         sessionId,
         projectId,
+        coworkMode,
         attachments: [],
         ...projectLiveRun({ messages: [] }, sessionId)
       })
@@ -941,7 +1102,13 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     setPromptBlocks: (blocks) => set({ promptBlocks: blocks }),
 
-    setCoworkMode: (on) => set({ coworkMode: on }),
+    setCoworkMode: (on) => {
+      set({ coworkMode: on })
+      // An explicit toggle is the "last-used mode": remember it so the next new
+      // chat opens here (Task 7). Fire-and-forget — the persist is best-effort and
+      // the in-memory coworkMode above already drives the current draft.
+      void useAppStore.getState().setLastMode(on ? 'cowork' : 'chat')
+    },
 
     decideApproval: (approvalId, decision) => {
       // Tell the main process (resumes the blocked tool loop).

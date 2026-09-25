@@ -3,7 +3,13 @@ import { app } from 'electron'
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { IpcChannel } from '../shared/ipc'
-import type { PersistedMessage, PersistedSession, SessionSummary } from '../shared/types'
+import type {
+  ChatMode,
+  PersistedMessage,
+  PersistedSession,
+  RewindResult,
+  SessionSummary
+} from '../shared/types'
 import { getSettings } from './settings'
 import {
   appendMessage,
@@ -19,6 +25,8 @@ import {
   setActiveSession,
   setMessageFeedback
 } from './db/sessions'
+import { rewindSession } from './rewind'
+import { findSnapshotBefore } from './db/snapshots'
 
 /**
  * Wires the session-persistence IPC. Query-style ops use handle/invoke;
@@ -35,11 +43,14 @@ export function registerSessionIpc(): void {
     return listSessions(projectId)
   })
 
-  ipcMain.handle(IpcChannel.SessionsCreate, (_event, projectId?: string | null): SessionSummary => {
-    const summary = createSession('', 'New session', Date.now(), projectId ?? null)
-    setActiveSession(summary.id)
-    return summary
-  })
+  ipcMain.handle(
+    IpcChannel.SessionsCreate,
+    (_event, projectId?: string | null, mode?: ChatMode): SessionSummary => {
+      const summary = createSession('', 'New session', Date.now(), projectId ?? null, mode ?? 'chat')
+      setActiveSession(summary.id)
+      return summary
+    }
+  )
 
   ipcMain.handle(IpcChannel.SessionsLoad, (_event, id: string): PersistedSession | null => {
     const loaded = loadSession(id)
@@ -99,6 +110,41 @@ export function registerSessionIpc(): void {
   ipcMain.on(IpcChannel.SessionsResetMessage, (_event, _sessionId: string, id: string) => {
     safe(() => resetMessageForRegenerate(id))
   })
+
+  // Rewind (#1): reverse-replay file snapshots + truncate the chat. Invoke-style —
+  // the renderer awaits the summary and reloads the session on success.
+  ipcMain.handle(
+    IpcChannel.SessionsRewind,
+    (_event, sessionId: string, afterMsgId: string): RewindResult => {
+      try {
+        return rewindSession(sessionId, afterMsgId, Date.now())
+      } catch (err) {
+        console.error('[myto] rewind failed:', err)
+        return {
+          ok: false,
+          filesRestored: 0,
+          filesDeleted: 0,
+          messagesRemoved: 0,
+          reason: err instanceof Error ? err.message : 'Rewind failed.'
+        }
+      }
+    }
+  )
+
+  // Snapshot diff base (#5): the pre-change bytes for a file card's overwrite diff.
+  // Content-addressed lookup (see findSnapshotBefore) — null means a fresh create,
+  // so the card falls back to its all-additions view. Read-only; never throws.
+  ipcMain.handle(
+    IpcChannel.SessionsSnapshotBefore,
+    (_event, sessionId: string, after: string): string | null => {
+      try {
+        return findSnapshotBefore(sessionId, after)
+      } catch (err) {
+        console.error('[myto] snapshotBefore failed:', err)
+        return null
+      }
+    }
+  )
 }
 
 /**

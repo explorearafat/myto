@@ -6,6 +6,7 @@ import { AppLayout } from '@renderer/components/layout/AppLayout'
 import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
 import { useAppStore } from '@renderer/store/useAppStore'
 import { useSessionStore } from '@renderer/store/useSessionStore'
+import { useChatStore } from '@renderer/store/useChatStore'
 import { useProjectStore } from '@renderer/store/useProjectStore'
 import { useByokConfig } from '@renderer/lib/useByokConfig'
 
@@ -42,6 +43,20 @@ export default function App() {
     void refreshConnectorStatus()
     return unsubscribe
   }, [watchConnectorStatus, refreshConnectorStatus])
+
+  // Scheduled tasks (#12): the main process pushes a "fire" when a task comes due.
+  // Each fire opens a fresh session in the task's mode and submits its prompt, so
+  // the task runs in its own conversation without disturbing whatever's on screen.
+  useEffect(() => {
+    const unsubscribe = window.myto.scheduledTasks.onFire((fire) => {
+      void (async () => {
+        useChatStore.getState().setCoworkMode(fire.mode === 'cowork')
+        await useSessionStore.getState().create()
+        useChatStore.getState().send(fire.prompt)
+      })()
+    })
+    return unsubscribe
+  }, [])
 
   return (
     <div className="relative flex h-full flex-col">

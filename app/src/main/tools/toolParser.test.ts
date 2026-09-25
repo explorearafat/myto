@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { createToolCallParser, parseToolCall, fenceFor, toolResultBlock } from './toolParser'
+import { createToolCallParser, parseToolCall, parseInvokeBlock, fenceFor, toolResultBlock } from './toolParser'
 
 /** Feed `chunks` through a fresh parser; collect emitted text and any calls. */
 function run(chunks: string[]): { text: string; calls: ReturnType<typeof parseToolCall>[]; blocks: string[] } {
@@ -102,6 +102,85 @@ describe('parseToolCall', () => {
   })
 })
 
+describe('native <invoke> markup', () => {
+  it('executes a native invoke call instead of leaking it as chat text', () => {
+    const { text, calls, blocks } = run([
+      'Let me run the build.\n',
+      '<invoke name="run_command">\n<parameter name="command">npm run build</parameter>\n</invoke>'
+    ])
+    expect(text).toBe('Let me run the build.\n')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].name).toBe('run_command')
+    expect(calls[0].input).toEqual({ command: 'npm run build' })
+    expect(calls[0].error).toBeNull()
+    // Folded into the canonical fenced shape so downstream code is format-agnostic.
+    expect(blocks[0]).toContain('```myto:tool')
+    expect(blocks[0]).toContain('run_command')
+  })
+
+  it('tolerates the antml namespace prefix on every tag', () => {
+    // The colon is assembled at runtime so nothing here reads as a real directive.
+    const ns = 'antml' + ':'
+    const src =
+      `<${ns}invoke name="write_file">` +
+      `<${ns}parameter name="path">index.html</${ns}parameter>` +
+      `</${ns}invoke>`
+    const { calls } = run([src])
+    expect(calls).toHaveLength(1)
+    expect(calls[0].name).toBe('write_file')
+    expect(calls[0].input).toEqual({ path: 'index.html' })
+  })
+
+  it('strips | DSML | token-pollution wedged into the markup', () => {
+    const { text, calls } = run([
+      '<invoke name="list_dir">| DSML |\n<parameter name="path">| DSML |src</parameter>\n</invoke>'
+    ])
+    expect(text).toBe('')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].name).toBe('list_dir')
+    expect(calls[0].input).toEqual({ path: 'src' })
+  })
+
+  it('holds a native call split across many deltas until </invoke> arrives', () => {
+    const src = '<invoke name="read_file"><parameter name="path">app.py</parameter></invoke>'
+    const { text, calls } = run([...src])
+    expect(text).toBe('')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].name).toBe('read_file')
+    expect(calls[0].input).toEqual({ path: 'app.py' })
+  })
+
+  it('JSON-parses a structured parameter value but keeps scalars as raw strings', () => {
+    const src =
+      '<invoke name="update_plan">' +
+      '<parameter name="todos">[{"text":"build","status":"pending"}]</parameter>' +
+      '<parameter name="note">go</parameter>' +
+      '</invoke>'
+    const { calls } = run([src])
+    expect(calls[0].input).toEqual({
+      todos: [{ text: 'build', status: 'pending' }],
+      note: 'go'
+    })
+  })
+
+  it('releases a nameless <invoke> as plain text instead of wedging the loop', () => {
+    // A stray tag with no tool name must never become an errored call, or the reply
+    // loop (which aborts on any detected call) would stall on prose.
+    const src = 'see <invoke>the docs</invoke> for details'
+    const { text, calls } = run([src])
+    expect(calls).toHaveLength(0)
+    expect(text).toBe(src)
+  })
+
+  it('parseInvokeBlock returns the canonical call for a whole block', () => {
+    const call = parseInvokeBlock('<invoke name="web_search"><parameter name="query">webgpu</parameter></invoke>')
+    expect(call).not.toBeNull()
+    expect(call?.name).toBe('web_search')
+    expect(call?.input).toEqual({ query: 'webgpu' })
+    expect(call?.block).toContain('```myto:tool')
+  })
+})
+
 describe('fenceFor', () => {
   it('returns three backticks for text with no backtick runs', () => {
     expect(fenceFor('plain text')).toBe('```')
@@ -123,5 +202,28 @@ describe('toolResultBlock', () => {
     const { text, call } = parsed.push(block)
     expect(call).toBeNull()
     expect(text + parsed.flush()).toContain('text with ``` inside')
+  })
+})
+
+describe('createToolCallParser holdingBlock', () => {
+  it('is false for plain prose, true once a tool fence opens but has not closed', () => {
+    const parser = createToolCallParser()
+    parser.push('just some prose ')
+    expect(parser.holdingBlock).toBe(false)
+    // Opener arrived, closing fence has not — the parser is mid-block.
+    parser.push('```myto:tool\n{"tool":"write_file"')
+    expect(parser.holdingBlock).toBe(true)
+  })
+
+  it('clears when the block closes, and flush() resets it', () => {
+    const parser = createToolCallParser()
+    const { call } = parser.push('```myto:tool\n{"tool":"web_search","input":{"query":"x"}}\n```\n')
+    expect(call).not.toBeNull()
+    expect(parser.holdingBlock).toBe(false)
+
+    parser.push('```myto:tool\n{"tool":"write_file"') // reopen, unclosed
+    expect(parser.holdingBlock).toBe(true)
+    parser.flush()
+    expect(parser.holdingBlock).toBe(false)
   })
 })

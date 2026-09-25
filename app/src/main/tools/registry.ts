@@ -1,16 +1,20 @@
-import type { ChatMode, PreviewTarget, ProviderSettings, TodoItem, ToolSideEffect } from '../../shared/types'
+import type { ChatMode, CommandRun, FileSnapshot, NativeToolSchema, PreviewTarget, ProviderSettings, TodoItem, ToolSideEffect } from '../../shared/types'
 import { toErrorMessage } from '../providers/http'
 import type { ToolCall } from './toolParser'
 import { webFetchTool, webSearchTool, wikiSearchTool } from './web'
 import { runCodeTool } from './runCode'
 import { fsTools } from './fs'
+import { editNotebookTool } from './notebook'
 import { previewTool } from './preview'
 import { updatePlanTool } from './plan'
 import { searchTools } from './search'
 import { runCommandTool } from './command'
-import { spawnAgentTool } from './agent'
+import { runDevServerTool } from './devServer'
+import { gitTools } from './git'
+import { spawnAgentTool, spawnAgentsTool } from './agent'
 import { askUserTool } from './ask'
 import { installConnectorTool, installSkillTool } from './install'
+import { rememberTool } from './remember'
 
 /**
  * The tool registry: the catalogue of tools the chat can use, the dispatcher that
@@ -56,6 +60,13 @@ export interface ToolContext extends ToolGate {
    */
   onPlan?: (todos: TodoItem[]) => void
   /**
+   * Report a shell command the `run_command` tool just ran, plus its output. The
+   * stream loop turns it into a {@link CompletionChunk.command} so the renderer can
+   * show it in the Terminal pane. Optional — absent outside the streaming loop, where
+   * the tool still returns its formatted result to the model as usual.
+   */
+  onCommand?: (run: CommandRun) => void
+  /**
    * Run a focused read-only sub-task in a nested agent and resolve to its digest.
    * The `spawn_agent` tool calls this; the nested loop lives in provider-ipc.ts
    * (it needs the provider + model). Optional — absent outside the streaming loop,
@@ -69,6 +80,28 @@ export interface ToolContext extends ToolGate {
    * with its best judgement.
    */
   askUser?: (questions: import('../../shared/types').AskQuestion[]) => Promise<string[]>
+  /**
+   * Record a before/after capture of a file a mutation tool touched (#1 checkpoints).
+   * The write/edit/delete tools call this so the stream loop can persist a
+   * `file_snapshots` row for rewind + the diff viewer. Optional — absent outside the
+   * streaming loop, where mutation tools simply skip the capture.
+   */
+  onFileSnapshot?: (snapshot: FileSnapshot) => void
+  /**
+   * Lifecycle hook run BEFORE a tool executes (#9). Returning `{ block }` with a
+   * non-empty string short-circuits the tool: the string is fed back to the model
+   * as the tool result (like a permission denial) and the tool never runs. Resolving
+   * with nothing lets the call proceed. Optional — absent outside the streaming loop
+   * and when the user configured no pre-hook.
+   */
+  preToolUse?: (call: ToolCall) => Promise<{ block?: string } | void>
+  /**
+   * Lifecycle hook run AFTER a tool completes (#9), given the call and its result
+   * string. Best-effort/observational — its own output is surfaced as a status line,
+   * never fed back as the tool result. Optional — absent outside the streaming loop
+   * and when the user configured no post-hook.
+   */
+  postToolUse?: (call: ToolCall, result: string) => Promise<void>
 }
 
 /** One tool the model can call through the text protocol. */
@@ -85,6 +118,14 @@ export interface ToolDef {
    * prompt — read-only tools never ask (see main/tools/approvals.ts).
    */
   sideEffect?: ToolSideEffect
+  /**
+   * JSON-Schema for this tool's `input`, advertised to a native function-calling
+   * backend (#15) via {@link toolSchemas}. Optional: a tool that declares none
+   * falls back to a permissive object schema, and the field is consulted ONLY when
+   * native tools are on — the text protocol ignores it and teaches shape via
+   * {@link usage}. Keep it in sync with what {@link run} accepts.
+   */
+  schema?: Record<string, unknown>
   /** Whether this tool may be advertised/run under the given gate. */
   available(gate: ToolGate): boolean
   /** Execute the call; always resolves to a string (errors become messages). */
@@ -97,14 +138,19 @@ const ALL_TOOLS: readonly ToolDef[] = [
   wikiSearchTool,
   runCodeTool,
   runCommandTool,
+  runDevServerTool,
   ...fsTools,
+  editNotebookTool,
   ...searchTools,
+  ...gitTools,
   previewTool,
   updatePlanTool,
   spawnAgentTool,
+  spawnAgentsTool,
   askUserTool,
   installConnectorTool,
-  installSkillTool
+  installSkillTool,
+  rememberTool
 ]
 
 /** Lookup by name. Mutable only so tests can inject a fake tool; not written at runtime. */
@@ -180,7 +226,30 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<string>
     }.`
   }
   try {
-    return await tool.run(call.input, ctx)
+    // PreToolUse hook (#9): a non-empty `block` string vetoes the call — it becomes
+    // the tool result the model reads back, and the tool never runs. Hook failures
+    // must never wedge the loop, so a throwing hook is swallowed and the call proceeds.
+    if (ctx.preToolUse) {
+      try {
+        const verdict = await ctx.preToolUse(call)
+        if (verdict && typeof verdict.block === 'string' && verdict.block.trim()) {
+          return verdict.block
+        }
+      } catch {
+        // A broken pre-hook shouldn't block work; fall through and run the tool.
+      }
+    }
+    const result = await tool.run(call.input, ctx)
+    // PostToolUse hook (#9): observational only — its output is surfaced as a status
+    // line by the loop, never merged into the result. Errors are ignored.
+    if (ctx.postToolUse) {
+      try {
+        await ctx.postToolUse(call, result)
+      } catch {
+        // ignore — a post-hook is best-effort.
+      }
+    }
+    return result
   } catch (err) {
     return `The "${call.name}" tool failed: ${toErrorMessage(err)}`
   }
@@ -203,12 +272,31 @@ export function toolsSystemPrompt(gate: ToolGate): string | null {
     '',
     'Rules:',
     '- Put the call on a single line of compact JSON between the fences.',
+    '- Use EXACTLY this fenced `myto:tool` format — it is the only syntax that runs. Do NOT emit native tool markup such as `<invoke name="...">` / `<parameter name="...">`; that is not a tool call here, it will be shown to the user as raw text and nothing will happen.',
     '- After the block, output nothing and wait. The result comes back to you as a ```myto:tool_result block.',
     '- Read the result, then either call another tool or write your final answer to the user.',
     '- Call a tool only when it genuinely helps: a fact you are unsure of, something current or time-sensitive, a page or source the user named, or code to run. Otherwise just answer directly.',
+    '- To RUN a project (start its dev server, build, install deps, run tests) use `run_command` or `run_dev_server`, not `run_code`. `run_code` is for a short throwaway snippet, not for running the user\'s project.',
     '- Never invent a tool result or claim you used a tool you did not.',
     '',
     'Available tools:',
     ...tools.map((t) => `- ${t.name} — ${t.description} Input example: ${t.usage}`)
   ].join('\n')
+}
+
+/**
+ * Build the native-function-calling tool schema array (#15) for the tools usable
+ * under `gate` — the native-path counterpart of {@link toolsSystemPrompt}. Each
+ * tool contributes its {@link ToolDef.schema} (or a permissive object schema when it
+ * declares none); the `usage` example is folded into the description so a model on
+ * the native path still gets the shape hint the text prompt gives. Empty when no
+ * tools are available, so the caller advertises none and the backend stays in plain
+ * chat.
+ */
+export function toolSchemas(gate: ToolGate): NativeToolSchema[] {
+  return availableTools(gate).map((t) => ({
+    name: t.name,
+    description: `${t.description} Input example: ${t.usage}`,
+    parameters: t.schema ?? { type: 'object', additionalProperties: true }
+  }))
 }

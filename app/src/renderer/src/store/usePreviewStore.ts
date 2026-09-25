@@ -41,6 +41,11 @@ export interface PreviewState {
   forward: () => void
   /** Reload the current target (remounts the webview). */
   reload: () => void
+  /**
+   * Show the pane without navigating — used by the top-bar Preview toggle to reopen
+   * whatever Myto last showed (or the empty state if it has shown nothing yet).
+   */
+  reveal: () => void
   /** Hide the pane (keeps history, so a later `show` or reopen resumes it). */
   close: () => void
   /** Open the current target in the user's external browser. */
@@ -83,6 +88,8 @@ export const usePreviewStore = create<PreviewState>((set, get) => ({
   },
 
   reload: () => set((s) => ({ reloadNonce: s.reloadNonce + 1 })),
+
+  reveal: () => set({ open: true }),
 
   close: () => set({ open: false }),
 

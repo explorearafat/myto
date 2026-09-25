@@ -1,6 +1,8 @@
-import { useState, type ReactNode } from 'react'
-import { toolHeadline, type ToolSegment } from '../lib/fileBlocks'
+import { useEffect, useState, type ReactNode } from 'react'
+import { basename, toolHeadline, type ToolSegment } from '../lib/fileBlocks'
 import { CodeBody } from './Markdown'
+import { DiffView } from './DiffView'
+import { useChatStore } from '../store/useChatStore'
 
 /**
  * Renders one tool round-trip — the call the model made and the result Myto fed
@@ -83,6 +85,15 @@ function ToolGlyph({ name }: { name: string | null }): ReactNode {
       </svg>
     )
   }
+  if (name === 'run_dev_server') {
+    return (
+      <svg {...common}>
+        <rect x="2" y="2.5" width="12" height="4.5" rx="1" {...stroke} />
+        <rect x="2" y="9" width="12" height="4.5" rx="1" {...stroke} />
+        <path d="M4.25 4.75h0.01M4.25 11.25h0.01" {...stroke} />
+      </svg>
+    )
+  }
   if (name === 'spawn_agent') {
     return (
       <svg {...common}>
@@ -148,33 +159,123 @@ function formatInput(input: unknown): string {
 
 export function ToolCard({ tool, cowork = false }: { tool: ToolSegment; cowork?: boolean }): ReactNode {
   const [expanded, setExpanded] = useState(false)
+  const sessionId = useChatStore((s) => s.sessionId)
+  // The pre-overwrite bytes for a write_file diff base (#5), fetched lazily on
+  // expand. edit_file already carries both sides on the segment, so only write_file
+  // needs this; null → a fresh create, which shows an all-additions view.
+  const [snapBefore, setSnapBefore] = useState<string | null>(null)
+
+  const running = tool.result === null
+  const input = tool.input && typeof tool.input === 'object' ? (tool.input as Record<string, unknown>) : null
+  const isWrite = tool.name === 'write_file'
+  const content = isWrite && input && typeof input.content === 'string' ? input.content : ''
+
+  // Fetch the pre-overwrite bytes only when a completed write card is opened (#5):
+  // an overwrite then diffs old→new; a fresh create keeps its all-additions view.
+  // Content-addressed so the card's relative path needn't match the snapshot's.
+  useEffect(() => {
+    if (!expanded || !isWrite || running || content === '' || sessionId == null) {
+      setSnapBefore(null)
+      return
+    }
+    let alive = true
+    void window.myto.sessions.snapshotBefore(sessionId, content).then((b) => {
+      if (alive) setSnapBefore(b)
+    })
+    return () => {
+      alive = false
+    }
+  }, [expanded, isWrite, running, content, sessionId])
 
   // update_plan has no card of its own — its whole purpose is the live PlanPanel
   // that AssistantMessage pins above the reply, so a tool card here would just
   // duplicate it. Render nothing.
   if (tool.name === 'update_plan') return null
 
-  const running = tool.result === null
   const phase = running ? (tool.complete ? 'Running…' : 'Preparing…') : tool.complete ? null : 'Running…'
 
   // Cowork filesystem tools render as a quiet, borderless one-liner — no expand,
   // no content dump. Code writes just show +added / -removed on the right; the
   // richer bordered/expandable card below is reserved for the normal chat tools.
   if (FS_TOOLS.has(tool.name ?? '')) {
-    const counts = diffCounts(tool)
+    // Once an overwrite's pre-change bytes have loaded, the badge shows the real
+    // −removed (old line count) rather than write_file's default all-additions.
+    const counts =
+      isWrite && snapBefore != null
+        ? { add: content === '' ? 0 : content.split('\n').length, del: snapBefore === '' ? 0 : snapBefore.split('\n').length }
+        : diffCounts(tool)
+    const fileName = input && typeof input.path === 'string' ? basename(input.path) : ''
+    const isFileWrite = tool.name === 'write_file' || tool.name === 'edit_file'
+    // While it streams, show the reason-style action ("Creating index.html"); once the
+    // write lands, collapse to the bare filename ("index.html") beside its +N −N.
+    const label = !running && isFileWrite && fileName ? fileName : toolHeadline(tool)
+
+    // A completed file write expands to an inline diff (#5): edit_file diffs old→new
+    // from the segment; write_file diffs the fetched pre-overwrite bytes → new body
+    // (falling back to all-additions when it was a fresh create / not yet loaded).
+    const oldText = isWrite
+      ? (snapBefore ?? '')
+      : tool.name === 'edit_file' && typeof input?.old === 'string'
+        ? input.old
+        : ''
+    const newText = isWrite
+      ? content
+      : tool.name === 'edit_file' && typeof input?.new === 'string'
+        ? input.new
+        : ''
+    const canDiff = !running && isFileWrite && (oldText !== '' || newText !== '')
+
     return (
-      <div className="my-1.5 flex items-center gap-2 text-[12px]">
-        <span className="shrink-0 text-muted">
-          <ToolGlyph name={tool.name} />
-        </span>
-        <span className="truncate font-medium text-text">{toolHeadline(tool)}</span>
-        {phase && <span className="myto-thinking shrink-0 text-[10px] font-medium">{phase}</span>}
-        <span className="flex-1" />
-        {counts && (
-          <span className="shrink-0 font-mono text-[11px]">
-            <span className="text-green-500">+{counts.add}</span>{' '}
-            <span className="text-red-500">-{counts.del}</span>
+      <div className="myto-step-in my-1.5">
+        <div className="flex items-center gap-2 text-[12px]">
+          <span className="shrink-0 text-muted">
+            <ToolGlyph name={tool.name} />
           </span>
+          {canDiff ? (
+            <button
+              type="button"
+              aria-expanded={expanded}
+              onClick={() => setExpanded((v) => !v)}
+              className="flex min-w-0 flex-1 items-center gap-2 text-left"
+            >
+              <span className="truncate font-medium text-text hover:underline">{label}</span>
+              {phase && <span className="myto-thinking shrink-0 text-[10px] font-medium">{phase}</span>}
+              <span className="flex-1" />
+              {counts && (
+                <span className="shrink-0 font-mono text-[11px]">
+                  <span className="text-green-500">+{counts.add}</span>{' '}
+                  <span className="text-red-500">-{counts.del}</span>
+                </span>
+              )}
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 16 16"
+                fill="none"
+                aria-hidden="true"
+                className={'shrink-0 text-muted transition-transform ' + (expanded ? 'rotate-180' : '')}
+              >
+                <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          ) : (
+            <>
+              <span className="truncate font-medium text-text">{label}</span>
+              {phase && <span className="myto-thinking shrink-0 text-[10px] font-medium">{phase}</span>}
+              <span className="flex-1" />
+              {counts && (
+                <span className="shrink-0 font-mono text-[11px]">
+                  <span className="text-green-500">+{counts.add}</span>{' '}
+                  <span className="text-red-500">-{counts.del}</span>
+                </span>
+              )}
+            </>
+          )}
+        </div>
+        {canDiff && expanded && (
+          <div className="mt-1.5 overflow-hidden rounded-md border border-border/60">
+            <DiffView oldText={oldText} newText={newText} />
+          </div>
         )}
       </div>
     )

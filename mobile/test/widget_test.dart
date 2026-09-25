@@ -1,35 +1,46 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sylor/app.dart';
 import 'package:sylor/services/auth_service.dart';
+import 'package:sylor/services/byok_service.dart';
 import 'package:sylor/services/conversation_store.dart';
+import 'package:sylor/theme.dart';
+import 'package:sylor/widgets/chat_empty_state.dart';
 
-/// Smoke tests that don't touch the network or Firebase — they exercise the guest path, which is
-/// exactly the fallback the app uses before Firebase is configured. Run with `flutter test`.
+/// Smoke tests that don't touch the network or Firebase. Sign-in is required (there's no guest
+/// mode), so with `firebaseReady: false` the gate resolves straight to the sign-in screen — the
+/// one screen reachable without a real Firebase user. The blank-chat hero is exercised directly.
 void main() {
-  Future<(AuthService, ConversationStore)> buildServices({bool guest = false}) async {
+  Future<({AuthService auth, ByokService byok, ConversationStore store})> buildServices() async {
     SharedPreferences.setMockInitialValues({});
     final store = ConversationStore();
     await store.load();
     final auth = AuthService(firebaseReady: false);
-    if (guest) auth.continueAsGuest();
-    return (auth, store);
+    auth.start(); // no Firebase → resolves immediately, so the gate shows the sign-in screen
+    final byok = ByokService(firebaseReady: false);
+    return (auth: auth, byok: byok, store: store);
   }
 
-  testWidgets('signed-out users see the sign-in gate', (tester) async {
-    final (auth, store) = await buildServices();
-    await tester.pumpWidget(MytoApp(auth: auth, store: store));
+  testWidgets('signed-out users see the Google sign-in gate', (tester) async {
+    final s = await buildServices();
+    await tester.pumpWidget(MytoApp(auth: s.auth, byok: s.byok, store: s.store));
     await tester.pump();
 
     expect(find.text('Myto'), findsWidgets);
-    expect(find.text('Continue without signing in'), findsOneWidget);
+    expect(find.text('Continue with Google'), findsOneWidget);
   });
 
-  testWidgets('a guest lands on the empty chat screen', (tester) async {
-    final (auth, store) = await buildServices(guest: true);
-    await tester.pumpWidget(MytoApp(auth: auth, store: store));
+  testWidgets('the blank-chat hero greets by first name', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: mytoLightTheme(),
+        home: const Scaffold(body: ChatEmptyState(firstName: 'Ada')),
+      ),
+    );
     await tester.pump();
 
-    expect(find.text('How can I help today?'), findsOneWidget);
+    // Greeting is a random time-of-day phrase, but always "<phrase>, <name>" when a name is given.
+    expect(find.textContaining('Ada'), findsOneWidget);
   });
 }
