@@ -1,5 +1,6 @@
+import { Download } from 'lucide-react';
+import { MytoMark } from './MytoMark';
 import { LINKS } from '../data';
-import { WindowsMark, AndroidMark } from './PlatformIcons';
 
 export function Hero() {
   return (
@@ -24,36 +25,28 @@ export function Hero() {
           <div
             data-reveal
             style={{ transitionDelay: '170ms' }}
-            className="mt-9 flex flex-wrap items-center gap-3"
+            className="mt-10 flex flex-col items-start gap-5"
           >
-            <a
-              href={LINKS.download}
-              className="inline-flex h-12 items-center justify-center gap-2.5 rounded-lg bg-[#141413] px-5 text-[15px] font-medium text-[#faf9f5] no-underline shadow-[0_2px_10px_-4px_rgba(20,20,19,0.45)] transition-colors duration-150 hover:bg-[#2b2721] active:translate-y-px"
-            >
-              <WindowsMark className="h-[18px] w-[18px]" />
-              Download for Windows
-            </a>
-            <a
-              href={LINKS.androidApk}
-              className="inline-flex h-12 items-center justify-center gap-2.5 rounded-lg border border-[#141413]/20 bg-white px-5 text-[15px] font-medium text-[#141413] no-underline transition-colors duration-150 hover:border-[#141413]/40 hover:bg-[#faf9f5]"
-            >
-              <AndroidMark className="h-[18px] w-[18px]" />
-              Get it on Android
-            </a>
-          </div>
-
-          <p
-            data-reveal
-            style={{ transitionDelay: '230ms' }}
-            className="mt-5 text-[14px] text-[#6b675e]"
-          >
+            {/* A medium-big brand lockup sits above the single download call-to-action. */}
+            <div className="flex items-center gap-3">
+              <MytoMark size={56} />
+              <span className="font-display font-normal text-[44px] leading-none tracking-[-0.02em] text-[#141413]">
+                Myto
+              </span>
+            </div>
+            {/* Borderless — just text and a glyph, quiet hover. The header keeps the solid pill. */}
             <a
               href={LINKS.downloadPage}
-              className="font-medium text-[#57544e] no-underline transition-colors duration-150 hover:text-[#141413]"
+              className="group inline-flex items-center gap-2.5 text-[17px] font-medium text-[#141413] no-underline transition-opacity duration-150 hover:opacity-70"
             >
-              macOS &amp; Linux, and every release &rarr;
+              <Download
+                className="h-[19px] w-[19px] transition-transform duration-150 group-hover:translate-y-0.5"
+                strokeWidth={1.9}
+                aria-hidden="true"
+              />
+              Download
             </a>
-          </p>
+          </div>
         </div>
       </div>
     </section>

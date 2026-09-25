@@ -17,16 +17,28 @@
 // trivially and run identically on Vercel Edge and in the Vite dev middleware.
 
 import type { ByokConfig } from '../shared/byok';
-import type { WireMessage } from './gateway';
+import type { WireMessage, ReasoningEffort } from './gateway';
 
 /** The format-specific surface the gateway delegates to. Every method is pure. */
 export interface WebWireAdapter {
   /** Absolute chat endpoint for a base URL that has had trailing slashes trimmed. */
   upstreamUrl(base: string): string;
+  /** Absolute model-list endpoint (GET) for a base URL with trailing slashes trimmed. */
+  modelsUrl(base: string): string;
   /** Auth (and any always-required) headers. `content-type`/`Accept` stay in the gateway. */
   upstreamHeaders(cfg: ByokConfig): Record<string, string>;
-  /** The streaming request body (always `stream: true`). */
-  buildBody(model: string, messages: WireMessage[], maxTokens: number): Record<string, unknown>;
+  /**
+   * The streaming request body (always `stream: true`). `effort`, when set, is a
+   * reasoning-effort hint the mobile composer opted into: OpenAI-family endpoints
+   * receive it as `reasoning_effort`; the Anthropic adapter ignores it. Absent =
+   * unchanged body, so the web chat (which never sends it) is byte-for-byte identical.
+   */
+  buildBody(
+    model: string,
+    messages: WireMessage[],
+    maxTokens: number,
+    effort?: ReasoningEffort,
+  ): Record<string, unknown>;
   /**
    * Visible reply text from one SSE `data:` payload, or '' when there is nothing
    * to forward (a terminal sentinel, a non-text event, reasoning, or partial JSON).
@@ -34,6 +46,20 @@ export interface WebWireAdapter {
   parseStreamLine(data: string): string;
   /** Visible reply text from a buffered (non-streaming) JSON body, or '' if none. */
   parseBuffered(json: unknown): string;
+  /** Model ids from a buffered model-list JSON body, or [] when none/unparseable. */
+  parseModels(json: unknown): string[];
+}
+
+/** Both OpenAI (`/models`) and Anthropic (`/v1/models`) return `{ data: [{ id }] }`. */
+function parseModelsList(json: unknown): string[] {
+  const data = (json as { data?: unknown } | null)?.data;
+  if (!Array.isArray(data)) return [];
+  const ids: string[] = [];
+  for (const m of data) {
+    const id = (m as { id?: unknown })?.id;
+    if (typeof id === 'string' && id.trim()) ids.push(id.trim());
+  }
+  return ids;
 }
 
 // ── OpenAI-compatible adapter ────────────────────────────────────────────────
@@ -43,18 +69,24 @@ export interface WebWireAdapter {
 export const openAiWebAdapter: WebWireAdapter = {
   upstreamUrl: (base) => `${base}/chat/completions`,
 
+  modelsUrl: (base) => `${base}/models`,
+
   upstreamHeaders(cfg) {
     if (!cfg.apiKey || cfg.authSchema === 'none') return {};
     if (cfg.authSchema === 'header') return { [cfg.authHeaderName || 'Authorization']: cfg.apiKey };
     return { Authorization: `Bearer ${cfg.apiKey}` };
   },
 
-  buildBody: (model, messages, maxTokens) => ({
+  buildBody: (model, messages, maxTokens, effort) => ({
     model,
     stream: true,
     stream_options: { include_usage: true },
     messages,
     max_tokens: maxTokens,
+    // Only present when the caller opted into an effort — reasoning models (o-series,
+    // GPT-5) honour it; a plain model may reject an unknown field, so we never send a
+    // default. The Anthropic adapter deliberately drops it (different thinking model).
+    ...(effort ? { reasoning_effort: effort } : {}),
   }),
 
   parseStreamLine(data) {
@@ -73,6 +105,8 @@ export const openAiWebAdapter: WebWireAdapter = {
     const data = json as { choices?: { message?: { content?: string } }[] } | null;
     return data?.choices?.[0]?.message?.content ?? '';
   },
+
+  parseModels: parseModelsList,
 };
 
 // ── Anthropic (Claude Messages) adapter ───────────────────────────────────────
@@ -91,6 +125,8 @@ function anthropicJoin(base: string, path: string): string {
 
 export const anthropicWebAdapter: WebWireAdapter = {
   upstreamUrl: (base) => anthropicJoin(base, 'messages'),
+
+  modelsUrl: (base) => anthropicJoin(base, 'models'),
 
   upstreamHeaders(cfg) {
     // Anthropic ignores the config's authSchema — the format is known from the
@@ -140,6 +176,8 @@ export const anthropicWebAdapter: WebWireAdapter = {
     }
     return '';
   },
+
+  parseModels: parseModelsList,
 };
 
 /**

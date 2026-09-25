@@ -5,7 +5,6 @@ import { HowItWorks } from './components/HowItWorks';
 import { Features } from './components/Features';
 import { Pricing } from './components/Pricing';
 import { Docs } from './components/Docs';
-import { Download } from './components/Download';
 import { Footer } from './components/Footer';
 import { ScrollCanvas } from './components/ScrollCanvas';
 import { useReveals } from './lib/reveal';
@@ -30,7 +29,6 @@ export default function App() {
         <Features />
         <Pricing />
         <Docs />
-        <Download />
       </main>
       <div className="relative z-10">
         <Footer />

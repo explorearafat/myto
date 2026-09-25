@@ -59,6 +59,38 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 /**
+ * Best-effort public IP + approximate location for the current browser, used to annotate a device
+ * sign-in. Client-side only — the request goes browser → ipapi.co, never through our own server.
+ * Hard 2.5s timeout and a total swallow of every failure so it can NEVER block or slow the sign-in
+ * or the token handoff; callers just get {} and the device row shows "—". This is the user's own
+ * record under owner-only rules; IP + coarse location are PII kept only on their own account.
+ */
+async function lookupIpGeo(): Promise<{ ip?: string; location?: string }> {
+  try {
+    if (typeof fetch !== 'function') return {};
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 2500) : null;
+    let res: Response;
+    try {
+      res = await fetch('https://ipapi.co/json/', ctrl ? { signal: ctrl.signal } : {});
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (!res.ok) return {};
+    const j = (await res.json()) as Record<string, unknown>;
+    const ip = typeof j.ip === 'string' ? j.ip : undefined;
+    const city = typeof j.city === 'string' ? j.city : '';
+    const region = typeof j.region === 'string' ? j.region : '';
+    const country = typeof j.country_name === 'string' ? j.country_name : '';
+    const parts = [city || region, country].filter(Boolean);
+    const location = parts.length ? parts.join(', ') : undefined;
+    return { ip, location };
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Record that this browser just signed in, at users/{uid}/devices/{deviceId}. Upserts: the first time
  * it creates the row (setting firstSeenAt); afterwards it refreshes the label/platform and bumps the
  * sign-in count. Best-effort — any failure (rules not published yet, offline, no database) is swallowed
@@ -69,6 +101,8 @@ export async function recordDeviceSignIn(uid: string, platform: DevicePlatform):
     const deviceId = getDeviceId();
     const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : '';
     const { browser, os, label } = parseUserAgent(userAgent);
+    // Best-effort IP + coarse location; degrades to {} well within the sign-in's own timeout budget.
+    const geo = await lookupIpGeo();
     const ref = doc(db, 'users', uid, 'devices', deviceId);
     const now = Date.now();
     const snap = await withTimeout(getDoc(ref), 6000, 'Device read');
@@ -84,18 +118,24 @@ export async function recordDeviceSignIn(uid: string, platform: DevicePlatform):
         lastSeenAt: now,
         count: 1,
       };
+      // Firestore rejects `undefined` fields, so only attach the geo bits when the lookup succeeded.
+      if (geo.ip) fresh.ip = geo.ip;
+      if (geo.location) fresh.location = geo.location;
       await withTimeout(setDoc(ref, fresh), 6000, 'Device create');
     } else {
       const prev = snap.data() as Partial<DeviceSession>;
-      await withTimeout(
-        setDoc(
-          ref,
-          { browser, os, label, platform, userAgent, lastSeenAt: now, count: (prev.count ?? 0) + 1 },
-          { merge: true },
-        ),
-        6000,
-        'Device update',
-      );
+      const update: Record<string, unknown> = {
+        browser,
+        os,
+        label,
+        platform,
+        userAgent,
+        lastSeenAt: now,
+        count: (prev.count ?? 0) + 1,
+      };
+      if (geo.ip) update.ip = geo.ip;
+      if (geo.location) update.location = geo.location;
+      await withTimeout(setDoc(ref, update, { merge: true }), 6000, 'Device update');
     }
     return true;
   } catch (e) {

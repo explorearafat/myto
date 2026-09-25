@@ -56,6 +56,15 @@ describe('openAiWebAdapter', () => {
     });
   });
 
+  it('forwards reasoning_effort only when the caller opts in', () => {
+    const msgs: WireMessage[] = [{ role: 'user', content: 'hi' }];
+    // No effort → the body is byte-for-byte what the web chat has always sent.
+    expect(a.buildBody('gpt-5', msgs, 1536).reasoning_effort).toBeUndefined();
+    // An opted-in effort rides through as OpenAI's reasoning_effort field.
+    expect(a.buildBody('gpt-5', msgs, 1536, 'high').reasoning_effort).toBe('high');
+    expect(a.buildBody('gpt-5', msgs, 1536, 'low').reasoning_effort).toBe('low');
+  });
+
   it('parses SSE deltas, the [DONE] sentinel, and buffered content', () => {
     expect(a.parseStreamLine('[DONE]')).toBe('');
     expect(a.parseStreamLine(JSON.stringify({ choices: [{ delta: { content: 'He' } }] }))).toBe('He');
@@ -103,6 +112,11 @@ describe('anthropicWebAdapter', () => {
 
   it('omits system when there are no system turns', () => {
     expect(a.buildBody('m', [{ role: 'user', content: 'hi' }], 1536).system).toBeUndefined();
+  });
+
+  it('ignores a reasoning effort — Anthropic uses a thinking budget, not this field', () => {
+    const body = a.buildBody('claude-3-5-sonnet', [{ role: 'user', content: 'hi' }], 1536, 'high');
+    expect(body.reasoning_effort).toBeUndefined();
   });
 
   it('forwards only text_delta, dropping thinking/other events and bad JSON', () => {

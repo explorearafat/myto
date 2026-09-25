@@ -9,7 +9,16 @@ import {defineConfig, loadEnv, type Plugin} from 'vite';
  * hosts resolve the directory index for both, so rewrite each here to keep dev
  * and production identical.
  */
-const SUBPAGES = ['/download', '/chat', '/authentication'];
+const SUBPAGES = [
+  '/download',
+  '/chat',
+  '/authentication',
+  '/policy',
+  '/android',
+  '/apple',
+  '/windows',
+  '/linux',
+];
 
 function extraPages(): Plugin {
   return {
@@ -29,23 +38,27 @@ function extraPages(): Plugin {
 }
 
 /**
- * Dev-only: serve `/api/chat` from the same runtime-agnostic handler that runs
- * as a Vercel Edge function in production, so `npm run dev` and the preview
- * tools exercise the real gateway. Adapts Node's req/res to the Web
- * Request/Response the handler speaks. In production Vercel routes `/api/*`
- * to the function directly and this middleware never runs.
+ * Dev-only: serve `/api/chat` and `/api/models` from the same runtime-agnostic
+ * handlers that run as Vercel Edge functions in production, so `npm run dev` and
+ * the preview tools exercise the real gateway. Adapts Node's req/res to the Web
+ * Request/Response the handlers speak. In production Vercel routes `/api/*` to
+ * the functions directly and this middleware never runs.
  */
 function apiDev(): Plugin {
+  const ROUTES: Record<string, 'chat' | 'models'> = { '/api/chat': 'chat', '/api/models': 'models' };
   return {
     name: 'myto-api-dev',
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const url = req.url || '';
-        if (url !== '/api/chat' && !url.startsWith('/api/chat?')) return next();
+        const pathname = url.split('?', 1)[0];
+        const route = ROUTES[pathname];
+        if (!route) return next();
 
         void (async () => {
           try {
-            const { handleChat } = await import('./src/server/gateway');
+            const { handleChat, handleModels } = await import('./src/server/gateway');
+            const handler = route === 'models' ? handleModels : handleChat;
 
             const chunks: Buffer[] = [];
             for await (const c of req) chunks.push(c as Buffer);
@@ -66,7 +79,7 @@ function apiDev(): Plugin {
               body: raw && method !== 'GET' && method !== 'HEAD' ? raw : undefined,
             });
 
-            const response = await handleChat(request);
+            const response = await handler(request);
             res.statusCode = response.status;
             response.headers.forEach((value, key) => res.setHeader(key, value));
 
@@ -115,6 +128,11 @@ export default defineConfig(({ mode }) => {
           download: path.resolve(__dirname, 'download/index.html'),
           chat: path.resolve(__dirname, 'chat/index.html'),
           authentication: path.resolve(__dirname, 'authentication/index.html'),
+          policy: path.resolve(__dirname, 'policy/index.html'),
+          android: path.resolve(__dirname, 'android/index.html'),
+          apple: path.resolve(__dirname, 'apple/index.html'),
+          windows: path.resolve(__dirname, 'windows/index.html'),
+          linux: path.resolve(__dirname, 'linux/index.html'),
         },
       },
     },

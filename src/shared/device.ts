@@ -29,6 +29,10 @@ export interface DeviceSession {
   lastSeenAt: number;
   /** How many sign-ins we've recorded from this device. */
   count: number;
+  /** Public IP at the last sign-in, best-effort. Absent when the lookup failed or was skipped. */
+  ip?: string;
+  /** Approximate location ("City, Country") at the last sign-in, best-effort. Absent when unknown. */
+  location?: string;
 }
 
 /**

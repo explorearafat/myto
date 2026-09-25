@@ -37,35 +37,22 @@ export interface Platform {
   ready: boolean;
   requires: string;
   body: string;
+  /** Optional secondary caveat, shown as a smaller muted line under the body. */
+  note?: string;
   href?: string;
   cta?: string;
+  /** Installer size, shown on the download card next to the file name. Ready platforms only. */
+  size?: string;
+  /** Per-platform version label; falls back to RELEASE.version when unset. */
+  version?: string;
 }
 
-/** The /download page. Statuses are deliberately blunt — no fake "soon" links. */
+/*
+ * The /download page renders these as alternating left/right blocks, so the ORDER
+ * here is load-bearing: index parity (`i % 2`) decides which side the media sits on.
+ * Android (left), Windows (right), iOS (left), Linux (right), macOS (left).
+ */
 export const PLATFORMS: Platform[] = [
-  {
-    name: 'Windows',
-    status: 'Available now',
-    ready: true,
-    requires: 'Windows 10 or 11, 64-bit',
-    body: 'The installer everyone uses today. It is self-signed, so SmartScreen warns on first run — click More info, then Run anyway.',
-    href: LINKS.download,
-    cta: 'Download the installer',
-  },
-  {
-    name: 'macOS',
-    status: 'Planned',
-    ready: false,
-    requires: 'Apple silicon and Intel',
-    body: 'Not built yet. Myto runs on Electron, so this is packaging and signing work rather than a rewrite — the releases page is the place to watch.',
-  },
-  {
-    name: 'Linux',
-    status: 'Planned',
-    ready: false,
-    requires: 'x86-64',
-    body: 'Same position as macOS: the workspace itself already runs cross-platform, and the packaging is what is missing.',
-  },
   {
     name: 'Android',
     status: 'Available now',
@@ -74,5 +61,38 @@ export const PLATFORMS: Platform[] = [
     body: 'A native chat app, built with Flutter — sign in, pick a model, and stream replies on your phone. Like the Windows build it is self-signed, so Android asks you to allow the install the first time.',
     href: LINKS.androidApk,
     cta: 'Download the APK',
+    size: '53 MB',
+  },
+  {
+    name: 'Windows',
+    status: 'Available now',
+    ready: true,
+    requires: 'Windows 10 or 11, 64-bit',
+    body: 'The full desktop workspace — the build everyone runs today. Read your project, edit with approval, run the build, all in one window.',
+    note: 'Self-signed, so SmartScreen warns on first run: click More info, then Run anyway.',
+    href: LINKS.download,
+    cta: 'Download the installer',
+    size: '129 MB',
+  },
+  {
+    name: 'iOS',
+    status: 'Planned',
+    ready: false,
+    requires: 'iPhone and iPad',
+    body: 'Not built yet. The Flutter chat app that powers Android is the same codebase iOS will use, so this is App Store packaging and signing rather than a rewrite.',
+  },
+  {
+    name: 'Linux',
+    status: 'Planned',
+    ready: false,
+    requires: 'x86-64',
+    body: 'The workspace itself already runs cross-platform; the packaging is what is missing. The releases page is where a Linux build will show up first.',
+  },
+  {
+    name: 'macOS',
+    status: 'Planned',
+    ready: false,
+    requires: 'Apple silicon and Intel',
+    body: 'Not built yet. Myto runs on Electron, so this is packaging and signing work rather than a rewrite — the releases page is the place to watch.',
   },
 ];

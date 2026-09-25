@@ -467,7 +467,9 @@ const TOOLS: Record<string, ToolDef> = {
 
 /** Whether tool calling is enabled for the gateway (env kill-switch; on by default). */
 export function toolsEnabled(): boolean {
-  const v = (process.env.SYLOR_TOOLS || '').trim().toLowerCase();
+  // MYTO_TOOLS is the current name; SYLOR_TOOLS stays honored as a deprecated fallback so a
+  // deployment that still sets the pre-rebrand var keeps working.
+  const v = (process.env.MYTO_TOOLS || process.env.SYLOR_TOOLS || '').trim().toLowerCase();
   return v !== '0' && v !== 'off' && v !== 'false';
 }
 

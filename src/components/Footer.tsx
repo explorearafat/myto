@@ -1,30 +1,15 @@
+import { ArrowRight } from 'lucide-react';
 import { MytoMark } from './MytoMark';
-import { LINKS } from '../data';
-
-/* In-page sections (hash) plus the real subpages. On a subpage the hashes have
-   to jump back to the product page — matching the header. */
-const SECTIONS = [
-  { label: 'Product', hash: '#features' },
-  { label: 'Docs', hash: '#docs' },
-  { label: 'Pricing', hash: '#pricing' },
-];
-const PAGES = [
-  { label: 'Download', href: LINKS.downloadPage },
-  { label: 'Chat', href: LINKS.chatPage },
-];
 
 interface FooterProps {
   subpage?: boolean;
 }
 
-const linkCls =
-  'font-medium text-[#6b675e] no-underline transition-colors duration-150 hover:text-[#141413]';
-
 export function Footer({ subpage = false }: FooterProps) {
   return (
     <footer className="border-t border-[#e4e1d8]">
       <div className="mx-auto max-w-6xl px-6 py-12">
-        <div className="flex flex-col gap-8 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex flex-col gap-10 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <a
               href={subpage ? '/' : '#top'}
@@ -43,18 +28,29 @@ export function Footer({ subpage = false }: FooterProps) {
             </p>
           </div>
 
-          <nav className="flex flex-wrap gap-x-8 gap-y-3 text-[14px]">
-            {SECTIONS.map((n) => (
-              <a key={n.hash} href={subpage ? `/${n.hash}` : n.hash} className={linkCls}>
-                {n.label}
-              </a>
-            ))}
-            {PAGES.map((p) => (
-              <a key={p.href} href={p.href} className={linkCls}>
-                {p.label}
-              </a>
-            ))}
-          </nav>
+          {/* Privacy & policy — a short legal/business note with the full documents on /policy. */}
+          <div className="max-w-[42ch]">
+            <h2 className="font-display font-normal text-[22px] leading-tight tracking-[-0.01em] text-[#141413]">
+              Privacy and Policy
+            </h2>
+            <p className="mt-3 text-[14px] leading-relaxed text-[#6b675e]">
+              Myto is bring-your-own-key: your API keys and model endpoints are stored under your
+              own account and are never shared, resold, or used to train anything. Sign-in and
+              device records exist only to keep your account secure, and you can remove them at
+              any time. Myto is operated as a closed-source product; the full privacy, terms, and
+              data-handling documents are linked below.
+            </p>
+            <a
+              href="/policy"
+              className="group mt-4 inline-flex items-center gap-1.5 text-[14px] font-medium text-[#141413] no-underline underline decoration-[#cbc6ba] underline-offset-2 transition-colors duration-150 hover:decoration-[#141413]"
+            >
+              see more
+              <ArrowRight
+                className="h-3.5 w-3.5 transition-transform duration-150 group-hover:translate-x-0.5"
+                aria-hidden="true"
+              />
+            </a>
+          </div>
         </div>
 
         <div className="mt-10 border-t border-[#eceae2] pt-6 text-[13px] text-[#9c988e]">

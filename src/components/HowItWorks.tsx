@@ -24,15 +24,22 @@ export function HowItWorks() {
     <section className="border-b border-[#e9e6dd]">
       <div className="mx-auto max-w-6xl px-6 py-20 sm:py-24">
         <div className="text-center">
+          <p
+            data-reveal
+            className="text-[13px] font-semibold uppercase tracking-[0.16em] text-[#9c988e]"
+          >
+            The workflow
+          </p>
           <h2
             data-reveal
-            className="font-display font-normal text-[32px] tracking-[-0.02em] text-[#141413] sm:text-[40px]"
+            style={{ transitionDelay: '60ms' }}
+            className="mt-3 font-display font-normal text-[32px] tracking-[-0.02em] text-[#141413] sm:text-[40px]"
           >
             How it works
           </h2>
           <p
             data-reveal
-            style={{ transitionDelay: '70ms' }}
+            style={{ transitionDelay: '120ms' }}
             className="mx-auto mt-4 max-w-[46ch] text-[17px] leading-relaxed text-[#6b675e]"
           >
             From an empty chat to a change that compiles, in four steps.

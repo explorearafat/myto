@@ -212,6 +212,24 @@
 }
 
 /*
+ * /download FAQ — a native <details> accordion. Hide the browser's default
+ * disclosure triangle and rotate our own chevron when the item opens. Unlayered
+ * so these deliberate rules aren't reordered under Tailwind's utilities.
+ */
+.faq-item summary {
+  list-style: none;
+}
+.faq-item summary::-webkit-details-marker {
+  display: none;
+}
+.faq-chevron {
+  transition: transform 0.2s ease;
+}
+.faq-item[open] .faq-chevron {
+  transform: rotate(180deg);
+}
+
+/*
  * Texture: graph-paper ruling on a 28px cell, masked so it fades out instead of
  * stopping at a hard edge, plus a soft bloom for the hero. Static gradients —
  * nothing here repaints while you scroll.

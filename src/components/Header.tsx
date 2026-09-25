@@ -1,11 +1,12 @@
 import { MytoMark } from './MytoMark';
 import { LINKS } from '../data';
 
-/* Plain anchors — no scroll-spy, no listeners, nothing recomputing on scroll. */
-const NAV = [
-  { label: 'Product', hash: '#features' },
+/* Plain anchors — no scroll-spy, no listeners, nothing recomputing on scroll.
+   Chat is a real path (renders the same on landing and subpages); Docs is an
+   in-page hash that has to jump back to the product page from a subpage. */
+const NAV: Array<{ label: string; href?: string; hash?: string }> = [
+  { label: 'Chat', href: LINKS.chatPage },
   { label: 'Docs', hash: '#docs' },
-  { label: 'Pricing', hash: '#pricing' },
 ];
 
 interface HeaderProps {
@@ -32,10 +33,14 @@ export function Header({ subpage = false }: HeaderProps) {
         </a>
 
         <nav className="flex items-center gap-1">
-          {/* Product / Docs / Pricing — hidden on small screens where they would crowd. */}
+          {/* Chat / Docs — hidden on small screens where they would crowd. */}
           <div className="hidden items-center gap-1 sm:flex">
             {NAV.map((n) => (
-              <a key={n.hash} href={subpage ? `/${n.hash}` : n.hash} className={linkCls}>
+              <a
+                key={n.label}
+                href={n.href ?? (subpage ? `/${n.hash}` : n.hash)}
+                className={linkCls}
+              >
                 {n.label}
               </a>
             ))}

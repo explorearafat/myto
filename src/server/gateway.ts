@@ -30,6 +30,19 @@ export interface WireMessage {
   content: string;
 }
 
+/**
+ * Reasoning-effort hint the mobile composer can opt into (the desktop app has the
+ * same control). OpenAI-family endpoints receive it as `reasoning_effort`; the
+ * Anthropic adapter ignores it. It is only ever forwarded when the caller sends one
+ * of these exact values, so the web chat — which never sends it — is unaffected.
+ */
+export type ReasoningEffort = 'low' | 'medium' | 'high';
+
+/** Accept only the three known efforts; anything else (incl. a stray 'default') → undefined. */
+function sanitizeEffort(input: unknown): ReasoningEffort | undefined {
+  return input === 'low' || input === 'medium' || input === 'high' ? input : undefined;
+}
+
 // Hard ceiling on model turns per reply. Each turn is a full upstream generation plus (usually) one
 // tool fetch, and this runs on Edge with a wall-clock budget, so keep it small: up to two tool
 // calls then a forced final answer. Also guarantees the agentic loop always terminates.
@@ -37,7 +50,14 @@ const MAX_TOOL_TURNS = 3;
 
 const MAX_MESSAGES = 24;
 const MAX_CHARS = 8000;
-const MAX_OUTPUT_TOKENS = Number(process.env.SYLOR_MAX_OUTPUT_TOKENS || 1536);
+// Per-reply output ceiling for web + mobile (both flow through this one constant). Kept high so a
+// long answer or a file-heavy reply never gets truncated mid-work — the user's ask was "effectively
+// infinite". 32000 sits inside the output ceiling of every current Claude/GPT-class model the app
+// targets; a smaller/older model that rejects it can lower this per-deployment via the env var.
+// MYTO_MAX_OUTPUT_TOKENS is the current name; the pre-rebrand SYLOR_ var is a deprecated fallback.
+const MAX_OUTPUT_TOKENS = Number(
+  process.env.MYTO_MAX_OUTPUT_TOKENS || process.env.SYLOR_MAX_OUTPUT_TOKENS || 32000,
+);
 
 function json(status: number, body: unknown, extra?: Record<string, string>): Response {
   return new Response(JSON.stringify(body), {
@@ -82,6 +102,7 @@ async function openUpstream(
   model: string,
   messages: WireMessage[],
   adapter: WebWireAdapter,
+  effort?: ReasoningEffort,
 ): Promise<Response | null> {
   const base = cfg.baseUrl.replace(/\/+$/, '');
   try {
@@ -92,7 +113,7 @@ async function openUpstream(
         Accept: 'text/event-stream',
         ...adapter.upstreamHeaders(cfg),
       },
-      body: JSON.stringify(adapter.buildBody(model, messages, MAX_OUTPUT_TOKENS)),
+      body: JSON.stringify(adapter.buildBody(model, messages, MAX_OUTPUT_TOKENS, effort)),
     });
     if (res.ok && res.body) return res;
     try {
@@ -186,6 +207,7 @@ function buildAgentStream(
   cfg: ByokConfig,
   model: string,
   toolsOn: boolean,
+  effort?: ReasoningEffort,
 ): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
   const abort = new AbortController();
@@ -205,7 +227,7 @@ function buildAgentStream(
               content: 'Answer the user now using what you already have. Do not call any more tools.',
             });
           }
-          const upstream = await openUpstream(cfg, model, messages, adapter);
+          const upstream = await openUpstream(cfg, model, messages, adapter, effort);
           if (!upstream) {
             send({ t: 'error', code: 'upstream' });
             errored = true;
@@ -249,7 +271,7 @@ export async function handleChat(req: Request): Promise<Response> {
   if (req.method !== 'POST') return json(405, { error: 'method_not_allowed' });
   if (!sameOrigin(req)) return json(403, { error: 'forbidden' });
 
-  let payload: { model?: unknown; messages?: unknown } & Partial<ByokConfig>;
+  let payload: { model?: unknown; messages?: unknown; reasoningEffort?: unknown } & Partial<ByokConfig>;
   try {
     payload = await req.json();
   } catch {
@@ -281,7 +303,9 @@ export async function handleChat(req: Request): Promise<Response> {
     ...history,
   ];
 
-  const stream = buildAgentStream(messages, cfg, model, toolsOn);
+  // Opt-in reasoning effort from the mobile composer (absent for the web chat).
+  const effort = sanitizeEffort(payload.reasoningEffort);
+  const stream = buildAgentStream(messages, cfg, model, toolsOn, effort);
 
   return new Response(stream, {
     status: 200,
@@ -291,4 +315,62 @@ export async function handleChat(req: Request): Promise<Response> {
       'x-accel-buffering': 'no',
     },
   });
+}
+
+/**
+ * List the models a BYOK endpoint exposes — powers the "Sync models" picker and the "Test Connection"
+ * button on /authentication. Same trust posture and SSRF guard as handleChat: only public HTTPS hosts,
+ * credentials come from the caller, and the key is never logged. The caller POSTs its own
+ * { baseUrl, apiKey, authSchema, authHeaderName }; we GET the provider's model list with the auth the
+ * schema dictates and return { models: [{ id }] } — a reachable+authorized round-trip doubles as the
+ * connection test. No message history, no streaming, no tool loop.
+ */
+export async function handleModels(req: Request): Promise<Response> {
+  if (req.method !== 'POST') return json(405, { error: 'method_not_allowed' });
+  if (!sameOrigin(req)) return json(403, { error: 'forbidden' });
+
+  let payload: unknown;
+  try {
+    payload = await req.json();
+  } catch {
+    return json(400, { error: 'bad_json' });
+  }
+
+  const cfg = normalizeByokConfig(payload);
+  if (!cfg.baseUrl) return json(400, { error: 'no_config' });
+
+  // SSRF guard: only public HTTPS endpoints — identical to handleChat.
+  let host: string;
+  try {
+    const u = new URL(cfg.baseUrl);
+    if (u.protocol !== 'https:') return json(400, { error: 'bad_base_url' });
+    host = u.hostname;
+  } catch {
+    return json(400, { error: 'bad_base_url' });
+  }
+  if (isBlockedHost(host)) return json(400, { error: 'bad_base_url' });
+
+  const adapter = pickWebAdapter(cfg.baseUrl);
+  const base = cfg.baseUrl.replace(/\/+$/, '');
+  try {
+    const res = await fetch(adapter.modelsUrl(base), {
+      method: 'GET',
+      headers: { Accept: 'application/json', ...adapter.upstreamHeaders(cfg) },
+    });
+    if (!res.ok) {
+      // 401/403 → key rejected; anything else → reachable but unhappy. Never echo the body (it can
+      // carry the key back) — just the status so the client can show a short reason.
+      try {
+        await res.body?.cancel();
+      } catch {
+        /* ignore */
+      }
+      return json(502, { error: 'upstream', status: res.status });
+    }
+    const data = await res.json().catch(() => null);
+    const models = adapter.parseModels(data).map((id) => ({ id }));
+    return json(200, { models });
+  } catch {
+    return json(502, { error: 'upstream' });
+  }
 }

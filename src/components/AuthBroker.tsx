@@ -8,10 +8,12 @@ import {
   signOut,
   type User,
 } from 'firebase/auth';
-import { Globe, LoaderCircle, LogOut, Monitor, Smartphone } from 'lucide-react';
-import { auth, googleProvider } from '../lib/firebase';
-import { getDeviceId, listDevices, recordDeviceSignIn } from '../lib/devices';
-import { absoluteDate, relativeTime, type DevicePlatform, type DeviceSession } from '../shared/device';
+import { ChevronRight, Laptop, LoaderCircle, LogOut, Monitor, Smartphone, Terminal } from 'lucide-react';
+import { doc, getDoc } from 'firebase/firestore';
+import { auth, db, googleProvider } from '../lib/firebase';
+import { listDevices, recordDeviceSignIn } from '../lib/devices';
+import { type DeviceSession } from '../shared/device';
+import { type UserProfile } from '../shared/profile';
 import { MytoMark } from './MytoMark';
 import { ByokPanel } from './ByokPanel';
 
@@ -50,7 +52,7 @@ interface Target {
 }
 
 /** Google's OIDC id_token, stashed so it survives the full-page reload the mobile redirect does. */
-const IDTOKEN_STASH_KEY = 'sylor.broker.idtoken';
+const IDTOKEN_STASH_KEY = 'myto.broker.idtoken';
 /** Seconds shown on the "returning you to the app" countdown after a device is authorized. */
 const REDIRECT_SECONDS = 3;
 
@@ -116,11 +118,12 @@ const ERROR_BOX =
   'rounded-lg border border-[#e4b8a8] bg-[#f9ede8] px-3 py-2 text-[13px] leading-relaxed text-[#8a3b22]';
 
 /** The paper page frame with the warm hero wash behind, shared by every state. */
-function Shell({ children, wide }: { children: ReactNode; wide?: boolean }) {
+function Shell({ children, size = 'sm' }: { children: ReactNode; size?: 'sm' | 'lg' | 'xl' }) {
+  const max = size === 'xl' ? 'max-w-5xl' : size === 'lg' ? 'max-w-lg' : 'max-w-sm';
   return (
     <main className="relative grid min-h-[100dvh] place-items-center overflow-hidden bg-[#faf9f5] px-6 py-16 text-[#141413]">
       <div aria-hidden="true" className="hero-aura" />
-      <div className={'chat-in relative w-full ' + (wide ? 'max-w-lg' : 'max-w-sm')}>{children}</div>
+      <div className={'chat-in relative w-full ' + max}>{children}</div>
     </main>
   );
 }
@@ -134,19 +137,6 @@ function CardHead({ title, children }: { title: string; children: ReactNode }) {
       <p className="mt-2 max-w-[44ch] text-[14px] leading-relaxed text-[#6b675e]">{children}</p>
     </div>
   );
-}
-
-function PlatformIcon({ platform }: { platform: DevicePlatform }) {
-  const cls = 'h-4 w-4';
-  if (platform === 'desktop') return <Monitor className={cls} aria-hidden="true" />;
-  if (platform === 'mobile') return <Smartphone className={cls} aria-hidden="true" />;
-  return <Globe className={cls} aria-hidden="true" />;
-}
-
-function platformLabel(platform: DevicePlatform): string {
-  if (platform === 'desktop') return 'Desktop app';
-  if (platform === 'mobile') return 'Mobile app';
-  return 'Web';
 }
 
 /** Two initials for the avatar fallback when the account has no photo. */
@@ -180,52 +170,13 @@ function AccountIdentity({ user }: { user: User }) {
   );
 }
 
-/** The list of devices that have signed in — one calm row each. */
-function DeviceList({ devices }: { devices: DeviceSession[] }) {
-  if (devices.length === 0) {
-    return (
-      <p className="rounded-xl border border-[#e4e1d8] bg-white px-4 py-5 text-center text-[14px] text-[#6b675e]">
-        No device sign-ins recorded yet.
-      </p>
-    );
-  }
-  const currentId = getDeviceId();
+/** One labelled profile line (role / company / about) inside the identity card. */
+function Detail({ label, value }: { label: string; value: string }) {
   return (
-    <ul className="space-y-3">
-      {devices.map((d) => {
-        const current = d.deviceId === currentId;
-        return (
-          <li
-            key={d.deviceId}
-            className="flex items-start gap-3.5 rounded-xl border border-[#e4e1d8] bg-white p-4 text-left"
-          >
-            <div className="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[#f4f1ea] text-[#8a6f5f]">
-              <PlatformIcon platform={d.platform} />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <span className="text-[15px] font-medium text-[#141413]">{d.label}</span>
-                {current ? (
-                  <span className="rounded-full border border-[#d8d5cc] bg-[#fbeee9] px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-[#57544e]">
-                    This device
-                  </span>
-                ) : null}
-              </div>
-              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[13px] text-[#6b675e]">
-                <span className="rounded-md bg-[#f0eee6] px-1.5 py-0.5 text-[12px] font-medium">
-                  {platformLabel(d.platform)}
-                </span>
-                <span>Last active {relativeTime(d.lastSeenAt)}</span>
-              </div>
-              <div className="mt-1 text-[12px] text-[#9c988e]">
-                First signed in {absoluteDate(d.firstSeenAt)} · {d.count} sign-in
-                {d.count === 1 ? '' : 's'}
-              </div>
-            </div>
-          </li>
-        );
-      })}
-    </ul>
+    <div>
+      <div className="text-[11px] font-medium uppercase tracking-wide text-[#9c988e]">{label}</div>
+      <div className="mt-0.5 text-[14px] leading-relaxed text-[#544f46]">{value}</div>
+    </div>
   );
 }
 
@@ -239,6 +190,7 @@ export function AuthBroker() {
   const [idToken, setIdToken] = useState<string | null>(null);
   const [countdown, setCountdown] = useState(REDIRECT_SECONDS);
   const [devices, setDevices] = useState<DeviceSession[]>([]);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [recordOk, setRecordOk] = useState(true);
   const [directBusy, setDirectBusy] = useState(false);
@@ -301,6 +253,15 @@ export function AuthBroker() {
       setRecordOk(ok);
       setDevices(rows);
       setDevicesLoading(false);
+      // Best-effort profile (role / company / about) for the identity card. This whole effect is
+      // gated to the direct-visit path (target is null), so the broker flow never runs it and a
+      // failed or missing profile only means the extra detail lines stay hidden.
+      try {
+        const snap = await getDoc(doc(db, 'users', authUser.uid));
+        if (snap.exists()) setProfile(snap.data() as UserProfile);
+      } catch {
+        /* profile is optional — leave it null */
+      }
     })();
   }, [target, authUser]);
 
@@ -379,6 +340,7 @@ export function AuthBroker() {
   const doSignOut = useCallback(async () => {
     await signOut(auth);
     setDevices([]);
+    setProfile(null);
     setRecordOk(true);
     recordedRef.current = false;
   }, []);
@@ -468,17 +430,19 @@ export function AuthBroker() {
   }
 
   if (authUser) {
-    const count = devices.length;
+    const groups = [
+      { href: '/android', label: 'Android', Icon: Smartphone, count: devices.filter((d) => d.os === 'Android').length },
+      { href: '/apple', label: 'Apple', Icon: Laptop, count: devices.filter((d) => d.os === 'macOS' || d.os === 'iOS').length },
+      { href: '/windows', label: 'Windows', Icon: Monitor, count: devices.filter((d) => d.os === 'Windows').length },
+      { href: '/linux', label: 'Linux', Icon: Terminal, count: devices.filter((d) => d.os === 'Linux').length },
+    ];
     return (
-      <Shell wide>
-        <CardHead title="Your devices">
-          {count === 0
-            ? 'This is where sign-ins made through Myto’s web sign-in show up.'
-            : `Signed in on ${count} device${count === 1 ? '' : 's'} through Myto’s web sign-in.`}
-        </CardHead>
-
-        <div className="mt-6 mb-4 flex items-center justify-between gap-3 rounded-xl border border-[#e4e1d8] bg-white px-4 py-3">
-          <AccountIdentity user={authUser} />
+      <Shell size="xl">
+        <div className="mb-7 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <MytoMark size={26} title="Myto" />
+            <span className="font-display text-[19px] font-normal">Myto</span>
+          </div>
           <button
             type="button"
             onClick={doSignOut}
@@ -489,35 +453,71 @@ export function AuthBroker() {
           </button>
         </div>
 
-        {devicesLoading ? (
-          <div className="flex items-center justify-center gap-2 py-8 text-[14px] text-[#6b675e]">
-            <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />
-            Loading your devices…
+        <div className="grid gap-6 lg:grid-cols-[340px_1fr]">
+          <div className="flex flex-col gap-5">
+            <section className="rounded-2xl border border-[#e4e1d8] bg-white p-5">
+              <AccountIdentity user={authUser} />
+              {profile && (profile.role || profile.company || profile.about) ? (
+                <div className="mt-4 space-y-3 border-t border-[#eceae2] pt-4">
+                  {profile.role ? <Detail label="Role" value={profile.role} /> : null}
+                  {profile.company ? <Detail label="Company" value={profile.company} /> : null}
+                  {profile.about ? <Detail label="About" value={profile.about} /> : null}
+                </div>
+              ) : null}
+            </section>
+            <section className="rounded-2xl border border-[#e4e1d8] bg-white p-5">
+              <h2 className="text-[12px] font-semibold uppercase tracking-wide text-[#9c988e]">
+                Your logged-in devices
+              </h2>
+              {!recordOk ? (
+                <p className={'mt-3 ' + ERROR_BOX}>
+                  Couldn’t load your devices — the sign-in security rules may not be published yet.
+                </p>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {groups.map((g) => {
+                    const Icon = g.Icon;
+                    return (
+                      <a
+                        key={g.href}
+                        href={g.href}
+                        className="group flex items-center justify-between gap-3 rounded-xl border border-[#e9e6dd] bg-[#faf9f5] px-3.5 py-3 transition-colors duration-150 hover:border-[#cbc6ba] hover:bg-white"
+                      >
+                        <span className="flex items-center gap-3">
+                          <span className="grid h-8 w-8 place-items-center rounded-lg border border-[#e9e6dd] bg-white text-[#8a6f5f]">
+                            <Icon className="h-4 w-4" aria-hidden="true" />
+                          </span>
+                          <span className="text-[14px] font-medium text-[#141413]">{g.label}</span>
+                        </span>
+                        <span className="flex items-center gap-1.5 text-[13px] text-[#6b675e]">
+                          {devicesLoading ? '…' : `${g.count} device${g.count === 1 ? '' : 's'}`}
+                          <ChevronRight
+                            className="h-4 w-4 text-[#9c988e] transition-transform duration-150 group-hover:translate-x-0.5"
+                            aria-hidden="true"
+                          />
+                        </span>
+                      </a>
+                    );
+                  })}
+                </div>
+              )}
+              <p className="mt-3 text-[12px] leading-relaxed text-[#9c988e]">
+                Only sign-ins made through Myto’s web sign-in are listed.
+              </p>
+            </section>
           </div>
-        ) : recordOk ? (
-          <DeviceList devices={devices} />
-        ) : (
-          <p className={ERROR_BOX}>
-            Couldn’t load your devices. If this keeps happening, the sign-in security rules may not be
-            published yet.
-          </p>
-        )}
-
-        <p className="mt-5 text-center text-[12px] leading-relaxed text-[#9c988e]">
-          Only sign-ins made through this page are listed — not every session on every device.
-        </p>
-
-        <div className="mt-10 border-t border-[#e4e1d8] pt-8">
-          <div className="mb-5 text-center">
-            <h2 className="font-display text-[22px] font-normal leading-tight text-[#141413]">
-              Your models
-            </h2>
-            <p className="mx-auto mt-2 max-w-[46ch] text-[14px] leading-relaxed text-[#6b675e]">
-              Add your own provider and models. These power chat in Myto’s web app, desktop app, and
-              mobile app — everywhere you’re signed in.
-            </p>
-          </div>
-          <ByokPanel uid={authUser.uid} />
+          <section>
+            <div className="mb-5">
+              <h2 className="font-display text-[22px] font-normal leading-tight text-[#141413]">
+                Your models
+              </h2>
+              <p className="mt-2 max-w-[52ch] text-[14px] leading-relaxed text-[#6b675e]">
+                Add your own provider and models. These power chat in Myto’s web app, desktop app, and
+                mobile app — everywhere you’re signed in.
+              </p>
+            </div>
+            <ByokPanel uid={authUser.uid} />
+          </section>
         </div>
       </Shell>
     );
