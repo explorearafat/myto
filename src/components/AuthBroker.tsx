@@ -26,7 +26,7 @@ import { ByokPanel } from './ByokPanel';
  * here, we run Google sign-in (which works in a real browser), and hand the resulting Google ID token
  * back to the app:
  *   • desktop → a loopback URL   http://127.0.0.1:<port>/callback
- *   • mobile  → a custom scheme   sylor://auth-callback
+ *   • mobile  → a custom scheme   myto://auth-callback
  * The app then completes Firebase sign-in itself with signInWithCredential — so no server secret and
  * no token minting happens here; we only relay Google's own token. The query parsing (readTarget) and
  * the callback URL (callbackUrl) are the app's contract and must stay byte-for-byte stable.
@@ -74,7 +74,7 @@ function callbackUrl(t: Target, idToken: string): string {
   const params = new URLSearchParams({ id_token: idToken, state: t.state });
   return t.platform === 'desktop'
     ? `http://127.0.0.1:${t.port}/callback?${params.toString()}`
-    : `sylor://auth-callback?${params.toString()}`;
+    : `myto://auth-callback?${params.toString()}`;
 }
 
 /** Turn a Firebase sign-in error into a short line, or '' when it should be silent (user closed it). */

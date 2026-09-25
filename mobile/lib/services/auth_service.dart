@@ -11,7 +11,7 @@ import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
 /// Google blocks its OAuth screen inside app webviews (`disallowed_useragent`), so we never
 /// sign in on-device. Instead [signInWithGoogle] opens a real browser (a Custom Tab) at the
 /// website's broker page, which runs Google sign-in and relays Google's OIDC ID token back to
-/// the `sylor://auth-callback` deep link; we finish locally with [signInWithCredential]. That
+/// the `myto://auth-callback` deep link; we finish locally with [signInWithCredential]. That
 /// needs no native google_sign_in plugin, google-services.json, SHA-1, or release keystore.
 ///
 /// Sign-in is required to use the app — there is no guest mode.
@@ -22,8 +22,8 @@ class AuthService extends ChangeNotifier {
   static const _brokerUrl = 'https://mytocode.vercel.app/authentication';
 
   /// The custom scheme the broker redirects to; must match the Android manifest's
-  /// CallbackActivity `<data android:scheme>` and the `sylor://` the broker builds.
-  static const _callbackScheme = 'sylor';
+  /// CallbackActivity `<data android:scheme>` and the `myto://` the broker builds.
+  static const _callbackScheme = 'myto';
 
   /// True when Firebase.initializeApp succeeded at startup.
   final bool firebaseReady;
@@ -78,7 +78,7 @@ class AuthService extends ChangeNotifier {
       });
 
   /// Opens the Myto website in a Custom Tab to run Google sign-in in a real browser, then
-  /// reads back the relayed OIDC ID token from the `sylor://auth-callback` deep link. A random
+  /// reads back the relayed OIDC ID token from the `myto://auth-callback` deep link. A random
   /// `state` is round-tripped and re-checked so we reject any callback we didn't initiate. See
   /// the website's AuthBroker page for the other half of this handshake.
   Future<String> _relayGoogleIdToken() async {

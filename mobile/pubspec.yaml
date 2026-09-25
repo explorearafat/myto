@@ -1,7 +1,7 @@
 name: sylor
 description: "Myto — a local-first AI coding workspace. The mobile chat companion."
 publish_to: "none"
-version: 0.5.0+9
+version: 0.6.0+10
 
 environment:
   sdk: ">=3.6.0 <4.0.0"
@@ -24,7 +24,7 @@ dependencies:
   # Sign-in against the same Firebase project as the website. Google blocks OAuth inside app
   # webviews, so we don't sign in on-device: flutter_web_auth_2 opens a real browser (Custom
   # Tab) at mytocode.vercel.app/authentication, which runs Google sign-in and relays the OIDC
-  # ID token back to sylor://auth-callback; we finish with signInWithCredential. No native
+  # ID token back to myto://auth-callback; we finish with signInWithCredential. No native
   # google_sign_in plugin, google-services.json, SHA-1, or release keystore is required.
   firebase_core: ^3.6.0
   firebase_auth: ^5.3.1
@@ -32,6 +32,10 @@ dependencies:
 
   # Bring-your-own-key config synced from the user's account (users/{uid}/config/byok).
   cloud_firestore: ^5.4.3
+
+  # On-device voice input for the composer's mic button. Uses the platform speech recognizer
+  # (Android SpeechRecognizer); degrades gracefully to a snackbar when unavailable or denied.
+  speech_to_text: ^7.0.0
 
 dev_dependencies:
   flutter_test:
