@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { basename, countLines, type FileSegment } from '../lib/fileBlocks'
-import { fileTypeFor, FileIcon } from '../lib/fileTypes'
+import { fileTypeFor } from '../lib/fileTypes'
+import { FileIcon } from '../lib/FileIcon'
 import { CodeBody } from './Markdown'
 import { DiffView } from './DiffView'
 import { useChatStore } from '../store/useChatStore'

@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type {
   CoworkHooks,
   CoworkPermissionMode,
+  BrowserTarget,
   ChatMode,
   EnvStatus,
   McpServerConfig,
@@ -107,6 +108,8 @@ export interface AppState {
   setCoworkHooks: (patch: Partial<CoworkHooks>) => Promise<void>
   /** Toggle the interactive-shell consent (#2) — arms the unrestricted PTY shell tab. */
   setCoworkTerminalConsent: (on: boolean) => Promise<void>
+  /** Set Cowork's browser target (off / in-app / system-chrome) and persist it (Track 2). */
+  setCoworkBrowserTarget: (target: BrowserTarget) => Promise<void>
   /** Set the reasoning-effort tier (sent to the provider as reasoning_effort) and persist. */
   setReasoningEffort: (effort: ReasoningEffort) => Promise<void>
   /** Set the assistant's writing voice / output style (#13) and persist. */
@@ -257,6 +260,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   setCoworkTerminalConsent: async (on) => {
     const { settings } = get()
     await get().saveSettings({ ...settings, cowork: { ...settings.cowork, terminalConsent: on } })
+  },
+
+  setCoworkBrowserTarget: async (target) => {
+    const { settings } = get()
+    await get().saveSettings({ ...settings, cowork: { ...settings.cowork, browserTarget: target } })
   },
 
   setReasoningEffort: async (effort) => {

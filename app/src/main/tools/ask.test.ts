@@ -29,6 +29,23 @@ describe('askUserTool', () => {
     expect(await askUserTool.run({ questions: [{ notQuestion: 1 }] }, ctx())).toMatch(/needs a non-empty/i)
   })
 
+  it('recovers a question from the mangled shapes weak models emit', async () => {
+    // A bare string, a JSON string, a top-level {question}, {prompt}/{text}, an array
+    // of plain strings, and {questions:"..."} must all raise a real question card
+    // rather than the old "nothing was asked" dead end.
+    const asked = async (input: unknown): Promise<string[]> => {
+      const askUser = vi.fn<(qs: Array<{ question: string }>) => Promise<string[]>>(async () => ['ok'])
+      await askUserTool.run(input, ctx({ askUser }))
+      return askUser.mock.calls.length ? askUser.mock.calls[0][0].map((q) => q.question) : []
+    }
+    expect(await asked('Which framework?')).toEqual(['Which framework?'])
+    expect(await asked('{"questions":[{"question":"Parsed?"}]}')).toEqual(['Parsed?'])
+    expect(await asked({ question: 'Top-level?' })).toEqual(['Top-level?'])
+    expect(await asked({ prompt: 'Via prompt?' })).toEqual(['Via prompt?'])
+    expect(await asked({ questions: ['A?', 'B?'] })).toEqual(['A?', 'B?'])
+    expect(await asked({ questions: 'Just a string?' })).toEqual(['Just a string?'])
+  })
+
   it('proceeds gracefully when no interactive channel is available', async () => {
     const out = await askUserTool.run({ questions: [{ question: 'Which stack?' }] }, ctx({ askUser: undefined }))
     expect(out).toMatch(/best judgement|proceed/i)

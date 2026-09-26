@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import type { OutputStyle, Theme } from '@shared/types'
+import type { BrowserTarget, OutputStyle, Theme } from '@shared/types'
 import { useAppStore } from '@renderer/store/useAppStore'
 import { ConnectorsPane } from '@renderer/components/ConnectorsPane'
 import { SkillsPane } from '@renderer/components/SkillsPane'
@@ -228,6 +228,13 @@ const OUTPUT_STYLE_OPTIONS: ReadonlyArray<{ id: OutputStyle; label: string }> = 
   { id: 'learning', label: 'Learning' }
 ]
 
+/** Cowork's browser target (Track 2): off, an in-app sandboxed window, or the user's own Chrome. */
+const BROWSER_TARGET_OPTIONS: ReadonlyArray<{ id: BrowserTarget; label: string }> = [
+  { id: 'off', label: 'Off' },
+  { id: 'in-app', label: 'In-app' },
+  { id: 'system-chrome', label: 'System Chrome' }
+]
+
 /** Tools pane: the master tool-use switch and the gated code-execution opt-in. */
 function ToolsPane() {
   const tools = useAppStore((s) => s.settings.tools)
@@ -238,6 +245,8 @@ function ToolsPane() {
   const setNativeTools = useAppStore((s) => s.setNativeTools)
   const terminalConsent = useAppStore((s) => s.settings.cowork.terminalConsent)
   const setTerminalConsent = useAppStore((s) => s.setCoworkTerminalConsent)
+  const browserTarget = useAppStore((s) => s.settings.cowork.browserTarget)
+  const setBrowserTarget = useAppStore((s) => s.setCoworkBrowserTarget)
   return (
     <div className="divide-y divide-border">
       <SettingRow
@@ -294,6 +303,29 @@ function ToolsPane() {
           options={ON_OFF}
           onChange={(v) => void setTerminalConsent(v === 'on')}
         />
+      </SettingRow>
+      <SettingRow
+        title="Browser"
+        description="Let Myto drive a web browser — read pages, fill forms, click through sites — working from a text outline, no vision needed. Works in both Chat and Cowork. In-app is a sandboxed window with no logins. System Chrome uses your own Chrome with your real logins: powerful, but Myto acts as you, so only pick it when you trust the task. Myto always asks before it clicks or types. Off by default."
+      >
+        <Segmented
+          ariaLabel="Browser"
+          value={browserTarget ?? 'off'}
+          options={BROWSER_TARGET_OPTIONS}
+          onChange={(v) => void setBrowserTarget(v)}
+        />
+      </SettingRow>
+      <SettingRow
+        title="Setup Myto Browser"
+        description="Open a browser window and sign in to Gmail, WhatsApp, Facebook, Telegram, and anything else by hand. Myto reuses these logins when it browses for you — your passwords never pass through the model."
+      >
+        <button
+          type="button"
+          onClick={() => void window.myto.cowork.openBrowserSetup()}
+          className="rounded-lg bg-primary px-3.5 py-1.5 text-[12px] font-medium text-bg shadow-sm transition-colors hover:opacity-90"
+        >
+          Open browser
+        </button>
       </SettingRow>
     </div>
   )

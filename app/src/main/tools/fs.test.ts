@@ -151,6 +151,12 @@ describe('edit_file', () => {
     writeFileSync(join(ROOT, 'a.txt'), 'x')
     expect(await editFileTool.run({ path: 'a.txt', old: 'x' }, ctx())).toMatch(/needs/i)
   })
+  it('points at write_file when the target does not exist yet (no opaque ENOENT)', async () => {
+    const out = await editFileTool.run({ path: 'brand-new.ts', old: 'foo', new: 'bar' }, ctx())
+    expect(out).toMatch(/does not exist yet/i)
+    expect(out).toMatch(/write_file/)
+    expect(out).not.toMatch(/ENOENT/)
+  })
 })
 
 describe('delete_file', () => {

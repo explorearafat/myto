@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import type { ToolDef } from './registry'
 
 /**
@@ -43,29 +45,73 @@ const INTERPRETERS: Record<string, InterpreterSpec> = {
   python3: { cmd: PYTHON, flag: '-c' },
   javascript: { cmd: process.execPath, flag: '-e', electronNode: true },
   js: { cmd: process.execPath, flag: '-e', electronNode: true },
-  node: { cmd: process.execPath, flag: '-e', electronNode: true },
-  bash: { cmd: 'bash', flag: '-c' },
-  sh: { cmd: 'bash', flag: '-c' }
+  node: { cmd: process.execPath, flag: '-e', electronNode: true }
 }
 
 /** Map a language name to its interpreter spec, or null if unsupported. */
 export function resolveInterpreter(language: string): InterpreterSpec | null {
-  return INTERPRETERS[language.toLowerCase()] ?? null
+  const key = language.toLowerCase()
+  // bash/sh resolve to a REAL shell: on Windows that means discovering Git Bash's
+  // bash.exe (which is rarely on PATH), so `run_code` with language "bash" actually
+  // runs instead of failing to spawn — the "Bash isn't available, let me try Python"
+  // fallback the agent used to hit. See {@link resolveBash}.
+  if (key === 'bash' || key === 'sh') return resolveBash()
+  return INTERPRETERS[key] ?? null
 }
 
 /**
- * The platform's native shell for running a whole command line (build, tests,
- * install, a dev server) — `cmd.exe /c` on Windows, `bash -c` on Unix. This is what
- * `run_command`/`run_dev_server` use instead of `resolveInterpreter('bash')`: bash
- * is frequently NOT on a Windows machine's PATH, so pinning to bash there made every
- * `npm …` command fail to spawn. cmd.exe is always present on Windows (via ComSpec),
- * so `npm`, `node`, `python`, git, etc. resolve exactly as they do in a normal
- * terminal. Never returns null — every supported OS has one of these.
+ * Where Git for Windows drops `bash.exe`, in preference order — checked because it
+ * is almost never on the Electron process's PATH (so a bare `spawn('bash')` throws
+ * ENOENT). `Git\bin\bash.exe` is the wrapper that sets up a sane MSYS environment,
+ * so it's preferred over `Git\usr\bin\bash.exe`. `MYTO_BASH` overrides everything for
+ * non-standard installs (Scoop, WSL, a portable Git).
+ */
+function windowsBashCandidates(): string[] {
+  const c: string[] = []
+  if (process.env.MYTO_BASH) c.push(process.env.MYTO_BASH)
+  const add = (base?: string): void => {
+    if (base) c.push(join(base, 'Git', 'bin', 'bash.exe'))
+  }
+  add(process.env.ProgramW6432)
+  add(process.env.ProgramFiles)
+  add(process.env['ProgramFiles(x86)'])
+  if (process.env.LOCALAPPDATA) c.push(join(process.env.LOCALAPPDATA, 'Programs', 'Git', 'bin', 'bash.exe'))
+  c.push('C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files (x86)\\Git\\bin\\bash.exe')
+  return c
+}
+
+/** The discovered bash.exe on Windows (Git Bash), or null. Resolved once, cached. */
+let winBash: string | null | undefined
+function windowsBashPath(): string | null {
+  if (winBash === undefined) winBash = windowsBashCandidates().find((p) => existsSync(p)) ?? null
+  return winBash
+}
+
+/**
+ * A real POSIX shell for `run_code` language "bash"/"sh". On Unix that is `bash -c`;
+ * on Windows it is the discovered Git Bash `bash.exe` ({@link windowsBashPath}), so
+ * bash snippets actually run rather than failing to spawn. Falls back to a bare
+ * `bash` when none is found, so the spawn error still names the missing interpreter
+ * instead of pretending bash is an unsupported language.
+ */
+export function resolveBash(): InterpreterSpec {
+  if (process.platform !== 'win32') return { cmd: 'bash', flag: '-c' }
+  return { cmd: windowsBashPath() ?? 'bash', flag: '-c' }
+}
+
+/**
+ * The shell for running a whole command line (build, tests, install, a dev server) —
+ * what `run_command`/`run_dev_server` use. On Unix, `bash -c`. On Windows we now
+ * PREFER the discovered Git Bash so the agent gets a genuine full shell — pipes,
+ * globs, `&&`, and unix tools (grep/sed/cat/ls) all work, and `npm`/`node`/`git`/
+ * `python` still resolve because Git Bash inherits the Windows PATH. Only when no
+ * bash is installed do we fall back to cmd.exe (always present via ComSpec) so
+ * `npm …` still spawns. Never returns null — every supported OS has one of these.
  */
 export function resolveShell(): InterpreterSpec {
-  return process.platform === 'win32'
-    ? { cmd: process.env.ComSpec || 'cmd.exe', flag: '/c' }
-    : { cmd: 'bash', flag: '-c' }
+  if (process.platform !== 'win32') return { cmd: 'bash', flag: '-c' }
+  const bash = windowsBashPath()
+  return bash ? { cmd: bash, flag: '-c' } : { cmd: process.env.ComSpec || 'cmd.exe', flag: '/c' }
 }
 
 /** Outcome of one execution. */

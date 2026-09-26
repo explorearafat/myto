@@ -203,7 +203,9 @@ function installShim(): void {
       // The browser preview has no native folder dialog; report "cancelled".
       pickWorkspace: () => Promise.resolve(null),
       // No workspace sandbox in the browser preview, so no files to mention.
-      listFiles: () => Promise.resolve([])
+      listFiles: () => Promise.resolve([]),
+      // No Electron BrowserWindow in the browser preview; opening the setup window is a no-op.
+      openBrowserSetup: () => Promise.resolve()
     },
     preview: {
       // No OS shell in the browser preview; opening externally is a no-op.

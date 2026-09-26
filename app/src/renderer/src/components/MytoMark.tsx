@@ -15,14 +15,22 @@ interface MytoMarkProps {
   color?: string
   className?: string
   title?: string
+  /** When true the mark "draws itself" ~2×/second — a working heartbeat used in the
+   *  live reply meta line. Normalises every stroke to pathLength 1 (so the dash sweep
+   *  is uniform) and adds the looping `myto-draw-loop` class; geometry is unchanged. */
+  draw?: boolean
 }
 
 export function MytoMark({
   size = 24,
   color = 'currentColor',
   className = '',
-  title = 'Myto'
+  title = 'Myto',
+  draw = false
 }: MytoMarkProps) {
+  // Spread onto every path when animating: pathLength 1 lets one keyframe sweep all
+  // six strokes in lockstep regardless of their real lengths.
+  const p = draw ? { pathLength: 1 } : {}
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -38,13 +46,13 @@ export function MytoMark({
       className={className}
     >
       <title>{title}</title>
-      <g transform="rotate(12 256 256)">
-        <path strokeWidth="17" d="M100 260C100 212 134 178 182 170C214 165 234 187 258 193C284 199 302 170 342 168C394 166 436 202 434 254C432 306 398 348 344 356C302 362 282 368 252 368C194 368 132 354 110 320C97 300 98 282 100 260Z" />
-        <path strokeWidth="13" d="M142 258C142 224 168 204 202 199C228 195 244 209 266 214C288 219 302 200 330 200C366 200 394 222 392 256C390 292 366 320 328 326C300 330 284 334 258 334C214 334 174 324 156 302C143 288 142 274 142 258Z" />
-        <path strokeWidth="14" d="M184 300C172 274 176 244 192 224" />
-        <path strokeWidth="15" d="M216 312C206 282 210 242 226 216" />
-        <path strokeWidth="14" d="M250 312C244 284 254 248 272 226" />
-        <path strokeWidth="13" d="M286 302C282 282 292 262 310 248" />
+      <g transform="rotate(12 256 256)" className={draw ? 'myto-draw-loop' : undefined}>
+        <path strokeWidth="17" {...p} d="M100 260C100 212 134 178 182 170C214 165 234 187 258 193C284 199 302 170 342 168C394 166 436 202 434 254C432 306 398 348 344 356C302 362 282 368 252 368C194 368 132 354 110 320C97 300 98 282 100 260Z" />
+        <path strokeWidth="13" {...p} d="M142 258C142 224 168 204 202 199C228 195 244 209 266 214C288 219 302 200 330 200C366 200 394 222 392 256C390 292 366 320 328 326C300 330 284 334 258 334C214 334 174 324 156 302C143 288 142 274 142 258Z" />
+        <path strokeWidth="14" {...p} d="M184 300C172 274 176 244 192 224" />
+        <path strokeWidth="15" {...p} d="M216 312C206 282 210 242 226 216" />
+        <path strokeWidth="14" {...p} d="M250 312C244 284 254 248 272 226" />
+        <path strokeWidth="13" {...p} d="M286 302C282 282 292 262 310 248" />
       </g>
     </svg>
   )

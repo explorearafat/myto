@@ -13,12 +13,19 @@ import {
   type ToolGate
 } from './registry'
 import { DEFAULT_PROVIDER_SETTINGS } from '../../shared/defaults'
-import type { ProviderSettings } from '../../shared/types'
+import type { BrowserTarget, ProviderSettings } from '../../shared/types'
 import type { ToolCall } from './toolParser'
 
 const settings = (enabled: boolean, codeExecution = false): ProviderSettings => ({
   ...DEFAULT_PROVIDER_SETTINGS,
   tools: { enabled, codeExecution }
+})
+
+/** Settings with the browser tools armed at a given target (tool use on). */
+const browserSettings = (target: BrowserTarget): ProviderSettings => ({
+  ...DEFAULT_PROVIDER_SETTINGS,
+  tools: { enabled: true, codeExecution: false },
+  cowork: { ...DEFAULT_PROVIDER_SETTINGS.cowork, browserTarget: target }
 })
 
 /** A gate: chat mode with no working folder unless overridden. */
@@ -58,7 +65,14 @@ describe('TOOLS catalogue', () => {
   it('registers the web, code, and filesystem tools', () => {
     expect(Object.keys(TOOLS).sort()).toEqual([
       'ask_user',
+      'browser_click',
+      'browser_navigate',
+      'browser_read',
+      'browser_snapshot',
+      'browser_type',
+      'create_document',
       'delete_file',
+      'detect_runtimes',
       'edit_file',
       'edit_notebook',
       'find_files',
@@ -66,6 +80,7 @@ describe('TOOLS catalogue', () => {
       'git_commit',
       'git_diff',
       'git_log',
+      'git_publish',
       'git_status',
       'install_connector',
       'install_skill',
@@ -76,10 +91,12 @@ describe('TOOLS catalogue', () => {
       'run_code',
       'run_command',
       'run_dev_server',
+      'scaffold_deploy',
       'search_code',
       'spawn_agent',
       'spawn_agents',
       'update_plan',
+      'verify_file',
       'web_fetch',
       'web_search',
       'wiki_search',
@@ -127,6 +144,38 @@ describe('availableTools', () => {
       availableTools(gate(settings(true), { mode: 'cowork', workspaceDir: null })).map((t) => t.name)
     ).toContain('preview')
     expect(availableTools(gate(settings(true))).map((t) => t.name)).not.toContain('preview')
+  })
+  it('exposes detect_runtimes only in cowork mode', () => {
+    expect(availableTools(coworkGate(settings(true))).map((t) => t.name)).toContain('detect_runtimes')
+    expect(availableTools(gate(settings(true))).map((t) => t.name)).not.toContain('detect_runtimes')
+  })
+  it('exposes verify_file only in cowork mode with a working folder', () => {
+    // Needs a folder (it reads a file), like the other fs tools.
+    expect(availableTools(coworkGate(settings(true))).map((t) => t.name)).toContain('verify_file')
+    expect(availableTools(gate(settings(true))).map((t) => t.name)).not.toContain('verify_file')
+    expect(
+      availableTools(gate(settings(true), { mode: 'cowork', workspaceDir: null })).map((t) => t.name)
+    ).not.toContain('verify_file')
+  })
+  it('exposes the browser tools whenever a target other than off is armed, in Chat and Cowork', () => {
+    const browserNames = ['browser_navigate', 'browser_snapshot', 'browser_read', 'browser_click', 'browser_type']
+    // Target off (the default): all hidden, in either mode.
+    expect(availableTools(coworkGate(settings(true))).map((t) => t.name)).not.toContain('browser_navigate')
+    expect(availableTools(gate(settings(true))).map((t) => t.name)).not.toContain('browser_navigate')
+    // Cowork + in-app: all five appear, and no working folder is needed for them.
+    const inApp = availableTools(gate(browserSettings('in-app'), { mode: 'cowork', workspaceDir: null })).map(
+      (t) => t.name
+    )
+    expect(inApp).toEqual(expect.arrayContaining(browserNames))
+    // system-chrome likewise arms them.
+    expect(availableTools(coworkGate(browserSettings('system-chrome'))).map((t) => t.name)).toContain(
+      'browser_click'
+    )
+    // Chat mode now exposes them too (with no working folder), so browser control works
+    // in the mode the user is actually in — not only in Cowork.
+    expect(availableTools(gate(browserSettings('in-app'))).map((t) => t.name)).toEqual(
+      expect.arrayContaining(browserNames)
+    )
   })
   it('does not expose the filesystem tools in chat mode even with a folder set', () => {
     const names = availableTools(gate(settings(true), { workspaceDir: '/work' })).map((t) => t.name)

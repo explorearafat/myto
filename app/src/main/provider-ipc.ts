@@ -24,12 +24,13 @@ import type {
 } from '../shared/types'
 import { createProvider, providerFromSettings } from './providers'
 import type { Provider } from './providers/provider'
-import { toErrorMessage } from './providers/http'
+import { toErrorMessage, httpStatusOf, rateLimitRetryDelay } from './providers/http'
 import { getSettings, saveSettings } from './settings'
 import {
   createStatusStripper,
   reasoningCaption,
   COWORK_SYSTEM_PROMPT,
+  coworkBrowserPrompt,
   FILE_PROTOCOL_SYSTEM_PROMPT,
   outputStylePrompt,
   PLAN_MODE_SYSTEM_PROMPT,
@@ -37,11 +38,37 @@ import {
 } from './status'
 import { availableTools, lookupTool, runTool, toolSchemas, toolsSystemPrompt, type ToolGate } from './tools/registry'
 import { ensureMytoDir, readJournal, recordGoal, recordToolAction } from './cowork-memory'
+import {
+  looksLikeUnsavedCode,
+  detectOscillation,
+  looksLikeContinuationRequest,
+  researchStallVerdict,
+  RESEARCH_TOOLS,
+  OSCILLATION_WINDOW,
+  OSCILLATION_MAX,
+  MAX_AUTO_CONTINUE
+} from './cowork-guards'
+import { detectRuntimesCached, summarizeRuntimes } from './cowork-runtimes'
+import { browserToolsEnabled } from './cowork-browser'
+import { createBrowserController, type BrowserController } from './cowork-browser-runtime'
+import { renderDocumentPdf } from './cowork-docgen-runtime'
+import type { BrowserSession } from './cowork-browser-cdp'
 import { readUserMemory } from './user-memory'
+import { materializeAttachments, type MaterializedAttachment } from './cowork-attachments'
+import { ensureDefaultWorkspace, ensureWorkspaceOnDesktop, FALLBACK_WORKSPACE_NAME } from './cowork-workspace'
 import { insertFileSnapshot } from './db/snapshots'
 import { approvalDetail, requiresApproval } from './tools/approvals'
 import { createToolCallParser, toolCallBlock, toolResultBlock, type ToolCall } from './tools/toolParser'
 import { executeArgv, formatRunResult, resolveShell } from './tools/runCode'
+
+/**
+ * The browser tools that act on the page (click/type). They are always confirmed
+ * before they run — in Cowork via the permission tier, and in Chat (which has no
+ * tier) via an explicit gate — because under `system-chrome` they drive the user's
+ * own Chrome with their real logins. Read-only browser tools carry no sideEffect and
+ * never prompt.
+ */
+const BROWSER_EXEC_TOOLS = new Set(['browser_click', 'browser_type'])
 
 /**
  * How often, at most, to refresh the status caption from a reasoning model's
@@ -313,6 +340,12 @@ export function registerProviderIpc(): void {
       /** Side-effect kinds the user granted for the rest of this run ("Always allow"). */
       const grantedAlways = new Set<ToolSideEffect>()
 
+      // Track 2 browser (Track 2): declared out here — before the try — so the `finally`
+      // can dispose it. It is assigned lazily inside the run by the `getBrowser` memo when
+      // the first browser_* tool call opens the chosen target, and stays null when the
+      // browser is never used.
+      let browserController: BrowserController | null = null
+
       try {
         const { provider, modelId, messages } = resolveRequest(request)
         const settings = getSettings()
@@ -333,7 +366,38 @@ export function registerProviderIpc(): void {
         }
         // In Cowork, the filesystem tools are scoped to this folder; null when none
         // is set, which keeps those tools dormant (see tools/fs.ts + registry.ts).
-        const workspaceDir = settings.cowork.workspaceDir.trim() || null
+        let workspaceDir = settings.cowork.workspaceDir.trim() || null
+        // Folder-selection-free Cowork: if the user hasn't picked a folder, don't force
+        // the native picker — ASK for a name and create the folder on the Desktop
+        // ourselves (the user's explicit request). We ask at run START because a null
+        // workspaceDir keeps the fs tools dormant, so the model can't lazily trigger a
+        // create later. Only when tools are on (a folderless run with tools off needs no
+        // folder). The chosen folder is persisted so later turns reuse it without asking.
+        if (mode === 'cowork' && !workspaceDir && settings.tools.enabled) {
+          const answers = await requestQuestions([
+            {
+              header: 'Project folder',
+              question:
+                "What should I name the project folder? I'll create it on your Desktop. (Leave blank and I'll use a default.)"
+            }
+          ])
+          if (controller.signal.aborted) return
+          const named = (answers[0] ?? '').trim() || FALLBACK_WORKSPACE_NAME
+          try {
+            workspaceDir = await ensureWorkspaceOnDesktop(named)
+            // Persist so the next turn reuses this folder (and the composer chip shows it).
+            saveSettings({ ...settings, cowork: { ...settings.cowork, workspaceDir } })
+          } catch {
+            // Couldn't create on the Desktop (permissions, missing path) — fall back to
+            // the Documents default so the run still proceeds rather than sitting idle.
+            try {
+              workspaceDir = await ensureDefaultWorkspace()
+            } catch {
+              // Even that failed — leave null; the fs tools stay dormant as before.
+            }
+          }
+          if (controller.signal.aborted) return
+        }
         const gate: ToolGate = { settings, mode, workspaceDir }
         const toolsPrompt = toolsSystemPrompt(gate)
         // Native function-calling (#15): opt-in AND the endpoint's wire format must support
@@ -352,9 +416,37 @@ export function registerProviderIpc(): void {
           ensureMytoDir(workspaceDir)
           coworkMemory = readJournal(workspaceDir)
         }
+        // Runtime awareness (Track 1): hand the agent the interpreters/toolchains that
+        // are actually installed and the EXACT command to invoke each, up front, so a
+        // weaker model scripts deliverables with a real command instead of guessing
+        // `python3` on Windows (the Store alias). Cached per process (runtimes are
+        // stable within a session); best-effort — probing never blocks the reply.
+        let runtimeSummary = ''
+        if (mode === 'cowork' && workspaceDir && settings.tools.enabled) {
+          try {
+            runtimeSummary = summarizeRuntimes(await detectRuntimesCached(controller.signal))
+          } catch {
+            // Probe failed or was cancelled — proceed without the readout.
+          }
+          if (controller.signal.aborted) return
+        }
         // Global (user-level) memory: cross-project facts/preferences the user saved,
         // injected in EVERY mode (chat and cowork) so they always apply. Best-effort.
         const userMemory = readUserMemory()
+        // Attachments → working folder (Cowork): the user's uploaded files live under
+        // userData/attachments/… which the sandboxed fs tools can't reach. Copy THIS
+        // turn's into <workspace>/uploads/ so the agent opens them directly by path
+        // instead of failing to find them, and note them in the system head below.
+        // Best-effort and Cowork-only; never blocks the reply.
+        let attachedFiles: MaterializedAttachment[] = []
+        if (mode === 'cowork' && workspaceDir && request.sessionId) {
+          attachedFiles = await materializeAttachments(
+            request.sessionId,
+            request.afterMsgId ?? null,
+            workspaceDir
+          )
+          if (controller.signal.aborted) return
+        }
         // Permission tier for side-effecting tools; only consulted in Cowork.
         const permissionMode = settings.cowork.permissionMode
         // Output style (#13): the persisted global voice preference, resolved to its
@@ -373,6 +465,46 @@ export function registerProviderIpc(): void {
          */
         const delegate = (task: string): Promise<string> =>
           runNestedAgent(provider, modelId, gate, task, controller.signal)
+
+        /**
+         * Browser session for this run (Track 2), created lazily and memoized: the first
+         * `browser_*` tool call opens the chosen target (the in-app sandboxed window or the
+         * user's system Chrome) and later calls reuse it; it is disposed in the `finally`
+         * below. Left undefined unless a browser target other than off is armed — which
+         * is exactly when the browser tools are advertised (in Chat AND Cowork) — so a
+         * defined `getBrowser` and an available browser tool always coincide. A failed
+         * launch keeps its rejected promise, so the tool reports the reason instead of
+         * relaunching on every call. (`browserController` itself is declared above the try
+         * so the `finally` can dispose it.)
+         */
+        let browserPending: Promise<BrowserSession> | null = null
+        const getBrowser =
+          browserToolsEnabled(settings.cowork.browserTarget)
+            ? (): Promise<BrowserSession> => {
+                if (!browserPending) {
+                  browserPending = createBrowserController(
+                    settings.cowork.browserTarget,
+                    controller.signal
+                  ).then((ctrl) => {
+                    browserController = ctrl
+                    return ctrl.session
+                  })
+                }
+                return browserPending
+              }
+            : undefined
+
+        /**
+         * Render a finished HTML page to PDF bytes for the `create_document` tool — backed by
+         * Chromium's own `webContents.printToPDF` in a hidden window (cowork-docgen-runtime.ts),
+         * the one PDF engine the app already ships. Always wired (Electron is always present in
+         * the running app), so `create_document` can emit real PDFs; only in unit tests — where
+         * this ctx field is absent — does the tool fall back to writing HTML.
+         */
+        const renderDocument = (
+          html: string,
+          kind: import('./cowork-docgen').DocKind
+        ): Promise<Uint8Array> => renderDocumentPdf(html, kind)
 
         /**
          * User-configured lifecycle hooks (#9). PreToolUse runs a shell command BEFORE
@@ -569,21 +701,63 @@ export function registerProviderIpc(): void {
             // `done` is intentionally not handled here — the loop sends it.
           }
 
-          try {
-            await provider.streamCompletion(modelId, turnHistory, onProviderChunk, iter.signal, {
-              reasoningEffort: settings.reasoningEffort,
-              // Advertise the tool schemas only on a tool-enabled native turn; the closing
-              // turn (parseTools=false) and the text protocol never send them.
-              ...(parseTools && useNativeTools ? { tools: nativeSchemas } : {})
-            })
-          } catch (err) {
-            controller.signal.removeEventListener('abort', onOuterAbort)
-            if (controller.signal.aborted) return { visible, call: null } // user cancel
-            if (pendingCall) {
-              closeThinking()
-              return { visible, call: pendingCall } // ended early for a tool
+          // Bounded retry around the generation stream. A busy free-tier endpoint
+          // answers with 429 (rate limit) or a transient 5xx *at the headers stage* —
+          // before a single token is emitted — so re-issuing the identical request after
+          // a short wait is safe and usually succeeds. We retry ONLY while this turn has
+          // emitted nothing (so a partial reply can never be duplicated), honour any
+          // Retry-After, and keep the user informed with a visible countdown. Exhausted
+          // or non-retryable → fall through to the humanized error (toErrorMessage spells
+          // out a 429 in plain language and points at Rewrite / another model).
+          for (let attempt = 0; ; attempt++) {
+            try {
+              await provider.streamCompletion(modelId, turnHistory, onProviderChunk, iter.signal, {
+                reasoningEffort: settings.reasoningEffort,
+                // Advertise the tool schemas only on a tool-enabled native turn; the closing
+                // turn (parseTools=false) and the text protocol never send them.
+                ...(parseTools && useNativeTools ? { tools: nativeSchemas } : {})
+              })
+              break // generation finished cleanly
+            } catch (err) {
+              if (controller.signal.aborted) {
+                controller.signal.removeEventListener('abort', onOuterAbort)
+                return { visible, call: null } // user cancel
+              }
+              if (pendingCall) {
+                controller.signal.removeEventListener('abort', onOuterAbort)
+                closeThinking()
+                return { visible, call: pendingCall } // ended early for a tool
+              }
+              // Only a pristine turn may be retried; a mid-stream failure keeps its
+              // partial output and surfaces the error rather than replaying tokens.
+              const pristine = visible === '' && reasoningText === '' && !contentStarted
+              const delay = pristine ? rateLimitRetryDelay(err, attempt) : null
+              if (delay === null) {
+                controller.signal.removeEventListener('abort', onOuterAbort)
+                return { visible, call: null, error: toErrorMessage(err) }
+              }
+              // Announce the wait, then sleep — waking early if the user cancels.
+              const why = httpStatusOf(err) === 429 ? 'Rate limited' : 'Endpoint busy'
+              send({ delta: '', done: false, status: `${why} — retrying in ${Math.ceil(delay / 1000)}s…` })
+              const aborted = await new Promise<boolean>((resolve) => {
+                if (controller.signal.aborted) return resolve(true)
+                const onAbort = (): void => {
+                  clearTimeout(t)
+                  resolve(true)
+                }
+                const t = setTimeout(() => {
+                  controller.signal.removeEventListener('abort', onAbort)
+                  resolve(false)
+                }, delay)
+                controller.signal.addEventListener('abort', onAbort, { once: true })
+              })
+              if (aborted) {
+                controller.signal.removeEventListener('abort', onOuterAbort)
+                return { visible, call: null } // user cancelled during the backoff
+              }
+              // Clear the countdown caption before the next attempt streams in.
+              send({ delta: '', done: false, status: '' })
             }
-            return { visible, call: null, error: toErrorMessage(err) }
           }
           controller.signal.removeEventListener('abort', onOuterAbort)
 
@@ -644,6 +818,23 @@ export function registerProviderIpc(): void {
           ...(mode === 'cowork'
             ? [{ role: 'system' as const, content: COWORK_SYSTEM_PROMPT }]
             : []),
+          // Runtime awareness (Track 1): the detected interpreters + the exact command
+          // for each, so a weaker model doesn't reach for `python3` on Windows. Sits
+          // right after the Cowork prompt that tells it to script deliverables.
+          ...(runtimeSummary
+            ? [{ role: 'system' as const, content: `RUNTIMES — ${runtimeSummary}` }]
+            : []),
+          // Browser (Track 2): the navigate → snapshot → act loop over the browser_* tools,
+          // added (in Chat AND Cowork) whenever a browser target other than `off` is armed.
+          // For system-chrome it also carries the real-logins safety caution.
+          ...(browserToolsEnabled(settings.cowork.browserTarget)
+            ? [
+                {
+                  role: 'system' as const,
+                  content: coworkBrowserPrompt(settings.cowork.browserTarget)
+                }
+              ]
+            : []),
           // Plan mode (#8): plan-first directive, right after the Cowork agent prompt so
           // it overrides the "ACT, don't narrate" bias until the user approves the plan.
           ...(planActive ? [{ role: 'system' as const, content: PLAN_MODE_SYSTEM_PROMPT }] : []),
@@ -655,6 +846,19 @@ export function registerProviderIpc(): void {
                   content:
                     'PROJECT MEMORY — you have worked in this folder before. Here is your journal of what you already did (most recent last). Do NOT repeat these steps; continue from where this leaves off:\n\n' +
                     coworkMemory
+                }
+              ]
+            : []),
+          // Attached files (Cowork): the user's uploads for THIS turn, already copied
+          // into the working folder. Tell the agent exactly where they are so it reads
+          // them directly instead of reporting it "couldn't find" the file.
+          ...(attachedFiles.length > 0
+            ? [
+                {
+                  role: 'system' as const,
+                  content:
+                    'ATTACHED FILES — the user attached these to their message and they are NOW in your working folder under uploads/. Open them directly at the paths below (e.g. read_file, or run code over them); do NOT say you cannot find them and do NOT search elsewhere:\n' +
+                    attachedFiles.map((f) => `- ${f.rel} (${f.mime}, ${f.size} bytes)`).join('\n')
                 }
               ]
             : [])
@@ -710,6 +914,30 @@ export function registerProviderIpc(): void {
         // can escalate from a hint to a hard "stop looking, build now" directive.
         let buildsMade = 0
         let exploreStreak = 0
+        // Research-stall guard (Cowork): a run of read-only research calls (web/browser/
+        // fs inspection) across DISTINCT targets — the exact loop the screenshot showed,
+        // and the one every signature-keyed guard misses because no single call repeats.
+        // Counts consecutive research calls with nothing built in between; any building
+        // action resets it. See {@link researchStallVerdict}.
+        let researchStreak = 0
+        // How many times we've told the model "you printed code but didn't save it"
+        // this reply. Capped at one nudge so a model that legitimately meant to only
+        // show code (or ignores the nudge) can't be trapped in a loop.
+        let codeProseNudges = 0
+
+        // Windowed oscillation guard (Cowork): the rolling tool-call signatures and how
+        // many times we've nudged the model to break a NON-consecutive repeat loop
+        // (A,B,A,B,A…) this reply — capped at one nudge, then the loop stops. Complements
+        // the consecutive-repeat guard below, which only catches back-to-back identical
+        // calls. See {@link detectOscillation}.
+        const recentSigs: string[] = []
+        let oscillationNudges = 0
+
+        // Auto-continue guard (Cowork): how many times we've pushed the model past a soft
+        // "should I continue?" prose-stop this reply. Capped by {@link MAX_AUTO_CONTINUE}
+        // so a genuine need-input pause isn't looped forever — after the cap the reply
+        // stands and the user can weigh in.
+        let autoContinues = 0
 
         // Verify gate state (#16): how many times the verify command has run this reply,
         // and whether it has passed (so a later natural-done doesn't re-run it needlessly).
@@ -737,6 +965,50 @@ export function registerProviderIpc(): void {
             return
           }
           if (!call) {
+            // Code-as-prose guard: in Cowork the deliverable is files on disk, but a
+            // weaker model often prints a file's contents in a fence and calls it done
+            // without ever invoking write_file — so nothing is saved. If this reply built
+            // nothing yet and ends on a substantial code block, nudge it once to actually
+            // write the file (with an explicit escape hatch if it only meant to explain),
+            // then loop with tools still live.
+            if (
+              mode === 'cowork' &&
+              workspaceDir &&
+              buildsMade === 0 &&
+              codeProseNudges === 0 &&
+              looksLikeUnsavedCode(visible)
+            ) {
+              codeProseNudges++
+              send({ delta: '', done: false, status: 'Saving the code to a file' })
+              history.push({ role: 'assistant', content: visible })
+              history.push({
+                role: 'user',
+                content: `${goalReminder}You wrote code in your reply but never saved it — it only exists in this chat, so the user cannot run or keep it. In Cowork you MUST create files with the write_file tool. Call write_file now with the correct path and the FULL contents of the file(s) you just showed. If you genuinely only meant to illustrate something and no file should be created, say so explicitly instead.`
+              })
+              continue
+            }
+            // Auto-continue past a soft "should I continue?" stop (Cowork). At extreme
+            // scale a model often PAUSES to ask whether to keep going instead of just
+            // finishing — for an autonomous builder that reads as a stall, not a real
+            // question. If the reply is a rhetorical permission-to-continue ask (not a
+            // genuine either/or, which wouldn't match), push it onward and loop with tools
+            // still live. Bounded by MAX_AUTO_CONTINUE so a model that truly needs a
+            // decision isn't trapped: after the cap the reply stands so the user can answer.
+            if (
+              mode === 'cowork' &&
+              workspaceDir &&
+              autoContinues < MAX_AUTO_CONTINUE &&
+              looksLikeContinuationRequest(visible)
+            ) {
+              autoContinues++
+              send({ delta: '', done: false, status: 'Continuing automatically' })
+              history.push({ role: 'assistant', content: visible })
+              history.push({
+                role: 'user',
+                content: `${goalReminder}Yes — continue, and don't stop to ask whether to proceed. In Cowork you work autonomously until the request is fully built and verified. If you genuinely need a decision only the user can make, call the ask_user tool instead of asking in prose. Take the next concrete action now.`
+              })
+              continue
+            }
             // #16 Programmatic verify gate. Before accepting "done" in Cowork, run the
             // user's verify command (build/test/lint). Exit 0 → the run really is done;
             // non-zero → feed the failure back as a user turn and loop so the tools stay
@@ -799,6 +1071,35 @@ export function registerProviderIpc(): void {
             break
           }
 
+          // Windowed oscillation guard: catches the NON-consecutive ping-pong the check
+          // above misses (A,B,A,B,A…), where the same call keeps returning and keeps
+          // returning the same result. Only fires when the CURRENT call is the offender
+          // (so we don't nag right as the model finally does something different). First
+          // trip → one strong nudge to break the pattern, tools still live; a second trip
+          // → stop the loop rather than burn the budget spinning.
+          recentSigs.push(callSig)
+          if (recentSigs.length > OSCILLATION_WINDOW) recentSigs.shift()
+          const osc = detectOscillation(recentSigs, {
+            window: OSCILLATION_WINDOW,
+            maxRepeatsInWindow: OSCILLATION_MAX
+          })
+          if (osc && osc.sig === callSig) {
+            if (oscillationNudges === 0) {
+              oscillationNudges++
+              recentSigs.length = 0 // clean slate so the nudge gets a fair chance
+              send({ delta: '', done: false, status: 'Breaking a repeat loop' })
+              const assistantTurn = (visible.trimEnd() ? `${visible.trimEnd()}\n` : '') + call.block
+              history.push({ role: 'assistant', content: assistantTurn })
+              history.push({
+                role: 'user',
+                content: `${goalReminder}You have issued the same "${toolName}" call ${osc.count} times and gotten the same result each time — this is a loop that is not advancing the task. Stop repeating it. Take a DIFFERENT concrete action toward the goal: write or edit a file, run the build, or give your final answer if the work is done. Do not issue that same call again.`
+              })
+              continue
+            }
+            send({ delta: toolResultBlock(toolName, `Stopped: "${toolName}" kept repeating (${osc.count}× in the last ${OSCILLATION_WINDOW} calls) without progress.`), done: false })
+            break
+          }
+
           // Permission gate: side-effecting tools in Cowork may need the user's OK,
           // unless already granted "always" for this run.
           const sideEffect = call.name ? lookupTool(call.name)?.sideEffect : undefined
@@ -828,13 +1129,20 @@ export function registerProviderIpc(): void {
             planJustApproved = true
           }
 
-          let result: string
-          if (
-            mode === 'cowork' &&
+          // Approval gate. In Cowork the permission tier decides (ask / autoApprove /
+          // bypass). In Chat there is no tier, but the browser's click/type act on real
+          // pages — and on the user's own logins under system-chrome — so those two are
+          // always confirmed before they run. Read-only browser tools have no sideEffect
+          // and never prompt; "allow always" still skips repeats within the run.
+          const needsApproval =
             !planJustApproved &&
-            requiresApproval(permissionMode, sideEffect) &&
-            !(sideEffect && grantedAlways.has(sideEffect))
-          ) {
+            !(sideEffect && grantedAlways.has(sideEffect)) &&
+            (mode === 'cowork'
+              ? requiresApproval(permissionMode, sideEffect)
+              : sideEffect === 'exec' && BROWSER_EXEC_TOOLS.has(toolName))
+
+          let result: string
+          if (needsApproval) {
             send({ delta: '', done: false, status: `Waiting for your approval` })
             const decision = await requestApproval(
               toolName,
@@ -856,7 +1164,9 @@ export function registerProviderIpc(): void {
                     delegate,
                     askUser,
                     preToolUse,
-                    postToolUse
+                    postToolUse,
+                    getBrowser,
+                    renderDocument
                   })
           } else {
             result = await runTool(call, {
@@ -869,7 +1179,9 @@ export function registerProviderIpc(): void {
                     delegate,
                     askUser,
                     preToolUse,
-                    postToolUse
+                    postToolUse,
+                    getBrowser,
+                    renderDocument
                   })
           }
           if (controller.signal.aborted) return
@@ -894,6 +1206,24 @@ export function registerProviderIpc(): void {
             ? `\n\nSTOP EXPLORING. You have inspected the folder ${exploreStreak} times and built NOTHING yet. The folder does not need more looking. Your VERY NEXT action MUST be to actually build: call update_plan with the concrete steps, then write_file to create the first real file. Do NOT call list_dir, read_file, search_code, or find_files again until files exist. Do not just say what you will do — do it now with a tool call.`
             : ''
 
+          // Research-stall guard: catches the distinct-target research loop (web/browser/
+          // file lookups across DIFFERENT targets) that every signature-keyed guard misses
+          // because no single call repeats. A building action resets the streak; plan
+          // updates and ask_user are neutral (so the model can't dodge by interleaving
+          // them); any other action resets it too. See {@link researchStallVerdict}.
+          if (sideEffect) {
+            researchStreak = 0
+          } else if (call.name && RESEARCH_TOOLS.has(call.name)) {
+            researchStreak++
+          } else if (call.name !== 'update_plan' && call.name !== 'ask_user') {
+            researchStreak = 0
+          }
+          const researchVerdict = mode === 'cowork' ? researchStallVerdict(researchStreak) : 'ok'
+          const researchDirective =
+            researchVerdict !== 'ok'
+              ? `\n\nSTOP RESEARCHING. You have run ${researchStreak} read-only research calls in a row (web searches, page opens, file lookups) without building anything. More searching will NOT complete the task. Your VERY NEXT action MUST build toward the goal: call write_file to create a real file (or edit_file / run_command). Do NOT open another page or run another search until you have produced files.`
+              : ''
+
           // Record the round-trip for the model's next turn. The assistant turn is
           // its visible prose plus the call block; the tool result comes back as a
           // user turn (providers accept only user/assistant/system roles).
@@ -901,8 +1231,12 @@ export function registerProviderIpc(): void {
           history.push({ role: 'assistant', content: assistantTurn })
           history.push({
             role: 'user',
-            content: `Tool result for ${toolName}:\n${result}\n\n${goalReminder}Keep going until the request is fully done: call another tool if you still need to, or give your final answer once it is complete. Do not repeat an identical call. An empty or sparse result (e.g. a near-empty folder) is a starting point, not a reason to stop — build what was asked for.${progressDirective}`
+            content: `Tool result for ${toolName}:\n${result}\n\n${goalReminder}Keep going until the request is fully done: call another tool if you still need to, or give your final answer once it is complete. Do not repeat an identical call. An empty or sparse result (e.g. a near-empty folder) is a starting point, not a reason to stop — build what was asked for.${progressDirective}${researchDirective}`
           })
+          // A distinct-target research loop that ignored the nudge and hit the hard cap:
+          // stop the loop rather than let it research all the way to the turn ceiling. The
+          // closing turn (below) makes the model answer with what it has.
+          if (researchVerdict === 'stop') break
         }
 
         // Budget spent: force a closing turn with tools withheld so the reply never
@@ -920,6 +1254,13 @@ export function registerProviderIpc(): void {
         // AbortError from a user cancel isn't a real failure.
         if (!controller.signal.aborted) send({ delta: '', done: true, error: toErrorMessage(err) })
       } finally {
+        // Track 2: tear down the run's browser (close the in-app window / kill the spawned
+        // Chrome) if one was ever opened. Best-effort — teardown must never mask a reply error.
+        // TS's control-flow analysis narrows `browserController` to `null` here (its only
+        // synchronous assignment is the initializer; the real one happens inside the
+        // getBrowser closure, which CFA doesn't propagate into this finally), so name the
+        // real type explicitly before the optional-chained dispose.
+        await (browserController as BrowserController | null)?.dispose().catch(() => {})
         activeStreams.delete(streamId)
       }
     }

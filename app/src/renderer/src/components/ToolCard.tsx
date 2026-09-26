@@ -129,6 +129,20 @@ const FS_TOOLS = new Set([
 ])
 
 /**
+ * Tools rendered as a single borderless, continuous-tense line ("Asking you",
+ * "Clicking", "Reading page") — no border, no chevron, no "Running…" pill. The verb
+ * just blinks while the step is live and settles to a steady muted line when done.
+ */
+const ACTIVITY_TOOLS = new Set([
+  'ask_user',
+  'browser_navigate',
+  'browser_snapshot',
+  'browser_read',
+  'browser_click',
+  'browser_type'
+])
+
+/**
  * Lines added / removed for a file-authoring call, computed from the call input
  * (never the content itself). write_file counts the whole body as additions;
  * edit_file counts the new vs old snippet. Null for anything that isn't a diff.
@@ -157,7 +171,18 @@ function formatInput(input: unknown): string {
   }
 }
 
-export function ToolCard({ tool, cowork = false }: { tool: ToolSegment; cowork?: boolean }): ReactNode {
+export function ToolCard({
+  tool,
+  cowork = false,
+  pending = false
+}: {
+  tool: ToolSegment
+  cowork?: boolean
+  /** Whether the reply this card belongs to is still streaming. A tool with no
+   *  result only reads as "running" while this is true; once the turn ends, an
+   *  unresolved call settles to a static "Stopped" instead of a stuck spinner. */
+  pending?: boolean
+}): ReactNode {
   const [expanded, setExpanded] = useState(false)
   const sessionId = useChatStore((s) => s.sessionId)
   // The pre-overwrite bytes for a write_file diff base (#5), fetched lazily on
@@ -192,7 +217,30 @@ export function ToolCard({ tool, cowork = false }: { tool: ToolSegment; cowork?:
   // duplicate it. Render nothing.
   if (tool.name === 'update_plan') return null
 
-  const phase = running ? (tool.complete ? 'Running…' : 'Preparing…') : tool.complete ? null : 'Running…'
+  // A tool with no result is "running" only while the turn is still live. Once the
+  // turn ends (finished or stopped), an unresolved call was cut off mid-flight — so
+  // show a quiet, static "Stopped" rather than a spinner that never settles. This is
+  // the fix for the "Running…" badge that used to stick forever after Stop / reload.
+  const phaseLive = running && pending
+  const phase = !running ? null : phaseLive ? (tool.complete ? 'Running…' : 'Preparing…') : 'Stopped'
+  const phaseClass = (phaseLive ? 'myto-thinking ' : 'text-muted ') + 'shrink-0 text-[10px] font-medium'
+
+  // ask_user + the browser tools: one borderless, continuous-tense line that blinks
+  // until the step completes, then settles. No border, no chevron, no "Running…".
+  if (ACTIVITY_TOOLS.has(tool.name ?? '')) {
+    return (
+      <div className="myto-step-in my-1.5">
+        <div className="flex items-center gap-2 text-[12px]">
+          <span className="shrink-0 text-muted">
+            <ToolGlyph name={tool.name} />
+          </span>
+          <span className={phaseLive ? 'myto-thinking font-medium' : 'font-medium text-muted'}>
+            {toolHeadline(tool)}
+          </span>
+        </div>
+      </div>
+    )
+  }
 
   // Cowork filesystem tools render as a quiet, borderless one-liner — no expand,
   // no content dump. Code writes just show +added / -removed on the right; the
@@ -239,7 +287,7 @@ export function ToolCard({ tool, cowork = false }: { tool: ToolSegment; cowork?:
               className="flex min-w-0 flex-1 items-center gap-2 text-left"
             >
               <span className="truncate font-medium text-text hover:underline">{label}</span>
-              {phase && <span className="myto-thinking shrink-0 text-[10px] font-medium">{phase}</span>}
+              {phase && <span className={phaseClass}>{phase}</span>}
               <span className="flex-1" />
               {counts && (
                 <span className="shrink-0 font-mono text-[11px]">
@@ -261,7 +309,7 @@ export function ToolCard({ tool, cowork = false }: { tool: ToolSegment; cowork?:
           ) : (
             <>
               <span className="truncate font-medium text-text">{label}</span>
-              {phase && <span className="myto-thinking shrink-0 text-[10px] font-medium">{phase}</span>}
+              {phase && <span className={phaseClass}>{phase}</span>}
               <span className="flex-1" />
               {counts && (
                 <span className="shrink-0 font-mono text-[11px]">
@@ -304,9 +352,10 @@ export function ToolCard({ tool, cowork = false }: { tool: ToolSegment; cowork?:
           <ToolGlyph name={tool.name} />
         </span>
         <span className="truncate text-[12px] font-medium text-text">{toolHeadline(tool)}</span>
-        {/* Only a live phase ("Running…") shows; once the result is in, the badge
-            disappears instantly — no lingering "done" marker. */}
-        {phase && <span className="myto-thinking shrink-0 text-[10px] font-medium">{phase}</span>}
+        {/* A live phase ("Running…") shows while the turn streams; once the result
+            is in the badge disappears, and a call left unresolved after the turn
+            ends settles to a static "Stopped" — never a lingering spinner. */}
+        {phase && <span className={phaseClass}>{phase}</span>}
         <span className="flex-1" />
         <svg
           width="13"

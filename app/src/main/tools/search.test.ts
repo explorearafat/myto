@@ -15,6 +15,8 @@ beforeAll(async () => {
   await writeFile(join(dir, 'src', 'app.ts'), 'export function handleLogin() {\n  return true\n}\n')
   await writeFile(join(dir, 'src', 'util.ts'), 'export const noop = () => {}\n')
   await writeFile(join(dir, 'README.md'), '# handleLogin lives in src/app.ts\n')
+  // A file directly at the ROOT (depth 0), for the `**/` globstar regression below.
+  await writeFile(join(dir, 'root.ts'), 'export const root = 1\n')
   // Something that must be skipped: a match inside node_modules.
   await writeFile(join(dir, 'node_modules', 'pkg', 'index.js'), 'function handleLogin(){}\n')
 })
@@ -44,6 +46,16 @@ describe('globToRegExp', () => {
   it('treats a plain string as a contains-match', () => {
     expect(globToRegExp('SignUp').test('SignUp.jsx')).toBe(true)
     expect(globToRegExp('login').test('handleLogin')).toBe(true) // case-insensitive
+  })
+  it('lets a `**/` prefix match any depth INCLUDING the root', () => {
+    // The bug: `**/*.ts` used to require a directory separator, so it missed files
+    // sitting directly in the working folder.
+    expect(globToRegExp('**/*.ts').test('b.ts')).toBe(true) // root (depth 0)
+    expect(globToRegExp('**/*.ts').test('src/b.ts')).toBe(true) // nested
+    expect(globToRegExp('**/*.ts').test('a/b/c.ts')).toBe(true) // deeper
+    expect(globToRegExp('**/*.ts').test('b.tsx')).toBe(false)
+    expect(globToRegExp('src/**/*.ts').test('src/b.ts')).toBe(true)
+    expect(globToRegExp('src/**/*.ts').test('lib/b.ts')).toBe(false)
   })
 })
 
@@ -87,6 +99,11 @@ describe('findFilesTool', () => {
   it('matches a bare substring against the path', async () => {
     const out = await findFilesTool.run({ pattern: 'app' }, ctx())
     expect(out).toMatch(/src\/app\.ts/)
+  })
+  it('finds root-level files with a `**/` glob', async () => {
+    const out = await findFilesTool.run({ pattern: '**/*.ts' }, ctx())
+    expect(out).toMatch(/(^|\n)root\.ts/) // depth-0 file is no longer missed
+    expect(out).toMatch(/src\/app\.ts/) // and nested files still match
   })
   it('needs a pattern', async () => {
     expect(await findFilesTool.run({}, ctx())).toMatch(/needs a "pattern"/i)

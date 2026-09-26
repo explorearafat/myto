@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { resolveInterpreter, formatRunResult, executeCode, runCodeTool } from './runCode'
+import { resolveInterpreter, resolveBash, resolveShell, formatRunResult, executeCode, runCodeTool } from './runCode'
 import { DEFAULT_PROVIDER_SETTINGS } from '../../shared/defaults'
 import type { ProviderSettings } from '../../shared/types'
 
@@ -25,6 +25,37 @@ describe('resolveInterpreter', () => {
   it('returns null for unsupported languages', () => {
     expect(resolveInterpreter('ruby')).toBeNull()
   })
+  it('routes bash/sh through the real shell resolver', () => {
+    // bash/sh no longer come from the static map — they resolve to resolveBash(),
+    // which on Windows is the discovered Git Bash rather than a bare (unfound) "bash".
+    expect(resolveInterpreter('sh')?.cmd).toBe(resolveBash().cmd)
+    expect(resolveInterpreter('bash')?.cmd).toBe(resolveBash().cmd)
+  })
+})
+
+describe('resolveBash / resolveShell', () => {
+  it('resolveBash always runs a bash with -c', () => {
+    expect(resolveBash().flag).toBe('-c')
+    expect(resolveBash().cmd).toMatch(/bash/i)
+  })
+  it('resolveShell picks a usable full shell for the platform', () => {
+    const s = resolveShell()
+    expect(s.cmd).toBeTruthy()
+    if (process.platform === 'win32') {
+      // Git Bash (-c) when installed, else cmd.exe (/c) — either is a real shell.
+      expect(s.flag === '-c' || s.flag === '/c').toBe(true)
+    } else {
+      expect(s.flag).toBe('-c')
+      expect(s.cmd).toMatch(/bash/i)
+    }
+  })
+  it('runs a bash snippet through the resolved shell when bash is available', async () => {
+    const r = await executeCode(resolveBash(), 'echo hi from bash', new AbortController().signal)
+    // No bash on this machine (e.g. Git for Windows not installed) — nothing to assert.
+    if (r.spawnError) return
+    expect(r.stdout).toContain('hi from bash')
+    expect(r.exitCode).toBe(0)
+  }, 20_000)
 })
 
 describe('formatRunResult', () => {

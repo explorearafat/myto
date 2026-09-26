@@ -106,7 +106,8 @@ const api: MytoApi = {
   },
   cowork: {
     pickWorkspace: () => ipcRenderer.invoke(IpcChannel.CoworkPickWorkspace),
-    listFiles: (query: string) => ipcRenderer.invoke(IpcChannel.CoworkListFiles, query)
+    listFiles: (query: string) => ipcRenderer.invoke(IpcChannel.CoworkListFiles, query),
+    openBrowserSetup: () => ipcRenderer.invoke(IpcChannel.BrowserOpenSetup)
   },
   preview: {
     openExternal: (url) => ipcRenderer.send(IpcChannel.PreviewOpenExternal, url)

@@ -145,10 +145,6 @@ export function ConversationRail() {
   // A saved conversation's mode is fixed (Task 6): once it has a row, the toggle
   // locks so Chat and Cowork turns never mix in one thread.
   const chatSessionId = useChatStore((s) => s.sessionId)
-  // Cowork needs a working folder; picking one arms its filesystem tools. Mirrors
-  // the composer's `enableCowork` so switching from the rail behaves identically.
-  const workspaceDir = useAppStore((s) => s.settings.cowork.workspaceDir)
-  const pickCoworkWorkspace = useAppStore((s) => s.pickCoworkWorkspace)
 
   // The signed-in Google account, for the footer. Held by AuthGate; surfaced here
   // through a small subscription hook so the rail never imports Firebase directly.
@@ -185,9 +181,11 @@ export function ConversationRail() {
   // The mode toggle above "New". A saved chat's mode is fixed, so it locks once
   // the open conversation has a row; a fresh draft (no id yet) stays switchable.
   const modeLocked = chatSessionId !== null
+  // Enabling Cowork no longer forces the native folder picker — Myto asks for a
+  // folder name at run start and creates it on the Desktop itself (see provider-ipc).
+  // The composer's folder chip stays as an optional override for an existing project.
   const enableCowork = (): void => {
     setCoworkMode(true)
-    if (!workspaceDir.trim()) void pickCoworkWorkspace()
   }
 
   // Backend search results for a non-blank query. `null` means "not searching" —
@@ -681,15 +679,18 @@ export function ConversationRail() {
         </button>
 
         <div className="flex shrink-0 items-center">
-          <span
-            aria-hidden="true"
-            title="Downloads (not available in this build)"
-            className="grid h-6 w-6 place-items-center rounded-md text-muted/60"
+          <button
+            type="button"
+            aria-label="Settings"
+            title="Settings"
+            onClick={() => openSettings('tools')}
+            className="grid h-6 w-6 place-items-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-text"
           >
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
-              <path d="M8 2.5v7M5 6.5L8 9.5l3-3M3 12.5h10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <circle cx="8" cy="8" r="2.1" stroke="currentColor" strokeWidth="1.3" />
+              <path d="M8 1.6v1.8M8 12.6v1.8M14.4 8h-1.8M3.4 8H1.6M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3M12.5 12.5l-1.3-1.3M4.8 4.8 3.5 3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
             </svg>
-          </span>
+          </button>
           <button
             type="button"
             aria-label="Search chats"

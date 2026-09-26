@@ -10,7 +10,14 @@ import { updatePlanTool } from './plan'
 import { searchTools } from './search'
 import { runCommandTool } from './command'
 import { runDevServerTool } from './devServer'
+import { detectRuntimesTool } from './runtimes'
+import { verifyFileTool } from './verify'
+import { scaffoldDeployTool } from './scaffold'
+import { createDocumentTool } from './document'
+import { browserTools } from './browser'
+import type { BrowserSession } from '../cowork-browser-cdp'
 import { gitTools } from './git'
+import { gitPublishTool } from './publish'
 import { spawnAgentTool, spawnAgentsTool } from './agent'
 import { askUserTool } from './ask'
 import { installConnectorTool, installSkillTool } from './install'
@@ -102,6 +109,22 @@ export interface ToolContext extends ToolGate {
    * and when the user configured no post-hook.
    */
   postToolUse?: (call: ToolCall, result: string) => Promise<void>
+  /**
+   * Obtain this run's browser session (Track 2), lazily created and memoized so the
+   * first `browser_*` call spins up the chosen target (in-app WebContentsView or the
+   * user's system Chrome) and later calls reuse it; provider-ipc disposes it when the
+   * run ends. Optional — absent outside the streaming loop (e.g. unit tests), where the
+   * browser tools degrade to a "not available" note.
+   */
+  getBrowser?: () => Promise<BrowserSession>
+  /**
+   * Render a finished HTML page to a PDF byte buffer (the `create_document` tool's PDF
+   * path). Backed by Chromium's own `webContents.printToPDF` in an offscreen window
+   * (cowork-docgen-runtime.ts) — the one PDF engine the app already ships, so no external
+   * library or headless-chrome download. Optional — absent outside the streaming loop and
+   * in unit tests, where `create_document` falls back to writing the HTML and says so.
+   */
+  renderDocument?: (html: string, kind: import('../cowork-docgen').DocKind) => Promise<Uint8Array>
 }
 
 /** One tool the model can call through the text protocol. */
@@ -139,10 +162,16 @@ const ALL_TOOLS: readonly ToolDef[] = [
   runCodeTool,
   runCommandTool,
   runDevServerTool,
+  detectRuntimesTool,
   ...fsTools,
+  verifyFileTool,
+  scaffoldDeployTool,
+  createDocumentTool,
+  ...browserTools,
   editNotebookTool,
   ...searchTools,
   ...gitTools,
+  gitPublishTool,
   previewTool,
   updatePlanTool,
   spawnAgentTool,

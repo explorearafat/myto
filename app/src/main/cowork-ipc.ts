@@ -3,6 +3,7 @@ import { IpcChannel } from '../shared/ipc'
 import { getSettings } from './settings'
 import { listWorkspaceFiles } from './tools/search'
 import { resolveInWorkspace } from './tools/fs'
+import { openBrowserSetup } from './cowork-browser-setup'
 
 /*
  * Cowork working-folder picker.
@@ -62,4 +63,8 @@ async function listFiles(query: unknown): Promise<string[]> {
 export function registerCoworkIpc(): void {
   ipcMain.handle(IpcChannel.CoworkPickWorkspace, (event) => pickWorkspace(event))
   ipcMain.handle(IpcChannel.CoworkListFiles, (_event, query: unknown) => listFiles(query))
+  // Open the human-driven "Setup Myto Browser" window (manual logins on the shared profile).
+  ipcMain.handle(IpcChannel.BrowserOpenSetup, () => {
+    openBrowserSetup()
+  })
 }

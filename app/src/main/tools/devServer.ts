@@ -14,9 +14,10 @@ import type { ToolContext, ToolDef } from './registry'
  * under a kill-timeout and hand the output back. A dev server never "completes" — it
  * stays up serving — so under those tools it would be killed by the timeout or hang
  * the agent loop. This tool instead:
- *   - spawns through the platform's NATIVE shell (resolveShell: cmd.exe on Windows,
- *     bash on Unix) so `npm run dev` resolves as in a real terminal — the old
- *     resolveInterpreter('bash') path failed to even spawn on a typical Windows box;
+ *   - spawns through the full shell (resolveShell: Git Bash where installed on
+ *     Windows, else cmd.exe; bash on Unix) so `npm run dev` resolves as in a real
+ *     terminal — the old resolveInterpreter('bash') path failed to even spawn on a
+ *     typical Windows box;
  *   - never sets a kill-timer and is NOT killed when the turn ends, so the server
  *     (and its preview) stays live while Myto keeps working;
  *   - streams stdout/stderr to the Terminal pane under a STABLE id (one row per

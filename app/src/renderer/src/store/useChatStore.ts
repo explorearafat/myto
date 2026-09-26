@@ -56,6 +56,10 @@ export interface ThinkingPhase {
   at: number
   text: string
   done: boolean
+  /** Wall-clock ms (`Date.now()`) when this phase began — lets the live block show a
+   *  time-based label ("Thinking" → "Thinking some more" → "Almost done thinking")
+   *  that survives re-mounts. Transient; never persisted. */
+  startedAt: number
 }
 
 /** A chat message as rendered in the UI (adds id + streaming/error metadata). */
@@ -583,7 +587,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       const phases = run.thinking ?? (run.thinking = [])
       const last = phases[phases.length - 1]
       if (last && !last.done) last.text = text
-      else phases.push({ at: run.content.length + run.buffer.length, text, done: false })
+      else phases.push({ at: run.content.length + run.buffer.length, text, done: false, startedAt: Date.now() })
       if (isVisible()) {
         const snapshot = phases.map((p) => ({ ...p }))
         set((state) => ({
@@ -1104,6 +1108,15 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     setCoworkMode: (on) => {
       set({ coworkMode: on })
+      // Chat mode hides the top-bar DNA/Terminal/Preview icons (they're Cowork
+      // affordances), so anything they drove that's still open would be stranded with
+      // no visible toggle. Tidy on the way into chat: drop the composer back to plain
+      // text and close both side panes.
+      if (!on) {
+        set({ composerMode: 'text' })
+        usePreviewStore.getState().close()
+        useTerminalStore.getState().close()
+      }
       // An explicit toggle is the "last-used mode": remember it so the next new
       // chat opens here (Task 7). Fire-and-forget — the persist is best-effort and
       // the in-memory coworkMode above already drives the current draft.

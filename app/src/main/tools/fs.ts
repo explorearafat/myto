@@ -161,7 +161,18 @@ export const editFileTool: ToolDef = {
     }
     if (oldText === '') return 'edit_file: "old" cannot be empty — give the exact text to replace.'
     try {
-      const before = await readFile(r.abs, 'utf8')
+      let before: string
+      try {
+        before = await readFile(r.abs, 'utf8')
+      } catch (readErr) {
+        // The single most common misfire: the model tries to edit a file it hasn't
+        // created yet. A raw "ENOENT" sends it in circles; point it straight at the
+        // tool that CAN create the file instead of failing opaquely.
+        if ((readErr as { code?: string })?.code === 'ENOENT') {
+          return `edit_file: ${r.rel} does not exist yet — use write_file to create it (edit_file only replaces text already in a file).`
+        }
+        throw readErr
+      }
       const count = before.split(oldText).length - 1
       if (count === 0) return `edit_file: the "old" text was not found in ${r.rel}. Read the file first to copy it exactly.`
       if (count > 1 && !all) {

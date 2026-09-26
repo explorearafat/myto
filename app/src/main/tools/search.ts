@@ -200,13 +200,26 @@ export const findFilesTool: ToolDef = {
 }
 
 /**
- * Compile a simple glob (`*` = any run within a segment, `?` = one char) to a
- * case-insensitive anchored RegExp. Plain substrings (no wildcard) become a
- * contains-match so `{"pattern": "SignUp"}` still finds `SignUp.jsx`.
+ * Compile a simple glob (`*` = any run, `?` = one char, and a `**` globstar segment
+ * = any depth of directories INCLUDING none) to a case-insensitive anchored RegExp.
+ * Plain substrings (no wildcard) become a contains-match so `{"pattern": "SignUp"}`
+ * still finds `SignUp.jsx`.
+ *
+ * The globstar handling is the fix for "find_files misses files at the root": the
+ * idiomatic `**` + `/` prefix must also match a `.ts` file sitting directly in the
+ * working folder, so a leading/intermediate globstar segment compiles to an OPTIONAL
+ * any-depth prefix (zero or more `dir/` segments) rather than one that requires a
+ * literal separator.
  */
 export function globToRegExp(glob: string): RegExp {
   const hasWildcard = /[*?]/.test(glob)
-  const escaped = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
+  // Escape regex-significant chars, leaving *, ? and / for glob translation below.
+  const escaped = glob
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    // Translate glob metacharacters in one ordered pass, longest pattern first,
+    // so a globstar+slash wins over a bare globstar wins over a single star. A
+    // `**/` swallows whole directory runs; `**`/`*` become "any run"; `?` one char.
+    .replace(/\*\*\/|\*\*|\*|\?/g, (m) => (m === '**/' ? '(?:.*/)?' : m === '?' ? '.' : '.*'))
   return hasWildcard ? new RegExp(`^${escaped}$`, 'i') : new RegExp(escaped, 'i')
 }
 

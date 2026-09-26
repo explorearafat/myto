@@ -320,6 +320,21 @@ export function toolHeadline(tool: ToolSegment): string {
       return 'Fetch page'
     case 'wiki_search':
       return 'Wikipedia'
+    // Continuous-tense verbs for the borderless activity line (ToolCard ACTIVITY_TOOLS):
+    // they blink while live, no "Running…" pill beside them.
+    case 'ask_user':
+      return 'Asking you'
+    case 'browser_navigate': {
+      const url = typeof input.url === 'string' ? input.url : ''
+      return url ? `Opening ${url.length > 40 ? `${url.slice(0, 40)}…` : url}` : 'Opening page'
+    }
+    case 'browser_snapshot':
+    case 'browser_read':
+      return 'Reading page'
+    case 'browser_click':
+      return 'Clicking'
+    case 'browser_type':
+      return 'Typing'
     default:
       return tool.name ?? 'Tool'
   }

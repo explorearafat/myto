@@ -796,11 +796,34 @@ function PlanPanel({ todos }: { todos: TodoItem[] }) {
  * blinking, "Thought for N tokens" once sealed); tap to reveal the raw chain-of-thought.
  * A reply can show several of these — a Cowork run reasons afresh before each tool step.
  */
+/**
+ * The live thinking label walks through phrases as the model keeps reasoning, so a
+ * long think reads as progress rather than a frozen "Thinking": "Thinking" for the
+ * first few seconds, then "Thinking some more", then "Almost done thinking". There is
+ * no cap — Myto may reason as long as it needs to clear up any confusion.
+ */
+function thinkingWord(ms: number): string {
+  if (ms >= 18_000) return 'Almost done thinking'
+  if (ms >= 7_000) return 'Thinking some more'
+  return 'Thinking'
+}
+
 function ThinkingBlock({ phase, live }: { phase: ThinkingPhase; live: boolean }) {
   const [expanded, setExpanded] = useState(false)
+  const mountRef = useRef<number>(Date.now())
+  const [, forceTick] = useState(0)
+  // While reasoning is live, re-render every second so both the elapsed-based phrase
+  // ("Thinking" → "Thinking some more" → "Almost done thinking") and the token count
+  // advance smoothly even during a pause in the reasoning stream.
+  useEffect(() => {
+    if (!live) return
+    const id = setInterval(() => forceTick((n) => n + 1), 1000)
+    return () => clearInterval(id)
+  }, [live])
   const tokens = estimateTokens(phase.text)
+  const startedAt = phase.startedAt ?? mountRef.current
   const label = live
-    ? `Thinking · ${tokens.toLocaleString()} tokens`
+    ? `${thinkingWord(Date.now() - startedAt)} · ${tokens.toLocaleString()} tokens`
     : `Thought for ${tokens.toLocaleString()} tokens`
   return (
     <div className="myto-step-in my-2">
@@ -849,12 +872,16 @@ function ThinkingBlock({ phase, live }: { phase: ThinkingPhase; live: boolean })
   )
 }
 
-/** Format ms as m:ss (or s.s under a minute), Claude-desktop style. */
+/** Format ms as `Ns`, `Nm Ns`, or `Nh Nm Ns` (no leading zeros), Claude-desktop style. */
 function fmtElapsed(ms: number): string {
   const totalSec = Math.max(0, Math.floor(ms / 1000))
-  const m = Math.floor(totalSec / 60)
   const s = totalSec % 60
-  return `${m}:${s.toString().padStart(2, '0')}`
+  const totalMin = Math.floor(totalSec / 60)
+  const m = totalMin % 60
+  const h = Math.floor(totalMin / 60)
+  if (h > 0) return `${h}h ${m}m ${s}s`
+  if (m > 0) return `${m}m ${s}s`
+  return `${s}s`
 }
 
 /** A rough token estimate from character count (~4 chars/token) — no usage wire needed. */
@@ -863,10 +890,11 @@ function estimateTokens(text: string): number {
 }
 
 /**
- * The Claude-desktop-style meta line under a reply: elapsed time and token count.
- * While the reply streams it updates live (a 1s tick + the growing content); once
- * the turn ends it freezes at the final values. Self-contained — it times from its
- * own mount (which coincides with the reply appearing), so no store plumbing.
+ * The Claude-desktop-style meta line under a reply. While the reply streams it shows
+ * the Myto mark drawing itself (a working heartbeat) ahead of a live elapsed clock and
+ * token count; once the turn ends (finished or stopped) that readout gives way to a
+ * single quiet Myto mark. Self-contained — it times from its own mount (which coincides
+ * with the reply appearing), so no store plumbing.
  *
  * While streaming it also owns the liveness readout: the elapsed clock alone keeps
  * climbing even after the model goes silent, which reads as "still working" when the
@@ -888,27 +916,37 @@ function MessageMeta({
 }) {
   const startRef = useRef<number>(Date.now())
   const [, forceTick] = useState(0)
-  const frozenRef = useRef<number | null>(null)
 
+  // Tick every second only while the turn is live; once it ends there is nothing
+  // changing (the readout gives way to a static mark), so we stop re-rendering.
   useEffect(() => {
-    if (!pending) {
-      // Freeze elapsed at the moment streaming ended.
-      if (frozenRef.current === null) frozenRef.current = Date.now() - startRef.current
-      return
-    }
+    if (!pending) return
     const id = setInterval(() => forceTick((n) => n + 1), 1000)
     return () => clearInterval(id)
   }, [pending])
 
-  const elapsed = frozenRef.current ?? Date.now() - startRef.current
+  // Once the turn ends (finished OR stopped) the elapsed clock and token count give
+  // way to a single quiet Myto mark — the reply's signature.
+  if (!pending) {
+    return (
+      <div className="mt-1 flex items-center text-muted/50">
+        <MytoMark size={13} title="Myto" />
+      </div>
+    )
+  }
+
+  const elapsed = Date.now() - startRef.current
   const tokens = estimateTokens(content)
   // Idle since the last real output. The 1s tick above re-runs this each second, and
   // a fresh chunk lands a new `activityAt` via the store, so the note clears the
-  // instant output resumes. Only meaningful while pending and once we've seen output.
-  const note = pending && activityAt ? livenessNote(Date.now() - activityAt) : null
-  const alarming = pending && activityAt ? Date.now() - activityAt >= STALL_ALARM_MS : false
+  // instant output resumes.
+  const note = activityAt ? livenessNote(Date.now() - activityAt) : null
+  const alarming = activityAt ? Date.now() - activityAt >= STALL_ALARM_MS : false
+  // While working, the Myto mark redraws itself ~2×/second (a heartbeat) AHEAD of the
+  // live elapsed time and token count.
   return (
     <div className="mt-1 flex items-center gap-2 text-[11px] tabular-nums text-muted/70">
+      <MytoMark size={13} draw title="Myto" className="shrink-0" />
       <span>{fmtElapsed(elapsed)}</span>
       <span aria-hidden="true">·</span>
       <span>{tokens.toLocaleString()} tokens</span>
@@ -1021,7 +1059,7 @@ function AssistantMessage({
             return <FileCard key={`f${i}`} file={item.file} cowork={coworkTurn} prevLines={prev} />
           }
           if (item.kind === 'tool') {
-            return <ToolCard key={`t${i}`} tool={item.tool} cowork={coworkTurn} />
+            return <ToolCard key={`t${i}`} tool={item.tool} cowork={coworkTurn} pending={!!message.pending} />
           }
           if (item.kind === 'think') {
             return (
@@ -1080,6 +1118,10 @@ function MainTopBar() {
   // the top bar (Task 3) while the builder it controls renders down in the composer.
   const composerMode = useChatStore((s) => s.composerMode)
   const setComposerMode = useChatStore((s) => s.setComposerMode)
+  // These three icons (Prompt DNA / Terminal / Preview) are Cowork affordances, so
+  // they only show in Cowork mode. Chat mode is a plain conversation — no builder, no
+  // command pane, no in-app browser — so the whole group is hidden there.
+  const coworkMode = useChatStore((s) => s.coworkMode)
   // The two right-hand side panes. Opening one closes the other so the toggles stay
   // honest (AppLayout renders a single slot with terminal precedence).
   const previewOpen = usePreviewStore((s) => s.open)
@@ -1127,48 +1169,51 @@ function MainTopBar() {
         )}
       </div>
 
-      <div className="ml-auto flex items-center gap-1">
-        <button
-          type="button"
-          aria-label={dnaLabel}
-          aria-pressed={dnaActive}
-          title={dnaLabel}
-          onClick={() => setComposerMode(dnaActive ? 'text' : 'builder')}
-          className={topIcon(dnaActive)}
-        >
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M5 2c0 3 6 3 6 6s-6 3-6 6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-            <path d="M11 2c0 3-6 3-6 6s6 3 6 6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-            <path d="M5.6 4.5h4.8M4.7 8h6.6M5.6 11.5h4.8" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          aria-label={terminalOpen ? 'Hide terminal' : 'Show terminal'}
-          aria-pressed={terminalOpen}
-          title="Terminal — Cowork command output"
-          onClick={toggleTerminal}
-          className={topIcon(terminalOpen)}
-        >
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
-            <path d="M4.5 6.5 6.5 8l-2 1.5M8 9.5h3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          aria-label={previewOpen ? 'Hide preview' : 'Show preview'}
-          aria-pressed={previewOpen}
-          title="Preview — Myto's in-app browser"
-          onClick={togglePreview}
-          className={topIcon(previewOpen)}
-        >
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
-            <path d="M2 5.7h12" stroke="currentColor" strokeWidth="1.3" />
-          </svg>
-        </button>
-      </div>
+      {coworkMode && (
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            type="button"
+            aria-label={dnaLabel}
+            aria-pressed={dnaActive}
+            title={dnaLabel}
+            onClick={() => setComposerMode(dnaActive ? 'text' : 'builder')}
+            className={topIcon(dnaActive)}
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M5 2c0 3 6 3 6 6s-6 3-6 6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+              <path d="M11 2c0 3-6 3-6 6s6 3 6 6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+              <path d="M5.6 4.5h4.8M4.7 8h6.6M5.6 11.5h4.8" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            aria-label={terminalOpen ? 'Hide terminal' : 'Show terminal'}
+            aria-pressed={terminalOpen}
+            title="Terminal — Cowork command output"
+            onClick={toggleTerminal}
+            className={topIcon(terminalOpen)}
+          >
+            {/* Bare `>_` prompt glyph — no window box, a touch larger than its neighbours. */}
+            <svg width="18" height="18" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M3 4 7 8l-4 4M8.5 12h4.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            aria-label={previewOpen ? 'Hide preview' : 'Show preview'}
+            aria-pressed={previewOpen}
+            title="Preview — Myto's in-app browser"
+            onClick={togglePreview}
+            className={topIcon(previewOpen)}
+          >
+            {/* Media-player style play button — a filled triangle in a ring. */}
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.3" />
+              <path d="M6.6 5.4 11 8l-4.4 2.6V5.4Z" fill="currentColor" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -1283,18 +1328,19 @@ function CoworkPermissionMenu() {
     return () => document.removeEventListener('mousedown', onDown)
   }, [open])
 
-  const danger = mode === 'bypass'
   return (
     <div ref={ref} className="relative">
       {/* Minimal trigger — plain text, no background / border / container — so it
-          sits quietly in the composer's bottom-left control row. */}
+          sits quietly just under the composer. Kept a calm neutral colour for every
+          tier (including bypass): the permission tier is a normal setting, not an
+          alarm, so it never turns red. */}
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         title="Cowork permissions & plan mode"
         className={
           'flex items-center gap-1 rounded-md px-1 py-1 text-[11px] font-medium transition-colors ' +
-          (danger ? 'text-red-500 hover:text-red-400' : 'text-muted hover:text-text')
+          'text-muted hover:text-text'
         }
       >
         <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -1352,12 +1398,7 @@ function CoworkPermissionMenu() {
                 (m.value === mode ? 'bg-surface-2' : '')
               }
             >
-              <span
-                className={
-                  'text-[12.5px] font-medium ' +
-                  (m.value === 'bypass' ? 'text-red-400' : 'text-text')
-                }
-              >
+              <span className="text-[12.5px] font-medium text-text">
                 {m.label}
                 {m.value === mode ? ' ✓' : ''}
               </span>
@@ -2115,7 +2156,7 @@ export function ChatPanel() {
           <button
             type="button"
             onClick={() => void pickCoworkWorkspace()}
-            title={workspaceDir || 'Choose a working folder for Cowork'}
+            title={workspaceDir || "Optional — otherwise Myto asks for a name and creates a folder on your Desktop"}
             className="flex items-center gap-1.5 rounded-[6px] bg-black px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:bg-neutral-800"
           >
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -2126,7 +2167,7 @@ export function ChatPanel() {
                 strokeLinejoin="round"
               />
             </svg>
-            <span className="max-w-[200px] truncate">{folderLabel || 'Choose folder'}</span>
+            <span className="max-w-[200px] truncate">{folderLabel || 'Set folder (optional)'}</span>
           </button>
         </div>
       )}
@@ -2215,7 +2256,7 @@ export function ChatPanel() {
               dragging
                 ? 'Drop files to attach…'
                 : coworkMode
-                  ? 'Give Cowork a goal to work on in your folder…'
+                  ? 'Give Cowork a goal — it sets up a folder for you…'
                   : placeholder
             }
             className="block max-h-40 min-h-6 w-full resize-none bg-transparent px-1 py-0.5 text-[14px] leading-6 text-text placeholder:text-muted focus:outline-none"
@@ -2253,10 +2294,6 @@ export function ChatPanel() {
                 <circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.2" />
               </svg>
             </button>
-
-            {/* Cowork permission tier + plan-mode toggle — a quiet, chrome-less
-                control at the bottom-left of the composer (Cowork only). */}
-            {coworkMode && <CoworkPermissionMenu />}
           </div>
 
           <div className="flex items-center gap-1.5">
@@ -2340,6 +2377,14 @@ export function ChatPanel() {
           </div>
         </div>
       </div>
+
+      {/* Cowork permission tier + plan-mode toggle — a quiet, chrome-less control
+          sitting just below the composer's border on the left (Cowork only). */}
+      {coworkMode && (
+        <div className="mt-1.5 flex items-center pl-1">
+          <CoworkPermissionMenu />
+        </div>
+      )}
 
       {!hasModel && (
         <p className="mt-2 text-center text-[12px] text-muted">

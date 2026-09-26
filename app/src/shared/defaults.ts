@@ -54,7 +54,11 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
     // Interactive terminal (#2) locked by default — the real PTY shell runs commands
     // with no per-call approval, so the Shell tab shows a consent panel until the
     // user opts in once here.
-    terminalConsent: false
+    terminalConsent: false,
+    // Browser control (Track 2) off by default — opt-in like code execution. The user
+    // picks `in-app` (Myto's sandboxed browser) or `system-chrome` (their real Chrome,
+    // real logins) in Settings › Cowork; until then the browser tools stay hidden.
+    browserTarget: 'off'
   },
   // No connectors until the user adds one (Settings › Connectors). Each is an MCP
   // server whose tools Myto can call once connected.

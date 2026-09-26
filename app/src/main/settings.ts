@@ -13,6 +13,7 @@ import {
 import { dirname, join } from 'node:path'
 import * as electron from 'electron'
 import { DEFAULT_PROVIDER_SETTINGS } from '../shared/defaults'
+import { resolveBrowserTarget } from './cowork-browser'
 import type {
   AuthSchema,
   ChatMode,
@@ -289,7 +290,9 @@ export function normalise(raw: unknown): ProviderSettings {
       terminalConsent:
         typeof cowork.terminalConsent === 'boolean'
           ? cowork.terminalConsent
-          : d.cowork.terminalConsent
+          : d.cowork.terminalConsent,
+      // Track 2: coalesce any stale/absent value to a valid target ('off' when unset).
+      browserTarget: resolveBrowserTarget(cowork.browserTarget)
     },
     mcpServers: Array.isArray(o.mcpServers)
       ? o.mcpServers.map(normaliseMcpServer).filter((s): s is McpServerConfig => s !== null)

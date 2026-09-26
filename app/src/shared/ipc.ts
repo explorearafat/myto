@@ -95,6 +95,13 @@ export const IpcChannel = {
   /** Renderer → main (invoke): list workspace-relative paths matching an `@file` query. */
   CoworkListFiles: 'cowork:list-files',
 
+  // Myto browser setup: open a standalone, interactive browser window on the same
+  // persistent profile the in-app browser tools drive, so the user can log into
+  // Gmail / WhatsApp / Facebook / Telegram / etc. by hand once and have those logins
+  // reused automatically when Myto later browses on their behalf.
+  /** Renderer → main (invoke): open the "Setup Myto Browser" window; resolves when shown. */
+  BrowserOpenSetup: 'browser:open-setup',
+
   // Cowork permission prompts: the renderer's answer to a mid-stream approval request.
   /** Renderer → main (send): answer an ApprovalRequest by id (allow / allow_always / deny). */
   ProvidersApprovalDecision: 'providers:approval-decision',

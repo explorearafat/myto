@@ -74,4 +74,44 @@ describe('updatePlanTool', () => {
     await updatePlanTool.run({ todos: many }, ctx({ onPlan }))
     expect((onPlan.mock.calls[0][0] as TodoItem[]).length).toBe(40)
   })
+
+  it('recovers the shapes a weak model actually emits', async () => {
+    const onPlan = vi.fn()
+    // container under `steps`, per-item text under `task`/`step`/`name`, status synonyms
+    await updatePlanTool.run(
+      {
+        steps: [
+          { task: 'Scaffold', status: 'completed' },
+          { step: 'Write page', state: 'doing' },
+          { name: 'Verify', status: 'todo' }
+        ]
+      },
+      ctx({ onPlan })
+    )
+    expect(onPlan.mock.calls[0][0]).toEqual([
+      { title: 'Scaffold', status: 'done' },
+      { title: 'Write page', status: 'in_progress' },
+      { title: 'Verify', status: 'pending' }
+    ])
+  })
+
+  it('accepts a bare array of strings', async () => {
+    const onPlan = vi.fn()
+    await updatePlanTool.run(['First', '  ', 'Second'], ctx({ onPlan }))
+    expect(onPlan.mock.calls[0][0]).toEqual([
+      { title: 'First', status: 'pending' },
+      { title: 'Second', status: 'pending' }
+    ])
+  })
+
+  it('accepts a JSON string payload', async () => {
+    const onPlan = vi.fn()
+    await updatePlanTool.run('{"tasks":[{"title":"A","status":"in progress"}]}', ctx({ onPlan }))
+    expect(onPlan.mock.calls[0][0]).toEqual([{ title: 'A', status: 'in_progress' }])
+  })
+
+  it('rejects a non-JSON string and a shape with no list', async () => {
+    expect(await updatePlanTool.run('just some prose', ctx())).toMatch(/needs a "todos" array/i)
+    expect(await updatePlanTool.run({ foo: 'bar' }, ctx())).toMatch(/needs a "todos" array/i)
+  })
 })

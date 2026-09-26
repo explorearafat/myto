@@ -10,9 +10,10 @@ import type { ToolDef } from './registry'
  * fixes what actually broke — instead of declaring success it never checked.
  *
  * It is a thin, clearer-labelled shell over the same {@link executeCode} runner
- * `run_code` uses, but through the platform's NATIVE shell ({@link resolveShell} —
- * cmd.exe on Windows, bash on Unix) pinned to the working folder as cwd. It is a
- * side-effecting exec tool, so the Cowork permission tier gates it like run_code.
+ * `run_code` uses, but through a full shell ({@link resolveShell} — Git Bash where
+ * installed on Windows, else cmd.exe; bash on Unix) pinned to the working folder as
+ * cwd. It is a side-effecting exec tool, so the Cowork permission tier gates it like
+ * run_code.
  */
 
 /** Verification/build commands can be slow (a real test run), so give them room. */

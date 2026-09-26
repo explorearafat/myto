@@ -12,15 +12,48 @@ import type { AskQuestion } from '../../shared/types'
  * actual blocking/answer plumbing lives in provider-ipc.ts via {@link ToolContext.askUser}.
  */
 
-/** Read the `questions` array out of the tool input, validating each entry. */
+/**
+ * Read the questions out of the tool input as forgivingly as possible. The documented
+ * shape is `{questions: [{question, header?, options?}]}`, but weaker models mangle it —
+ * they send a bare string, a top-level `{question: "..."}`, an array of plain strings,
+ * `{prompt}`/`{text}`, or a JSON string that still needs parsing. Rather than reject
+ * those (which left the user staring at a card that asked nothing), we recover a real
+ * question from any of them; only genuinely empty input yields `[]`.
+ */
 function readQuestions(input: unknown): AskQuestion[] {
-  const raw = input && typeof input === 'object' ? (input as Record<string, unknown>).questions : undefined
-  const list = Array.isArray(raw) ? raw : []
+  let root: unknown = input
+  // A JSON string → parse it; a plain non-JSON string → treat as the question itself.
+  if (typeof root === 'string') {
+    const s = root.trim()
+    if (!s) return []
+    try {
+      root = JSON.parse(s)
+    } catch {
+      return [{ question: s }]
+    }
+  }
+  const obj = root && typeof root === 'object' ? (root as Record<string, unknown>) : {}
+  let raw: unknown = obj.questions
+  // No `questions` key, but a singular question lives on the object itself
+  // (`{question|prompt|text|q: "..."}`) — reuse the object so any header/options ride along.
+  if (raw === undefined) {
+    const hasSingle = ['question', 'prompt', 'text', 'q'].some(
+      (k) => typeof obj[k] === 'string' && (obj[k] as string).trim().length > 0
+    )
+    if (hasSingle) raw = [obj]
+  }
+  const list = Array.isArray(raw) ? raw : raw != null ? [raw] : []
   const out: AskQuestion[] = []
   for (const q of list) {
+    if (typeof q === 'string') {
+      const t = q.trim()
+      if (t) out.push({ question: t })
+      continue
+    }
     if (!q || typeof q !== 'object') continue
     const o = q as Record<string, unknown>
-    const question = typeof o.question === 'string' ? o.question.trim() : ''
+    const pick = (k: string): string => (typeof o[k] === 'string' ? (o[k] as string).trim() : '')
+    const question = pick('question') || pick('prompt') || pick('text') || pick('q')
     if (!question) continue
     const options = Array.isArray(o.options)
       ? o.options.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).slice(0, 6)

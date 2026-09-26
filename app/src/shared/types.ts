@@ -172,6 +172,14 @@ export interface CoworkSettings {
    * panel instead of a shell; the user flips it once to accept an unrestricted shell.
    */
   terminalConsent: boolean
+  /**
+   * Which browser the Track-2 browser tools drive (see {@link BrowserTarget}). Optional
+   * so an older settings file, or any partial one, merges to `off` — browser control is
+   * opt-in, like {@link ToolSettings.codeExecution} and {@link terminalConsent}. When
+   * `system-chrome`, click/type stay permission-gated because they act on the user's real
+   * logged-in sessions.
+   */
+  browserTarget?: BrowserTarget
 }
 
 /** Pre/Post tool-use hook commands (#9). Empty string = that hook is disabled. */
@@ -310,6 +318,16 @@ export interface McpTestResult {
  * Read-only tools (list_dir, read_file, the web tools) never ask, in any mode.
  */
 export type CoworkPermissionMode = 'ask' | 'autoApprove' | 'bypass'
+
+/**
+ * Which browser Cowork's Track-2 browser tools drive. `off` (default) hides them
+ * entirely; `in-app` drives Myto's own sandboxed browser pane (blank profile — the
+ * user logs into sites inside Myto), the safe/reversible choice; `system-chrome`
+ * drives the user's real Chrome over the DevTools Protocol so their existing logins
+ * (Gmail/WhatsApp/…) are reused — powerful but higher-stakes. User-selectable in
+ * Settings › Cowork.
+ */
+export type BrowserTarget = 'off' | 'in-app' | 'system-chrome'
 
 /** What a tool changes, used to decide whether it needs approval. Absent = read-only. */
 export type ToolSideEffect = 'write' | 'exec'
@@ -985,6 +1003,14 @@ export interface CoworkApi {
    * folder is set, so the composer popover simply shows nothing off-sandbox.
    */
   listFiles: (query: string) => Promise<string[]>
+  /**
+   * Open the standalone "Setup Myto Browser" window — an interactive browser on the
+   * same persistent profile (`persist:myto-inapp-browser`) the in-app browser tools
+   * drive. The user logs into Gmail / WhatsApp / Facebook / Telegram / etc. by hand
+   * once; those cookies persist, so Myto reuses the sessions when it later browses on
+   * their behalf. Resolves once the window is shown (focuses it if already open).
+   */
+  openBrowserSetup: () => Promise<void>
 }
 
 /**

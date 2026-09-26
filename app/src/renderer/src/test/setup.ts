@@ -123,7 +123,8 @@ const mytoMock: MytoApi = {
   },
   cowork: {
     pickWorkspace: vi.fn().mockResolvedValue(null),
-    listFiles: vi.fn().mockResolvedValue([])
+    listFiles: vi.fn().mockResolvedValue([]),
+    openBrowserSetup: vi.fn().mockResolvedValue(undefined)
   },
   preview: {
     openExternal: vi.fn()

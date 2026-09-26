@@ -4,7 +4,11 @@ import {
   stallGuard,
   StallError,
   toErrorMessage,
-  TimeoutError
+  TimeoutError,
+  httpStatusOf,
+  rateLimitRetryDelay,
+  MAX_RATE_LIMIT_RETRIES,
+  MAX_RETRY_WAIT_MS
 } from '@main/providers/http'
 import { modelInfo } from '@main/providers/provider'
 import { OllamaProvider } from '@main/providers/ollama'
@@ -28,6 +32,69 @@ describe('http helpers', () => {
 
     expect(toErrorMessage(new TimeoutError(15000))).toMatch(/timed out/i)
     expect(toErrorMessage('boom')).toBe('boom')
+  })
+
+  it('humanizes a 429 into a rate-limit explanation with a way out', () => {
+    // The raw "HTTP 429 Too Many Requests" is opaque; a tagged 429 must explain the
+    // free-tier cap and point at Rewrite / another model instead.
+    const rate = Object.assign(new Error('HTTP 429 Too Many Requests'), { httpStatus: 429 })
+    const msg = toErrorMessage(rate)
+    expect(msg).toMatch(/rate-limit/i)
+    expect(msg).toMatch(/rewrite/i)
+    // A non-429 HTTP error keeps its raw message (no false rate-limit framing).
+    const other = Object.assign(new Error('HTTP 500 Internal Server Error'), { httpStatus: 500 })
+    expect(toErrorMessage(other)).toBe('HTTP 500 Internal Server Error')
+  })
+})
+
+describe('rateLimitRetryDelay', () => {
+  it('reads the numeric status a provider tagged onto the error', () => {
+    expect(httpStatusOf(Object.assign(new Error('x'), { httpStatus: 429 }))).toBe(429)
+    expect(httpStatusOf(new Error('x'))).toBeUndefined()
+    expect(httpStatusOf(null)).toBeUndefined()
+    expect(httpStatusOf('nope')).toBeUndefined()
+  })
+
+  it('retries a 429 and honours Retry-After (capped), on the first attempt', () => {
+    const err = Object.assign(new Error('HTTP 429'), { httpStatus: 429, retryAfterMs: 4_000 })
+    expect(rateLimitRetryDelay(err, 0)).toBe(4_000)
+    // A hostile Retry-After is clamped so it can't freeze the turn.
+    const hostile = Object.assign(new Error('HTTP 429'), { httpStatus: 429, retryAfterMs: 10 * 60_000 })
+    expect(rateLimitRetryDelay(hostile, 0)).toBe(MAX_RETRY_WAIT_MS)
+  })
+
+  it('backs off exponentially when there is no Retry-After', () => {
+    const err = Object.assign(new Error('HTTP 503'), { httpStatus: 503 })
+    // 1s, 2s, 4s bases (+ up to 250ms jitter), each attempt roughly double the last.
+    const a0 = rateLimitRetryDelay(err, 0) as number
+    const a1 = rateLimitRetryDelay(err, 1) as number
+    const a2 = rateLimitRetryDelay(err, 2) as number
+    expect(a0).toBeGreaterThanOrEqual(1_000)
+    expect(a0).toBeLessThan(1_250)
+    expect(a1).toBeGreaterThanOrEqual(2_000)
+    expect(a1).toBeLessThan(2_250)
+    expect(a2).toBeGreaterThanOrEqual(4_000)
+    expect(a2).toBeLessThan(4_250)
+  })
+
+  it('stops after the retry budget is spent', () => {
+    const err = Object.assign(new Error('HTTP 429'), { httpStatus: 429 })
+    expect(rateLimitRetryDelay(err, MAX_RATE_LIMIT_RETRIES)).toBeNull()
+    expect(rateLimitRetryDelay(err, MAX_RATE_LIMIT_RETRIES + 5)).toBeNull()
+  })
+
+  it('never retries a non-transient status or an untagged error', () => {
+    expect(rateLimitRetryDelay(Object.assign(new Error('x'), { httpStatus: 400 }), 0)).toBeNull()
+    expect(rateLimitRetryDelay(Object.assign(new Error('x'), { httpStatus: 401 }), 0)).toBeNull()
+    expect(rateLimitRetryDelay(Object.assign(new Error('x'), { httpStatus: 500 }), 0)).toBeNull()
+    expect(rateLimitRetryDelay(new Error('network blip'), 0)).toBeNull()
+    expect(rateLimitRetryDelay(new StallError(60_000), 0)).toBeNull()
+  })
+
+  it('retries the transient upstream 5xx family (502/503/504)', () => {
+    for (const status of [502, 503, 504]) {
+      expect(rateLimitRetryDelay(Object.assign(new Error('x'), { httpStatus: status }), 0)).not.toBeNull()
+    }
   })
 })
 

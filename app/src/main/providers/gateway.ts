@@ -177,7 +177,10 @@ export class GatewayProvider implements Provider {
         throw err
       }
       const err = new Error(`HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 160)}` : ''}`)
-      // Surface Retry-After so withRetry can honour it (Principle 6 #2).
+      // Tag the numeric status so the caller's retry loop and humanizer can key off
+      // it structurally (429 rate-limit, 5xx transient) instead of scraping the text.
+      Object.assign(err, { httpStatus: res.status })
+      // Surface Retry-After so the retry loop can honour it (Principle 6 #2).
       const retryAfter = res.headers.get('retry-after')
       if (retryAfter) {
         const ms = parseRetryAfter(retryAfter)

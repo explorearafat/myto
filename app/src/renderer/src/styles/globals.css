@@ -360,6 +360,27 @@ h3 {
 }
 
 /*
+ * The Myto mark "drawing itself" ~2× per second in the live reply meta line — a
+ * working heartbeat that reads as motion (a stroke sweeping around the mark) rather
+ * than a spinner. Each path is normalised to pathLength 1 (MytoMark's `draw` prop),
+ * so one 0.5s cycle sweeps all six strokes in lockstep: draw on, brief hold full,
+ * repeat. Reduced-motion holds the finished mark (below).
+ */
+@keyframes myto-draw-loop {
+  0% {
+    stroke-dashoffset: 1;
+  }
+  75%,
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+.myto-draw-loop path {
+  stroke-dasharray: 1;
+  animation: myto-draw-loop 0.5s ease-in-out infinite;
+}
+
+/*
  * Cross-fade for the live status caption. When the model's <status> changes the
  * StatusLine remounts (it's keyed on the caption text), so the new phrase fades
  * up over the old instead of snapping in. Reuses the step-in keyframes (fade +
@@ -498,6 +519,11 @@ h3 {
   .myto-blink {
     animation: none;
     opacity: 1;
+  }
+  .myto-draw-loop path {
+    animation: none;
+    stroke-dasharray: none;
+    stroke-dashoffset: 0;
   }
   .myto-step-in {
     animation: none;

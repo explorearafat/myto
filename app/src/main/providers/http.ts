@@ -21,9 +21,19 @@ export class StallError extends Error {
     this.name = 'StallError'
   }
 }
+/** Numeric HTTP status tagged onto a provider error by the gateway/ollama throw. */
+export function httpStatusOf(err: unknown): number | undefined {
+  const s = (err as { httpStatus?: unknown } | null)?.httpStatus
+  return typeof s === 'number' ? s : undefined
+}
+
 export function toErrorMessage(err: unknown): string {
   if (err instanceof TimeoutError || err instanceof StallError) return err.message
   if (err instanceof Error) {
+    // A rate-limit is the single most common free-tier failure; the raw "HTTP 429
+    // Too Many Requests" is opaque, so spell out the cause and the two ways out.
+    if (httpStatusOf(err) === 429)
+      return 'The model endpoint is rate-limiting requests (HTTP 429). Free-tier models cap how many requests you can make per minute — wait a few seconds, then use Rewrite (↻) below to try again, or switch to a different model on the Myto website → Authentication page.'
     const cause = (err as { cause?: { code?: string } }).cause
     if (cause?.code === 'ECONNREFUSED') return 'Connection refused — is the server running?'
     if (cause?.code === 'ENOTFOUND') return 'Host not found — check the Base URL.'
@@ -31,6 +41,41 @@ export function toErrorMessage(err: unknown): string {
     return err.message
   }
   return String(err)
+}
+
+/** Longest a rate-limit / transient failure is retried before giving up. */
+export const MAX_RATE_LIMIT_RETRIES = 3
+/** Cap on any single backoff wait, so a hostile Retry-After can't freeze the turn. */
+export const MAX_RETRY_WAIT_MS = 30_000
+
+/** Statuses worth retrying: 429 rate-limit + transient upstream 5xx. */
+function isRetryableStatus(status: number | undefined): boolean {
+  return status === 429 || status === 502 || status === 503 || status === 504
+}
+
+/**
+ * Decide whether a failed generation attempt should be retried and, if so, how long
+ * to wait first — returns the delay in ms, or `null` to stop.
+ *
+ * Retries only rate-limit (429) and transient upstream (502/503/504) failures — the
+ * symptoms of a busy free-tier endpoint — and only up to `maxRetries` times. Honours a
+ * server `Retry-After` (surfaced as `retryAfterMs`) when present, capped at
+ * {@link MAX_RETRY_WAIT_MS}; otherwise backs off exponentially (1s, 2s, 4s…) with a
+ * little jitter so many clients rate-limited at once don't resynchronise their retries.
+ * `attempt` is 0-based (0 on the first failure). Safe to retry only when the caller has
+ * emitted nothing yet — these errors all throw at the headers stage, before any token.
+ */
+export function rateLimitRetryDelay(
+  err: unknown,
+  attempt: number,
+  maxRetries = MAX_RATE_LIMIT_RETRIES
+): number | null {
+  if (attempt >= maxRetries) return null
+  if (!isRetryableStatus(httpStatusOf(err))) return null
+  const retryAfterMs = (err as { retryAfterMs?: unknown } | null)?.retryAfterMs
+  if (typeof retryAfterMs === 'number' && retryAfterMs >= 0) return Math.min(retryAfterMs, MAX_RETRY_WAIT_MS)
+  const backoff = Math.min(1000 * 2 ** attempt, MAX_RETRY_WAIT_MS)
+  return backoff + Math.floor(Math.random() * 250)
 }
 export function normaliseBaseUrl(url: string): string {
   return url.trim().replace(/\/+$/, '')
