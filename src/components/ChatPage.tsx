@@ -22,7 +22,6 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { LINKS } from '../data';
-import { matchAnswer } from '../chatKb';
 import { MytoMark } from './MytoMark';
 import { MessageActions } from './MessageActions';
 import { Markdown } from '../lib/markdown';
@@ -40,9 +39,10 @@ import { profileSummary, type UserProfile } from '../shared/profile';
  *
  * Replies are real: each turn POSTs the conversation to our own /api/chat gateway, which proxies
  * to the user's own OpenAI-compatible endpoint using the models they configured on the
- * Authentication page (bring-your-own-key). The user picks among their own models. If the endpoint
- * is unreachable, the turn falls back to the built-in knowledge base so the page still answers; if
- * no models are configured yet, the composer points the user to the Authentication page.
+ * Authentication page (bring-your-own-key) — exactly the path the desktop app's chat uses. The user
+ * picks among their own models. There is no canned/demo fallback: if the endpoint fails, the turn
+ * surfaces the real error with a Try-again action; if no models are configured yet, the composer
+ * points the user to the Authentication page.
  *
  * Type follows Claude's split: Georgia (`.font-display`) for the greeting, Inter for everything else.
  */
@@ -139,18 +139,21 @@ function getInitialModel(models: ByokConfig['models']): string {
 }
 
 /**
- * The offline fallback: when the gateway is unreachable, answer from the built-in knowledge base
- * so the page is still useful. The matched answer is rendered as Markdown, the same path as a
- * live reply, so there is only one render surface.
+ * A human reason for a failed turn, keyed off the gateway's error code — the same honest surfacing
+ * the desktop app does (no canned answer stands in for a real failure). `quota` may carry a reset.
  */
-function kbMarkdown(question: string): string {
-  const a = matchAnswer(question);
-  const parts: string[] = [];
-  if (a.heading) parts.push(`**${a.heading}**`);
-  parts.push(a.lead);
-  if (a.bullets && a.bullets.length > 0) parts.push(a.bullets.map((b) => `- ${b}`).join('\n'));
-  if (a.cta) parts.push(`[${a.cta.label}](${a.cta.href})`);
-  return parts.join('\n\n');
+function errorMessage(code?: string, resetSeconds?: number): string {
+  switch (code) {
+    case 'quota':
+      return resetSeconds && resetSeconds > 0
+        ? `Your provider is rate-limiting requests. Try again in about ${Math.ceil(resetSeconds / 60)} min.`
+        : 'Your provider is rate-limiting requests. Wait a moment and try again.';
+    case 'network':
+      return "Couldn't reach the chat service. Check your connection and try again.";
+    case 'upstream':
+    default:
+      return 'Your model endpoint rejected the request or is unreachable. Check the base URL, API key, and model on the Authentication page.';
+  }
 }
 
 /**
@@ -232,6 +235,22 @@ function AgentReply({
                 className="caret ml-0.5 inline-block h-[1.05em] w-[2px] translate-y-[0.15em] bg-[#141413] align-middle"
                 aria-hidden="true"
               />
+            ) : null}
+            {turn.status === 'error' ? (
+              <div className="mt-2 rounded-xl border border-[#e4b8a8] bg-[#f9ede8] px-4 py-3">
+                <p className="text-[13px] leading-relaxed text-[#8a3b22]">
+                  {errorMessage(turn.errorCode, turn.resetSeconds)}
+                </p>
+                {onRegenerate ? (
+                  <button
+                    type="button"
+                    onClick={() => onRegenerate(turn.id)}
+                    className="mt-2 inline-flex items-center rounded-lg border border-[#e4b8a8] bg-white px-3 py-1.5 text-[13px] font-medium text-[#8a3b22] transition-colors duration-150 hover:bg-[#f4e3dc]"
+                  >
+                    Try again
+                  </button>
+                ) : null}
+              </div>
             ) : null}
             {turn.status === 'done' && !turn.text ? (
               <p className="text-[13px] italic text-[#9c988e]">Stopped.</p>
@@ -368,13 +387,14 @@ export function ChatPage({ profile, byok, onSignOut }: ChatPageProps = {}) {
       signal: controller.signal,
       onToken: (chunk) => patch((t) => ({ ...t, status: 'streaming', text: t.text + chunk })),
       onDone: () => {
-        // A live reply with no content, or an unreachable endpoint, falls back to the KB answer.
-        patch((t) => ({ ...t, status: 'done', text: t.text || kbMarkdown(t.question) }));
+        // Real reply finished. Whatever streamed is the answer — no canned stand-in.
+        patch((t) => ({ ...t, status: 'done' }));
         finish();
       },
-      onError: () => {
-        // Any gateway/endpoint error falls back to the built-in knowledge base so the page stays useful.
-        patch((t) => ({ ...t, status: 'done', text: t.text || kbMarkdown(t.question) }));
+      onError: (code, info) => {
+        // Surface the real failure (and keep any partial text) so the user can fix it and retry,
+        // exactly like the desktop chat — instead of masking it with a demo answer.
+        patch((t) => ({ ...t, status: 'error', errorCode: code, resetSeconds: info?.resetSeconds }));
         finish();
       },
     });
