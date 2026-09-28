@@ -1,5 +1,6 @@
 import { resolve } from 'node:path'
 import { executeCode, formatRunResult, resolveShell } from './runCode'
+import { unsafeCommandReason } from './exec-guard'
 import { fsAvailable } from './fs'
 import type { ToolDef } from './registry'
 
@@ -40,6 +41,11 @@ export const runCommandTool: ToolDef = {
   async run(input, ctx) {
     const command = readCommand(input)
     if (!command) return 'run_command needs a "command" string, e.g. {"command": "npm test"}.'
+    // Defence-in-depth under the permission tier: reject control-character injection
+    // (NUL / newline / CR / ESC) before it reaches the shell. Normal shell syntax
+    // (&&, pipes, quotes, globs) is untouched — this only stops the pathological cases.
+    const unsafe = unsafeCommandReason(command)
+    if (unsafe) return `run_command refused: ${unsafe}`
     const spec = resolveShell()
     const cwd = ctx.workspaceDir ? resolve(ctx.workspaceDir) : undefined
     if (!cwd) return 'run_command: no working folder is set.'
