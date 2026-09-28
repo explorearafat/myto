@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, appendFileSync, writeFileSync, existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { recallMemory } from './memory-recall'
 
 /**
  * Global (user-level) memory — a single `memory.md` under the app's userData folder.
@@ -43,14 +44,18 @@ const MEMORY_MAX_BYTES = 40_000
 /**
  * Read the global memory for injection into a run, capped to its recent tail.
  * Returns '' when there is nothing yet (or no userData dir was injected).
+ *
+ * A `query` (the current task) lets {@link recallMemory} surface the most relevant
+ * older notes alongside the tail once the file overflows — offline. Omitting it
+ * reproduces the previous tail byte-for-byte.
  */
-export function readUserMemory(): string {
+export function readUserMemory(query = ''): string {
   const path = memoryPath()
   if (!path) return ''
   try {
     const text = readFileSync(path, 'utf8').trim()
     if (!text) return ''
-    return text.length > MEMORY_READ_CAP ? `…(earlier notes trimmed)\n${text.slice(-MEMORY_READ_CAP)}` : text
+    return recallMemory(text, query, { cap: MEMORY_READ_CAP, trimmedMarker: '…(earlier notes trimmed)' })
   } catch {
     return ''
   }

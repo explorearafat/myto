@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, appendFileSync, writeFileSync, existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ToolCall } from './tools/toolParser'
+import { recallMemory } from './memory-recall'
 
 /*
  * Cowork project memory — the `.myto/` folder.
@@ -84,8 +85,12 @@ export function ensureMytoDir(workspaceDir: string): void {
  * Read the project journal for injection into the next turn, capped to its recent tail.
  * Reads the current `.myto/journal.md`, falling back to the legacy `.sylor/journal.md`
  * when a project hasn't been touched since the rebrand. Returns '' when neither exists.
+ *
+ * When a `query` (the current task) is given and the journal has overflowed its cap,
+ * the most RELEVANT older notes are surfaced alongside the recency tail via
+ * {@link recallMemory} — fully offline. Omitting `query` reproduces the old tail exactly.
  */
-export function readJournal(workspaceDir: string): string {
+export function readJournal(workspaceDir: string, query = ''): string {
   try {
     let text = ''
     try {
@@ -101,7 +106,7 @@ export function readJournal(workspaceDir: string): string {
       }
     }
     if (!text) return ''
-    return text.length > JOURNAL_READ_CAP ? `…(earlier entries trimmed)\n${text.slice(-JOURNAL_READ_CAP)}` : text
+    return recallMemory(text, query, { cap: JOURNAL_READ_CAP })
   } catch {
     return ''
   }

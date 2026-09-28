@@ -538,12 +538,18 @@ export function registerProviderIpc(): void {
         // agent tools, in-loop compaction. Plain Chat keeps the short bounded loop.
         const maxToolTurns = agentic ? MAX_TOOL_TURNS_COWORK : MAX_TOOL_TURNS
 
+        // The current task, used to surface the most RELEVANT older memory notes
+        // (offline, deterministic) when a long journal/global memory overflows its cap.
+        // Omitted-query path is byte-identical to the old recency tail, so this only
+        // ever helps. Chat and Cowork both pass it.
+        const recallQuery = ([...convo].reverse().find((m) => m.role === 'user')?.content ?? '').trim()
+
         // Cowork project memory (.myto/journal.md): read what earlier turns already
         // did in this folder so this turn continues instead of repeating. Best-effort.
         let coworkMemory = ''
         if (mode === 'cowork' && workspaceDir) {
           ensureMytoDir(workspaceDir)
-          coworkMemory = readJournal(workspaceDir)
+          coworkMemory = readJournal(workspaceDir, recallQuery)
         }
         // Runtime awareness (Track 1): hand the agent the interpreters/toolchains that
         // are actually installed and the EXACT command to invoke each, up front, so a
@@ -561,7 +567,7 @@ export function registerProviderIpc(): void {
         }
         // Global (user-level) memory: cross-project facts/preferences the user saved,
         // injected in EVERY mode (chat and cowork) so they always apply. Best-effort.
-        const userMemory = readUserMemory()
+        const userMemory = readUserMemory(recallQuery)
         // Attachments → working folder (Cowork): the user's uploaded files live under
         // userData/attachments/… which the sandboxed fs tools can't reach. Copy THIS
         // turn's into <workspace>/uploads/ so the agent opens them directly by path
