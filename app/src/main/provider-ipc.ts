@@ -24,7 +24,7 @@ import type {
 } from '../shared/types'
 import { createProvider, providerFromSettings } from './providers'
 import type { Provider } from './providers/provider'
-import { toErrorMessage, httpStatusOf, rateLimitRetryDelay } from './providers/http'
+import { toErrorMessage, httpStatusOf, rateLimitRetryDelay, planFailover } from './providers/http'
 import { getSettings, saveSettings } from './settings'
 import {
   createStatusStripper,
@@ -41,6 +41,7 @@ import { availableTools, lookupTool, runTool, toolSchemas, toolsSystemPrompt, ty
 import { ensureMytoDir, readJournal, recordGoal, recordToolAction } from './cowork-memory'
 import {
   looksLikeUnsavedCode,
+  extractNarratedFiles,
   detectOscillation,
   looksLikeContinuationRequest,
   looksLikeAnnouncedAction,
@@ -51,9 +52,15 @@ import {
   OSCILLATION_WINDOW,
   OSCILLATION_MAX,
   MAX_AUTO_CONTINUE,
+  MAX_CODE_PROSE_NUDGES,
   MAX_ANNOUNCED_ACTION,
   MAX_FALSE_LIMIT_DEFERRAL,
-  MAX_EMPTY_START
+  MAX_EMPTY_START,
+  MAX_PLAN_INCOMPLETE,
+  planHasPending,
+  pendingPlanTitles,
+  planFileTarget,
+  isVerifyStep
 } from './cowork-guards'
 import { detectRuntimesCached, summarizeRuntimes } from './cowork-runtimes'
 import { browserToolsEnabled } from './cowork-browser'
@@ -66,6 +73,8 @@ import { insertFileSnapshot } from './db/snapshots'
 import { approvalDetail, requiresApproval } from './tools/approvals'
 import { createToolCallParser, toolCallBlock, toolResultBlock, type ToolCall } from './tools/toolParser'
 import { executeArgv, formatRunResult, resolveShell } from './tools/runCode'
+import { resolveInWorkspace } from './tools/fs'
+import { statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolveResearchAgent, buildAgentSystemPrompt, agentIdentityLine } from './agents/persona'
 
@@ -98,6 +107,28 @@ const REASONING_CAPTION_MS = 300
  * STALL_WARN_MS) keeps the run honestly "alive" and shows the file growing live.
  */
 const HELD_BLOCK_HEARTBEAT_MS = 1000
+
+/**
+ * Lightweight, opt-in structured trace for the agentic loop. One line per turn (the
+ * model's stop shape — a completed tool call vs. a truncated cut-off vs. a plain end —
+ * plus the live plan state and reply length) and one per finish (WHY the loop ended:
+ * natural completion, verify pass, a cap hit, an error, the turn budget). This is the
+ * "add logging: stop_reason, tool calls, plan state, reason for finishing" the fix
+ * brief asks for, so a run that stops early can be diagnosed after the fact. OFF unless
+ * `MYTO_AGENT_LOG` is set (e2e / debugging) so production stays quiet, and it logs only
+ * structural counters and tool NAMES — never message content, file contents, or the API
+ * key — so enabling it can't leak secrets.
+ */
+function agentTrace(event: string, data: Record<string, unknown>): void {
+  if (!process.env.MYTO_AGENT_LOG) return
+  try {
+    // eslint-disable-next-line no-console
+    console.log(`[myto:agent] ${event} ${JSON.stringify(data)}`)
+  } catch {
+    // eslint-disable-next-line no-console
+    console.log(`[myto:agent] ${event}`)
+  }
+}
 
 /**
  * A short present-tense label for a tool whose call block is still streaming in, used
@@ -196,6 +227,17 @@ const VERIFY_TIMEOUT_MS = 180_000
  * endlessly — after the cap the run surfaces the honest notice and stops.
  */
 const MAX_TRUNCATION_CONTINUES = 6
+
+/**
+ * Most tool calls the loop will execute from a SINGLE text-protocol generation (RC-7).
+ * Weak models routinely batch several ```myto:tool blocks in one reply — e.g. three
+ * write_file calls then the update_plan that marks them done. The old loop ran only the
+ * FIRST and discarded the rest (it aborted the generation the moment one call parsed), so
+ * the batched update_plan never ran and the plan stayed frozen at 0/N (the plan-stays-0/4
+ * bug). We now collect the whole batch and execute it across successive turns. The cap is a
+ * runaway guard, not an expected ceiling: a well-behaved reply carries a handful of calls.
+ */
+const MAX_BATCH_CALLS = 16
 
 /** Read-only "look at the project" tools — churning on these without building is the
  *  classic weak-model stall (see the progress guard in the Cowork loop). */
@@ -322,8 +364,17 @@ export function registerProviderIpc(): void {
         send({ delta: '', done: false, preview: target })
       }
 
+      /**
+       * The latest working plan the model published via `update_plan`, captured so the
+       * loop can gate its finish on it (RC-1): a no-tool-call turn with items still not
+       * done should nudge the model onward, not be read as a completed run. Display-only
+       * forwarding alone ({@link onPlan}) left this state invisible to the loop.
+       */
+      let latestPlan: TodoItem[] = []
+
       /** Forward the working plan the `update_plan` tool published (Cowork). */
       const onPlan = (todos: TodoItem[]): void => {
+        latestPlan = todos
         send({ delta: '', done: false, todos })
       }
 
@@ -672,7 +723,7 @@ export function registerProviderIpc(): void {
         const runTurn = async (
           turnHistory: ChatMessage[],
           parseTools: boolean
-        ): Promise<{ visible: string; call: ToolCall | null; error?: string; truncated?: boolean }> => {
+        ): Promise<{ visible: string; call: ToolCall | null; calls?: ToolCall[]; error?: string; truncated?: boolean }> => {
           // Per-turn abort, chained to the outer user-cancel controller: aborting
           // `iter` ends just this generation (e.g. once a tool call is complete)
           // without tearing down the whole reply.
@@ -682,9 +733,19 @@ export function registerProviderIpc(): void {
           else controller.signal.addEventListener('abort', onOuterAbort, { once: true })
 
           const stripper = createStatusStripper()
-          // Native mode reads the structured tool call from the chunk stream, so the
-          // text-protocol fence parser stays off; otherwise it watches the prose.
-          const toolParser = parseTools && !useNativeTools ? createToolCallParser() : null
+          // The text-protocol fence parser is ALWAYS on when tools are live — even in
+          // native mode. Native function-calling reads a STRUCTURED tool call off a
+          // disjoint channel (chunk.toolCall), but a model on a native-capable endpoint
+          // routinely DRIFTS to emitting the ```myto:tool TEXT protocol instead: the loop
+          // records every tool RESULT as a ```myto:tool_result text block, so the model
+          // sees that shape in history and imitates it. With the parser off (the old
+          // `!useNativeTools` gate) those text calls leaked into the reply as prose, ran
+          // NOTHING, and read as the model stopping mid-build — the plan-stalls-at-N/M
+          // halt this whole investigation chased (RC-9). Running both channels at once is
+          // safe: a native call arrives as structured args (never in the text stream) and
+          // a text call arrives as prose (never as chunk.toolCall), so they never double-
+          // fire, and real prose almost never contains the exact fence. See NOTES.md RC-9.
+          const toolParser = parseTools ? createToolCallParser() : null
           let reasoningText = ''
           let contentStarted = false
           let captionFromReasoning = false
@@ -701,6 +762,19 @@ export function registerProviderIpc(): void {
           let thinkingClosed = false
           let visible = ''
           let pendingCall: ToolCall | null = null
+          // Additional complete tool calls the model batched AFTER the first in this one
+          // generation (RC-7). The text protocol lets a reply carry several ```myto:tool
+          // blocks; we collect every one here and hand them all back so the loop runs the
+          // whole batch (the first as this turn's call, the rest on following turns) instead
+          // of discarding all but the first — which is why a batched update_plan-done never
+          // landed and the plan stayed at 0/N.
+          const extraCalls: ToolCall[] = []
+          // Set when the provider reports the model stopped at its OUTPUT-token limit
+          // (terminal chunk `truncated`), or when a native tool call's JSON arguments
+          // arrive unparseable — both mean "the reply was cut off mid-answer." The loop
+          // reads the returned `truncated` to auto-resume instead of treating the partial
+          // output as a finished turn (RC-2).
+          let sawTruncation = false
 
           // Close this turn's thinking phase (if one is open): send a final snapshot
           // then a reset so the renderer's block stops blinking and the NEXT turn's
@@ -712,21 +786,32 @@ export function registerProviderIpc(): void {
             send({ delta: '', done: false, thinkingReset: true })
           }
 
-          // Route status-stripped text through the tool parser (when on): forward
-          // the prose it releases, and capture the first complete tool call, ending
-          // the turn. With tools off it is a straight passthrough.
+          // Route status-stripped text through the tool parser (when on): forward the
+          // prose it releases and collect every complete tool call in this generation.
+          // Unlike the old path (which aborted on the FIRST call), we keep parsing so a
+          // reply that batches several ```myto:tool blocks runs them ALL (RC-7). With tools
+          // off it is a straight passthrough.
           const emitText = (piece: string): void => {
             if (!piece) return
             if (toolParser) {
-              const { text, call } = toolParser.push(piece)
-              if (text) {
-                visible += text
-                send({ delta: text, done: false })
-              }
-              if (call && !pendingCall) {
-                pendingCall = call
-                iter.abort()
-                return
+              // Drain loop: one push can release prose AND complete a call, and a single
+              // delta can even carry two whole blocks (the parser buffers the second and
+              // yields it on the next push, so we re-push empty to pull it out). Feed the
+              // real `piece` once, then '' to flush any further buffered call.
+              for (let first = true; ; first = false) {
+                const { text, call } = toolParser.push(first ? piece : '')
+                if (text) {
+                  visible += text
+                  send({ delta: text, done: false })
+                }
+                if (!call) break
+                if (!pendingCall) pendingCall = call
+                else if (extraCalls.length < MAX_BATCH_CALLS - 1) extraCalls.push(call)
+                else {
+                  // Runaway batch — stop generating rather than collect without bound.
+                  iter.abort()
+                  return
+                }
               }
               // A tool block is streaming in but the parser releases no visible text
               // until its closing fence — a large write_file can stream for minutes.
@@ -758,13 +843,20 @@ export function registerProviderIpc(): void {
             done: boolean
             reasoning?: string
             toolCall?: NativeToolCall
+            truncated?: boolean
           }): void => {
-            if (pendingCall) return // call already found — ignore the tail
+            // Native path: once a structured call is captured we abort and drop the tail.
+            // Text path: keep feeding chunks so we can collect a whole batch of calls (RC-7)
+            // — the generation runs to its natural end instead of aborting on the first.
+            if (pendingCall && !toolParser) return
             // Native function-calling (#15): the gateway assembled a structured tool call.
             // Synthesize the SAME ```myto:tool block the text protocol produces so history,
             // the transcript card, and the loop stay format-agnostic, then end the turn
-            // exactly like the text path does on a complete fence.
-            if (parseTools && chunk.toolCall) {
+            // exactly like the text path does on a complete fence. Guarded by `!pendingCall`
+            // so a call already captured this generation — a native one whose abort tail is
+            // still draining, or a ```myto:tool text call the parser found first now that it
+            // runs in native mode too (RC-9) — is never clobbered by a later structured one.
+            if (parseTools && chunk.toolCall && !pendingCall) {
               let input: unknown = {}
               let parseErr: string | null = null
               const argsJson = chunk.toolCall.argsJson?.trim()
@@ -775,12 +867,24 @@ export function registerProviderIpc(): void {
                   parseErr = `invalid JSON arguments (${e instanceof Error ? e.message : String(e)})`
                 }
               }
+              // Unparseable JSON args on a native call are the max_tokens signature: the
+              // model streamed a valid-so-far argument object that got cut mid-token, so it
+              // no longer parses. Executing it with `{}` (the old behaviour) runs a
+              // half-specified action — a write_file with no content, a bogus path — which
+              // is exactly the "wrote garbage / didn't persist" symptom. Treat it as a
+              // truncation instead: flag it, DON'T set pendingCall, DON'T abort — let the
+              // stream reach its terminal `done` so the loop auto-resumes and asks the model
+              // to redo the call (writing large files in pieces) rather than executing junk.
+              if (parseErr) {
+                sawTruncation = true
+                return
+              }
               const name = chunk.toolCall.name
               pendingCall = {
-                block: toolCallBlock(name, parseErr ? {} : input),
+                block: toolCallBlock(name, input),
                 name,
-                input: parseErr ? {} : input,
-                error: parseErr
+                input,
+                error: null
               }
               iter.abort()
               return
@@ -825,7 +929,12 @@ export function registerProviderIpc(): void {
                 emitText(text)
               }
             }
-            // `done` is intentionally not handled here — the loop sends it.
+            // The terminal chunk carries `truncated` when the provider reported the model
+            // stopped at its output-token limit (OpenAI finish_reason:'length' / Anthropic
+            // stop_reason:'max_tokens'). Latch it so the loop auto-resumes — this catches a
+            // cut-off that lands mid visible prose (no open tool block), which the held-block
+            // check below can't see. `done` is otherwise not handled here — the loop sends it.
+            if (chunk.done && chunk.truncated) sawTruncation = true
           }
 
           // Bounded retry around the generation stream. A busy free-tier endpoint
@@ -836,9 +945,16 @@ export function registerProviderIpc(): void {
           // Retry-After, and keep the user informed with a visible countdown. Exhausted
           // or non-retryable → fall through to the humanized error (toErrorMessage spells
           // out a 429 in plain language and points at Rewrite / another model).
+          //
+          // Beyond retrying the SAME request, a pristine terminal failure may fail over
+          // to a configured second model (settings.fallbackModel) — one-shot, with its
+          // own fresh retry budget. `activeModelId` is the model actually streamed; it
+          // starts at the requested model and is swapped once if failover fires.
+          let activeModelId = modelId
+          let triedFallback = false
           for (let attempt = 0; ; attempt++) {
             try {
-              await provider.streamCompletion(modelId, turnHistory, onProviderChunk, iter.signal, {
+              await provider.streamCompletion(activeModelId, turnHistory, onProviderChunk, iter.signal, {
                 reasoningEffort: settings.reasoningEffort,
                 // Advertise the tool schemas only on a tool-enabled native turn; the closing
                 // turn (parseTools=false) and the text protocol never send them.
@@ -853,13 +969,32 @@ export function registerProviderIpc(): void {
               if (pendingCall) {
                 controller.signal.removeEventListener('abort', onOuterAbort)
                 closeThinking()
-                return { visible, call: pendingCall } // ended early for a tool
+                // ended early for a tool (native first-call abort, or the text-protocol
+                // batch cap) — hand back the whole batch collected so far
+                return { visible, call: pendingCall, calls: [pendingCall, ...extraCalls] }
               }
               // Only a pristine turn may be retried; a mid-stream failure keeps its
               // partial output and surfaces the error rather than replaying tokens.
               const pristine = visible === '' && reasoningText === '' && !contentStarted
               const delay = pristine ? rateLimitRetryDelay(err, attempt) : null
               if (delay === null) {
+                // Same-request retries are exhausted (or the failure was never retryable).
+                // Before surfacing the error, try a one-shot switch to the configured
+                // fallback model — pristine only, so no emitted token is ever replayed.
+                const fb = planFailover({
+                  pristine,
+                  err,
+                  fallbackModel: settings.fallbackModel,
+                  activeModel: activeModelId,
+                  triedFallback
+                })
+                if (fb !== null) {
+                  triedFallback = true
+                  activeModelId = fb
+                  send({ delta: '', done: false, status: `Model unavailable — switching to fallback (${fb})…` })
+                  attempt = -1 // ++ → 0: give the fallback its own fresh retry budget
+                  continue
+                }
                 controller.signal.removeEventListener('abort', onOuterAbort)
                 return { visible, call: null, error: toErrorMessage(err) }
               }
@@ -926,7 +1061,15 @@ export function registerProviderIpc(): void {
           // never trips the content-start close above; seal it here so the phase
           // doesn't stay open and get overwritten by the next turn's reasoning.
           closeThinking()
-          return { visible, call: pendingCall, truncated }
+          // `truncated` = the held-block cut-off (text protocol) OR a provider-reported
+          // output-limit / unparseable-native-args truncation (sawTruncation). Either way
+          // the loop auto-resumes instead of finishing on a half-written answer.
+          return {
+            visible,
+            call: pendingCall,
+            calls: pendingCall ? [pendingCall, ...extraCalls] : undefined,
+            truncated: truncated || sawTruncation
+          }
         }
 
         // Base system prompts: <status> narration + the file-card protocol. Applied
@@ -1075,6 +1218,25 @@ export function registerProviderIpc(): void {
         // this reply. Capped at one nudge so a model that legitimately meant to only
         // show code (or ignores the nudge) can't be trapped in a loop.
         let codeProseNudges = 0
+        // Auto-persist ledger (Cowork, RC-5): content signatures of narrated code blocks
+        // we've already written to disk ourselves. A weaker model often NARRATES a file's
+        // full contents in a fence instead of calling write_file, then marks its plan item
+        // "done" and moves on — so nudging never lands the file. When a silent turn carries
+        // a confidently-named block, we write it directly (a synthesized write_file through
+        // runTool, same sandbox + journaling as the model's own call) rather than only
+        // asking. This set dedupes so the identical block, re-narrated on a later turn,
+        // isn't written twice; a genuinely-changed body has a new signature and is saved.
+        const autoPersistedSigs = new Set<string>()
+
+        // Cross-turn narrated-file accumulator (Cowork, RC-8). Every file the model prints
+        // in a fence — in ANY turn, not just the silent one that trips auto-persist — is
+        // captured here (path → most-recent body). RC-5 auto-persist only ever sees the
+        // CURRENT turn's reply, so a file narrated on an early turn (then buried under later
+        // tool calls) that never got written is invisible to it; the run-1 e2e lost app.js
+        // exactly this way. Filesystem reconciliation reads this ledger to materialize a
+        // planned-but-missing file from whatever body the model last showed for it. Later
+        // (more complete) narration wins, mirroring {@link extractNarratedFiles}.
+        const narratedAcc = new Map<string, string>()
 
         // Deliberation guard: consecutive `think`-tool calls with no real action between
         // them (see MAX_THINK_STREAK). Reset the moment any other tool runs, so thinking
@@ -1121,6 +1283,15 @@ export function registerProviderIpc(): void {
         // forever can't loop endlessly — after the cap the run surfaces the notice and stops.
         let truncationContinues = 0
 
+        // Plan-completion guard (agentic, RC-1): how many times this reply we've caught the
+        // model ENDING with no tool call while its own plan (update_plan) still has pending
+        // items, and pushed it to finish them. This is the headline "stops midway" stall — a
+        // model builds a couple of steps, marks nothing done, then falls silent at plan 1/4.
+        // Reset by any completed tool call (like {@link truncationContinues}) so the cap
+        // counts only CONSECUTIVE premature stops with no progress between them; bounded by
+        // {@link MAX_PLAN_INCOMPLETE} so a plan the model can't finish can't loop forever.
+        let planIncompleteNudges = 0
+
         // Verify gate state (#16): how many times the verify command has run this reply,
         // and whether it has passed (so a later natural-done doesn't re-run it needlessly).
         let verifyRounds = 0
@@ -1129,6 +1300,14 @@ export function registerProviderIpc(): void {
         // Plan-mode gate state (#8): whether the user has approved the drafted plan this
         // reply. Until then the FIRST side-effecting tool is held for plan approval.
         let planApproved = false
+
+        // Batched-call queue (RC-7): tool calls the model emitted AFTER the first in a
+        // single generation. runTurn hands back the whole batch; we run the first as the
+        // current turn's call and enqueue the rest here, draining one per loop iteration
+        // WITHOUT re-generating. This is what lets a reply of "write a; write b; write c;
+        // update_plan(all done)" actually mark the plan done — the old loop ran only
+        // write a and threw the other three away, so the plan never left its initial state.
+        const carriedCalls: ToolCall[] = []
 
         for (let turn = 0; turn < maxToolTurns; turn++) {
           // Keep the running history inside the context window on long tasks: once it
@@ -1140,9 +1319,51 @@ export function registerProviderIpc(): void {
             if (controller.signal.aborted) return
           }
 
-          const { visible, call, error, truncated } = await runTurn(history, true)
+          // Drain a call the model batched into an EARLIER generation before spending a new
+          // one (RC-7). A carried call is replayed with no fresh visible prose (its prose was
+          // already streamed on the generating turn); when the queue empties we generate the
+          // next turn and enqueue anything past the first call it returns.
+          let visible = ''
+          let call: ToolCall | null = null
+          let error: string | undefined
+          let truncated: boolean | undefined
+          if (carriedCalls.length > 0) {
+            call = carriedCalls.shift() ?? null
+          } else {
+            const r = await runTurn(history, true)
+            visible = r.visible
+            call = r.call
+            error = r.error
+            truncated = r.truncated
+            if (r.calls && r.calls.length > 1) carriedCalls.push(...r.calls.slice(1))
+          }
           if (controller.signal.aborted) return
+          // Capture any file the model narrated in a fence this turn into the cross-turn
+          // ledger (RC-8), so reconciliation can later write a planned file the model only
+          // ever showed in chat. Idempotent: re-seeing the same body just re-sets the entry.
+          if (mode === 'cowork' && workspaceDir) {
+            for (const f of extractNarratedFiles(visible)) narratedAcc.set(f.path, f.content)
+          }
+          // Count raw tool-fence markers in the visible reply. Content-free: it tells a trace
+          // whether parseable call blocks LEAKED into the reply text (a parser/echo problem)
+          // vs the model simply stopping without emitting a block (a model problem) — the two
+          // have opposite fixes, and this is the one signal that separates them in a live run.
+          const leakedMarkers = visible.split('```myto:tool').length - 1
+          // One structural line per turn (gated): the model's stop shape and the live plan
+          // state, so a premature stop is legible in a trace without leaking any content.
+          agentTrace('turn', {
+            turn,
+            tool: call?.name ?? null,
+            truncated: !!truncated,
+            error: !!error,
+            visibleLen: visible.length,
+            leakedMarkers,
+            queued: carriedCalls.length,
+            planDone: latestPlan.filter((t) => t.status === 'done').length,
+            planTotal: latestPlan.length
+          })
           if (error) {
+            agentTrace('finish', { reason: 'error', turn })
             send({ delta: '', done: true, error })
             return
           }
@@ -1174,31 +1395,191 @@ export function registerProviderIpc(): void {
               // and let the run stop so the user can weigh in, rather than spinning forever.
               const notice =
                 "\n\n⚠️ The reply kept getting cut off at the output-token limit even after retrying in smaller pieces, so the last action may be incomplete. Send \"continue\" to resume."
+              agentTrace('finish', { reason: 'truncation-cap', turn })
               send({ delta: notice, done: false })
               send({ delta: '', done: true })
               return
             }
-            // Code-as-prose guard: in Cowork the deliverable is files on disk, but a
-            // weaker model often prints a file's contents in a fence and calls it done
-            // without ever invoking write_file — so nothing is saved. If this reply built
-            // nothing yet and ends on a substantial code block, nudge it once to actually
-            // write the file (with an explicit escape hatch if it only meant to explain),
-            // then loop with tools still live.
-            if (
-              mode === 'cowork' &&
-              workspaceDir &&
-              buildsMade === 0 &&
-              codeProseNudges === 0 &&
-              looksLikeUnsavedCode(visible)
-            ) {
-              codeProseNudges++
-              send({ delta: '', done: false, status: 'Saving the code to a file' })
-              history.push({ role: 'assistant', content: visible })
-              history.push({
-                role: 'user',
-                content: `${goalReminder}You wrote code in your reply but never saved it — it only exists in this chat, so the user cannot run or keep it. In Cowork you MUST create files with the write_file tool. Call write_file now with the correct path and the FULL contents of the file(s) you just showed. If you genuinely only meant to illustrate something and no file should be created, say so explicitly instead.`
+            // Filesystem reconciliation (Cowork, RC-8) — the model-independent backstop, run
+            // BEFORE every cooperation-dependent nudge below so they all operate on a plan
+            // that matches the real disk. Two failure modes the nudges never reliably fix:
+            // (a) the model narrated a planned file in chat and never wrote it (run-1 lost
+            // app.js this way — narrated on an early turn, invisible to the current-turn-only
+            // auto-persist); (b) files exist on disk but the plan still reads pending because
+            // the model forgot update_plan (the "plan stays 0/N" headline). We (1) materialize
+            // any planned-but-missing file from the cross-turn narration ledger via the same
+            // sandboxed write_file path, then (2) mark every file-target plan item done whose
+            // file actually exists, and (3) only once all file deliverables exist (and any
+            // verify command has passed) mark residual verify/preview steps done — never
+            // claiming a headless "preview" happened. Nothing here depends on the model
+            // cooperating, so a run can finish truthfully even when the model won't.
+            if (agentic && mode === 'cowork' && workspaceDir && latestPlan.length > 0) {
+              const rcVerifyCmd = settings.cowork.verifyCommand.trim()
+              const existsNonEmpty = (rel: string): boolean => {
+                const abs = resolveInWorkspace(workspaceDir, rel)
+                if (!abs) return false
+                try {
+                  return statSync(abs).size > 0
+                } catch {
+                  return false
+                }
+              }
+              // Step 1: write planned-but-missing files captured from earlier narration.
+              const toWrite: { path: string; content: string }[] = []
+              for (const item of latestPlan) {
+                if (item.status === 'done') continue
+                const target = planFileTarget(item.title)
+                if (!target || existsNonEmpty(target)) continue
+                const content = narratedAcc.get(target)
+                if (content == null || autoPersistedSigs.has(`${target}\u0000${content}`)) continue
+                if (!toWrite.some((w) => w.path === target)) toWrite.push({ path: target, content })
+              }
+              const reconciledWrites: string[] = []
+              if (toWrite.length > 0) {
+                let approvedWrite = true
+                if (!grantedAlways.has('write') && requiresApproval(permissionMode, 'write')) {
+                  send({ delta: '', done: false, status: 'Waiting for your approval' })
+                  const decision = await requestApproval(
+                    'write_file',
+                    'write',
+                    `Save ${toWrite.length} planned file(s) not yet on disk: ${toWrite.map((w) => w.path).join(', ')}`
+                  )
+                  if (controller.signal.aborted) return
+                  if (decision === 'allow_always') grantedAlways.add('write')
+                  approvedWrite = decision !== 'deny'
+                }
+                if (approvedWrite) {
+                  for (const w of toWrite) {
+                    const synth: ToolCall = { block: '', name: 'write_file', input: { path: w.path, content: w.content }, error: null }
+                    const res = await runTool(synth, {
+                      ...gate,
+                      signal: controller.signal,
+                      onPreview, onPlan, onCommand, onFileSnapshot,
+                      delegate, askUser, preToolUse, postToolUse, getBrowser, renderDocument
+                    })
+                    if (controller.signal.aborted) return
+                    autoPersistedSigs.add(`${w.path}\u0000${w.content}`)
+                    recordToolAction(workspaceDir, synth, res)
+                    buildsMade++
+                    exploreStreak = 0
+                    researchStreak = 0
+                    reconciledWrites.push(w.path)
+                    send({ delta: toolResultBlock('write_file', res), done: false, status: `Saved ${w.path}` })
+                    agentTrace('reconcile-write', { turn, path: w.path, lines: w.content.split('\n').length })
+                  }
+                }
+              }
+              // Steps 2 & 3: mark the plan from real disk state. A file-target step is done
+              // once its file exists non-empty; a verify/preview step is done only once EVERY
+              // file deliverable exists and any configured verify command has passed.
+              const fileItems = latestPlan.filter((t) => planFileTarget(t.title))
+              const allFilesExist =
+                fileItems.length > 0 && fileItems.every((t) => existsNonEmpty(planFileTarget(t.title) as string))
+              let reconciledMarks = 0
+              const nextPlan: TodoItem[] = latestPlan.map((t) => {
+                const target = planFileTarget(t.title)
+                if (target && t.status !== 'done' && existsNonEmpty(target)) {
+                  reconciledMarks++
+                  return { ...t, status: 'done' }
+                }
+                if (isVerifyStep(t.title) && t.status !== 'done' && allFilesExist && (!rcVerifyCmd || verifyPassed)) {
+                  reconciledMarks++
+                  return { ...t, status: 'done' }
+                }
+                return t
               })
-              continue
+              if (reconciledMarks > 0) onPlan(nextPlan)
+              if (reconciledWrites.length > 0 || reconciledMarks > 0) {
+                agentTrace('reconcile', {
+                  turn,
+                  wrote: reconciledWrites.length,
+                  marked: reconciledMarks,
+                  planDone: nextPlan.filter((t) => t.status === 'done').length,
+                  planTotal: nextPlan.length
+                })
+              }
+              if (reconciledWrites.length > 0) {
+                // We wrote real files the model had only narrated — tell it what changed and
+                // press on, so it continues from a disk-truthful state, not by re-narrating.
+                if (visible.trim()) history.push({ role: 'assistant', content: visible })
+                history.push({
+                  role: 'user',
+                  content: `${goalReminder}Some files your plan requires existed only as text in your reply, not on disk, so I saved them for you: ${reconciledWrites.join(', ')}. Never paste file contents into chat — always call write_file yourself. Continue: take the next concrete action for any remaining step, and mark a plan item done only once its file actually exists on disk.`
+                })
+                continue
+              }
+              // No writes were needed. If marking alone closed the plan we fall through to the
+              // verify gate / finish below, now judging a plan that matches the filesystem.
+            }
+            // Code-as-prose guard + AUTO-PERSIST (RC-5). In Cowork the deliverable is
+            // files on disk, but a weaker model routinely prints a file's FULL contents in
+            // a fence and moves on — often even marking its plan item "done" — without ever
+            // calling write_file, so nothing is saved. Nudging alone never reliably fixes
+            // this (the model narrates the next file too, and laundered the progress
+            // counters via read-only calls). So when a silent turn carries confidently-
+            // named code blocks, we WRITE them ourselves: a synthesized write_file run
+            // through the same runTool path (same resolveInWorkspace sandbox, onFileSnapshot
+            // preview, and journaling as a model call), honoring the permission tier and
+            // deduped by content signature so the identical block re-narrated later isn't
+            // rewritten. Only when nothing is confidently named do we fall back to nudging,
+            // still bounded by MAX_CODE_PROSE_NUDGES and reset on each real write.
+            if (mode === 'cowork' && workspaceDir && looksLikeUnsavedCode(visible)) {
+              const narrated = extractNarratedFiles(visible).filter(
+                (f) => !autoPersistedSigs.has(`${f.path}\u0000${f.content}`)
+              )
+              if (narrated.length > 0) {
+                let approvedWrite = true
+                if (!grantedAlways.has('write') && requiresApproval(permissionMode, 'write')) {
+                  send({ delta: '', done: false, status: 'Waiting for your approval' })
+                  const decision = await requestApproval(
+                    'write_file',
+                    'write',
+                    `Save ${narrated.length} file(s) shown in chat: ${narrated.map((f) => f.path).join(', ')}`
+                  )
+                  if (controller.signal.aborted) return
+                  if (decision === 'allow_always') grantedAlways.add('write')
+                  approvedWrite = decision !== 'deny'
+                }
+                if (approvedWrite) {
+                  const saved: string[] = []
+                  for (const f of narrated) {
+                    const synth: ToolCall = { block: '', name: 'write_file', input: { path: f.path, content: f.content }, error: null }
+                    const res = await runTool(synth, {
+                      ...gate,
+                      signal: controller.signal,
+                      onPreview, onPlan, onCommand, onFileSnapshot,
+                      delegate, askUser, preToolUse, postToolUse, getBrowser, renderDocument
+                    })
+                    if (controller.signal.aborted) return
+                    autoPersistedSigs.add(`${f.path}\u0000${f.content}`)
+                    recordToolAction(workspaceDir, synth, res)
+                    buildsMade++
+                    exploreStreak = 0
+                    researchStreak = 0
+                    saved.push(f.path)
+                    send({ delta: toolResultBlock('write_file', res), done: false, status: `Saved ${f.path}` })
+                    agentTrace('autopersist', { turn, path: f.path, lines: f.content.split('\n').length })
+                  }
+                  history.push({ role: 'assistant', content: visible })
+                  history.push({
+                    role: 'user',
+                    content: `${goalReminder}I found file contents in your reply that you never saved, so I wrote them to disk for you: ${saved.join(', ')}. Never paste file contents into chat again — always call write_file yourself. Continue now: take the next concrete action (write the next file, or verify), and only mark a plan item done once its file actually exists on disk.`
+                  })
+                  continue
+                }
+              }
+              // Nothing confidently named (or the write was denied): fall back to nudging
+              // the model to save it itself, bounded so it can't loop forever.
+              if (codeProseNudges < MAX_CODE_PROSE_NUDGES) {
+                codeProseNudges++
+                send({ delta: '', done: false, status: 'Saving the code to a file' })
+                history.push({ role: 'assistant', content: visible })
+                history.push({
+                  role: 'user',
+                  content: `${goalReminder}You wrote code in your reply but never saved it — it only exists in this chat, so the user cannot run or keep it. In Cowork you MUST create files with the write_file tool. Call write_file now with the correct path and the FULL contents of the file(s) you just showed. If you genuinely only meant to illustrate something and no file should be created, say so explicitly instead.`
+                })
+                continue
+              }
             }
             // Auto-continue past a soft "should I continue?" stop (Cowork). At extreme
             // scale a model often PAUSES to ask whether to keep going instead of just
@@ -1315,6 +1696,42 @@ export function registerProviderIpc(): void {
               })
               continue
             }
+            // Plan-completion gate (RC-1) — the headline "stops midway" stall. The model
+            // ends a turn with NO tool call while its own update_plan list still has
+            // unfinished items (e.g. it wrote one file, left the plan at 1/4, then fell
+            // silent). None of the text-shape guards above catch this: the reply can be a
+            // confident, well-formed "here's what I built" summary that merely happens to be
+            // premature. Treat an incomplete plan as proof the run is not done — list the
+            // still-pending steps back to the model and tell it to either carry them out with
+            // tool calls, or, for any step already handled, mark it done via update_plan so
+            // the plan reflects reality. Bounded by {@link MAX_PLAN_INCOMPLETE} CONSECUTIVE
+            // premature stops (reset by any completed tool call); after the cap the reply
+            // stands so the user can step in rather than looping a plan the model can't close.
+            if (
+              agentic &&
+              workspaceDir &&
+              planIncompleteNudges < MAX_PLAN_INCOMPLETE &&
+              planHasPending(latestPlan)
+            ) {
+              planIncompleteNudges++
+              const pending = pendingPlanTitles(latestPlan)
+              send({
+                delta: '',
+                done: false,
+                status: `Finishing the plan (${pending.length} step${pending.length === 1 ? '' : 's'} left)`
+              })
+              if (visible.trim()) history.push({ role: 'assistant', content: visible })
+              const list = pending.map((t) => `- ${t}`).join('\n')
+              history.push({
+                role: 'user',
+                content: `${goalReminder}You stopped, but your OWN plan still has unfinished steps:\n\n${list}\n\nThe task is NOT complete until every plan item is done. Take the next concrete step NOW: emit the tool call (${
+                  research
+                    ? 'browser_* action, web_search, web_fetch, read_file, run_code …'
+                    : 'write_file / edit_file / run_command …'
+                }) that carries out the first unfinished step above, with its FULL contents, and keep going one tool call at a time. As you finish each step, call update_plan to mark it done. If a listed step is in fact already complete or genuinely not needed, call update_plan now to mark it done so the plan reflects reality — do not merely say so in prose.`
+              })
+              continue
+            }
             // #16 Programmatic verify gate. Before accepting "done" in Cowork, run the
             // user's verify command (build/test/lint). Exit 0 → the run really is done;
             // non-zero → feed the failure back as a user turn and loop so the tools stay
@@ -1341,6 +1758,7 @@ export function registerProviderIpc(): void {
               })
               if (!vr.spawnError && vr.exitCode === 0) {
                 verifyPassed = true
+                agentTrace('finish', { reason: 'verify-pass', turn, planTotal: latestPlan.length })
                 send({ delta: '', done: true })
                 return
               }
@@ -1353,6 +1771,15 @@ export function registerProviderIpc(): void {
               })
               continue
             }
+            // Nothing above intervened: no tool call, not truncated, no shape-guard match,
+            // no pending plan item, and verify (if any) has passed — the run is genuinely
+            // complete. This is the ONLY unforced finish of the agentic loop.
+            agentTrace('finish', {
+              reason: 'complete',
+              turn,
+              planDone: latestPlan.filter((t) => t.status === 'done').length,
+              planTotal: latestPlan.length
+            })
             send({ delta: '', done: true })
             return
           }
@@ -1402,6 +1829,16 @@ export function registerProviderIpc(): void {
           // successful call between them, letting a big project truncate a few times and
           // still finish while a perpetually-truncating file is still bounded.
           truncationContinues = 0
+          // The model is acting, not prematurely stopping, so the plan-completion streak
+          // resets too — the cap counts only CONSECUTIVE silent stops with pending plan
+          // items, so a long multi-stage build that pauses, is nudged, then makes progress
+          // never exhausts the cap early (RC-1).
+          planIncompleteNudges = 0
+          // NB: codeProseNudges is NOT reset here (RC-5). It must be grounded in a real
+          // write (the `if (sideEffect)` block below), not any tool call — otherwise a
+          // read_file / list_dir / update_plan launders the code-as-prose counter, which is
+          // exactly how the e2e run gamed its way to a false "complete" while narrating
+          // styles.css / app.js as prose and never saving them.
 
           send({ delta: `\n${call.block}\n`, done: false, status: `Running ${toolName}` })
 
@@ -1546,6 +1983,11 @@ export function registerProviderIpc(): void {
           if (sideEffect) {
             buildsMade++
             exploreStreak = 0
+            // Ground the code-as-prose reset in a REAL write/edit/delete/exec (RC-5), not
+            // any tool call: a multi-file build that writes file 2, then narrates file 3 and
+            // is nudged, should have a fresh budget — but a read-only call must NOT clear it,
+            // or the model laundered the counter and narrated its way to a false finish.
+            codeProseNudges = 0
           } else if (call.name && EXPLORE_TOOLS.has(call.name)) {
             exploreStreak++
           } else if (call.name === 'update_plan') {
@@ -1591,6 +2033,12 @@ export function registerProviderIpc(): void {
 
         // Budget spent: force a closing turn with tools withheld so the reply never
         // ends mid-loop.
+        agentTrace('finish', {
+          reason: 'turn-budget',
+          maxToolTurns,
+          planDone: latestPlan.filter((t) => t.status === 'done').length,
+          planTotal: latestPlan.length
+        })
         send({ delta: '', done: false, status: 'Finishing up' })
         history.push({
           role: 'system',

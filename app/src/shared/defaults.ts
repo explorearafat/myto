@@ -24,6 +24,8 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
   // list (or types an id in settings). Empty here so nothing is shown until then.
   modelName: '',
   modelId: '',
+  // No failover target until the user names one; empty disables it.
+  fallbackModel: '',
   ui: {
     // Warm light is the default; the dark toggle overrides it.
     theme: 'light',

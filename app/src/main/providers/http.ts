@@ -48,17 +48,23 @@ export const MAX_RATE_LIMIT_RETRIES = 3
 /** Cap on any single backoff wait, so a hostile Retry-After can't freeze the turn. */
 export const MAX_RETRY_WAIT_MS = 30_000
 
-/** Statuses worth retrying: 429 rate-limit + transient upstream 5xx. */
+/** Statuses worth retrying: 429 rate-limit + transient upstream 5xx (incl. Anthropic 529). */
 function isRetryableStatus(status: number | undefined): boolean {
-  return status === 429 || status === 502 || status === 503 || status === 504
+  return (
+    status === 429 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    status === 529
+  )
 }
 
 /**
  * Decide whether a failed generation attempt should be retried and, if so, how long
  * to wait first — returns the delay in ms, or `null` to stop.
  *
- * Retries only rate-limit (429) and transient upstream (502/503/504) failures — the
- * symptoms of a busy free-tier endpoint — and only up to `maxRetries` times. Honours a
+ * Retries only rate-limit (429) and transient upstream (502/503/504/529) failures — the
+ * symptoms of a busy free-tier endpoint or an overloaded Anthropic backend (529) — and only up to `maxRetries` times. Honours a
  * server `Retry-After` (surfaced as `retryAfterMs`) when present, capped at
  * {@link MAX_RETRY_WAIT_MS}; otherwise backs off exponentially (1s, 2s, 4s…) with a
  * little jitter so many clients rate-limited at once don't resynchronise their retries.
@@ -77,6 +83,44 @@ export function rateLimitRetryDelay(
   const backoff = Math.min(1000 * 2 ** attempt, MAX_RETRY_WAIT_MS)
   return backoff + Math.floor(Math.random() * 250)
 }
+
+/** Auth failures — the fallback shares the same credentials, so a switch can't help. */
+function isAuthStatus(status: number | undefined): boolean {
+  return status === 401 || status === 403
+}
+
+/**
+ * Decide whether an exhausted (or non-retryable) *pristine* generation failure should
+ * fail over to a configured second model — the piece {@link rateLimitRetryDelay} does
+ * not cover. Retry re-issues the *same* request; failover switches the model instead,
+ * for when the primary is down, gone (404 model-not-found), or persistently overloaded
+ * after its retries ran out. Kept deliberately narrow and one-shot:
+ *
+ * - **Pristine only.** A mid-stream failure already emitted tokens; switching models
+ *   would replay them, so we never fail over once output has begun (mirrors the retry rule).
+ * - **Once per turn.** `triedFallback` guards against a fallback that itself fails looping.
+ * - **A real, different target.** Empty or primary-equal `fallbackModel` is a no-op.
+ * - **Not on auth errors.** 401/403 mean bad credentials; the fallback shares them, so
+ *   a switch just burns a second doomed request.
+ *
+ * Returns the trimmed fallback model id to switch to, or `null` to surface the error.
+ * The caller gives the fallback its own fresh retry budget.
+ */
+export function planFailover(opts: {
+  pristine: boolean
+  err: unknown
+  fallbackModel: string | undefined
+  activeModel: string
+  triedFallback: boolean
+}): string | null {
+  const { pristine, err, fallbackModel, activeModel, triedFallback } = opts
+  if (!pristine || triedFallback) return null
+  const fb = fallbackModel?.trim()
+  if (!fb || fb === activeModel.trim()) return null
+  if (isAuthStatus(httpStatusOf(err))) return null
+  return fb
+}
+
 export function normaliseBaseUrl(url: string): string {
   return url.trim().replace(/\/+$/, '')
 }

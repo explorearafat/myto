@@ -7,6 +7,7 @@ import {
   TimeoutError,
   httpStatusOf,
   rateLimitRetryDelay,
+  planFailover,
   MAX_RATE_LIMIT_RETRIES,
   MAX_RETRY_WAIT_MS
 } from '@main/providers/http'
@@ -95,6 +96,56 @@ describe('rateLimitRetryDelay', () => {
     for (const status of [502, 503, 504]) {
       expect(rateLimitRetryDelay(Object.assign(new Error('x'), { httpStatus: status }), 0)).not.toBeNull()
     }
+  })
+
+  it('retries 529 (Anthropic "Overloaded") — transient, must back off not end the run', () => {
+    // Anthropic returns 529 when overloaded; it is transient like 503. A mid-run 529 was
+    // ending the agent's run instead of retrying (root cause RC-3). 500 stays non-retryable
+    // (asserted above) — only 529 is added.
+    expect(rateLimitRetryDelay(Object.assign(new Error('Overloaded'), { httpStatus: 529 }), 0)).not.toBeNull()
+  })
+})
+
+describe('planFailover (optional model failover, one-shot, pristine-only)', () => {
+  const rate = Object.assign(new Error('HTTP 429'), { httpStatus: 429 })
+  const base = {
+    pristine: true,
+    err: rate,
+    fallbackModel: 'claude-haiku-4-5',
+    activeModel: 'claude-opus-4-8',
+    triedFallback: false
+  }
+
+  it('returns the fallback model when a pristine primary is exhausted and a fallback is set', () => {
+    expect(planFailover(base)).toBe('claude-haiku-4-5')
+  })
+
+  it('never fails over mid-stream (output already emitted cannot be replayed)', () => {
+    expect(planFailover({ ...base, pristine: false })).toBeNull()
+  })
+
+  it('fails over only once per turn', () => {
+    expect(planFailover({ ...base, triedFallback: true })).toBeNull()
+  })
+
+  it('is a no-op without a real, different fallback target', () => {
+    expect(planFailover({ ...base, fallbackModel: undefined })).toBeNull()
+    expect(planFailover({ ...base, fallbackModel: '' })).toBeNull()
+    expect(planFailover({ ...base, fallbackModel: '   ' })).toBeNull()
+    // Same model (modulo surrounding whitespace) is pointless.
+    expect(planFailover({ ...base, fallbackModel: '  claude-opus-4-8  ' })).toBeNull()
+  })
+
+  it('does not fail over on auth errors — the fallback shares the same credentials', () => {
+    expect(planFailover({ ...base, err: Object.assign(new Error('unauth'), { httpStatus: 401 }) })).toBeNull()
+    expect(planFailover({ ...base, err: Object.assign(new Error('forbidden'), { httpStatus: 403 }) })).toBeNull()
+  })
+
+  it('fails over on a non-retryable but non-auth failure (e.g. a 404 model-not-found)', () => {
+    // rateLimitRetryDelay would return null here, so retry is done — but a gone/misconfigured
+    // primary is exactly what a fallback model rescues.
+    const gone = Object.assign(new Error('model not found'), { httpStatus: 404 })
+    expect(planFailover({ ...base, err: gone })).toBe('claude-haiku-4-5')
   })
 })
 
@@ -1066,24 +1117,26 @@ describe('GatewayProvider — native function-calling (#15)', () => {
     res: Response,
     config: GatewayConfig,
     options?: CompletionOptions
-  ): Promise<{ text: string; toolCalls: NativeToolCall[]; done: boolean }> {
+  ): Promise<{ text: string; toolCalls: NativeToolCall[]; done: boolean; truncated: boolean }> {
     fetchMock.mockResolvedValue(res)
     const provider = new GatewayProvider(config)
     let text = ''
     const toolCalls: NativeToolCall[] = []
     let done = false
+    let truncated = false
     await provider.streamCompletion(
       'model-x',
       [{ role: 'user', content: 'weather in NYC?' }],
       (c) => {
         if (c.delta) text += c.delta
         if (c.toolCall) toolCalls.push(c.toolCall)
+        if (c.truncated) truncated = true
         if (c.done) done = true
       },
       undefined,
       options
     )
-    return { text, toolCalls, done }
+    return { text, toolCalls, done, truncated }
   }
   // __NATIVE_TESTS__
 
@@ -1201,5 +1254,72 @@ describe('GatewayProvider — native function-calling (#15)', () => {
       { tools: [weatherTool] }
     )
     expect(toolCalls).toEqual([{ id: 'toolu_2', name: 'get_weather', argsJson: '{"city":"SF"}' }])
+  })
+
+  // __TRUNCATION_TESTS__
+  // RC-2: the model's output-token limit must be surfaced as `truncated` on the terminal
+  // chunk so the agent loop can auto-continue instead of reading a cut-off answer as done.
+
+  it('flags an OpenAI stop on finish_reason:"length" as truncated (max output tokens)', async () => {
+    const { text, done, truncated } = await collect(
+      sseResponse([
+        sse({ choices: [{ delta: { content: 'Here is the first half of the file' } }] }),
+        sse({ choices: [{ delta: {}, finish_reason: 'length' }] }),
+        'data: [DONE]\n'
+      ]),
+      openAiConfig
+    )
+    expect(text).toBe('Here is the first half of the file')
+    expect(done).toBe(true)
+    expect(truncated).toBe(true)
+  })
+
+  it('does NOT flag a normal OpenAI stop (finish_reason:"stop") as truncated', async () => {
+    const { done, truncated } = await collect(
+      sseResponse([
+        sse({ choices: [{ delta: { content: 'All done.' } }] }),
+        sse({ choices: [{ delta: {}, finish_reason: 'stop' }] }),
+        'data: [DONE]\n'
+      ]),
+      openAiConfig
+    )
+    expect(done).toBe(true)
+    expect(truncated).toBe(false)
+  })
+
+  it('flags an Anthropic stop_reason:"max_tokens" as truncated', async () => {
+    const { text, done, truncated } = await collect(
+      streamedResponse(
+        [
+          sse({ type: 'message_start', message: { id: 'msg_2' } }),
+          sse({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+          sse({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Half a file' } }),
+          sse({ type: 'content_block_stop', index: 0 }),
+          sse({ type: 'message_delta', delta: { stop_reason: 'max_tokens' } }),
+          sse({ type: 'message_stop' })
+        ],
+        'text/event-stream'
+      ),
+      anthropicConfig
+    )
+    expect(text).toBe('Half a file')
+    expect(done).toBe(true)
+    expect(truncated).toBe(true)
+  })
+
+  it('does NOT flag a normal Anthropic stop_reason:"end_turn" as truncated', async () => {
+    const { done, truncated } = await collect(
+      streamedResponse(
+        [
+          sse({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Complete.' } }),
+          sse({ type: 'message_delta', delta: { stop_reason: 'end_turn' } }),
+          sse({ type: 'message_stop' })
+        ],
+        'text/event-stream'
+      ),
+      anthropicConfig
+    )
+    expect(done).toBe(true)
+    expect(truncated).toBe(false)
   })
 })

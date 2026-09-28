@@ -470,6 +470,14 @@ export interface ProviderSettings {
   modelName: string
   /** Actual identifier sent to the provider API. */
   modelId: string
+  /**
+   * Optional second model to fall over to when the primary model's request fails
+   * before emitting any output and its retries are exhausted (or the failure is
+   * non-retryable, e.g. the model is gone). Same provider/endpoint — this is "try
+   * my other model" on the gateway already configured, not a new connection. Empty
+   * (the default) disables failover. Never used mid-stream, so no token is replayed.
+   */
+  fallbackModel?: string
   /** UI preferences (theme). Persisted in the same settings file. */
   ui: UiSettings
   /** Tool-use preferences (web tools + code execution). */
@@ -722,6 +730,14 @@ export interface CompletionChunk {
    * turn (native tools off or unsupported by the backend).
    */
   toolCall?: NativeToolCall
+  /**
+   * True on the terminal chunk ({@link done}) when the model stopped because it hit its
+   * OUTPUT-token limit (OpenAI `finish_reason:"length"`, Anthropic `stop_reason:"max_tokens"`)
+   * — a cut-off mid-answer, not a finished reply. The main-process agentic loop reads this to
+   * auto-continue the truncated write (re-issue the cut-off call, instruct chunking) instead
+   * of mistaking the partial output for a completed turn. Absent on every non-truncated stop.
+   */
+  truncated?: boolean
 }
 
 /**
