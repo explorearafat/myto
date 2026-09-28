@@ -69,4 +69,21 @@ describe('syncSkills', () => {
     syncSkills([skill({ name: 'Alpha' })])
     expect(lookupTool('skill__alpha')!.sideEffect).toBeUndefined()
   })
+
+  it('merges file-discovered skills alongside settings skills', () => {
+    syncSkills([skill({ id: 's', name: 'Settings One' })], [skill({ id: 'file:disk', name: 'Disk One' })])
+    expect(extensionToolNames()).toEqual(
+      expect.arrayContaining(['skill__settings_one', 'skill__disk_one'])
+    )
+  })
+
+  it('lets a settings skill win a slug collision with a discovered one (even if disabled)', () => {
+    // Same slug "shared": the file must NOT shadow or re-enable the user's own skill.
+    syncSkills(
+      [skill({ id: 's', name: 'Shared', enabled: false, instructions: 'from settings' })],
+      [skill({ id: 'file:x', name: 'Shared', enabled: true, instructions: 'from disk' })]
+    )
+    // The user disabled it → no tool registered, and the disk copy did not sneak in.
+    expect(lookupTool('skill__shared')).toBeUndefined()
+  })
 })

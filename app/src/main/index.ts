@@ -17,6 +17,8 @@ import { registerScreenshotIpc } from './screenshot-ipc'
 import { registerScheduledTasksIpc } from './scheduled-tasks-ipc'
 import { registerTerminalIpc } from './terminal-ipc'
 import { syncSkills } from './skills/manager'
+import { discoverSkills } from './skills/discovery'
+import type { SkillConfig } from '../shared/types'
 import { closeDb, setDbPath } from './db/db'
 import { reconcileInterruptedRuns } from './db/sessions'
 import { setUserDataDir, getSettings, setSettingsSavedListener } from './settings'
@@ -98,6 +100,22 @@ function migrateLegacyUserData(): void {
   }
 }
 
+/**
+ * Discover file-based skills under `userData/skills` (best-effort). Returns the parsed
+ * skills and logs any that were skipped, so a malformed SKILL.md is visible in the log
+ * rather than silently missing. Never throws — a bad skills dir must not block startup.
+ */
+function loadFileSkills(): SkillConfig[] {
+  try {
+    const { skills, skipped } = discoverSkills(join(app.getPath('userData'), 'skills'))
+    for (const s of skipped) console.warn(`[myto] skill skipped (${s.reason}): ${s.path}`)
+    return skills
+  } catch (error) {
+    console.error('[myto] file-based skill discovery failed:', error)
+    return []
+  }
+}
+
 app.whenReady().then(() => {
   // Inject Electron's per-user paths here (not inside the modules) so the DB and
   // settings layers stay electron-free and unit-testable. Local-only, outside any
@@ -151,9 +169,12 @@ app.whenReady().then(() => {
   })
   applyTrayState(getSettings().background.keepAliveInTray)
 
-  // Register the enabled skills as tools up front (synchronous, cheap).
+  // Register the enabled skills as tools up front (synchronous, cheap). Merge in any
+  // file-based skills dropped under userData/skills (a folder with a SKILL.md, like
+  // Claude Code's skills dir); symlinks are never followed and malformed files are
+  // logged and skipped. Settings skills always win a slug collision.
   try {
-    syncSkills(getSettings().skills)
+    syncSkills(getSettings().skills, loadFileSkills())
   } catch (error) {
     console.error('[myto] skill sync failed:', error)
   }
@@ -163,7 +184,7 @@ app.whenReady().then(() => {
   // from the renderer because they surface async connection status.)
   setSettingsSavedListener((settings) => {
     try {
-      syncSkills(settings.skills)
+      syncSkills(settings.skills, loadFileSkills())
     } catch (error) {
       console.error('[myto] skill re-sync failed:', error)
     }

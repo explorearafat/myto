@@ -61,11 +61,18 @@ function wrapSkill(skill: SkillConfig): ToolDef {
  * Reconcile the registered `skill__*` tools against the enabled skills. Clears every
  * existing skill tool, then registers the enabled ones — so a rename, disable, or edit
  * is reflected without leaving a stale tool behind.
+ *
+ * `discovered` are file-based skills found on disk (see {@link ./discovery}). They are
+ * merged in AFTER the settings skills, and a discovered skill whose slug is already
+ * claimed by a settings skill is dropped — the user's own configuration always wins
+ * (including a deliberate disable), so a planted file can't shadow or re-enable it.
  */
-export function syncSkills(skills: SkillConfig[]): void {
+export function syncSkills(skills: SkillConfig[], discovered: SkillConfig[] = []): void {
   const stale = extensionToolNames().filter((n) => n.startsWith(SKILL_PREFIX))
   if (stale.length) unregisterExtensionTools(stale)
-  for (const skill of skills) {
+  const claimed = new Set(skills.map((s) => skillSlug(s.name)))
+  const merged = [...skills, ...discovered.filter((d) => !claimed.has(skillSlug(d.name)))]
+  for (const skill of merged) {
     if (skill.enabled) registerExtensionTool(wrapSkill(skill))
   }
 }
