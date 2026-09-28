@@ -237,15 +237,17 @@ export const runCodeTool: ToolDef = {
   description: 'Execute a snippet of python, JavaScript (node), or bash on this machine and return its output.',
   usage: '{"language": "python", "code": "print(2 + 2)"}',
   sideEffect: 'exec',
-  // Available when the user opted into code execution, OR in Cowork mode — where
-  // running code is how the agent produces generated artifacts (a PDF, an image),
-  // and the permission system (approvals.ts) gates each run rather than a toggle.
-  available: (gate) => gate.settings.tools.codeExecution || gate.mode === 'cowork',
+  // Available when the user opted into code execution, OR in an agentic mode (Cowork /
+  // Research) — where running code is how the agent produces generated artifacts (a PDF,
+  // an image) and the permission system (approvals.ts) gates each run rather than a toggle.
+  available: (gate) =>
+    gate.settings.tools.codeExecution || gate.mode === 'cowork' || gate.mode === 'research',
   async run(input, ctx) {
-    // Belt-and-braces: allowed when the toggle is on or we're in Cowork; never
+    // Belt-and-braces: allowed when the toggle is on or we're in an agentic mode; never
     // trust that a call couldn't arrive anyway (stale prompt, replayed turn).
-    if (!ctx.settings.tools.codeExecution && ctx.mode !== 'cowork') {
-      return 'run_code is disabled. The user can turn it on in Settings › Tools › “Run code on this machine”, or use Cowork mode.'
+    const agenticMode = ctx.mode === 'cowork' || ctx.mode === 'research'
+    if (!ctx.settings.tools.codeExecution && !agenticMode) {
+      return 'run_code is disabled. The user can turn it on in Settings › Tools › “Run code on this machine”, or use Cowork/Research mode.'
     }
     const { language, code } = readCodeInput(input)
     if (!language || !code) {
@@ -253,9 +255,9 @@ export const runCodeTool: ToolDef = {
     }
     const spec = resolveInterpreter(language)
     if (!spec) return `run_code does not support "${language}". Use python, javascript, or bash.`
-    // In Cowork, run inside the working folder so generated files land there, and
-    // give the snippet a longer ceiling — it's producing real deliverables.
-    const inCowork = ctx.mode === 'cowork'
+    // In an agentic mode, run inside the working folder so generated files land there,
+    // and give the snippet a longer ceiling — it's producing real deliverables.
+    const inCowork = agenticMode
     const cwd = inCowork && ctx.workspaceDir ? ctx.workspaceDir : undefined
     const timeoutMs = inCowork ? COWORK_RUN_TIMEOUT_MS : RUN_TIMEOUT_MS
     return formatRunResult(language, await executeCode(spec, code, ctx.signal, cwd, timeoutMs), timeoutMs)

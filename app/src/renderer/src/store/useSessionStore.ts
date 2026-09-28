@@ -210,9 +210,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   create: async () => {
     // New chats are filed under the project the rail is scoped to (or none), and
-    // fixed to the mode the composer's Chat/Cowork toggle is currently on — a
-    // session never mixes the two, so the mode is captured once here at creation.
-    const mode = useChatStore.getState().coworkMode ? 'cowork' : 'chat'
+    // fixed to the mode the composer is currently on ('chat' | 'cowork' | 'research')
+    // — a session never mixes modes, so the mode is captured once here at creation.
+    const mode = useChatStore.getState().draftMode
     const summary = await window.myto.sessions.create(get().activeProjectId, mode)
     useChatStore.getState().resetTo(summary.id, summary.projectId)
     set({ activeSessionId: summary.id })

@@ -82,6 +82,14 @@ export interface ToolCallParser {
    * trailing prose.
    */
   readonly holdingBlock: boolean
+  /**
+   * The tool name of the block currently held open ({@link holdingBlock}), parsed
+   * cheaply from the buffered opener, or null when no block is open yet or its name
+   * has not streamed in. Lets the reply loop label a long in-progress write with a
+   * live "Writing…" heartbeat while the block streams (it releases no visible text
+   * until its closing fence, which would otherwise read as a stall).
+   */
+  readonly holdingToolName: string | null
 }
 
 /**
@@ -119,30 +127,54 @@ export function parseToolCall(block: string): { name: string | null; input: unkn
   return parseToolBody(lines.slice(1, end).join('\n'))
 }
 
-/** Index of the first line in `s` that begins with `marker`, or -1. */
-function lineStartIndexOf(s: string, marker: string): number {
-  if (s.startsWith(marker)) return 0
-  let from = 0
-  for (;;) {
-    const nl = s.indexOf('\n', from)
-    if (nl === -1) return -1
-    if (s.startsWith(marker, nl + 1)) return nl + 1
-    from = nl + 1
+/**
+ * True when the char that would follow the marker terminates the info line — a fence
+ * carries no payload on the opener line, so a real tool fence is `` ```myto:tool `` then
+ * whitespace or a line break. `undefined` (end of buffer) is deliberately NOT a
+ * terminator: the next delta could turn `` ```myto:tool `` into `` ```myto:tool_result ``
+ * (the RESULT wrapper), so an unterminated marker is left for {@link heldToolPrefix}.
+ */
+function isMarkerTerminator(ch: string | undefined): boolean {
+  return ch === '\n' || ch === '\r' || ch === ' ' || ch === '\t'
+}
+
+/**
+ * Index of the first EXACT opening tool fence in `s`, or -1. The fence is matched
+ * anywhere on a line — a model may glue it to the prose before it
+ * (`…fill the fields reliably.```myto:tool`) instead of breaking a line first — but it
+ * must be its OWN three-backtick run terminated right after the marker: both a 4+
+ * backtick fence and the `` ```myto:tool_result `` RESULT wrapper contain `` ```myto:tool ``
+ * as a substring yet are NOT calls, so a run whose backticks extend past three, or a
+ * marker followed by a word char, is rejected.
+ */
+function findMarker(s: string): number {
+  for (let from = 0; ; ) {
+    const i = s.indexOf(MARKER, from)
+    if (i === -1) return -1
+    const prevOk = i === 0 || s[i - 1] !== '`'
+    if (prevOk && isMarkerTerminator(s[i + MARKER.length])) return i
+    from = i + 1
   }
 }
 
 /**
- * Length of the trailing suffix of `s` that is a nonempty proper prefix of
- * {@link MARKER} sitting at a line start — i.e. text that could still grow into an
- * opening fence on the next delta, so it must be held back rather than shown. A
- * closing ```` ``` ```` fence of some other block matches too and is simply
- * released a tick later, exactly like the status stripper's held `<`.
+ * Length of the trailing suffix of `s` that could still grow into an opening fence on
+ * the next delta and so must be held back rather than shown: a nonempty prefix of
+ * {@link MARKER}, or the whole marker whose terminator has not arrived yet (it might
+ * become `` ```myto:tool_result ``). The fence is matched ANYWHERE, not only at a line
+ * start, because weak models routinely glue it to the prose before it; holding the
+ * partial suffix keeps a fence split across deltas at the backtick boundary intact. A
+ * run whose backticks continue to the left is a 4+ backtick fence that can never open a
+ * call, so it is not held. Anything held is released a tick later once disambiguated,
+ * exactly like the status stripper's held `<`.
  */
 function heldToolPrefix(s: string): number {
-  const nl = s.lastIndexOf('\n')
-  const lastLine = nl === -1 ? s : s.slice(nl + 1)
-  if (lastLine.length > 0 && lastLine.length < MARKER.length && MARKER.startsWith(lastLine)) {
-    return lastLine.length
+  const max = Math.min(s.length, MARKER.length)
+  for (let k = max; k > 0; k--) {
+    if (!s.endsWith(MARKER.slice(0, k))) continue
+    const before = s.length - k - 1
+    // Reject when the leading backticks are the tail of a longer run (a 4+ fence).
+    return before < 0 || s[before] !== '`' ? k : 0
   }
   return 0
 }
@@ -290,7 +322,11 @@ export function createToolCallParser(): ToolCallParser {
 
       for (;;) {
         if (!inTool && !inInvoke) {
-          const fenceIdx = lineStartIndexOf(buffer, MARKER)
+          // Match the fence anywhere — a model may glue it to the end of a prose line
+          // (`…reliably.```myto:tool`) rather than start a fresh line; the prose before
+          // it is released as text below. findMarker rejects the ```myto:tool_result
+          // wrapper and 4+ backtick fences that merely contain the marker.
+          const fenceIdx = findMarker(buffer)
           const invMatch = INVOKE_OPEN.exec(buffer)
           const invIdx = invMatch ? invMatch.index : -1
 
@@ -345,6 +381,17 @@ export function createToolCallParser(): ToolCallParser {
     },
     get holdingBlock(): boolean {
       return inTool || inInvoke
+    },
+    get holdingToolName(): string | null {
+      if (inInvoke) {
+        const m = /<\s*(?:antml[:.]?)?invoke\b[^>]*?\bname\s*=\s*["']([^"']+)["']/i.exec(buffer)
+        return m ? m[1].trim() : null
+      }
+      if (inTool) {
+        const m = /"tool"\s*:\s*"([^"]+)"/.exec(buffer)
+        return m ? m[1].trim() : null
+      }
+      return null
     }
   }
 }

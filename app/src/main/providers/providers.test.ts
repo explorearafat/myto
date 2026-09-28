@@ -13,7 +13,7 @@ import {
 import { modelInfo } from '@main/providers/provider'
 import { OllamaProvider } from '@main/providers/ollama'
 import { GatewayProvider } from '@main/providers/gateway'
-import { pickAdapter, openAiAdapter, anthropicAdapter } from '@main/providers/adapters'
+import { pickAdapter, looksLikeClaudeModel, openAiAdapter, anthropicAdapter } from '@main/providers/adapters'
 import type { CompletionOptions, GatewayConfig, NativeToolCall } from '@shared/types'
 
 describe('http helpers', () => {
@@ -522,6 +522,47 @@ describe('GatewayProvider', () => {
     expect(done).toBe(true)
   })
 
+  it('routes DeepSeek reasoning_content to reasoning, never into the reply text', async () => {
+    // The exact bug the user hit: DeepSeek-class reasoners stream chain-of-thought in
+    // `delta.reasoning_content` (not `delta.reasoning`), which the parser ignored — so
+    // the thinking block showed "0 tokens" and an empty expand. It must surface as
+    // reasoning, out-of-band from the reply text.
+    fetchMock.mockResolvedValue(
+      sseResponse([
+        'data: {"choices":[{"delta":{"reasoning_content":"weighing "}}]}\n',
+        'data: {"choices":[{"delta":{"reasoning_content":"the options"}}]}\n',
+        'data: {"choices":[{"delta":{"content":"Answer."}}]}\n',
+        'data: [DONE]\n'
+      ])
+    )
+    const provider = new GatewayProvider(baseConfig)
+    let text = ''
+    let reasoning = ''
+    await provider.streamCompletion('deepseek-reasoner', [{ role: 'user', content: 'hi' }], (c) => {
+      if (c.delta) text += c.delta
+      if (c.reasoning) reasoning += c.reasoning
+    })
+    expect(reasoning).toBe('weighing the options')
+    expect(text).toBe('Answer.')
+  })
+
+  it('still honours the legacy `reasoning` field and tolerates an object-shaped value', async () => {
+    // OpenRouter and some proxies use `reasoning`; a few wrap it as `{text}`/`{content}`.
+    fetchMock.mockResolvedValue(
+      sseResponse([
+        'data: {"choices":[{"delta":{"reasoning":"plain "}}]}\n',
+        'data: {"choices":[{"delta":{"reasoning":{"text":"wrapped"}}}]}\n',
+        'data: [DONE]\n'
+      ])
+    )
+    const provider = new GatewayProvider(baseConfig)
+    let reasoning = ''
+    await provider.streamCompletion('some-reasoner', [{ role: 'user', content: 'hi' }], (c) => {
+      if (c.reasoning) reasoning += c.reasoning
+    })
+    expect(reasoning).toBe('plain wrapped')
+  })
+
   it('sends reasoning_effort and drops temperature when an effort is requested', async () => {
     // Anthropic-backed proxies reject a custom temperature while extended thinking
     // is on, so effort and temperature must never ride together on the wire.
@@ -661,9 +702,55 @@ describe('pickAdapter', () => {
     expect(pickAdapter('https://proxy.example.com/v1/messages')).toBe(anthropicAdapter)
   })
 
+  it('selects Anthropic for a third-party Claude proxy pointed at the messages endpoint', () => {
+    // The user's case: a Claude reseller on an ordinary host whose Cloudflare only
+    // allows the Anthropic path. Pointing the base URL at the messages endpoint —
+    // with the /v1 prefix or without — forces the Anthropic adapter instead of the
+    // OpenAI default the bare host would get.
+    expect(pickAdapter('https://api.justwoker.icu/v1/messages')).toBe(anthropicAdapter)
+    expect(pickAdapter('https://api.justwoker.icu/messages')).toBe(anthropicAdapter)
+    // The bare host alone, with no model to go on, is still ambiguous → OpenAI default.
+    expect(pickAdapter('https://api.justwoker.icu/v1')).toBe(openAiAdapter)
+  })
+
+  it('routes a bare claude-* model to Anthropic on a plain /v1 base (zero-config)', () => {
+    // The real fix for the user: their saved base URL is a plain `/v1` (or bare host)
+    // and the model is `claude-opus-4-8`. The model id alone selects Anthropic, so the
+    // request goes to /v1/messages (200) instead of /chat/completions (Cloudflare 403) —
+    // no need to hand-edit the URL to the /v1/messages escape hatch.
+    expect(pickAdapter('https://api.justwoker.icu/v1', 'claude-opus-4-8')).toBe(anthropicAdapter)
+    expect(pickAdapter('https://api.justwoker.icu', 'claude-3-5-sonnet-20241022')).toBe(anthropicAdapter)
+    expect(pickAdapter('https://api.justwoker.icu/v1/', 'claude-3.5-haiku')).toBe(anthropicAdapter)
+    // A non-Claude model on the same ambiguous host stays OpenAI-compatible.
+    expect(pickAdapter('https://api.justwoker.icu/v1', 'gpt-4o')).toBe(openAiAdapter)
+    expect(pickAdapter('https://api.justwoker.icu/v1', 'deepseek-chat')).toBe(openAiAdapter)
+    // OpenRouter keeps its vendor prefix on Claude models → OpenAI-compatible (correct).
+    expect(pickAdapter('https://openrouter.ai/api/v1', 'anthropic/claude-3.5-sonnet')).toBe(openAiAdapter)
+  })
+
+  it('lets the explicit anthropic host win regardless of model', () => {
+    expect(pickAdapter('https://api.anthropic.com/v1', 'gpt-4o')).toBe(anthropicAdapter)
+  })
+
   it('defaults to OpenAI for an empty or unparseable base URL', () => {
     expect(pickAdapter('')).toBe(openAiAdapter)
     expect(pickAdapter('not a url')).toBe(openAiAdapter)
+  })
+})
+
+describe('looksLikeClaudeModel', () => {
+  it('matches a bare claude-* id and rejects vendor-prefixed or non-Claude ids', () => {
+    expect(looksLikeClaudeModel('claude-opus-4-8')).toBe(true)
+    expect(looksLikeClaudeModel('claude-3-5-sonnet-20241022')).toBe(true)
+    expect(looksLikeClaudeModel('claude.3.5')).toBe(true)
+    expect(looksLikeClaudeModel('Claude-Opus')).toBe(true) // case-insensitive
+    expect(looksLikeClaudeModel('  claude-opus-4-8  ')).toBe(true) // trimmed
+    expect(looksLikeClaudeModel('anthropic/claude-3.5-sonnet')).toBe(false) // OpenRouter
+    expect(looksLikeClaudeModel('gpt-4o')).toBe(false)
+    expect(looksLikeClaudeModel('claudexyz')).toBe(false) // needs a separator after "claude"
+    expect(looksLikeClaudeModel('')).toBe(false)
+    expect(looksLikeClaudeModel(undefined)).toBe(false)
+    expect(looksLikeClaudeModel(null)).toBe(false)
   })
 })
 
@@ -733,6 +820,72 @@ describe('GatewayProvider — Anthropic endpoint (auto-detected)', () => {
     const provider = new GatewayProvider({ ...anthropicConfig, baseUrl: 'https://api.anthropic.com/v1' })
     await provider.streamCompletion('claude-3-5-sonnet-20241022', [{ role: 'user', content: 'hi' }], () => {})
     expect(fetchMock.mock.calls[0][0]).toBe('https://api.anthropic.com/v1/messages')
+  })
+
+  it('does not double the path when the base already spells out /v1/messages', async () => {
+    // The escape hatch a user sets on a third-party Claude proxy: the base URL points
+    // straight at the messages endpoint. It must POST there verbatim, not to
+    // …/v1/messages/v1/messages, and list models from the sibling …/v1/models.
+    fetchMock.mockResolvedValue(anthropicSse('ok'))
+    const provider = new GatewayProvider({ ...anthropicConfig, baseUrl: 'https://api.justwoker.icu/v1/messages' })
+    await provider.streamCompletion('claude-opus-4-8', [{ role: 'user', content: 'hi' }], () => {})
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.justwoker.icu/v1/messages')
+
+    fetchMock.mockResolvedValue(jsonResponse({ data: [{ id: 'claude-opus-4-8' }] }))
+    await provider.listModels()
+    expect(fetchMock.mock.calls[1][0]).toBe('https://api.justwoker.icu/v1/models')
+  })
+
+  it('sends a User-Agent so a UA-less request is not taken for a bot', async () => {
+    // Node's fetch sends no UA by default; a Cloudflare-fronted proxy then answers an
+    // HTML 403. Every provider request must carry a real UA (see http.ts PROVIDER_UA).
+    fetchMock.mockResolvedValue(anthropicSse('ok'))
+    const provider = new GatewayProvider(anthropicConfig)
+    await provider.streamCompletion('claude-3-5-sonnet-20241022', [{ role: 'user', content: 'hi' }], () => {})
+    const headers = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<string, string>
+    expect(headers['User-Agent']).toMatch(/mozilla/i)
+  })
+
+  it('zero-config: a claude-* model on a plain /v1 base POSTs to /v1/messages with x-api-key', async () => {
+    // The user's exact setup: base URL a bare `…/v1` on an ordinary host (auto-detects
+    // as OpenAI by URL alone) + model `claude-opus-4-8`. The model id must flip the
+    // request onto the Anthropic path — /v1/messages with the dual headers, no bearer —
+    // so it hits the endpoint's working path (200) instead of /chat/completions (CF 403).
+    const proxyBearerConfig: GatewayConfig = {
+      baseUrl: 'https://api.justwoker.icu/v1',
+      apiKey: 'sk-proxy-key',
+      authSchema: 'bearer',
+      authHeaderName: 'Authorization'
+    }
+    fetchMock.mockResolvedValue(anthropicSse('ok'))
+    const provider = new GatewayProvider(proxyBearerConfig)
+    await provider.streamCompletion('claude-opus-4-8', [{ role: 'user', content: 'hi' }], () => {})
+
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.justwoker.icu/v1/messages')
+    const headers = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<string, string>
+    expect(headers['x-api-key']).toBe('sk-proxy-key')
+    expect(headers['anthropic-version']).toBe('2023-06-01')
+    expect(headers.Authorization).toBeUndefined()
+  })
+
+  it('keeps a non-Claude model on the same plain /v1 base on the OpenAI path', async () => {
+    // The other side of the model signal: a plain host + a gpt/deepseek model must NOT
+    // be dragged onto the Anthropic path — it stays /chat/completions with the bearer.
+    const proxyBearerConfig: GatewayConfig = {
+      baseUrl: 'https://api.justwoker.icu/v1',
+      apiKey: 'sk-proxy-key',
+      authSchema: 'bearer',
+      authHeaderName: 'Authorization'
+    }
+    fetchMock.mockResolvedValue(
+      streamedResponse(['data: {"choices":[{"delta":{"content":"ok"}}]}\n', 'data: [DONE]\n'], 'text/event-stream')
+    )
+    const provider = new GatewayProvider(proxyBearerConfig)
+    await provider.streamCompletion('gpt-4o', [{ role: 'user', content: 'hi' }], () => {})
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.justwoker.icu/v1/chat/completions')
+    const headers = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<string, string>
+    expect(headers.Authorization).toBe('Bearer sk-proxy-key')
+    expect(headers['x-api-key']).toBeUndefined()
   })
 
   it('hoists system turns to a top-level system string and defaults max_tokens', async () => {

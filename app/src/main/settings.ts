@@ -125,7 +125,7 @@ function readJsonFile<T>(path: string): T | undefined {
 const VALID_PROVIDERS: ProviderKind[] = ['ollama', 'gateway']
 const VALID_SCHEMAS: AuthSchema[] = ['none', 'bearer', 'header']
 const VALID_THEMES: Theme[] = ['light', 'dark']
-const VALID_MODES: ChatMode[] = ['chat', 'cowork']
+const VALID_MODES: ChatMode[] = ['chat', 'cowork', 'research']
 const VALID_PERMISSION_MODES: CoworkPermissionMode[] = ['ask', 'autoApprove', 'bypass']
 const VALID_TRANSPORTS: McpTransport[] = ['stdio', 'http', 'sse']
 const VALID_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'max']
@@ -231,6 +231,7 @@ export function normalise(raw: unknown): ProviderSettings {
   const tools = (o.tools ?? {}) as Partial<ProviderSettings['tools']>
   const cowork = (o.cowork ?? {}) as Partial<ProviderSettings['cowork']>
   const coworkHooks = (cowork.hooks ?? {}) as Partial<ProviderSettings['cowork']['hooks']>
+  const background = (o.background ?? {}) as Partial<ProviderSettings['background']>
 
   const activeProvider =
     o.activeProvider && VALID_PROVIDERS.includes(o.activeProvider)
@@ -309,7 +310,27 @@ export function normalise(raw: unknown): ProviderSettings {
     outputStyle: VALID_OUTPUT_STYLES.includes(o.outputStyle as OutputStyle)
       ? (o.outputStyle as OutputStyle)
       : d.outputStyle,
-    nativeTools: typeof o.nativeTools === 'boolean' ? o.nativeTools : d.nativeTools
+    nativeTools: typeof o.nativeTools === 'boolean' ? o.nativeTools : d.nativeTools,
+    // Research surface: keep any non-empty persisted agent id verbatim (validity is
+    // checked at run time by resolveResearchAgent, which falls back to the default),
+    // so a catalog that gains/renames agents never strands a saved choice here.
+    researchAgentId:
+      typeof o.researchAgentId === 'string' && o.researchAgentId.trim()
+        ? o.researchAgentId.trim()
+        : d.researchAgentId,
+    // Background autonomy: both flags coalesce to false unless explicitly a boolean
+    // true, so any old/partial settings file keeps the app's normal "quit on last
+    // window" lifecycle. See BackgroundSettings for the safety scope.
+    background: {
+      keepAliveInTray:
+        typeof background.keepAliveInTray === 'boolean'
+          ? background.keepAliveInTray
+          : d.background.keepAliveInTray,
+      inboxEvery10min:
+        typeof background.inboxEvery10min === 'boolean'
+          ? background.inboxEvery10min
+          : d.background.inboxEvery10min
+    }
   }
 }
 

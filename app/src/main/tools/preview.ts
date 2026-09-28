@@ -25,9 +25,9 @@ import type { ToolDef, ToolGate } from './registry'
  * loop forwards to the renderer as a preview chunk.
  */
 
-/** Available in Cowork (a URL preview needs no folder; a file preview checks for one at run time). */
+/** Available in the agentic modes (Cowork and Research); a file preview checks for a root at run time. */
 function previewAvailable(gate: ToolGate): boolean {
-  return gate.mode === 'cowork'
+  return gate.mode === 'cowork' || gate.mode === 'research'
 }
 
 /** Read a trimmed string field out of a tool input, or null. */

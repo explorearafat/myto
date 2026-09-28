@@ -41,9 +41,18 @@ export function resolveInWorkspace(workspaceDir: string, rel: string): string | 
   return target
 }
 
-/** Cowork + a chosen working folder: the precondition for every filesystem tool. */
+/**
+ * The filesystem tools' precondition: an agentic mode (Cowork or Research) plus a
+ * root to work in. Cowork's root is the user's chosen folder; Research's is set by
+ * the loop to the user's home directory (broad, permission-gated access — the mandate's
+ * "reach any folder"). `resolveInWorkspace` still confines every path under that root.
+ */
 export function fsAvailable(gate: ToolGate): boolean {
-  return gate.mode === 'cowork' && typeof gate.workspaceDir === 'string' && gate.workspaceDir.trim().length > 0
+  return (
+    (gate.mode === 'cowork' || gate.mode === 'research') &&
+    typeof gate.workspaceDir === 'string' &&
+    gate.workspaceDir.trim().length > 0
+  )
 }
 
 /** Read a non-empty `path` string out of a tool input, or null. */

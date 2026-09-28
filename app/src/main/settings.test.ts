@@ -237,6 +237,34 @@ describe('normalise — output style + native tools', () => {
   })
 })
 
+describe('normalise — background autonomy', () => {
+  it('defaults both flags to off when the block is absent', () => {
+    const bg = normalise({}).background
+    expect(bg.keepAliveInTray).toBe(false)
+    expect(bg.inboxEvery10min).toBe(false)
+  })
+
+  it('keeps a boolean keepAliveInTray and ignores a non-boolean', () => {
+    expect(normalise({ background: { keepAliveInTray: true } }).background.keepAliveInTray).toBe(true)
+    expect(normalise({ background: { keepAliveInTray: 'yes' } }).background.keepAliveInTray).toBe(
+      false
+    )
+  })
+
+  it('keeps a boolean inboxEvery10min and ignores a non-boolean', () => {
+    expect(normalise({ background: { inboxEvery10min: true } }).background.inboxEvery10min).toBe(
+      true
+    )
+    expect(normalise({ background: { inboxEvery10min: 1 } }).background.inboxEvery10min).toBe(false)
+  })
+
+  it('a partial block leaves the other flag at its default', () => {
+    const bg = normalise({ background: { keepAliveInTray: true } }).background
+    expect(bg.keepAliveInTray).toBe(true)
+    expect(bg.inboxEvery10min).toBe(false)
+  })
+})
+
 // The on-disk round-trip through the stubbed userData path: a save normalises and
 // persists, and a fresh read (cache cleared) returns exactly the saved shape.
 describe('saveSettings / getSettings round-trip', () => {

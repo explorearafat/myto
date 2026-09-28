@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   pickWebAdapter,
+  looksLikeClaudeModel,
   openAiWebAdapter,
   anthropicWebAdapter,
   type WebWireAdapter,
@@ -31,10 +32,49 @@ describe('pickWebAdapter', () => {
     expect(pickWebAdapter('https://proxy.example.com/v1/messages')).toBe(anthropicWebAdapter);
   });
 
+  it('selects Anthropic for a third-party Claude proxy pointed at the messages endpoint', () => {
+    // The escape hatch for a Claude proxy on an ordinary host: point the base URL at
+    // /v1/messages (or a bare /messages) to force the Anthropic wire format.
+    expect(pickWebAdapter('https://api.justwoker.icu/v1/messages')).toBe(anthropicWebAdapter);
+    expect(pickWebAdapter('https://api.justwoker.icu/messages')).toBe(anthropicWebAdapter);
+    expect(pickWebAdapter('https://api.justwoker.icu/v1/messages/')).toBe(anthropicWebAdapter);
+    // …but a bare host or a plain /v1 stays OpenAI-compatible (ambiguous → the common case).
+    expect(pickWebAdapter('https://api.justwoker.icu/v1')).toBe(openAiWebAdapter);
+  });
+
   it('keeps OpenAI for ordinary hosts and an unparseable URL', () => {
     expect(pickWebAdapter('https://api.openai.com/v1')).toBe(openAiWebAdapter);
     expect(pickWebAdapter('https://myproxy.dev/anthropic')).toBe(openAiWebAdapter);
     expect(pickWebAdapter('not a url')).toBe(openAiWebAdapter);
+  });
+
+  it('routes a bare claude-* model to Anthropic on a plain /v1 base (zero-config)', () => {
+    // The real fix: the user's saved base URL is a plain `/v1` (or bare host) and the
+    // model is `claude-opus-4-8`. The model id alone selects Anthropic, so chat POSTs to
+    // /v1/messages (200) not /chat/completions (Cloudflare 403) — no URL editing needed.
+    expect(pickWebAdapter('https://api.justwoker.icu/v1', 'claude-opus-4-8')).toBe(anthropicWebAdapter);
+    expect(pickWebAdapter('https://api.justwoker.icu', 'claude-3-5-sonnet-20241022')).toBe(anthropicWebAdapter);
+    // A non-Claude model on the same ambiguous host stays OpenAI-compatible.
+    expect(pickWebAdapter('https://api.justwoker.icu/v1', 'gpt-4o')).toBe(openAiWebAdapter);
+    // OpenRouter keeps its vendor prefix on Claude models → OpenAI-compatible (correct).
+    expect(pickWebAdapter('https://openrouter.ai/api/v1', 'anthropic/claude-3.5-sonnet')).toBe(openAiWebAdapter);
+    // No model → the bare host stays the OpenAI default.
+    expect(pickWebAdapter('https://api.justwoker.icu/v1')).toBe(openAiWebAdapter);
+  });
+});
+
+describe('looksLikeClaudeModel', () => {
+  it('matches a bare claude-* id and rejects vendor-prefixed or non-Claude ids', () => {
+    expect(looksLikeClaudeModel('claude-opus-4-8')).toBe(true);
+    expect(looksLikeClaudeModel('claude-3-5-sonnet-20241022')).toBe(true);
+    expect(looksLikeClaudeModel('Claude-Opus')).toBe(true);
+    expect(looksLikeClaudeModel('  claude-opus-4-8  ')).toBe(true);
+    expect(looksLikeClaudeModel('anthropic/claude-3.5-sonnet')).toBe(false);
+    expect(looksLikeClaudeModel('gpt-4o')).toBe(false);
+    expect(looksLikeClaudeModel('claudexyz')).toBe(false);
+    expect(looksLikeClaudeModel('')).toBe(false);
+    expect(looksLikeClaudeModel(undefined)).toBe(false);
+    expect(looksLikeClaudeModel(null)).toBe(false);
   });
 });
 
@@ -81,6 +121,12 @@ describe('anthropicWebAdapter', () => {
   it('joins the messages path without doubling /v1', () => {
     expect(a.upstreamUrl('https://api.anthropic.com')).toBe('https://api.anthropic.com/v1/messages');
     expect(a.upstreamUrl('https://api.anthropic.com/v1')).toBe('https://api.anthropic.com/v1/messages');
+    // A proxy base already spelling out the endpoint must not double the path.
+    expect(a.upstreamUrl('https://api.justwoker.icu/v1/messages')).toBe('https://api.justwoker.icu/v1/messages');
+    expect(a.upstreamUrl('https://api.justwoker.icu/messages')).toBe('https://api.justwoker.icu/v1/messages');
+    // …and the models endpoint collapses to the same single /v1 root.
+    expect(a.modelsUrl('https://api.justwoker.icu/v1/messages')).toBe('https://api.justwoker.icu/v1/models');
+    expect(a.modelsUrl('https://api.anthropic.com/v1')).toBe('https://api.anthropic.com/v1/models');
   });
 
   it('sends both required headers and never a bearer, whatever the schema says', () => {

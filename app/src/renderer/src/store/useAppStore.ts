@@ -116,6 +116,18 @@ export interface AppState {
   setOutputStyle: (style: OutputStyle) => Promise<void>
   /** Toggle native provider function-calling (#15) and persist. */
   setNativeTools: (on: boolean) => Promise<void>
+  /**
+   * Set the active Research agent (one of the 322 specialists in the catalog) and
+   * persist it. This is the persona Research mode adopts — its system prompt,
+   * identity line and status pill all derive from this id. Cowork ignores it.
+   */
+  setResearchAgentId: (id: string) => Promise<void>
+  /**
+   * Toggle background keep-alive: when on, closing the last window leaves Myto running
+   * in the system tray (scheduled tasks / in-flight runs survive) instead of quitting.
+   * OFF by default; the main process reconciles the tray on save. See BackgroundSettings.
+   */
+  setBackgroundKeepAlive: (on: boolean) => Promise<void>
 
   // ── Connectors (MCP) ──
   /** Live status of every configured connector, keyed by server id (main-process pushed). */
@@ -280,6 +292,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   setNativeTools: async (on) => {
     const { settings } = get()
     await get().saveSettings({ ...settings, nativeTools: on })
+  },
+
+  setResearchAgentId: async (id) => {
+    const { settings } = get()
+    await get().saveSettings({ ...settings, researchAgentId: id })
+  },
+
+  setBackgroundKeepAlive: async (on) => {
+    const { settings } = get()
+    await get().saveSettings({
+      ...settings,
+      background: { ...settings.background, keepAliveInTray: on }
+    })
   },
 
   saveConnector: async (config) => {

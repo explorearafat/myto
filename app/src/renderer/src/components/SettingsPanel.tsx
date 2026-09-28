@@ -247,6 +247,8 @@ function ToolsPane() {
   const setTerminalConsent = useAppStore((s) => s.setCoworkTerminalConsent)
   const browserTarget = useAppStore((s) => s.settings.cowork.browserTarget)
   const setBrowserTarget = useAppStore((s) => s.setCoworkBrowserTarget)
+  const keepAliveInTray = useAppStore((s) => s.settings.background.keepAliveInTray)
+  const setBackgroundKeepAlive = useAppStore((s) => s.setBackgroundKeepAlive)
   return (
     <div className="divide-y divide-border">
       <SettingRow
@@ -326,6 +328,17 @@ function ToolsPane() {
         >
           Open browser
         </button>
+      </SettingRow>
+      <SettingRow
+        title="Run in background"
+        description="Keep Myto running in the system tray after you close the window, so scheduled tasks and any task already in progress keep going. A tray icon (Show / Quit) appears while this is on; Quit exits fully. This does not relaunch Myto after you fully quit or restart your computer. Off by default."
+      >
+        <Segmented
+          ariaLabel="Run in background"
+          value={keepAliveInTray ? 'on' : 'off'}
+          options={ON_OFF}
+          onChange={(v) => void setBackgroundKeepAlive(v === 'on')}
+        />
       </SettingRow>
     </div>
   )

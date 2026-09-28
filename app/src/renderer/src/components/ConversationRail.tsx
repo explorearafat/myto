@@ -181,9 +181,9 @@ export function ConversationRail() {
   // The mode toggle above "New". A saved chat's mode is fixed, so it locks once
   // the open conversation has a row; a fresh draft (no id yet) stays switchable.
   const modeLocked = chatSessionId !== null
-  // Enabling Cowork no longer forces the native folder picker — Myto asks for a
-  // folder name at run start and creates it on the Desktop itself (see provider-ipc).
-  // The composer's folder chip stays as an optional override for an existing project.
+  // Enabling Cowork doesn't force the native folder picker here — the composer makes
+  // folder selection mandatory instead: a Cowork message can't be sent until the user
+  // picks a working folder (ChatPanel opens the picker on send if none is set).
   const enableCowork = (): void => {
     setCoworkMode(true)
   }
@@ -298,14 +298,35 @@ export function ConversationRail() {
                   opening it always restores that mode. Icon-only to stay quiet in the
                   narrow rail; the label rides the tooltip + aria-label. */}
               <span
-                title={s.mode === 'cowork' ? 'Cowork session' : 'Chat session'}
-                aria-label={s.mode === 'cowork' ? 'Cowork session' : 'Chat session'}
+                title={
+                  s.mode === 'cowork'
+                    ? 'Cowork session'
+                    : s.mode === 'research'
+                      ? 'Research session'
+                      : 'Chat session'
+                }
+                aria-label={
+                  s.mode === 'cowork'
+                    ? 'Cowork session'
+                    : s.mode === 'research'
+                      ? 'Research session'
+                      : 'Chat session'
+                }
                 className="grid shrink-0 place-items-center text-muted/70"
               >
                 {s.mode === 'cowork' ? (
                   <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <path
                       d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3L8 4.5h4.5A1.5 1.5 0 0 1 14 6v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12V4.5Z"
+                      stroke="currentColor"
+                      strokeWidth="1.3"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                ) : s.mode === 'research' ? (
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path
+                      d="M8 1.7l1.5 3.9 3.9 1.5-3.9 1.5L8 12.5 6.5 8.6 2.6 7.1l3.9-1.5L8 1.7Z"
                       stroke="currentColor"
                       strokeWidth="1.3"
                       strokeLinejoin="round"
@@ -379,7 +400,7 @@ export function ConversationRail() {
             title={
               modeLocked
                 ? "This chat's mode is fixed — start a new chat to switch"
-                : 'Chat — a normal conversation'
+                : 'Research — 300+ professional agents, browser & your files, no folder needed'
             }
             className={
               'flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-[12px] font-medium transition-colors disabled:cursor-not-allowed ' +
@@ -390,13 +411,14 @@ export function ConversationRail() {
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path
-                d="M2.5 4.5A1.5 1.5 0 0 1 4 3h8a1.5 1.5 0 0 1 1.5 1.5V10A1.5 1.5 0 0 1 12 11.5H6l-3 2.5V11.5H4A1.5 1.5 0 0 1 2.5 10V4.5Z"
+                d="M8 1.7l1.5 3.9 3.9 1.5-3.9 1.5L8 12.5 6.5 8.6 2.6 7.1l3.9-1.5L8 1.7Z"
                 stroke="currentColor"
                 strokeWidth="1.3"
                 strokeLinejoin="round"
               />
+              <circle cx="12.6" cy="12.6" r="1.4" stroke="currentColor" strokeWidth="1.2" />
             </svg>
-            Chat
+            Research
           </button>
           <button
             type="button"

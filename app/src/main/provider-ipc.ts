@@ -32,6 +32,7 @@ import {
   COWORK_SYSTEM_PROMPT,
   coworkBrowserPrompt,
   FILE_PROTOCOL_SYSTEM_PROMPT,
+  IDENTITY_SYSTEM_PROMPT,
   outputStylePrompt,
   PLAN_MODE_SYSTEM_PROMPT,
   STATUS_SYSTEM_PROMPT
@@ -42,11 +43,17 @@ import {
   looksLikeUnsavedCode,
   detectOscillation,
   looksLikeContinuationRequest,
+  looksLikeAnnouncedAction,
+  looksLikeFalseLimitDeferral,
+  looksLikeContentFreeReply,
   researchStallVerdict,
   RESEARCH_TOOLS,
   OSCILLATION_WINDOW,
   OSCILLATION_MAX,
-  MAX_AUTO_CONTINUE
+  MAX_AUTO_CONTINUE,
+  MAX_ANNOUNCED_ACTION,
+  MAX_FALSE_LIMIT_DEFERRAL,
+  MAX_EMPTY_START
 } from './cowork-guards'
 import { detectRuntimesCached, summarizeRuntimes } from './cowork-runtimes'
 import { browserToolsEnabled } from './cowork-browser'
@@ -55,11 +62,12 @@ import { renderDocumentPdf } from './cowork-docgen-runtime'
 import type { BrowserSession } from './cowork-browser-cdp'
 import { readUserMemory } from './user-memory'
 import { materializeAttachments, type MaterializedAttachment } from './cowork-attachments'
-import { ensureDefaultWorkspace, ensureWorkspaceOnDesktop, FALLBACK_WORKSPACE_NAME } from './cowork-workspace'
 import { insertFileSnapshot } from './db/snapshots'
 import { approvalDetail, requiresApproval } from './tools/approvals'
 import { createToolCallParser, toolCallBlock, toolResultBlock, type ToolCall } from './tools/toolParser'
 import { executeArgv, formatRunResult, resolveShell } from './tools/runCode'
+import { homedir } from 'node:os'
+import { resolveResearchAgent, buildAgentSystemPrompt, agentIdentityLine } from './agents/persona'
 
 /**
  * The browser tools that act on the page (click/type). They are always confirmed
@@ -80,6 +88,42 @@ const BROWSER_EXEC_TOOLS = new Set(['browser_click', 'browser_type'])
 const REASONING_CAPTION_MS = 300
 
 /**
+ * Cadence for the "still receiving" heartbeat emitted while a tool-call block streams
+ * in but releases no visible text yet (see {@link createToolCallParser} — the parser
+ * holds the whole block until its closing fence). A big `write_file` can take minutes,
+ * during which the token stream is alive (so the main-process stall guard,
+ * `providers/http.ts` STREAM_STALL_MS, never fires) yet the renderer gets no delta —
+ * so without this its liveness clock freezes and falsely reads "no new output … the
+ * model may have stalled". A ~1s status ping (well under the renderer's 15s
+ * STALL_WARN_MS) keeps the run honestly "alive" and shows the file growing live.
+ */
+const HELD_BLOCK_HEARTBEAT_MS = 1000
+
+/**
+ * A short present-tense label for a tool whose call block is still streaming in, used
+ * only by the held-block heartbeat (see {@link HELD_BLOCK_HEARTBEAT_MS}) while the
+ * block is buffered and no card exists yet. Falls back to a generic "Receiving the
+ * response" when the tool name has not streamed in or is unknown.
+ */
+function streamingToolLabel(name: string | null): string {
+  switch (name) {
+    case 'write_file':
+      return 'Writing the file'
+    case 'edit_file':
+      return 'Editing the file'
+    case 'create_document':
+      return 'Creating the document'
+    case 'run_command':
+    case 'run_code':
+      return 'Preparing the command'
+    case 'update_plan':
+      return 'Updating the plan'
+    default:
+      return 'Receiving the response'
+  }
+}
+
+/**
  * Hard ceiling on tool round-trips in one reply. Each turn is a full model
  * generation, so this bounds cost and latency and — more importantly — guarantees
  * the agentic loop always terminates even if the model keeps asking for tools. On
@@ -91,17 +135,17 @@ const MAX_TOOL_TURNS = 6
 /**
  * The tool-round ceiling in Cowork mode. Real agentic work — scaffold a project,
  * read and write many files, install deps, run and fix a build — routinely needs
- * dozens of round-trips, so a small cap made Cowork give up before it could finish
- * anything substantial. The ask was "effectively infinite steps to build a project",
- * so this is now a very high HARD ceiling that only trips a genuinely runaway loop;
- * real work terminates long before it via the model deciding it's done. Two things
- * keep an unbounded loop safe: in-loop context compaction (below) stops the message
- * history growing without limit as turns pile up, and the stall guards
- * ({@link MAX_REPEAT_CALLS} / {@link MAX_EXPLORE_WITHOUT_BUILD}) end the loop early
- * when the model stops making progress. The final turn still withholds tools so the
- * reply never ends mid-loop.
+ * dozens of round-trips, and the user's explicit ask was to remove any per-run cap and
+ * "give infinite steps to build a project". So there is NO fixed ceiling: the loop runs
+ * until the model decides it is done (a no-tool-call turn that clears the stall guards)
+ * or a stall guard ends it. Three things keep an unbounded loop safe: in-loop context
+ * compaction (below) stops the message history growing without limit as turns pile up;
+ * the stall guards ({@link MAX_REPEAT_CALLS} / {@link MAX_EXPLORE_WITHOUT_BUILD} /
+ * {@link detectOscillation} / {@link researchStallVerdict}) end a loop that stops making
+ * progress; and the user can Stop the run at any time. If a guard does break the loop,
+ * the final turn still withholds tools so the reply never ends mid-loop.
  */
-const MAX_TOOL_TURNS_COWORK = 1000
+const MAX_TOOL_TURNS_COWORK = Number.POSITIVE_INFINITY
 
 /**
  * When the running message history (system prompts + the growing tool round-trips)
@@ -138,11 +182,43 @@ const MAX_VERIFY_ROUNDS = 3
 /** How long a single verify command may run before it is killed (builds/tests are slow). */
 const VERIFY_TIMEOUT_MS = 180_000
 
+/**
+ * How many times, within a SINGLE reply, the agentic loop will automatically resume a
+ * tool call the model cut off mid-stream. When a big `write_file` runs into the model's
+ * output-token limit before its closing fence, the partial call is dropped and nothing
+ * runs — the classic "built one file, then Stopped mid-project" halt users hit. Instead
+ * of ending the run with a dead "Send continue" notice, the loop re-asks the model to
+ * re-issue the interrupted call in full, telling it to split a very large file across
+ * write_file + edit_file so it stops re-truncating at the same point, then loops on with
+ * tools still live. The counter tracks CONSECUTIVE truncations with no completed tool
+ * call in between (any real tool call resets it), so a genuinely large project that
+ * truncates a few times keeps going, while a file that truncates forever can't spin
+ * endlessly — after the cap the run surfaces the honest notice and stops.
+ */
+const MAX_TRUNCATION_CONTINUES = 6
+
 /** Read-only "look at the project" tools — churning on these without building is the
  *  classic weak-model stall (see the progress guard in the Cowork loop). */
 const EXPLORE_TOOLS = new Set(['list_dir', 'read_file', 'search_code', 'find_files'])
 /** After this many explorations with nothing built yet, force a "stop looking, build now". */
 const MAX_EXPLORE_WITHOUT_BUILD = 2
+
+/**
+ * How many times in a row the model may call the `think` tool (pure deliberation, no
+ * action) before the loop steps in. Thinking between actions is exactly the behaviour we
+ * want — this only guards the degenerate case of a model that thinks over and over without
+ * ever acting. On reaching the cap it gets one hard "stop thinking, act now" nudge; a think
+ * PAST the cap ends the loop and forces a closing answer. Reset whenever any other (real)
+ * tool runs, so interleaved think→act→think→act never trips it. See the `think` tool.
+ */
+const MAX_THINK_STREAK = 4
+
+/** Parse the `think` tool's `{thought: string}` input into the reasoning text to surface. */
+function thinkText(input: unknown): string {
+  const rec = input && typeof input === 'object' ? (input as Record<string, unknown>) : {}
+  const raw = rec.thought ?? rec.thinking ?? rec.text
+  return typeof raw === 'string' ? raw.trim() : ''
+}
 
 /**
  * Session-level compaction ceiling, in estimated tokens. Unlike {@link COMPACT_OVER_CHARS}
@@ -364,41 +440,41 @@ export function registerProviderIpc(): void {
           if (controller.signal.aborted) return
           send({ delta: '', done: false, status: '' })
         }
+        // Mode shape. Research and Cowork are the two "agentic" modes (full tool loop,
+        // unbounded budget, compaction). Research is the folderless, agent-driven surface:
+        // it roots the filesystem tools at the user's home directory and arms the browser
+        // by default, so the chosen specialist can reach anywhere and drive the web without
+        // the user picking a folder or flipping a setting — side-effects still gated below.
+        const research = mode === 'research'
+        const agentic = mode === 'cowork' || research
         // In Cowork, the filesystem tools are scoped to this folder; null when none
         // is set, which keeps those tools dormant (see tools/fs.ts + registry.ts).
-        let workspaceDir = settings.cowork.workspaceDir.trim() || null
-        // Folder-selection-free Cowork: if the user hasn't picked a folder, don't force
-        // the native picker — ASK for a name and create the folder on the Desktop
-        // ourselves (the user's explicit request). We ask at run START because a null
-        // workspaceDir keeps the fs tools dormant, so the model can't lazily trigger a
-        // create later. Only when tools are on (a folderless run with tools off needs no
-        // folder). The chosen folder is persisted so later turns reuse it without asking.
-        if (mode === 'cowork' && !workspaceDir && settings.tools.enabled) {
-          const answers = await requestQuestions([
-            {
-              header: 'Project folder',
-              question:
-                "What should I name the project folder? I'll create it on your Desktop. (Leave blank and I'll use a default.)"
+        // Folder selection is MANDATORY and enforced in the composer: a Cowork message
+        // can't be sent until the user picks a working folder (ChatPanel gates send on
+        // it, opening the native picker when missing). So by the time a Cowork run
+        // reaches here the folder is already set and persisted — we simply read it, and
+        // never prompt for a name mid-run (that old per-message "name the folder?" ask
+        // is gone). A still-empty workspaceDir just leaves the fs tools dormant.
+        const workspaceDir = research ? homedir() : settings.cowork.workspaceDir.trim() || null
+        // Research arms the full agent runtime by default (the mandate: every one of the
+        // 300+ specialists drives the browser and reaches the user's files without any
+        // opt-in dance). We synthesise an "effective settings" whose cowork.workspaceDir is
+        // the home root and whose browserTarget is coerced off→in-app, and drive the gate,
+        // tool advertisement, and browser launch off it. Cowork is untouched (effSettings ===
+        // settings by value there). Side-effects stay behind the same permission tier, and
+        // the fs sandbox (resolveInWorkspace) still confines every path under the home root.
+        const effSettings: ProviderSettings = research
+          ? {
+              ...settings,
+              cowork: {
+                ...settings.cowork,
+                workspaceDir: workspaceDir ?? '',
+                browserTarget:
+                  settings.cowork.browserTarget === 'off' ? 'in-app' : settings.cowork.browserTarget
+              }
             }
-          ])
-          if (controller.signal.aborted) return
-          const named = (answers[0] ?? '').trim() || FALLBACK_WORKSPACE_NAME
-          try {
-            workspaceDir = await ensureWorkspaceOnDesktop(named)
-            // Persist so the next turn reuses this folder (and the composer chip shows it).
-            saveSettings({ ...settings, cowork: { ...settings.cowork, workspaceDir } })
-          } catch {
-            // Couldn't create on the Desktop (permissions, missing path) — fall back to
-            // the Documents default so the run still proceeds rather than sitting idle.
-            try {
-              workspaceDir = await ensureDefaultWorkspace()
-            } catch {
-              // Even that failed — leave null; the fs tools stay dormant as before.
-            }
-          }
-          if (controller.signal.aborted) return
-        }
-        const gate: ToolGate = { settings, mode, workspaceDir }
+          : settings
+        const gate: ToolGate = { settings: effSettings, mode, workspaceDir }
         const toolsPrompt = toolsSystemPrompt(gate)
         // Native function-calling (#15): opt-in AND the endpoint's wire format must support
         // it. When on, we advertise structured tool schemas and read the model's structured
@@ -407,7 +483,9 @@ export function registerProviderIpc(): void {
         const useNativeTools =
           !!toolsPrompt && settings.nativeTools && (provider.supportsNativeTools?.() ?? false)
         const nativeSchemas = useNativeTools ? toolSchemas(gate) : []
-        const maxToolTurns = mode === 'cowork' ? MAX_TOOL_TURNS_COWORK : MAX_TOOL_TURNS
+        // Cowork and Research are the agentic modes: unbounded tool budget, filesystem +
+        // agent tools, in-loop compaction. Plain Chat keeps the short bounded loop.
+        const maxToolTurns = agentic ? MAX_TOOL_TURNS_COWORK : MAX_TOOL_TURNS
 
         // Cowork project memory (.myto/journal.md): read what earlier turns already
         // did in this folder so this turn continues instead of repeating. Best-effort.
@@ -422,7 +500,7 @@ export function registerProviderIpc(): void {
         // `python3` on Windows (the Store alias). Cached per process (runtimes are
         // stable within a session); best-effort — probing never blocks the reply.
         let runtimeSummary = ''
-        if (mode === 'cowork' && workspaceDir && settings.tools.enabled) {
+        if (agentic && workspaceDir && settings.tools.enabled) {
           try {
             runtimeSummary = summarizeRuntimes(await detectRuntimesCached(controller.signal))
           } catch {
@@ -447,7 +525,8 @@ export function registerProviderIpc(): void {
           )
           if (controller.signal.aborted) return
         }
-        // Permission tier for side-effecting tools; only consulted in Cowork.
+        // Permission tier for side-effecting tools; consulted in the agentic modes
+        // (Cowork and Research). Research inherits the same cowork.permissionMode tier.
         const permissionMode = settings.cowork.permissionMode
         // Output style (#13): the persisted global voice preference, resolved to its
         // system instruction once ('' for 'default') and injected into baseSystem below.
@@ -456,6 +535,16 @@ export function registerProviderIpc(): void {
         // plan and win the user's approval before the first write/exec tool. Injects the
         // plan directive into baseSystem and arms the one-time plan gate in the loop below.
         const planActive = mode === 'cowork' && settings.cowork.planMode
+
+        // Research persona: the chosen professional agent (one of 300+ in the catalog),
+        // resolved from the persisted id with a fallback to the default generalist, and
+        // composed into a full system prompt on demand. In Research this REPLACES the
+        // generic Cowork prompt — buildAgentSystemPrompt already appends the folderless,
+        // full-tool working contract (RESEARCH_WORKING_PROMPT). Null outside Research.
+        const researchAgent = research ? resolveResearchAgent(settings.researchAgentId) : null
+        if (researchAgent) {
+          send({ delta: '', done: false, status: `${researchAgent.name} · ${researchAgent.categoryName}` })
+        }
 
         /**
          * Run a focused read-only sub-task in a nested agent (the `spawn_agent` tool).
@@ -479,11 +568,11 @@ export function registerProviderIpc(): void {
          */
         let browserPending: Promise<BrowserSession> | null = null
         const getBrowser =
-          browserToolsEnabled(settings.cowork.browserTarget)
+          browserToolsEnabled(effSettings.cowork.browserTarget)
             ? (): Promise<BrowserSession> => {
                 if (!browserPending) {
                   browserPending = createBrowserController(
-                    settings.cowork.browserTarget,
+                    effSettings.cowork.browserTarget,
                     controller.signal
                   ).then((ctrl) => {
                     browserController = ctrl
@@ -583,7 +672,7 @@ export function registerProviderIpc(): void {
         const runTurn = async (
           turnHistory: ChatMessage[],
           parseTools: boolean
-        ): Promise<{ visible: string; call: ToolCall | null; error?: string }> => {
+        ): Promise<{ visible: string; call: ToolCall | null; error?: string; truncated?: boolean }> => {
           // Per-turn abort, chained to the outer user-cancel controller: aborting
           // `iter` ends just this generation (e.g. once a tool call is complete)
           // without tearing down the whole reply.
@@ -600,6 +689,12 @@ export function registerProviderIpc(): void {
           let contentStarted = false
           let captionFromReasoning = false
           let lastReasoningEmit = 0
+          // Throttle + running size for the held-tool-block heartbeat (see
+          // {@link HELD_BLOCK_HEARTBEAT_MS}). `heldToolChars` is the approximate number
+          // of characters streamed into the currently-open block; both reset the moment
+          // no block is being held.
+          let lastHeldEmit = 0
+          let heldToolChars = 0
           // Whether this turn's thinking phase has already been closed (a fresh
           // <status>-derived caption is transient, but the raw chain-of-thought is a
           // discrete block that must be closed exactly once — see closeThinking).
@@ -631,6 +726,26 @@ export function registerProviderIpc(): void {
               if (call && !pendingCall) {
                 pendingCall = call
                 iter.abort()
+                return
+              }
+              // A tool block is streaming in but the parser releases no visible text
+              // until its closing fence — a large write_file can stream for minutes.
+              // The token stream is alive (the stall guard stays armed, so no
+              // StallError), yet the renderer sees no delta, so its liveness clock
+              // would freeze and falsely warn "no new output … may have stalled". Emit
+              // a throttled heartbeat: it re-stamps the run's activity and shows the
+              // file growing live. Reset the counters whenever nothing is held.
+              if (toolParser.holdingBlock) {
+                heldToolChars += piece.length
+                const now = Date.now()
+                if (now - lastHeldEmit >= HELD_BLOCK_HEARTBEAT_MS) {
+                  lastHeldEmit = now
+                  const label = streamingToolLabel(toolParser.holdingToolName)
+                  send({ delta: '', done: false, status: `${label}… (${heldToolChars.toLocaleString()} chars)` })
+                }
+              } else {
+                heldToolChars = 0
+                lastHeldEmit = 0
               }
             } else {
               visible += piece
@@ -680,6 +795,18 @@ export function registerProviderIpc(): void {
                 const caption = reasoningCaption(reasoningText)
                 if (caption) captionFromReasoning = true
                 send({ delta: '', done: false, thinking: reasoningText, ...(caption ? { status: caption } : {}) })
+              }
+            } else if (chunk.reasoning) {
+              // Reasoning that RESUMES after visible content has begun (interleaved-
+              // reasoning models). This turn's thinking block is already sealed, so we
+              // don't reopen it — but the model IS working, and dropping these frames
+              // silently would freeze the renderer's liveness clock into a false stall
+              // (the raw frames still re-arm the stall guard, so nothing aborts). A
+              // throttled status heartbeat keeps the run honestly alive.
+              const now = Date.now()
+              if (now - lastReasoningEmit >= HELD_BLOCK_HEARTBEAT_MS) {
+                lastReasoningEmit = now
+                send({ delta: '', done: false, status: 'Thinking…' })
               }
             }
             if (chunk.delta) {
@@ -765,20 +892,31 @@ export function registerProviderIpc(): void {
           // then deal with anything the tool parser was still holding.
           const tail = stripper.flush()
           if (tail) emitText(tail)
+          let truncated = false
           if (toolParser && !pendingCall) {
             // A held partial-opener (a lone fence/`<` tail) is benign trailing prose and
             // is released as text. But a leftover that is a *mid-tool-call* block — the
             // stream was cut off (token limit / dropped upstream) before its closing
             // fence — must NOT be forwarded verbatim: the renderer would bake it into a
             // tool card stuck on "Preparing…" forever (the close never comes). Drop the
-            // partial invocation (nothing ran) and surface a clear truncation notice.
+            // partial invocation (nothing ran) and flag the truncation so the caller can
+            // recover.
             const openBlock = toolParser.holdingBlock
             const leftover = toolParser.flush()
             if (openBlock) {
-              const notice =
-                "\n\n⚠️ The model's reply was cut off in the middle of a tool call (it likely hit the output-token limit), so the action didn't run. Send \"continue\" to resume."
-              visible += notice
-              send({ delta: notice, done: false })
+              truncated = true
+              // In the agentic loop the caller AUTO-RESUMES a cut-off tool call (see the
+              // truncation-recovery branch in the loop), so do NOT surface a dead-end
+              // "Send continue" notice there — that hand-back to the user is exactly the
+              // premature stop we are removing (the "built one file then Stopped" halt on a
+              // big write_file). Only in a plain, non-agentic chat — which has no build loop
+              // to resume — do we tell the user how to carry on.
+              if (!agentic) {
+                const notice =
+                  "\n\n⚠️ The model's reply was cut off in the middle of a tool call (it likely hit the output-token limit), so the action didn't run. Send \"continue\" to resume."
+                visible += notice
+                send({ delta: notice, done: false })
+              }
             } else if (leftover) {
               visible += leftover
               send({ delta: leftover, done: false })
@@ -788,13 +926,17 @@ export function registerProviderIpc(): void {
           // never trips the content-start close above; seal it here so the phase
           // doesn't stay open and get overwritten by the next turn's reasoning.
           closeThinking()
-          return { visible, call: pendingCall }
+          return { visible, call: pendingCall, truncated }
         }
 
         // Base system prompts: <status> narration + the file-card protocol. Applied
         // only here, on the interactive stream — the non-streaming getCompletion
         // path (auto-titles) never receives them.
         const baseSystem: ChatMessage[] = [
+          // Identity FIRST, in every mode: pins the assistant to "Myto" so the
+          // underlying gateway/model never leaks a foreign name (it was answering
+          // "Kiro", then "Claude"). See IDENTITY_SYSTEM_PROMPT.
+          { role: 'system', content: IDENTITY_SYSTEM_PROMPT },
           { role: 'system', content: STATUS_SYSTEM_PROMPT },
           { role: 'system', content: FILE_PROTOCOL_SYSTEM_PROMPT },
           // Output style (#13): the user's chosen voice (concise/explanatory/learning),
@@ -814,10 +956,14 @@ export function registerProviderIpc(): void {
                 }
               ]
             : []),
-          // Cowork turns the assistant into a goal-driven agent over the folder.
+          // Cowork turns the assistant into a goal-driven agent over the folder; Research
+          // swaps in the chosen professional agent's persona, which carries its own
+          // folderless full-tool working contract (so no generic Cowork prompt on top).
           ...(mode === 'cowork'
             ? [{ role: 'system' as const, content: COWORK_SYSTEM_PROMPT }]
-            : []),
+            : research && researchAgent
+              ? [{ role: 'system' as const, content: buildAgentSystemPrompt(researchAgent) }]
+              : []),
           // Runtime awareness (Track 1): the detected interpreters + the exact command
           // for each, so a weaker model doesn't reach for `python3` on Windows. Sits
           // right after the Cowork prompt that tells it to script deliverables.
@@ -825,13 +971,14 @@ export function registerProviderIpc(): void {
             ? [{ role: 'system' as const, content: `RUNTIMES — ${runtimeSummary}` }]
             : []),
           // Browser (Track 2): the navigate → snapshot → act loop over the browser_* tools,
-          // added (in Chat AND Cowork) whenever a browser target other than `off` is armed.
+          // added (in Chat AND Cowork) whenever a browser target other than `off` is armed —
+          // and always in Research, where the effective target arms in-app by default.
           // For system-chrome it also carries the real-logins safety caution.
-          ...(browserToolsEnabled(settings.cowork.browserTarget)
+          ...(browserToolsEnabled(effSettings.cowork.browserTarget)
             ? [
                 {
                   role: 'system' as const,
-                  content: coworkBrowserPrompt(settings.cowork.browserTarget)
+                  content: coworkBrowserPrompt(effSettings.cowork.browserTarget)
                 }
               ]
             : []),
@@ -891,9 +1038,13 @@ export function registerProviderIpc(): void {
         // pasted turn can't blow up every subsequent message.
         const lastUser = [...convo].reverse().find((m) => m.role === 'user')
         const goal = (lastUser?.content ?? '').trim()
-        const goalReminder = goal
+        // Persona anchor: in Research, reassert the chosen agent's identity at the top of
+        // every mid-run nudge so a long autonomous run can't drift out of character.
+        const agentPrefix = researchAgent ? `${agentIdentityLine(researchAgent)}\n` : ''
+        const goalLine = goal
           ? `Remember, the user's request is: "${goal.length > 500 ? `${goal.slice(0, 500)}…` : goal}"\n\n`
           : ''
+        const goalReminder = agentPrefix + goalLine
         // Log this turn's goal to the project journal (Cowork memory).
         if (mode === 'cowork' && workspaceDir && goal) recordGoal(workspaceDir, goal)
 
@@ -925,6 +1076,11 @@ export function registerProviderIpc(): void {
         // show code (or ignores the nudge) can't be trapped in a loop.
         let codeProseNudges = 0
 
+        // Deliberation guard: consecutive `think`-tool calls with no real action between
+        // them (see MAX_THINK_STREAK). Reset the moment any other tool runs, so thinking
+        // interleaved with acting is unlimited and only a think-only spin is checked.
+        let thinkStreak = 0
+
         // Windowed oscillation guard (Cowork): the rolling tool-call signatures and how
         // many times we've nudged the model to break a NON-consecutive repeat loop
         // (A,B,A,B,A…) this reply — capped at one nudge, then the loop stops. Complements
@@ -939,6 +1095,32 @@ export function registerProviderIpc(): void {
         // stands and the user can weigh in.
         let autoContinues = 0
 
+        // Announced-action guard (Cowork): how many times we've pushed the model past a
+        // reply that ENDS by announcing a build step ("Now I'm building index.html…") it
+        // never actually performed — no tool call followed. Capped by
+        // {@link MAX_ANNOUNCED_ACTION} so a genuinely-finished reply isn't looped.
+        let announcedActionNudges = 0
+
+        // False-limit / deferral guard (Cowork): how many times we've pushed the model
+        // past a reply that abandons the run by inventing a tool/usage limit or deferring
+        // the work to a "next turn" instead of finishing or acting. Capped by
+        // {@link MAX_FALSE_LIMIT_DEFERRAL} so a genuinely-finished reply isn't looped.
+        let falseLimitDeferralNudges = 0
+
+        // Empty-reply guard (Cowork): how many times we've turned a content-free reply
+        // (empty / whitespace / stray marks, no tool call) back into "take the next action"
+        // — whether the run built nothing yet OR built some files and then fell silent
+        // mid-project. Capped by {@link MAX_EMPTY_START} so a task that genuinely needs no
+        // (more) files isn't looped — after the cap the (empty) reply stands.
+        let emptyStartNudges = 0
+
+        // Truncation-recovery guard (agentic): how many times this reply we've auto-resumed
+        // a tool call the model cut off mid-stream at the output-token limit. Reset by any
+        // completed tool call, so the cap counts only CONSECUTIVE cut-offs with no progress
+        // between them. Capped by {@link MAX_TRUNCATION_CONTINUES} so a file that truncates
+        // forever can't loop endlessly — after the cap the run surfaces the notice and stops.
+        let truncationContinues = 0
+
         // Verify gate state (#16): how many times the verify command has run this reply,
         // and whether it has passed (so a later natural-done doesn't re-run it needlessly).
         let verifyRounds = 0
@@ -951,20 +1133,51 @@ export function registerProviderIpc(): void {
         for (let turn = 0; turn < maxToolTurns; turn++) {
           // Keep the running history inside the context window on long tasks: once it
           // grows past the threshold, fold the older middle into a short summary so the
-          // loop can continue instead of eventually overflowing the model. Cowork only —
-          // a plain-chat tool loop is short and never reaches this.
-          if (mode === 'cowork' && historyChars(history) > COMPACT_OVER_CHARS) {
+          // loop can continue instead of eventually overflowing the model. Agentic modes
+          // only (Cowork/Research) — a plain-chat tool loop is short and never reaches this.
+          if (agentic && historyChars(history) > COMPACT_OVER_CHARS) {
             await compactMiddle(history, baseLen, provider, modelId, controller.signal)
             if (controller.signal.aborted) return
           }
 
-          const { visible, call, error } = await runTurn(history, true)
+          const { visible, call, error, truncated } = await runTurn(history, true)
           if (controller.signal.aborted) return
           if (error) {
             send({ delta: '', done: true, error })
             return
           }
           if (!call) {
+            // Truncation recovery (agentic) — checked FIRST, before every "did it really
+            // finish?" guard below. The model's reply was cut off in the MIDDLE of a tool
+            // call: it hit the output-token limit before the closing fence, so the partial
+            // call was dropped and nothing ran. This is the "built one file then Stopped"
+            // mid-project halt on a large write_file (and any oversized tool block). Rather
+            // than ending the run and making the user type "continue", re-ask the model to
+            // re-issue that exact call in full — and, for a large file, to write it in parts
+            // (an initial write_file, then append the rest with edit_file) so it stops
+            // re-truncating at the same point — then loop on with tools still live. Bounded
+            // by {@link MAX_TRUNCATION_CONTINUES} consecutive cut-offs (any completed tool
+            // call resets the counter) so a file that keeps truncating can't spin forever.
+            if (agentic && truncated) {
+              if (truncationContinues < MAX_TRUNCATION_CONTINUES) {
+                truncationContinues++
+                send({ delta: '', done: false, status: 'Output limit hit — resuming automatically' })
+                if (visible.trim()) history.push({ role: 'assistant', content: visible })
+                history.push({
+                  role: 'user',
+                  content: `${goalReminder}Your previous reply was cut off by the output-token limit in the MIDDLE of a tool call, so that action did NOT run and nothing from it was saved. Re-issue that tool call now, from the start, with its FULL contents. IMPORTANT: to avoid hitting the same limit again, do not emit one enormous block — if the file is large, first call write_file with the opening portion, then append each remaining portion with edit_file (successive edit_file calls are fine), keeping every single tool call comfortably under the output limit. Continue one tool call at a time until every file is fully written and the task is complete.`
+                })
+                continue
+              }
+              // Cap reached — the model keeps truncating even when asked to chunk (files
+              // too large, or a very low upstream output cap). Surface the honest notice
+              // and let the run stop so the user can weigh in, rather than spinning forever.
+              const notice =
+                "\n\n⚠️ The reply kept getting cut off at the output-token limit even after retrying in smaller pieces, so the last action may be incomplete. Send \"continue\" to resume."
+              send({ delta: notice, done: false })
+              send({ delta: '', done: true })
+              return
+            }
             // Code-as-prose guard: in Cowork the deliverable is files on disk, but a
             // weaker model often prints a file's contents in a fence and calls it done
             // without ever invoking write_file — so nothing is saved. If this reply built
@@ -995,7 +1208,7 @@ export function registerProviderIpc(): void {
             // still live. Bounded by MAX_AUTO_CONTINUE so a model that truly needs a
             // decision isn't trapped: after the cap the reply stands so the user can answer.
             if (
-              mode === 'cowork' &&
+              agentic &&
               workspaceDir &&
               autoContinues < MAX_AUTO_CONTINUE &&
               looksLikeContinuationRequest(visible)
@@ -1005,7 +1218,100 @@ export function registerProviderIpc(): void {
               history.push({ role: 'assistant', content: visible })
               history.push({
                 role: 'user',
-                content: `${goalReminder}Yes — continue, and don't stop to ask whether to proceed. In Cowork you work autonomously until the request is fully built and verified. If you genuinely need a decision only the user can make, call the ask_user tool instead of asking in prose. Take the next concrete action now.`
+                content: `${goalReminder}Yes — continue, and don't stop to ask whether to proceed. As an autonomous agent you keep working until the request is fully handled and verified. If you genuinely need a decision only the user can make, call the ask_user tool instead of asking in prose. Take the next concrete action now.`
+              })
+              continue
+            }
+            // Announced-but-unexecuted action (Cowork). The commonest half-finished-run
+            // stall: the model builds one file, then ENDS its reply narrating the next
+            // step ("Now I'm building index.html…") without emitting the tool call — so
+            // nothing is written and the loop, seeing no call, reads the turn as done and
+            // stops mid-project. Every other guard misses it (a file WAS written, so it is
+            // no explore-only spin; nothing repeats, so it is no oscillation; it prints no
+            // code, so the unsaved-code guard is silent). Detect the announcement off the
+            // reply's tail and push the model to actually perform it, tools still live.
+            // Bounded by MAX_ANNOUNCED_ACTION so a genuinely-finished reply that merely
+            // mentions a follow-up isn't trapped: after the cap the reply stands.
+            if (
+              agentic &&
+              workspaceDir &&
+              announcedActionNudges < MAX_ANNOUNCED_ACTION &&
+              looksLikeAnnouncedAction(visible)
+            ) {
+              announcedActionNudges++
+              send({ delta: '', done: false, status: 'Carrying out the announced step' })
+              history.push({ role: 'assistant', content: visible })
+              history.push({
+                role: 'user',
+                content: research
+                  ? `${goalReminder}You described a next step you were about to take (checking a page, grabbing a snapshot, reading, searching, or opening something) but never actually called a tool to do it — so it didn't happen and no progress was made. Do it now: emit the actual tool call (a browser_* action, web_search, web_fetch, read_file, run_code …) that carries out the step you just described. Don't merely narrate it. If the task is genuinely, fully handled, give the user your final answer and stop.`
+                  : `${goalReminder}You described an action you were about to take (e.g. building or writing a file) but never actually called a tool to do it, so nothing was created — the work is only announced, not done. Do it now: emit the tool call (write_file / edit_file / run_command …) that carries out the step you just described, with the full contents. Don't merely narrate it. If the project is genuinely complete, say so explicitly and stop.`
+              })
+              continue
+            }
+            // False-limit / deferral give-up (Cowork). A weak model sometimes abandons a
+            // run by INVENTING a stop condition — "the tool-use limit was reached … the
+            // implementation remains pending for the next available tool-enabled turn" —
+            // and stops with nothing built. It is always a confabulation: there is no
+            // per-reply tool cap (the ceiling is unbounded), and a real cap would tell the
+            // model to answer with what it has, never to defer. No other guard catches it
+            // (nothing was built, so it's no announced-action; nothing repeats; it prints
+            // no code; it's not a question). Detect the excuse and push the model to act
+            // now, tools still live. Bounded by MAX_FALSE_LIMIT_DEFERRAL, with an explicit
+            // escape hatch so a genuinely-complete reply that trips it can just confirm.
+            if (
+              agentic &&
+              workspaceDir &&
+              falseLimitDeferralNudges < MAX_FALSE_LIMIT_DEFERRAL &&
+              looksLikeFalseLimitDeferral(visible)
+            ) {
+              falseLimitDeferralNudges++
+              send({ delta: '', done: false, status: 'Continuing the build' })
+              history.push({ role: 'assistant', content: visible })
+              history.push({
+                role: 'user',
+                content: `${goalReminder}There is NO per-reply tool limit and no cap that forces you to stop — you can keep calling tools until the work is genuinely finished. Do not defer the work to a "next turn" and do not claim a limit or quota was reached; that is not true here. Take the next concrete action NOW: emit the tool call (write_file / edit_file / run_command …) that moves the project forward, with the full file contents. If the project is genuinely, fully complete, say so explicitly and stop.`
+              })
+              continue
+            }
+            // Empty / content-free reply (Cowork) — the subtlest stall, in TWO shapes:
+            //   • NON-START (buildsMade === 0): the model narrated an intention and/or a
+            //     few `think` calls, then closed its turn blank — nothing built, ever.
+            //   • MID-BUILD (buildsMade > 0): the model built one or more files, then closed
+            //     a LATER turn blank while the project is still half-done — the round-3
+            //     buildsMade===0 gate let this slip straight through to "done", ending a run
+            //     with a PARTIAL project (the observed "built data.js then went silent"
+            //     stall). An empty reply — no letter or digit anywhere, no tool call — is
+            //     NEVER a real completion in either shape, and every text-keyed guard above
+            //     is silent on emptiness. Push the model to act, tools still live, bounded by
+            //     MAX_EMPTY_START, with an escape hatch so a task that needs nothing more can
+            //     just say so. The message adapts to whether anything has been built yet.
+            if (
+              agentic &&
+              workspaceDir &&
+              emptyStartNudges < MAX_EMPTY_START &&
+              looksLikeContentFreeReply(visible)
+            ) {
+              emptyStartNudges++
+              send({
+                delta: '',
+                done: false,
+                status: research
+                  ? 'Taking the next step'
+                  : buildsMade === 0
+                    ? 'Starting the build'
+                    : 'Continuing the build'
+              })
+              // Skip pushing an empty assistant turn (some providers reject empty content);
+              // only record it if it actually carried a stray mark.
+              if (visible.trim()) history.push({ role: 'assistant', content: visible })
+              history.push({
+                role: 'user',
+                content: research
+                  ? `${goalReminder}Your reply was empty — no words and no tool call — but the user's request is not resolved. An empty turn is never a valid place to stop. Take the next concrete step NOW: call a tool (read a file, list a folder, search, browse with the browser_* tools, run_code, or write_file) to make progress, or give the user a real answer. Thinking alone is not enough — you must emit an actual tool call or a substantive reply. If the request is genuinely, fully handled, say so explicitly in a sentence and stop.`
+                  : buildsMade === 0
+                    ? `${goalReminder}Your reply was empty and you have not created a single file yet — the project has not been started. Do NOT end your turn without acting. Take the first concrete step NOW: call update_plan with the concrete steps, then immediately call write_file to create the first real file with its FULL contents, and keep going one tool call at a time until every file exists. Thinking is not enough — you must emit actual tool calls. If the request genuinely requires no files at all, say so explicitly in a sentence and stop.`
+                    : `${goalReminder}Your reply was empty — no words and no tool call — but the project is NOT finished: you have taken ${buildsMade} build step${buildsMade === 1 ? '' : 's'} so far and more of the requested files and features still remain. An empty turn is never a valid place to stop. Take the next concrete step NOW: emit the next tool call (write_file / edit_file / run_command …) with the FULL file contents, and keep going one tool call at a time until everything the request asks for exists and works. Thinking is not enough — you must emit actual tool calls. If the project is genuinely, fully complete, say so explicitly in a sentence and stop.`
               })
               continue
             }
@@ -1055,6 +1361,48 @@ export function registerProviderIpc(): void {
           // reached the reply), so write it to the transcript now, run the tool,
           // then stream the result block onto the same card.
           const toolName = call.name ?? 'tool'
+
+          // The `think` tool is deliberation, not an action. Rather than a tool card and a
+          // result block, surface the thought on the SAME out-of-band "thinking" channel the
+          // provider's own reasoning stream uses — so tapping the thinking block shows exactly
+          // what the model reasoned and which decisions it made — then feed a terse ack back and
+          // loop, so it thinks and THEN acts within the one reply. This is the "think tool"
+          // pattern: structured room to plan/reflect mid-loop without polluting the visible
+          // answer, which is the lever behind "agi-level thinking power through tool calling".
+          if (call.name === 'think') {
+            const thought = thinkText(call.input)
+            thinkStreak++
+            if (thought) {
+              // A fresh, self-contained thinking block per think call: push the text, then
+              // seal it (thinkingReset) so the next thought / the reply opens a new block.
+              send({ delta: '', done: false, thinking: thought })
+              send({ delta: '', done: false, thinkingReset: true })
+            }
+            const assistantTurn = (visible.trimEnd() ? `${visible.trimEnd()}\n` : '') + call.block
+            history.push({ role: 'assistant', content: assistantTurn })
+            if (thinkStreak > MAX_THINK_STREAK) {
+              // It ignored the nudge and kept deliberating without acting — stop the loop and
+              // let the closing turn force an answer rather than think to the turn ceiling.
+              send({ delta: '', done: false, status: 'Wrapping up' })
+              break
+            }
+            history.push({
+              role: 'user',
+              content:
+                thinkStreak === MAX_THINK_STREAK
+                  ? `${goalReminder}You have recorded your reasoning ${thinkStreak} times in a row without acting. Stop calling "think" and take a concrete step now: call a tool that actually does something (write_file, edit_file, run_command, a browser_* action, a search…) or give your final answer if the work is already done.`
+                  : `${thought ? 'Reasoning recorded.' : 'Noted.'} ${goalReminder}Now act on it — call the tool that carries out your decided next step, or give your final answer if the request is fully done. Only call "think" again when you reach a genuinely new decision to reason through.`
+            })
+            continue
+          }
+          // A real (non-think) tool call — the deliberation streak is broken.
+          thinkStreak = 0
+          // A complete tool call arrived (not cut off mid-stream), so the truncation-
+          // recovery streak resets: its cap counts only CONSECUTIVE cut-offs with no
+          // successful call between them, letting a big project truncate a few times and
+          // still finish while a perpetually-truncating file is still bounded.
+          truncationContinues = 0
+
           send({ delta: `\n${call.block}\n`, done: false, status: `Running ${toolName}` })
 
           // Stall guard: if the model keeps issuing the same call, it is spinning, not
@@ -1129,15 +1477,17 @@ export function registerProviderIpc(): void {
             planJustApproved = true
           }
 
-          // Approval gate. In Cowork the permission tier decides (ask / autoApprove /
-          // bypass). In Chat there is no tier, but the browser's click/type act on real
-          // pages — and on the user's own logins under system-chrome — so those two are
-          // always confirmed before they run. Read-only browser tools have no sideEffect
-          // and never prompt; "allow always" still skips repeats within the run.
+          // Approval gate. In the agentic modes (Cowork / Research) the permission tier
+          // decides (ask / autoApprove / bypass) — and Research runs rooted at the user's
+          // HOME folder with the browser armed, so gating side effects there matters even
+          // more than in a scoped Cowork folder. In Chat there is no tier, but the browser's
+          // click/type act on real pages — and on the user's own logins under system-chrome —
+          // so those two are always confirmed before they run. Read-only browser tools have
+          // no sideEffect and never prompt; "allow always" still skips repeats within the run.
           const needsApproval =
             !planJustApproved &&
             !(sideEffect && grantedAlways.has(sideEffect)) &&
-            (mode === 'cowork'
+            (agentic
               ? requiresApproval(permissionMode, sideEffect)
               : sideEffect === 'exec' && BROWSER_EXEC_TOOLS.has(toolName))
 

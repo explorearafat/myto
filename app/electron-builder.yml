@@ -7,6 +7,10 @@ directories:
 files:
   - out/**
   - package.json
+  # Ship the brand PNG inside the package so the system-tray keep-alive (opt-in
+  # background autonomy) has a runtime icon; buildResources otherwise keeps resources/
+  # out of the app. asarUnpack below places it in app.asar.unpacked/resources/.
+  - resources/icon.png
 asarUnpack:
   - resources/**
   # node-pty (#2 interactive terminal) ships a native .node addon + a ConPTY helper

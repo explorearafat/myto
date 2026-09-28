@@ -95,6 +95,7 @@ describe('TOOLS catalogue', () => {
       'search_code',
       'spawn_agent',
       'spawn_agents',
+      'think',
       'update_plan',
       'verify_file',
       'web_fetch',

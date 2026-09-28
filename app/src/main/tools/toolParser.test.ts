@@ -49,9 +49,9 @@ describe('createToolCallParser', () => {
     expect(calls[0].input).toEqual({ url: 'https://x.dev' })
   })
 
-  it('holds back a partial opening-fence prefix at a line start, then releases a non-tool fence', () => {
-    // A tool fence only opens at a line start, so "``" right after a newline could
-    // still grow into "```myto:tool" and must not be shown yet.
+  it('holds back a partial opening-fence prefix, then releases a non-tool fence', () => {
+    // A partial backtick run could still grow into "```myto:tool", so it must not be
+    // shown yet — whether it sits at a line start or is glued to prose.
     const parser = createToolCallParser()
     const first = parser.push('answer\n``')
     expect(first.text).toBe('answer\n')
@@ -91,6 +91,48 @@ describe('createToolCallParser', () => {
     expect(r.call).toBeNull()
     const r2 = parser.push('"input":{"query":"Ada Lovelace"}}\n```\n')
     expect(r2.call?.name).toBe('wiki_search')
+  })
+
+  it('detects a fence glued to the end of a prose line (no newline before it)', () => {
+    // Weak models routinely write the fence inline — "…reliably.```myto:tool" — rather
+    // than breaking a line first. The prose must still be shown AND the call must run,
+    // not leak into the chat as raw text with the turn ending on a no-op.
+    const { text, calls } = run([
+      'Switching to the compose view to fill the fields reliably.```myto:tool\n' +
+        '{"tool":"browser_navigate","input":{"url":"https://mail.google.com/#compose"}}\n```\n'
+    ])
+    expect(text).toBe('Switching to the compose view to fill the fields reliably.')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].name).toBe('browser_navigate')
+    expect(calls[0].input).toEqual({ url: 'https://mail.google.com/#compose' })
+    expect(calls[0].error).toBeNull()
+  })
+
+  it('keeps a glued fence intact when it splits across deltas at the backticks', () => {
+    const parser = createToolCallParser()
+    const first = parser.push('done it reliably.``')
+    expect(first.text).toBe('done it reliably.') // the "``" is held — it could be a fence
+    expect(first.call).toBeNull()
+    const second = parser.push('`myto:tool\n{"tool":"browser_read","input":{}}\n```\n')
+    expect(second.call?.name).toBe('browser_read')
+    // The sentence surfaces exactly once, with no stray backticks leaking around it.
+    expect(first.text + second.text).toBe('done it reliably.')
+  })
+
+  it('does not mistake a ```myto:tool_result wrapper for a call', () => {
+    // The result wrapper starts with the same "```myto:tool" — but the "_result" suffix
+    // (and, when the payload holds backticks, a 4-fence) must keep it plain text so it
+    // renders on the call's card instead of firing a bogus, mis-parsed call.
+    const { text, calls } = run(['```myto:tool_result web_search\nsome result body\n```\n'])
+    expect(calls).toHaveLength(0)
+    expect(text).toContain('```myto:tool_result web_search')
+    expect(text).toContain('some result body')
+  })
+
+  it('requires a terminator after the marker (```myto:toolbar is not a call)', () => {
+    const { text, calls } = run(['see the ```myto:toolbar helper for details'])
+    expect(calls).toHaveLength(0)
+    expect(text).toBe('see the ```myto:toolbar helper for details')
   })
 })
 
@@ -225,5 +267,37 @@ describe('createToolCallParser holdingBlock', () => {
     expect(parser.holdingBlock).toBe(true)
     parser.flush()
     expect(parser.holdingBlock).toBe(false)
+  })
+})
+
+describe('createToolCallParser holdingToolName', () => {
+  it('is null with no open block, and null until the tool name has streamed in', () => {
+    const parser = createToolCallParser()
+    expect(parser.holdingToolName).toBeNull()
+    // Fence opened but the JSON name has not arrived yet.
+    parser.push('```myto:tool\n{"to')
+    expect(parser.holdingBlock).toBe(true)
+    expect(parser.holdingToolName).toBeNull()
+  })
+
+  it('reports the fenced tool name mid-stream, before the block closes', () => {
+    const parser = createToolCallParser()
+    parser.push('```myto:tool\n{"tool":"write_file","input":{"path":"index.html","content":"<!doc')
+    expect(parser.holdingBlock).toBe(true)
+    expect(parser.holdingToolName).toBe('write_file')
+  })
+
+  it('reports the native <invoke> tool name mid-stream', () => {
+    const parser = createToolCallParser()
+    parser.push('<invoke name="run_command">\n<parameter name="command">npm ')
+    expect(parser.holdingBlock).toBe(true)
+    expect(parser.holdingToolName).toBe('run_command')
+  })
+
+  it('is null again once the block closes', () => {
+    const parser = createToolCallParser()
+    const { call } = parser.push('```myto:tool\n{"tool":"web_search","input":{"query":"x"}}\n```\n')
+    expect(call).not.toBeNull()
+    expect(parser.holdingToolName).toBeNull()
   })
 })

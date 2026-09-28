@@ -96,10 +96,16 @@ export type OutputStyle = 'default' | 'concise' | 'explanatory' | 'learning'
  *               goal across a chosen working folder, with filesystem tools on top
  *               of the web/code tools and a larger tool-use budget so it can plan,
  *               read, and write over several steps. See {@link CoworkSettings}.
+ *  - `research` → the Research surface: a folderless, fully-powered agentic mode. The
+ *               user picks one of 300+ professional agents (see shared/agent-catalog)
+ *               and it works with the full toolset — files anywhere under the user's
+ *               home, a real browser, web, code, documents, sub-agents — with
+ *               side-effects permission-gated. Strictly more capable than `chat`, and
+ *               unlike `cowork` needs no folder selected. See {@link ProviderSettings.researchAgentId}.
  * Threaded per-turn from the composer into the streaming request; never persisted
  * on a message (the transcript is mode-agnostic).
  */
-export type ChatMode = 'chat' | 'cowork'
+export type ChatMode = 'chat' | 'cowork' | 'research'
 
 /** UI preferences persisted alongside the provider config. */
 export interface UiSettings {
@@ -188,6 +194,39 @@ export interface CoworkHooks {
   preToolUse: string
   /** Command run after each tool completes; its output is surfaced as a status line. */
   postToolUse: string
+}
+
+/**
+ * Background-autonomy preferences — the "treat the computer as Myto's own device"
+ * mandate. Every field is OFF by default: with the whole block at its defaults Myto
+ * behaves exactly as before (closing the last window quits the app), so this can
+ * never change the app's lifecycle without the user's explicit, sticky opt-in.
+ *
+ * SAFETY / SCOPE. Only {@link keepAliveInTray} is wired today: it keeps the *already
+ * running* process alive in the system tray after the window is closed, so scheduled
+ * tasks and in-flight runs survive a window close. It does NOT relaunch Myto after a
+ * full Quit or an OS restart — surviving an actual app exit needs an OS login-item /
+ * daemon, which is deliberately DEFERRED (it runs code unattended at boot and must be
+ * a separate, clearly-consented step). {@link inboxEvery10min} is the scaffold flag
+ * for the periodic inbox/mail check; it stays inert until a mail connector is added,
+ * and any replies it ever drafts MUST be saved as drafts for the user to review —
+ * never auto-sent.
+ */
+export interface BackgroundSettings {
+  /**
+   * Keep Myto running in the system tray when the last window is closed, instead of
+   * quitting (opt-in; default false). A tray icon with Show/Quit is shown only while
+   * this is on. Quit from the tray (or the OS) still exits fully. Does not survive a
+   * full Quit or a reboot — see the interface note.
+   */
+  keepAliveInTray: boolean
+  /**
+   * Scaffold flag for the ~10-minute inbox/mail check (default false). Inert until a
+   * mail connector + explicit account consent exist; when active it may only DRAFT
+   * replies for the user to review, never auto-send. Kept here so the setting shape
+   * and the tray plumbing are ready without shipping any unattended network side-effect.
+   */
+  inboxEvery10min: boolean
 }
 
 /**
@@ -463,6 +502,21 @@ export interface ProviderSettings {
    * text protocol automatically.
    */
   nativeTools: boolean
+  /**
+   * The professional agent driving the Research surface (see shared/agent-catalog):
+   * an id from that catalog (e.g. `research-assistant`, `frontend-engineer`,
+   * `ip-lawyer`). Chosen from the composer's agent picker and persisted globally so a
+   * fresh Research chat reopens with the same specialist. An unknown/empty id resolves
+   * to the default generalist ({@link DEFAULT_RESEARCH_AGENT_ID}) at run time, so this
+   * can never leave Research without a persona. Only consulted when `mode==='research'`.
+   */
+  researchAgentId: string
+  /**
+   * Background-autonomy preferences (tray keep-alive + the inbox-check scaffold). All
+   * OFF by default, so an older settings file or a partial one merges to "behave exactly
+   * as before". See {@link BackgroundSettings}.
+   */
+  background: BackgroundSettings
 }
 
 /** A model advertised by a provider's list endpoint. */

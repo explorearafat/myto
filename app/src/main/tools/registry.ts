@@ -22,6 +22,7 @@ import { spawnAgentTool, spawnAgentsTool } from './agent'
 import { askUserTool } from './ask'
 import { installConnectorTool, installSkillTool } from './install'
 import { rememberTool } from './remember'
+import { thinkTool } from './think'
 
 /**
  * The tool registry: the catalogue of tools the chat can use, the dispatcher that
@@ -174,6 +175,7 @@ const ALL_TOOLS: readonly ToolDef[] = [
   gitPublishTool,
   previewTool,
   updatePlanTool,
+  thinkTool,
   spawnAgentTool,
   spawnAgentsTool,
   askUserTool,

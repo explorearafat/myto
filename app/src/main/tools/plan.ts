@@ -103,9 +103,9 @@ function parseTodos(input: unknown): TodoItem[] | null {
   return items
 }
 
-/** Available in Cowork only — this is where multi-step agentic work happens. */
+/** Available in the agentic modes (Cowork and Research) — where multi-step work happens. */
 function planAvailable(gate: ToolGate): boolean {
-  return gate.mode === 'cowork'
+  return gate.mode === 'cowork' || gate.mode === 'research'
 }
 
 export const updatePlanTool: ToolDef = {

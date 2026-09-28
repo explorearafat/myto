@@ -93,6 +93,16 @@ function sanitizeMessages(input: unknown): WireMessage[] {
   return out;
 }
 
+/**
+ * A browser-like User-Agent for every upstream provider request. A growing number of
+ * BYOK endpoints — especially third-party Claude proxies — sit behind Cloudflare's
+ * bot-fight, which treats a request with no (or a datacenter) User-Agent as a bot and
+ * answers with an HTML 403 challenge instead of the API. Sending a real UA clears the
+ * naive check; it mirrors the desktop provider hardening (app/src/main/providers/http.ts).
+ */
+const BROWSER_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
 // Open the upstream stream against the caller's own endpoint. The adapter supplies the format's URL,
 // auth headers, and request body; everything else (Accept, failure handling) is provider-agnostic.
 // There is a single endpoint, so there is no failover; a non-OK status or a transport error simply
@@ -109,6 +119,7 @@ async function openUpstream(
     const res = await fetch(adapter.upstreamUrl(base), {
       method: 'POST',
       headers: {
+        'User-Agent': BROWSER_UA,
         'content-type': 'application/json',
         Accept: 'text/event-stream',
         ...adapter.upstreamHeaders(cfg),
@@ -214,8 +225,10 @@ function buildAgentStream(
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const send = (obj: unknown) => controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
-      // Auto-detect the wire format once per reply from the caller's base URL.
-      const adapter = pickWebAdapter(cfg.baseUrl);
+      // Auto-detect the wire format once per reply from the caller's base URL AND model:
+      // a bare `claude-*` model means an Anthropic-format proxy even on a plain `/v1` base
+      // (its WAF 403s the OpenAI path), so route it to `/v1/messages` with `x-api-key`.
+      const adapter = pickWebAdapter(cfg.baseUrl, model);
       const messages: WireMessage[] = [...base];
       let errored = false;
       try {
@@ -355,7 +368,7 @@ export async function handleModels(req: Request): Promise<Response> {
   try {
     const res = await fetch(adapter.modelsUrl(base), {
       method: 'GET',
-      headers: { Accept: 'application/json', ...adapter.upstreamHeaders(cfg) },
+      headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json', ...adapter.upstreamHeaders(cfg) },
     });
     if (!res.ok) {
       // 401/403 → key rejected; anything else → reachable but unhappy. Never echo the body (it can

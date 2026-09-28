@@ -161,10 +161,36 @@ interface OpenAiToolCallFragment {
 }
 interface OpenAiStreamChunk {
   choices?: Array<{
-    delta?: { content?: string; reasoning?: string; tool_calls?: OpenAiToolCallFragment[] }
+    delta?: {
+      content?: string
+      // The two field names reasoning models actually use on the wire: DeepSeek (and
+      // its many resellers) stream chain-of-thought as `reasoning_content`; OpenRouter
+      // and some OpenAI-compatible proxies use `reasoning`. Either may arrive as a bare
+      // string OR an object (`{text}` / `{content}`), so the type is deliberately loose
+      // and {@link deltaReasoning} does the coercion.
+      reasoning_content?: unknown
+      reasoning?: unknown
+      tool_calls?: OpenAiToolCallFragment[]
+    }
     finish_reason?: string | null
   }>
   error?: { message?: string }
+}
+
+/**
+ * Coerce a `delta.reasoning_content` / `delta.reasoning` value to the text to forward.
+ * Reasoning models are wildly inconsistent here: most stream a bare string, but some
+ * wrap it (`{text: "…"}` / `{content: "…"}`). Anything else (a number, null) yields ''
+ * so a stray shape never crashes the stream or leaks `[object Object]` into the block.
+ */
+function reasoningText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value && typeof value === 'object') {
+    const rec = value as Record<string, unknown>
+    if (typeof rec.text === 'string') return rec.text
+    if (typeof rec.content === 'string') return rec.content
+  }
+  return ''
 }
 
 /**
@@ -175,12 +201,15 @@ interface OpenAiStreamChunk {
  */
 function parseOpenAiEvent(parsed: OpenAiStreamChunk): StreamEvent {
   const event: StreamEvent = {}
-  // Reasoning models stream chain-of-thought in `delta.reasoning` while
-  // `delta.content` stays empty; forward it out-of-band, never as reply text.
-  const reasoning = parsed.choices?.[0]?.delta?.reasoning
+  // Reasoning models stream chain-of-thought while `delta.content` stays empty; forward
+  // it out-of-band, never as reply text. DeepSeek uses `reasoning_content`, others use
+  // `reasoning` — read whichever carries text this chunk (checking the DeepSeek field
+  // first, since that's the model class the user hit with an empty thinking block).
+  const delta = parsed.choices?.[0]?.delta
+  const reasoning = reasoningText(delta?.reasoning_content) || reasoningText(delta?.reasoning)
   if (reasoning) event.reasoning = reasoning
-  const delta = parsed.choices?.[0]?.delta?.content
-  if (delta) event.delta = delta
+  const content = delta?.content
+  if (content) event.delta = content
   return event
 }
 
@@ -317,12 +346,19 @@ const ANTHROPIC_VERSION = '2023-06-01'
 const ANTHROPIC_DEFAULT_MAX_TOKENS = 32000
 
 /**
- * Join a path onto a base that may or may not already end in `/v1`. `…/v1` +
- * `messages` → `…/v1/messages`; a bare host → `…/v1/messages`. Avoids a doubled
- * `/v1/v1` when a user includes it (Anthropic's own docs show the bare host).
+ * Join a path onto an Anthropic base, whatever shape the user saved it in. A base
+ * may be a bare host (`https://h`), already end in `/v1`, or spell out the whole
+ * endpoint — `…/v1/messages` (the {@link pickAdapter} escape hatch a user sets to
+ * force this adapter on a third-party Claude proxy), a bare `…/messages`, or even
+ * `…/v1/models`. All of them reduce to the same API root, then get `/v1/<path>`
+ * appended — so none of them doubles into `…/v1/messages/v1/messages` (the bug the
+ * documented escape hatch used to hit) and `…/v1` never becomes `…/v1/v1`.
  */
 function anthropicJoin(base: string, path: string): string {
-  return /\/v1$/.test(base) ? `${base}/${path}` : `${base}/v1/${path}`
+  const root = base
+    .replace(/\/(?:messages|models)\/*$/i, '') // drop a trailing endpoint segment
+    .replace(/\/v1\/*$/i, '') // and a trailing /v1, so we re-append exactly one
+  return `${root}/v1/${path}`
 }
 
 /**
@@ -506,15 +542,36 @@ export const anthropicAdapter: WireAdapter = {
 }
 
 /**
- * Auto-detect the wire format from the base URL. Host-based: the real Anthropic
- * API lives at `api.anthropic.com` (and any `*.anthropic.com`); everything else is
- * treated as OpenAI-compatible. As a fallback for a proxy that mirrors Anthropic's
- * path on another host, an explicit `/v1/messages` in the URL also selects
- * Anthropic. A malformed URL falls back to OpenAI (the provider surfaces the URL
- * error later). Selection is invisible to the shared BYOK config — nothing in the
- * saved contract changes.
+ * A bare Claude model id — `claude-opus-4-8`, `claude-3-5-sonnet-20241022`,
+ * `claude-3.5-haiku` — is a strong, zero-config signal that the endpoint is a Claude
+ * proxy speaking the native Anthropic Messages format, even on an ordinary host with a
+ * plain `/v1` base. The id must START with `claude`; that is the discriminator against
+ * an OpenAI-compatible aggregator like OpenRouter, whose ids keep a vendor prefix
+ * (`anthropic/claude-3.5-sonnet`) and must stay on the OpenAI adapter. Empirically the
+ * proxies that serve `claude-*` implement `/v1/messages` (often ONLY that — their WAF
+ * 403s the OpenAI `/chat/completions` path), so this routes them right without the user
+ * having to know the `/v1/messages` escape hatch.
  */
-export function pickAdapter(baseUrl: string): WireAdapter {
+export function looksLikeClaudeModel(model: string | undefined | null): boolean {
+  return typeof model === 'string' && /^claude(?:[-.]|$)/i.test(model.trim())
+}
+
+/**
+ * Auto-detect the wire format. Host-based first: the real Anthropic API lives at
+ * `api.anthropic.com` (and any `*.anthropic.com`). Then two signals for a third-party
+ * Claude proxy that speaks the Anthropic Messages format on an ordinary host (e.g. a
+ * reseller at `api.example.icu` — its Cloudflare/WAF only allows the `/v1/messages`
+ * path, so the OpenAI `/chat/completions` path gets an HTML 403):
+ *   1. an explicit `…/v1/messages` (or bare `…/messages`) in the base URL — the manual
+ *      escape hatch; and
+ *   2. a bare `claude-*` model id (see {@link looksLikeClaudeModel}) — the zero-config
+ *      path, so the user's existing `…/v1` base URL just works untouched.
+ * Everything else is OpenAI-compatible. A malformed URL falls back to OpenAI (the
+ * provider surfaces the URL error later). Selection is invisible to the shared BYOK
+ * config — nothing in the saved contract changes, and {@link anthropicJoin} normalises
+ * the endpoint-suffixed base so the request URL never doubles.
+ */
+export function pickAdapter(baseUrl: string, model?: string): WireAdapter {
   let host = ''
   try {
     host = new URL(baseUrl).hostname.toLowerCase()
@@ -524,6 +581,10 @@ export function pickAdapter(baseUrl: string): WireAdapter {
   if (host === 'anthropic.com' || host === 'api.anthropic.com' || host.endsWith('.anthropic.com')) {
     return anthropicAdapter
   }
-  if (/\/v1\/messages\b/.test(baseUrl)) return anthropicAdapter
+  // The Anthropic chat endpoint is `/v1/messages`; accept a bare trailing
+  // `/messages` too, so a user need not remember the `/v1` prefix to force it.
+  if (/\/v1\/messages\b/.test(baseUrl) || /\/messages\/*$/i.test(baseUrl)) return anthropicAdapter
+  // Zero-config: a bare Claude model id means an Anthropic-format proxy.
+  if (looksLikeClaudeModel(model)) return anthropicAdapter
   return openAiAdapter
 }

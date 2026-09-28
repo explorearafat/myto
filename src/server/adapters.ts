@@ -118,9 +118,20 @@ export const openAiWebAdapter: WebWireAdapter = {
 /** Anthropic requires this on every request; a dated API version, not a secret. */
 const ANTHROPIC_VERSION = '2023-06-01';
 
-/** Join a path onto a base that may or may not already end in `/v1`, avoiding `/v1/v1`. */
+/**
+ * Build `<root>/v1/<path>` for the Anthropic Messages API, whatever endpoint-ish
+ * suffix the saved base URL carries. A third-party Claude proxy is commonly entered
+ * as the full `…/v1/messages` — which is also the value that forces this adapter via
+ * {@link pickWebAdapter} — so naively appending `/v1/messages` would double the path
+ * (`…/v1/messages/v1/messages`) and 404. Strip a trailing `messages`/`models` segment
+ * and a trailing `/v1` first, then re-append exactly one `/v1/<path>`. Handles a bare
+ * host, `…/v1`, `…/v1/messages`, `…/messages`, and `…/v1/models` alike.
+ */
 function anthropicJoin(base: string, path: string): string {
-  return /\/v1$/.test(base) ? `${base}/${path}` : `${base}/v1/${path}`;
+  const root = base
+    .replace(/\/(?:messages|models)\/*$/i, '')
+    .replace(/\/v1\/*$/i, '');
+  return `${root}/v1/${path}`;
 }
 
 export const anthropicWebAdapter: WebWireAdapter = {
@@ -181,14 +192,30 @@ export const anthropicWebAdapter: WebWireAdapter = {
 };
 
 /**
- * Auto-detect the wire format from the base URL — host-based, mirroring the
- * desktop `pickAdapter`. The real Anthropic API lives at `*.anthropic.com`;
- * everything else is OpenAI-compatible. A proxy that mirrors Anthropic's path on
- * another host is caught by an explicit `/v1/messages` in the URL. A malformed
- * URL falls back to OpenAI (the gateway rejects a bad base URL separately).
- * Selection is invisible to the saved BYOK contract.
+ * A bare Claude model id — `claude-opus-4-8`, `claude-3-5-sonnet-20241022` — is a
+ * strong, zero-config signal that the endpoint is a Claude proxy speaking the native
+ * Anthropic Messages format, even on an ordinary host with a plain `/v1` base. The id
+ * must START with `claude`; that discriminates against an OpenAI-compatible aggregator
+ * like OpenRouter, whose ids keep a vendor prefix (`anthropic/claude-3.5-sonnet`) and
+ * must stay OpenAI-compatible. Empirically these proxies implement `/v1/messages`
+ * (often ONLY that — their WAF 403s the OpenAI `/chat/completions` path), so this
+ * routes them right without the user knowing the `/v1/messages` escape hatch.
  */
-export function pickWebAdapter(baseUrl: string): WebWireAdapter {
+export function looksLikeClaudeModel(model: string | undefined | null): boolean {
+  return typeof model === 'string' && /^claude(?:[-.]|$)/i.test(model.trim());
+}
+
+/**
+ * Auto-detect the wire format — host-based first, mirroring the desktop `pickAdapter`.
+ * The real Anthropic API lives at `*.anthropic.com`. Then two signals for a third-party
+ * Claude proxy on an ordinary host: an explicit `/v1/messages` (or bare `/messages`) in
+ * the URL — the manual escape hatch — and a bare `claude-*` model id (see
+ * {@link looksLikeClaudeModel}) — the zero-config path, so the user's plain `/v1` base
+ * URL just works. Everything else is OpenAI-compatible. A malformed URL falls back to
+ * OpenAI (the gateway rejects a bad base URL separately). Selection is invisible to the
+ * saved BYOK contract.
+ */
+export function pickWebAdapter(baseUrl: string, model?: string): WebWireAdapter {
   let host = '';
   try {
     host = new URL(baseUrl).hostname.toLowerCase();
@@ -198,6 +225,8 @@ export function pickWebAdapter(baseUrl: string): WebWireAdapter {
   if (host === 'anthropic.com' || host === 'api.anthropic.com' || host.endsWith('.anthropic.com')) {
     return anthropicWebAdapter;
   }
-  if (/\/v1\/messages\b/.test(baseUrl)) return anthropicWebAdapter;
+  if (/\/v1\/messages\b/.test(baseUrl) || /\/messages\/*$/i.test(baseUrl)) return anthropicWebAdapter;
+  // Zero-config: a bare Claude model id means an Anthropic-format proxy.
+  if (looksLikeClaudeModel(model)) return anthropicWebAdapter;
   return openAiWebAdapter;
 }

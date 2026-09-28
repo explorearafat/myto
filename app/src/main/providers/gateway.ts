@@ -38,7 +38,21 @@ export class GatewayProvider implements Provider {
     this.baseUrl = normaliseBaseUrl(config.baseUrl)
     this.config = config
     // Auto-detect the wire format from the endpoint host; invisible to the config.
+    // This URL-only pick is the default for model-less calls (listModels); per-request
+    // paths refine it with the model id via adapterFor (a `claude-*` model on a plain
+    // `/v1` base is an Anthropic proxy — see pickAdapter).
     this.adapter = pickAdapter(this.baseUrl)
+  }
+
+  /**
+   * The wire adapter for a specific request. Refines the constructor's URL-only pick
+   * with the model id: a bare `claude-*` model means an Anthropic-format proxy even on
+   * an ordinary host, so its chat requests hit `/v1/messages` with `x-api-key` instead
+   * of the Cloudflare-blocked OpenAI `/chat/completions`. Model-less callers keep the
+   * URL-only default.
+   */
+  private adapterFor(modelId?: string): WireAdapter {
+    return modelId && modelId.trim() ? pickAdapter(this.baseUrl, modelId) : this.adapter
   }
 
   private authHeaders(): Record<string, string> {
@@ -85,11 +99,12 @@ export class GatewayProvider implements Provider {
       }
     }
     try {
-      const res = await httpFetch(this.adapter.chatUrl(this.baseUrl), {
+      const adapter = this.adapterFor(modelId)
+      const res = await httpFetch(adapter.chatUrl(this.baseUrl), {
         method: 'POST',
-        headers: this.authHeaders(),
+        headers: adapter.authHeaders(this.config),
         timeoutMs: 20_000,
-        body: this.adapter.pingBody(modelId)
+        body: adapter.pingBody(modelId)
       })
       const latencyMs = Date.now() - started
       if (!res.ok) {
@@ -150,14 +165,15 @@ export class GatewayProvider implements Provider {
     guard: ReturnType<typeof stallGuard>,
     options?: CompletionOptions
   ): Promise<void> {
-    const res = await httpFetch(this.adapter.chatUrl(this.baseUrl), {
+    const adapter = this.adapterFor(modelId)
+    const res = await httpFetch(adapter.chatUrl(this.baseUrl), {
       method: 'POST',
       // `Accept` nudges gateways that decide streaming from request headers to
       // actually stream; the non-SSE fallback below covers those that ignore it.
-      headers: { Accept: 'text/event-stream', ...this.authHeaders() },
+      headers: { Accept: 'text/event-stream', ...adapter.authHeaders(this.config) },
       timeoutMs: COMPLETION_TIMEOUT_MS,
       signal: guard.signal,
-      body: this.adapter.buildBody(modelId, messages, options)
+      body: adapter.buildBody(modelId, messages, options)
     })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
@@ -204,7 +220,7 @@ export class GatewayProvider implements Provider {
     const contentType = res.headers.get('content-type') ?? ''
     if (!res.body || !contentType.includes('text/event-stream')) {
       const data = await res.json().catch(() => null)
-      const content = this.adapter.parseBuffered(data)
+      const content = adapter.parseBuffered(data)
       if (content) onChunk({ delta: content, done: false })
       onChunk({ delta: '', done: true })
       return
@@ -215,7 +231,7 @@ export class GatewayProvider implements Provider {
     // concurrent streams that share this module-level adapter singleton. With no tool
     // call in the stream it forwards the same delta / reasoning / done events the old
     // per-line parse did, so the text-protocol path is byte-for-byte unchanged.
-    const parser = this.adapter.createParser()
+    const parser = adapter.createParser()
     const emit = (event: StreamEvent | null): void => {
       if (!event) return
       // Reasoning is forwarded out-of-band (empty delta) so the funnel can show a

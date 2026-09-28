@@ -15,9 +15,9 @@ import type { ToolDef, ToolGate } from './registry'
  * model), reached here through {@link ToolContext.delegate}.
  */
 
-/** Available in Cowork (delegation is a folder-work capability). */
+/** Available in the agentic modes (Cowork and Research) — delegation is agent work. */
 function agentAvailable(gate: ToolGate): boolean {
-  return gate.mode === 'cowork'
+  return gate.mode === 'cowork' || gate.mode === 'research'
 }
 
 export const spawnAgentTool: ToolDef = {

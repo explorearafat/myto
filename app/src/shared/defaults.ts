@@ -1,4 +1,5 @@
 import type { ProviderSettings } from './types'
+import { DEFAULT_RESEARCH_AGENT_ID } from './agent-catalog'
 
 /** Ollama's default local endpoint. */
 export const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434'
@@ -73,5 +74,16 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
   outputStyle: 'default',
   // Text-protocol tool calling by default (#15); native function-calling is an
   // opt-in for capable backends and never changes behaviour while off.
-  nativeTools: false
+  nativeTools: false,
+  // The Research surface opens on the default generalist; the composer's agent
+  // picker swaps in any of the 300+ professional specialists (shared/agent-catalog).
+  researchAgentId: DEFAULT_RESEARCH_AGENT_ID,
+  // Background autonomy fully OFF by default — closing the last window quits the app
+  // exactly as before. The tray keep-alive and the inbox-check scaffold are sticky
+  // opt-ins; the inbox flag stays inert until a mail connector + consent exist, and
+  // may only ever draft (never auto-send) replies.
+  background: {
+    keepAliveInTray: false,
+    inboxEvery10min: false
+  }
 }

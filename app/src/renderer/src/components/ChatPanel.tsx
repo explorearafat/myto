@@ -38,6 +38,13 @@ import type {
   ReasoningEffort,
   TodoItem
 } from '@shared/types'
+import {
+  searchAgents,
+  findAgent,
+  defaultAgent,
+  AGENT_COUNT,
+  type AgentSpec
+} from '@shared/agent-catalog'
 
 /** Human-readable byte size for an attachment chip (e.g. "12.4 KB"). */
 function formatBytes(bytes: number): string {
@@ -1550,6 +1557,120 @@ function StyleMenu() {
   )
 }
 
+/** Search the full catalog and group the hits by category for the picker list. */
+function useAgentGroups(query: string): { id: string; name: string; agents: AgentSpec[] }[] {
+  return useMemo(() => {
+    const results = searchAgents(query, 400)
+    const map = new Map<string, { id: string; name: string; agents: AgentSpec[] }>()
+    for (const a of results) {
+      let g = map.get(a.category)
+      if (!g) {
+        g = { id: a.category, name: a.categoryName, agents: [] }
+        map.set(a.category, g)
+      }
+      g.agents.push(a)
+    }
+    return [...map.values()]
+  }, [query])
+}
+
+/**
+ * The Research agent picker: a searchable popover over the {@link AGENT_COUNT}-strong
+ * professional catalog (agent-catalog.ts), mirroring {@link EffortMenu}'s open/
+ * outside-click shell but with a filter box and category-grouped results. The choice
+ * persists as settings.researchAgentId and becomes Research's persona for the next
+ * session. Only mounted in Research mode; Cowork ignores it.
+ */
+function AgentMenu() {
+  const agentId = useAppStore((s) => s.settings.researchAgentId)
+  const setAgentId = useAppStore((s) => s.setResearchAgentId)
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const ref = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const current = findAgent(agentId) ?? defaultAgent()
+  const groups = useAgentGroups(query)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent): void => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  // Focus the filter box on open; clear the query on close so it reopens fresh.
+  useEffect(() => {
+    if (open) inputRef.current?.focus()
+    else setQuery('')
+  }, [open])
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title={`${current.name} — ${current.tagline}. Click to pick from ${AGENT_COUNT} specialists.`}
+        className="flex max-w-[170px] items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-[12px] font-medium text-text/80 transition-colors hover:bg-surface-2"
+      >
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="shrink-0 text-muted">
+          <path d="M6 1l1.15 3.05L10.5 4.2 7.6 6.3l1 3.35L6 7.6 3.4 9.65l1-3.35L1.5 4.2l3.35-.15z" fill="currentColor" />
+        </svg>
+        <span className="truncate">{current.name}</span>
+        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="shrink-0 text-muted">
+          <path d="M3 4.5L6 7.5l3-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute bottom-full right-0 z-20 mb-1.5 flex max-h-[22rem] w-80 flex-col rounded-xl border border-border bg-surface p-1 shadow-lg">
+          <div className="p-1">
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={`Search ${AGENT_COUNT} agents…`}
+              className="w-full rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-[12.5px] text-text placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-border"
+            />
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {groups.length === 0 && (
+              <p className="px-2.5 py-3 text-center text-[12px] text-muted">No agent matches “{query}”.</p>
+            )}
+            {groups.map((g) => (
+              <div key={g.id}>
+                <p className="sticky top-0 bg-surface px-2.5 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted">
+                  {g.name}
+                </p>
+                {g.agents.map((a) => (
+                  <button
+                    key={a.id}
+                    type="button"
+                    onClick={() => {
+                      void setAgentId(a.id)
+                      setOpen(false)
+                    }}
+                    className={
+                      'flex w-full flex-col items-start gap-0.5 rounded-lg px-2.5 py-1.5 text-left transition-colors hover:bg-surface-2 ' +
+                      (a.id === current.id ? 'bg-surface-2' : '')
+                    }
+                  >
+                    <span className="text-[12.5px] font-medium text-text">
+                      {a.name}
+                      {a.id === current.id ? ' ✓' : ''}
+                    </span>
+                    <span className="line-clamp-1 text-[11px] text-muted">{a.tagline}</span>
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ChatPanel() {
   const messages = useChatStore((s) => s.messages)
   const attachments = useChatStore((s) => s.attachments)
@@ -1899,6 +2020,16 @@ export function ChatPanel() {
     }
     if ((text.trim().length === 0 && pending.length === 0) || running || !hasModel) return
 
+    // Cowork works INSIDE a folder — its file tools are sandboxed to one. Folder
+    // selection is mandatory: a Cowork message can't be sent until one is picked.
+    // If none is set, open the native picker instead of sending; only proceed once
+    // the user actually chooses a folder (persisted by pickCoworkWorkspace, so the
+    // run reads it via getSettings). Cancel → nothing is sent.
+    if (coworkMode && !useAppStore.getState().settings.cowork.workspaceDir.trim()) {
+      const dir = await pickCoworkWorkspace()
+      if (!dir) return
+    }
+
     const outgoing: OutgoingAttachment[] = pending.map((p) => ({
       attachment: p.attachment,
       ...(p.textContent != null ? { textContent: p.textContent } : {})
@@ -2081,6 +2212,11 @@ export function ChatPanel() {
   }
 
   const canSend = (input.trim().length > 0 || pending.length > 0) && hasModel
+  // Cowork is folder-scoped: a working folder MUST be chosen before a message can be
+  // sent (submitText opens the picker and bails if the user cancels). needsFolder drives
+  // the composer's "pick a folder" affordances so the requirement is visible up front.
+  const hasFolder = workspaceDir.trim().length > 0
+  const needsFolder = coworkMode && !hasFolder
   // Attaching is always allowed: stageFiles creates a session lazily if the chat is
   // still an unsaved draft, so there's no need to send a message first. sessionId is
   // still read elsewhere; referencing it here keeps the dependency explicit.
@@ -2147,17 +2283,25 @@ export function ChatPanel() {
         </div>
       )}
 
-      {/* Working-folder chip — shown ABOVE the composer only before the first
-          message is sent; once the chat is under way it's hidden to keep the
-          composer clean. Plan mode + the permission tier now live inside the
-          permission control at the composer's bottom-left. */}
-      {coworkMode && isEmpty && (
+      {/* Working-folder chip — Cowork runs inside this folder, and picking one is
+          REQUIRED before a message can be sent. Shown before the first message, and
+          kept visible whenever no folder is set yet so the requirement is obvious.
+          Plan mode + the permission tier live inside the permission control at the
+          composer's bottom-left. */}
+      {coworkMode && (isEmpty || needsFolder) && (
         <div className="mb-2 flex items-center">
           <button
             type="button"
             onClick={() => void pickCoworkWorkspace()}
-            title={workspaceDir || "Optional — otherwise Myto asks for a name and creates a folder on your Desktop"}
-            className="flex items-center gap-1.5 rounded-[6px] bg-black px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:bg-neutral-800"
+            title={
+              hasFolder
+                ? workspaceDir
+                : 'Cowork works inside this folder — pick one to start. Required before you can send.'
+            }
+            className={
+              'flex items-center gap-1.5 rounded-[6px] bg-black px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:bg-neutral-800 ' +
+              (needsFolder ? 'ring-2 ring-primary/40' : '')
+            }
           >
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path
@@ -2167,8 +2311,11 @@ export function ChatPanel() {
                 strokeLinejoin="round"
               />
             </svg>
-            <span className="max-w-[200px] truncate">{folderLabel || 'Set folder (optional)'}</span>
+            <span className="max-w-[200px] truncate">{folderLabel || 'Select a working folder'}</span>
           </button>
+          {needsFolder && (
+            <span className="ml-2 text-[11px] text-muted">Required to start Cowork</span>
+          )}
         </div>
       )}
 
@@ -2256,7 +2403,9 @@ export function ChatPanel() {
               dragging
                 ? 'Drop files to attach…'
                 : coworkMode
-                  ? 'Give Cowork a goal — it sets up a folder for you…'
+                  ? needsFolder
+                    ? 'Select a working folder to start Cowork…'
+                    : 'Give Cowork a goal…'
                   : placeholder
             }
             className="block max-h-40 min-h-6 w-full resize-none bg-transparent px-1 py-0.5 text-[14px] leading-6 text-text placeholder:text-muted focus:outline-none"
@@ -2297,6 +2446,7 @@ export function ChatPanel() {
           </div>
 
           <div className="flex items-center gap-1.5">
+            {!coworkMode && <AgentMenu />}
             <ModelSelector openUp />
             <EffortMenu />
             <StyleMenu />

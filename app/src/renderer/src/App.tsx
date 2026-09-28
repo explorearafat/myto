@@ -50,7 +50,7 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = window.myto.scheduledTasks.onFire((fire) => {
       void (async () => {
-        useChatStore.getState().setCoworkMode(fire.mode === 'cowork')
+        useChatStore.getState().setDraftMode(fire.mode)
         await useSessionStore.getState().create()
         useChatStore.getState().send(fire.prompt)
       })()

@@ -21,6 +21,7 @@ import { closeDb, setDbPath } from './db/db'
 import { reconcileInterruptedRuns } from './db/sessions'
 import { setUserDataDir, getSettings, setSettingsSavedListener } from './settings'
 import { setUserMemoryDir } from './user-memory'
+import { setTrayWindowOpener, applyTrayState, markQuitting, shouldKeepAlive } from './tray'
 
 /** Registers window-control IPC handlers used by the custom title bar. */
 function registerWindowControls(): void {
@@ -135,6 +136,21 @@ app.whenReady().then(() => {
 
   createWindow()
 
+  // Background autonomy (opt-in): let the tray's "Show Myto" re-open or focus a window,
+  // then bring the tray up if the user has enabled keep-alive. With the flag off (the
+  // default) this is a no-op and the app keeps its normal quit-on-last-window lifecycle.
+  setTrayWindowOpener(() => {
+    const [existing] = BrowserWindow.getAllWindows()
+    if (existing) {
+      if (existing.isMinimized()) existing.restore()
+      existing.show()
+      existing.focus()
+    } else {
+      createWindow()
+    }
+  })
+  applyTrayState(getSettings().background.keepAliveInTray)
+
   // Register the enabled skills as tools up front (synchronous, cheap).
   try {
     syncSkills(getSettings().skills)
@@ -151,6 +167,12 @@ app.whenReady().then(() => {
     } catch (error) {
       console.error('[myto] skill re-sync failed:', error)
     }
+    // Toggle the tray keep-alive live when the user flips it in Settings — no restart.
+    try {
+      applyTrayState(settings.background.keepAliveInTray)
+    } catch (error) {
+      console.error('[myto] tray reconcile failed:', error)
+    }
   })
 
   // Connect to the user's enabled connectors in the background. Failure-isolated
@@ -166,10 +188,21 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   // On macOS it's conventional to keep the app running until Cmd+Q.
-  if (process.platform !== 'darwin') app.quit()
+  if (process.platform === 'darwin') return
+  // Background autonomy (opt-in): when the user has enabled tray keep-alive, closing the
+  // last window leaves Myto running in the tray (scheduled tasks / in-flight runs survive)
+  // instead of quitting. Default OFF → quit exactly as before.
+  try {
+    if (shouldKeepAlive(getSettings().background.keepAliveInTray)) return
+  } catch (error) {
+    console.error('[myto] keep-alive check failed; quitting normally:', error)
+  }
+  app.quit()
 })
 
 app.on('before-quit', () => {
+  // Mark the real quit so the tray never tries to keep the process alive past this point.
+  markQuitting()
   // Abort any in-flight provider streams and close the DB so nothing outlives the app.
   cancelAllStreams()
   closeDb()

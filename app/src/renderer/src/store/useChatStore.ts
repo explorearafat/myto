@@ -233,10 +233,19 @@ export interface ChatState {
   /** Visual prompt blocks when in builder mode. */
   promptBlocks: PromptBlock[]
   /**
-   * Whether the composer's Chat/Cowork toggle is on Cowork. When true, a sent turn
-   * runs in `cowork` mode: the main process advertises the filesystem tools (scoped
-   * to the chosen working folder), prepends the agentic system prompt, and raises
-   * the tool-use budget. A plain UI toggle — it never persists on a message.
+   * The draft's working mode — the authoritative source of truth for how the next
+   * sent turn runs: `'chat'` (plain conversation), `'cowork'` (folder-scoped agent),
+   * or `'research'` (the folderless professional-agent surface). A session's mode is
+   * fixed at creation, so loading one restores its stored mode here. A plain UI
+   * selection — it never persists on a message; it is captured at send time.
+   */
+  draftMode: ChatMode
+
+  /**
+   * Convenience mirror of `draftMode === 'cowork'`, kept in sync by the setters. Read
+   * by the many Cowork-specific affordances (rewind, plan chip, folder chip, top-bar
+   * DNA/Terminal/Preview icons, folder gate) so they light up for Cowork only and stay
+   * dark for Chat and Research.
    */
   coworkMode: boolean
 
@@ -287,7 +296,9 @@ export interface ChatState {
   setComposerMode: (mode: 'text' | 'builder') => void
   /** Update the visual prompt blocks (builder mode). */
   setPromptBlocks: (blocks: PromptBlock[]) => void
-  /** Turn the Chat/Cowork toggle on (Cowork) or off (Chat). */
+  /** Set the draft's working mode directly ('chat' | 'cowork' | 'research'). */
+  setDraftMode: (mode: ChatMode) => void
+  /** Toggle Cowork on (Cowork) or off (Research — the new non-Cowork surface). */
   setCoworkMode: (on: boolean) => void
   /**
    * Answer a pending Cowork approval prompt. Sends the decision to the main process
@@ -875,6 +886,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     liveSessionIds: [],
     composerMode: 'text',
     promptBlocks: [],
+    draftMode: 'research',
     coworkMode: false,
 
     send: (text, attachments = []) => {
@@ -882,8 +894,8 @@ export const useChatStore = create<ChatState>((set, get) => {
       if ((!trimmed && attachments.length === 0) || get().running) return
 
       // Capture the mode at send time so a later toggle can't change how this
-      // in-flight turn runs.
-      const mode: ChatMode = get().coworkMode ? 'cowork' : 'chat'
+      // in-flight turn runs. draftMode is authoritative (chat | cowork | research).
+      const mode: ChatMode = get().draftMode
 
       const userMsg: ChatMessageUI = { id: nextId(), role: 'user', content: trimmed }
       const assistantId = nextId()
@@ -1061,7 +1073,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       const answersMsgId =
         [...messages.slice(0, idx)].reverse().find((m) => m.role === 'user')?.id ?? null
 
-      startRun(sessionId, messageId, history, get().coworkMode ? 'cowork' : 'chat', answersMsgId)
+      startRun(sessionId, messageId, history, get().draftMode, answersMsgId)
     },
 
     applyLoaded: (loaded) => {
@@ -1075,8 +1087,10 @@ export const useChatStore = create<ChatState>((set, get) => {
         projectId: loaded.session.projectId,
         // A session is fixed to one mode at creation (Task 6): restore it so the
         // right toolset is armed and the nav toggle reflects it. Set directly (not
-        // via setCoworkMode) so merely opening an old chat never changes the
-        // last-used mode that new drafts default to.
+        // via setDraftMode) so merely opening an old chat never changes the
+        // last-used mode that new drafts default to. draftMode is authoritative;
+        // coworkMode mirrors it for the Cowork-only affordances.
+        draftMode: loaded.session.mode,
         coworkMode: loaded.session.mode === 'cowork',
         attachments,
         ...projectLiveRun({ messages }, loaded.session.id)
@@ -1087,16 +1101,23 @@ export const useChatStore = create<ChatState>((set, get) => {
       // A fresh session starts empty; it has no live run to re-attach to, but we
       // still route through projectLiveRun for a single, consistent projection.
       //
-      // A brand-new draft (no id yet) opens in the last-used mode (Task 7). When
-      // binding to a freshly-created row instead, coworkMode is already
-      // authoritative — create() persisted the row with it — so it's left as-is,
-      // never remixing a session's fixed mode.
-      const coworkMode =
-        sessionId === null ? useAppStore.getState().lastMode === 'cowork' : get().coworkMode
+      // A brand-new draft (no id yet) opens in the last-used mode (Task 7), but the
+      // non-Cowork surface is now Research — a persisted legacy 'chat' last-mode opens
+      // as Research so the rename is complete for new drafts. When binding to a
+      // freshly-created row instead, the current draftMode is already authoritative
+      // (create() persisted the row with it), so it's left as-is — never remixing a
+      // session's fixed mode.
+      const draftMode: ChatMode =
+        sessionId === null
+          ? useAppStore.getState().lastMode === 'cowork'
+            ? 'cowork'
+            : 'research'
+          : get().draftMode
       set({
         sessionId,
         projectId,
-        coworkMode,
+        draftMode,
+        coworkMode: draftMode === 'cowork',
         attachments: [],
         ...projectLiveRun({ messages: [] }, sessionId)
       })
@@ -1106,21 +1127,27 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     setPromptBlocks: (blocks) => set({ promptBlocks: blocks }),
 
-    setCoworkMode: (on) => {
-      set({ coworkMode: on })
-      // Chat mode hides the top-bar DNA/Terminal/Preview icons (they're Cowork
-      // affordances), so anything they drove that's still open would be stranded with
-      // no visible toggle. Tidy on the way into chat: drop the composer back to plain
-      // text and close both side panes.
-      if (!on) {
+    setDraftMode: (mode) => {
+      set({ draftMode: mode, coworkMode: mode === 'cowork' })
+      // The top-bar DNA/Terminal/Preview icons are Cowork affordances; leaving Cowork
+      // (to Chat or Research) would strand anything they drove with no visible toggle.
+      // Tidy on the way out: drop the composer back to plain text and close both side
+      // panes. (Research is folderless and drives its own preview via the preview tool.)
+      if (mode !== 'cowork') {
         set({ composerMode: 'text' })
         usePreviewStore.getState().close()
         useTerminalStore.getState().close()
       }
-      // An explicit toggle is the "last-used mode": remember it so the next new
-      // chat opens here (Task 7). Fire-and-forget — the persist is best-effort and
-      // the in-memory coworkMode above already drives the current draft.
-      void useAppStore.getState().setLastMode(on ? 'cowork' : 'chat')
+      // An explicit selection is the "last-used mode": remember it so the next new
+      // chat opens here (Task 7). Fire-and-forget — the persist is best-effort and the
+      // in-memory draftMode above already drives the current draft.
+      void useAppStore.getState().setLastMode(mode)
+    },
+
+    // Legacy binary toggle: Cowork on, or off → Research (the renamed non-Cowork
+    // surface). Kept so existing callers (rail buttons, slash commands) keep working.
+    setCoworkMode: (on) => {
+      get().setDraftMode(on ? 'cowork' : 'research')
     },
 
     decideApproval: (approvalId, decision) => {

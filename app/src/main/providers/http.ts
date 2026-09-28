@@ -199,6 +199,19 @@ export function stallGuard(idleMs: number, outer?: AbortSignal): StallGuard {
   }
 }
 
+/**
+ * A browser-like User-Agent for every provider request. Node/Electron's `fetch`
+ * (undici) sends NO `User-Agent` by default, and a growing number of BYOK endpoints
+ * — especially third-party Claude proxies — sit behind Cloudflare's bot-fight, which
+ * treats a UA-less request as a bot and answers with an HTML 403 challenge instead of
+ * the API. That is the exact "blocked by Cloudflare" failure users hit on stricter
+ * proxies while the same key works in a desktop client that does send a UA. A real UA
+ * clears the naive check; mirrors the browser UA the web-search path already uses
+ * (main/tools/web.ts) for the same reason. Callers can still override it.
+ */
+const PROVIDER_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
 export async function httpFetch(url: string, options: FetchOptions = {}): Promise<Response> {
   const { method = 'GET', headers = {}, body, timeoutMs = 15_000, signal } = options
   const controller = new AbortController()
@@ -213,11 +226,14 @@ export async function httpFetch(url: string, options: FetchOptions = {}): Promis
   try {
     // A string body is sent verbatim (the caller pre-encoded it and sets its own
     // content-type, e.g. a form POST); any other value is JSON-encoded and gets the
-    // JSON content-type unless the caller overrode it.
+    // JSON content-type unless the caller overrode it. The UA is a default the caller
+    // can also override; both sit before `...headers` so an explicit value wins.
     const rawBody = typeof body === 'string'
+    const defaults: Record<string, string> = { 'User-Agent': PROVIDER_UA }
+    if (body != null && !rawBody) defaults['content-type'] = 'application/json'
     return await fetch(url, {
       method,
-      headers: body != null && !rawBody ? { 'content-type': 'application/json', ...headers } : headers,
+      headers: { ...defaults, ...headers },
       body: body == null ? undefined : rawBody ? (body as string) : JSON.stringify(body),
       signal: controller.signal
     })

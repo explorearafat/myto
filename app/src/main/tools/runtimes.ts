@@ -16,7 +16,7 @@ export const detectRuntimesTool: ToolDef = {
   usage: '{}',
   // Read-only: no sideEffect, so it never raises a Cowork permission prompt.
   schema: { type: 'object', properties: {}, additionalProperties: false },
-  available: (gate: ToolGate) => gate.mode === 'cowork',
+  available: (gate: ToolGate) => gate.mode === 'cowork' || gate.mode === 'research',
   async run(_input: unknown, ctx: ToolContext): Promise<string> {
     return summarizeRuntimes(await detectRuntimes(ctx.signal))
   }

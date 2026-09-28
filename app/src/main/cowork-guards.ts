@@ -148,3 +148,150 @@ export function looksLikeContinuationRequest(text: string): boolean {
   if (!t) return false
   return CONTINUATION_PATTERNS.some((re) => re.test(t))
 }
+
+/** Announced-but-unexecuted action nudges allowed per reply before the reply stands. */
+export const MAX_ANNOUNCED_ACTION = 2
+
+/**
+ * Declarative "I'm about to DO it" phrasings pointing at a concrete next action the
+ * model then failed to take. Two families:
+ *
+ *  • BUILD — writing a file, creating the page, running a command. Present-progressive
+ *    ("Now I'm building…", "I'm creating…") and immediate-future ("I'll write…", "Let me
+ *    create…", "Next, I'll add…"). This is the Cowork half-finished-run stall.
+ *  • RESEARCH / BROWSER — the Research-mode twin: "Let me grab a fresh snapshot", "I'll
+ *    check your messages", "Now I'm reading the page", "Let me pull up your inbox". A
+ *    research agent narrates the next inspection/browse step and then stops, emitting no
+ *    browser/web/read tool call — so the loop reads the no-call turn as finished and ends
+ *    a browser task half-done (the observed Instagram/Research stop).
+ *
+ * All four are deliberately first-person + action-verb: a past-tense wrap-up ("I've
+ * built…", "Created the file.", "I checked your messages.") never matches, so a
+ * genuinely finished reply isn't mistaken for an abandoned step. They are matched only
+ * against the reply's LAST sentence (see {@link lastSentence}), which keeps a finished
+ * answer that merely mentions an earlier step from tripping the guard.
+ */
+const ANNOUNCED_ACTION_PATTERNS: readonly RegExp[] = [
+  // BUILD — present progressive: "Now I'm building…", "I am creating…", "I'm setting up…".
+  /\bi(?:'m| am)\s+(?:now\s+)?(building|creating|writing|adding|implementing|generating|making|coding|scaffolding|drafting|assembling|putting together|setting up|starting)\b/i,
+  // BUILD — immediate future / self-directive: base verb after "I'll / I will / I'm going
+  // to / I'm about to / let me / next, I'll / then I'll". "I will now implement…" etc.
+  /\b(?:i(?:'ll| will)|i(?:'m| am)\s+(?:going to|about to)|let me|next[,]?\s+i(?:'ll| will)?|then\s+i(?:'ll| will))\s+(?:now\s+)?(build|create|write|add|implement|generate|make|code|scaffold|draft|assemble|put together|set up|start)\b/i,
+  // RESEARCH/BROWSER — present progressive: "Now I'm reading the page", "I'm checking your
+  // DMs", "I am pulling up your inbox". The -ing form follows "I'm/I am" (optionally now/
+  // going to/about to). "looking" excludes the "looking forward" sign-off (not an action).
+  /\bi(?:'m| am)\s+(?:now\s+|going to\s+|about to\s+)?(checking|looking(?!\s+forward)|reading|opening|navigating|browsing|searching|scrolling|grabbing|fetching|gathering|loading|refreshing|reloading|pulling up|bringing up|logging in|signing in|taking a look|taking a snapshot|grabbing a snapshot)\b/i,
+  // RESEARCH/BROWSER — immediate future / self-directive: inspection verb after the same
+  // lead-ins. "Let me grab a fresh snapshot", "I'll check the page", "Let me pull up …".
+  // "look" excludes "look forward" for the same reason.
+  /\b(?:i(?:'ll| will)|i(?:'m| am)\s+(?:going to|about to)|let me|next[,]?\s+i(?:'ll| will)?|then\s+i(?:'ll| will))\s+(?:now\s+)?(check|look at|look up|look(?!\s+forward)|read|open|navigate|browse|search|find|examine|inspect|review|grab|fetch|gather|scroll|load|refresh|reload|pull up|bring up|go to|log in|sign in|take a look|take a snapshot|grab a snapshot|get a snapshot)\b/i
+]
+
+/**
+ * Extract the LAST sentence of a reply — the announcement that matters is the final
+ * thing the model says before it stops. Keying on the last sentence (not the whole
+ * reply) is what tells the observed stall ("…and then Now I'm building index.html.")
+ * apart from a finished reply that merely mentions a step earlier and then concludes
+ * ("First I'll create the files. All three are written and the build passes."), where
+ * the last sentence is a completion statement and no nudge should fire.
+ */
+function lastSentence(text: string): string {
+  const t = text.trim()
+  if (!t) return ''
+  const parts = t.split(/(?<=[.!?…])\s+/)
+  return parts[parts.length - 1] ?? t
+}
+
+/**
+ * Does this reply END by announcing a build action it never carried out? The exact
+ * hard stall a weaker model falls into mid-run: it writes one file, narrates the next
+ * step ("Now I'm building index.html…"), and stops — emitting no tool call — so the
+ * loop reads the turn as a finished answer and ends the run with the work half-built.
+ *
+ * The signature-keyed and progress guards all miss it: nothing repeats, and a file WAS
+ * written this run (buildsMade > 0), so it is neither an oscillation nor an
+ * explore-only spin. This catches it directly off the reply's last sentence (see
+ * {@link lastSentence} + {@link ANNOUNCED_ACTION_PATTERNS}) so the loop can nudge the
+ * model to actually emit the tool call, bounded by {@link MAX_ANNOUNCED_ACTION}.
+ */
+export function looksLikeAnnouncedAction(text: string): boolean {
+  const tail = lastSentence(text)
+  if (!tail) return false
+  return ANNOUNCED_ACTION_PATTERNS.some((re) => re.test(tail))
+}
+
+/** False-limit / deferral give-up nudges allowed per reply before the reply stands. */
+export const MAX_FALSE_LIMIT_DEFERRAL = 2
+
+/**
+ * "I can't keep going / I'll do it later" excuses a weak model invents to abandon a run
+ * with nothing built. Two shapes, either of which trips the guard:
+ *
+ *  1. DEFERRAL — postponing the actual work to a later turn/reply/session ("the
+ *     implementation remains pending for the next available tool-enabled turn", "I'll
+ *     finish this in the next turn"). A genuinely-finished reply never defers its own
+ *     core task; a genuinely-blocked one asks a real question. Anchored on next/later +
+ *     turn/reply/session (not "time"/"iteration", which show up in benign wrap-ups).
+ *  2. FALSE LIMIT CLAIM — asserting a tool/usage/token/turn limit or quota was reached as
+ *     the reason it stopped ("the tool-use limit was reached", "I've run out of tool
+ *     calls"). Mid-loop this is never a real stop condition the model should honor: the
+ *     turn ceiling is effectively unbounded, and if a real cap were ever hit the loop's
+ *     own closing turn tells the model to answer with what it has — it does NOT ask the
+ *     model to defer to a "next turn". So a reply that says so has invented the limit.
+ *
+ * The leading group must be immediately followed (≤1 separator) by a limit/quota/cap
+ * word, so a bare "tool"/"turn"/"call" in ordinary prose can't trip it — only phrases
+ * like "token limit", "tool-use limit", "rate quota", "turn budget".
+ */
+const FALSE_LIMIT_DEFERRAL_PATTERNS: readonly RegExp[] = [
+  // Deferral to a later turn/reply/session.
+  /\b(?:pending|deferred|postponed|resume[d]?|continue[d]?|finish(?:ed|ing)?|complete[d]?|do (?:this|it|so))\b[^.?!\n]{0,70}\b(?:next|later|following|subsequent|future|another|upcoming)\b[^.?!\n]{0,25}\b(?:turn|reply|response|session|message|round|prompt)\b/i,
+  // Limit/quota "was reached" (limit-word first, then the verb).
+  /\b(?:tool[- ]?use|tool|usage|token|api|rate|step|turn|call|message|request|quota|budget|compute)[- ]?(?:limit|quota|budget|cap|ceiling|allowance|restriction|allotment)\b[^.?!\n]{0,60}\b(?:reached|hit|exceeded|met|ran out|used up|exhausted|maxed(?:\s+out)?)\b/i,
+  // "reached the limit/quota" (verb first, then the limit-word).
+  /\b(?:reached|hit|exceeded|ran out of|used up|exhausted|out of|no more|maxed out)\b[^.?!\n]{0,40}\b(?:tool[- ]?use|tool|usage|token|api|rate|step|turn|call|message|request|quota|budget|compute)[- ]?(?:limit|quota|budget|cap|ceiling|allowance|restriction|allotment|calls?)\b/i
+]
+
+/**
+ * Does this reply abandon the run by inventing a limit or deferring the work to a later
+ * turn, rather than either finishing or taking the next action? The exact stall behind
+ * "project complete na korei theme gelo" round two: a weak model, after only a plan,
+ * writes "I couldn't build the app because the tool-use limit was reached … the
+ * implementation remains pending for the next available tool-enabled turn" and stops —
+ * no tool call, zero files. No other guard catches it (nothing was built so it is no
+ * announced-action; nothing repeats; it prints no code; it is not a question), so the
+ * loop reads the no-call turn as a finished answer and ends the run empty. Matched on the
+ * whole reply — the phrases (see {@link FALSE_LIMIT_DEFERRAL_PATTERNS}) are distinctive
+ * enough not to need tail-anchoring — so the loop can push the model to act now, bounded
+ * by {@link MAX_FALSE_LIMIT_DEFERRAL}.
+ */
+export function looksLikeFalseLimitDeferral(text: string): boolean {
+  const t = text.trim()
+  if (!t) return false
+  return FALSE_LIMIT_DEFERRAL_PATTERNS.some((re) => re.test(t))
+}
+
+/** Empty / content-free "you haven't started" nudges allowed per reply before it stands. */
+export const MAX_EMPTY_START = 3
+
+/**
+ * Is this reply content-free — carrying no substance a user could read or run? True for
+ * the empty string, whitespace only, and a reply made up solely of punctuation or stray
+ * marks ("…", "—", a lone emoji) — anything with no letter or digit anywhere.
+ *
+ * This is the LAST stall shape a run can end on, and the subtlest: a weak model narrates
+ * its intent ("I'll start by drafting a plan, then build every file out") and/or records a
+ * few `think` thoughts, then closes its turn with a
+ * blank reply — no tool call, no words. Every other {@link looksLikeUnsavedCode},
+ * {@link looksLikeAnnouncedAction}, {@link looksLikeFalseLimitDeferral} guard keys on
+ * SOMETHING in the text and so is silent on emptiness, and the announcement itself never
+ * reached a no-call turn (it rode along with a `think` call), so the loop reads the blank
+ * turn as a finished answer and ends the run with zero files. An empty reply is never a
+ * real completion — nothing was built and nothing was said — so the loop, gated on
+ * "nothing built this run", turns it back into "take your first concrete action now",
+ * bounded by {@link MAX_EMPTY_START}. Keyed on the ABSENCE of any word character, so a
+ * genuine one-line answer (which has letters) never trips it.
+ */
+export function looksLikeContentFreeReply(text: string): boolean {
+  return !/[\p{L}\p{N}]/u.test(text)
+}
