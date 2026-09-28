@@ -1,5 +1,5 @@
-import { readFile, writeFile, readdir, mkdir, rm } from 'node:fs/promises'
-import { resolve, relative, isAbsolute, dirname, sep } from 'node:path'
+import { readFile, writeFile, readdir, mkdir, rm, realpath, lstat } from 'node:fs/promises'
+import { resolve, relative, isAbsolute, dirname, basename, sep } from 'node:path'
 import { toErrorMessage } from '../providers/http'
 import type { ToolDef, ToolGate } from './registry'
 
@@ -41,6 +41,65 @@ export function resolveInWorkspace(workspaceDir: string, rel: string): string | 
   return target
 }
 
+/** True if a path exists on disk. Uses `lstat`, so a symlink counts as existing
+ * even when its target is missing or external — the climb in
+ * {@link resolveInWorkspaceReal} must stop AT the symlink so realpath can unmask it. */
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await lstat(p)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The real-path containment check layered on top of {@link resolveInWorkspace}.
+ * Beyond the `..`/absolute rejection, this resolves symlinks: it realpaths the
+ * workspace root and the nearest EXISTING ancestor of the target, re-joins any
+ * not-yet-existing trailing segments (so a write to a new file is handled), and
+ * re-runs the segment containment test on the RESOLVED path. A symlink inside the
+ * workspace that points outside it is therefore refused on both reads and writes —
+ * the class of escape behind CVE-2026-31990, which `resolveInWorkspace`'s lexical
+ * check alone does not catch. Returns the lexical absolute path when safe (callers
+ * keep operating on the path they already had), or null to refuse. Fails CLOSED:
+ * any realpath/lstat error is treated as unsafe.
+ */
+export async function resolveInWorkspaceReal(
+  workspaceDir: string,
+  rel: string
+): Promise<string | null> {
+  // 1. Cheap lexical gate first — fail fast on `..`, absolute, or a different drive.
+  const lexical = resolveInWorkspace(workspaceDir, rel)
+  if (lexical === null) return null
+  try {
+    // 2. Canonicalise the root once (handles a symlinked workspace such as
+    //    /tmp -> /private/tmp on macOS). The root always exists.
+    const realRoot = await realpath(resolve(workspaceDir))
+    // 3. Climb to the nearest ancestor that exists, collecting the trailing
+    //    segments that don't exist yet. `lstat` stops the climb at a symlink.
+    let existing = lexical
+    const trailing: string[] = []
+    while (!(await pathExists(existing))) {
+      const parent = dirname(existing)
+      if (parent === existing) break // hit a filesystem root without finding one
+      trailing.unshift(basename(existing))
+      existing = parent
+    }
+    // 4. Realpath the deepest existing ancestor — this is where a symlink is
+    //    followed — then re-join the not-yet-existing trailing segments.
+    const realExisting = await realpath(existing)
+    const realTarget = trailing.length ? resolve(realExisting, ...trailing) : realExisting
+    // 5. Re-run the segment containment test on the RESOLVED path.
+    if (realTarget === realRoot) return lexical
+    const relReal = relative(realRoot, realTarget)
+    if (relReal === '..' || relReal.startsWith(`..${sep}`) || isAbsolute(relReal)) return null
+    return lexical
+  } catch {
+    return null // fail closed on any resolution error
+  }
+}
+
 /**
  * The filesystem tools' precondition: an agentic mode (Cowork or Research) plus a
  * root to work in. Cowork's root is the user's chosen folder; Research's is set by
@@ -68,14 +127,14 @@ function readContent(input: unknown): string | null {
 }
 
 /** Resolve `input.path` against the context's workspace, or return a refusal string. */
-function pathInWorkspace(
+async function pathInWorkspace(
   input: unknown,
   workspaceDir: string | null,
   toolName: string
-): { abs: string; rel: string } | string {
+): Promise<{ abs: string; rel: string } | string> {
   const rel = readPath(input)
   if (!rel) return `${toolName} needs a JSON input like {"path": "src/app.ts"} (relative to the working folder).`
-  const abs = workspaceDir ? resolveInWorkspace(workspaceDir, rel) : null
+  const abs = workspaceDir ? await resolveInWorkspaceReal(workspaceDir, rel) : null
   if (!abs) return `${toolName}: "${rel}" is outside the working folder and was refused.`
   return { abs, rel }
 }
@@ -88,7 +147,7 @@ export const listDirTool: ToolDef = {
   async run(input, ctx) {
     // `path` is optional for list_dir; default to the folder root.
     const rel = readPath(input) ?? '.'
-    const abs = ctx.workspaceDir ? resolveInWorkspace(ctx.workspaceDir, rel) : null
+    const abs = ctx.workspaceDir ? await resolveInWorkspaceReal(ctx.workspaceDir, rel) : null
     if (!abs) return `list_dir: "${rel}" is outside the working folder and was refused.`
     try {
       const entries = await readdir(abs, { withFileTypes: true })
@@ -110,7 +169,7 @@ export const readFileTool: ToolDef = {
   usage: '{"path": "src/app.ts"}',
   available: fsAvailable,
   async run(input, ctx) {
-    const r = pathInWorkspace(input, ctx.workspaceDir, 'read_file')
+    const r = await pathInWorkspace(input, ctx.workspaceDir, 'read_file')
     if (typeof r === 'string') return r
     try {
       const text = await readFile(r.abs, 'utf8')
@@ -129,7 +188,7 @@ export const writeFileTool: ToolDef = {
   sideEffect: 'write',
   available: fsAvailable,
   async run(input, ctx) {
-    const r = pathInWorkspace(input, ctx.workspaceDir, 'write_file')
+    const r = await pathInWorkspace(input, ctx.workspaceDir, 'write_file')
     if (typeof r === 'string') return r
     const content = readContent(input)
     if (content == null) return 'write_file needs a "content" string, e.g. {"path": "notes.md", "content": "…"}.'
@@ -159,7 +218,7 @@ export const editFileTool: ToolDef = {
   sideEffect: 'write',
   available: fsAvailable,
   async run(input, ctx) {
-    const r = pathInWorkspace(input, ctx.workspaceDir, 'edit_file')
+    const r = await pathInWorkspace(input, ctx.workspaceDir, 'edit_file')
     if (typeof r === 'string') return r
     const o = input && typeof input === 'object' ? (input as Record<string, unknown>) : {}
     const oldText = typeof o.old === 'string' ? o.old : null
@@ -206,7 +265,7 @@ export const deleteFileTool: ToolDef = {
   sideEffect: 'write',
   available: fsAvailable,
   async run(input, ctx) {
-    const r = pathInWorkspace(input, ctx.workspaceDir, 'delete_file')
+    const r = await pathInWorkspace(input, ctx.workspaceDir, 'delete_file')
     if (typeof r === 'string') return r
     // Refuse to delete the workspace root itself.
     if (r.abs === (ctx.workspaceDir ? resolve(ctx.workspaceDir) : '')) {

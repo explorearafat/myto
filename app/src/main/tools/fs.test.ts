@@ -1,9 +1,18 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import {
+  mkdtempSync,
+  rmSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  symlinkSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
   resolveInWorkspace,
+  resolveInWorkspaceReal,
   fsAvailable,
   listDirTool,
   readFileTool,
@@ -57,6 +66,75 @@ describe('resolveInWorkspace (sandbox)', () => {
   })
   it('refuses when there is no workspace', () => {
     expect(resolveInWorkspace('', 'a.txt')).toBeNull()
+  })
+})
+
+describe('resolveInWorkspaceReal (symlink containment — CVE-2026-31990 class)', () => {
+  // Create a symlink, or return false so the test can skip. On Windows a real
+  // symlink needs Developer Mode or elevation, but an NTFS *junction* (directory
+  // only) needs neither and `realpath` resolves it identically — so it exercises
+  // the exact same escape vector. We fall back to a junction for dir links there;
+  // a genuine failure is logged so the case never silently passes as a no-op.
+  function trySymlink(target: string, linkPath: string, type: 'dir' | 'file'): boolean {
+    const attempts: Array<'dir' | 'file' | 'junction'> =
+      process.platform === 'win32' && type === 'dir' ? ['junction', 'dir'] : [type]
+    for (const t of attempts) {
+      try {
+        symlinkSync(target, linkPath, t)
+        return true
+      } catch {
+        // try the next strategy
+      }
+    }
+    // eslint-disable-next-line no-console
+    console.warn('[fs.test] skipping symlink case — OS refused symlink/junction creation')
+    return false
+  }
+
+  it('refuses reading a file through a symlink that escapes the workspace', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'myto-fs-outside-'))
+    writeFileSync(join(outside, 'secret.txt'), 'top secret')
+    if (!trySymlink(outside, join(ROOT, 'link'), 'dir')) {
+      rmSync(outside, { recursive: true, force: true })
+      return
+    }
+    // Lexically "link/secret.txt" looks inside; the real path is outside.
+    expect(await resolveInWorkspaceReal(ROOT, 'link/secret.txt')).toBeNull()
+    const out = await readFileTool.run({ path: 'link/secret.txt' }, ctx())
+    expect(out).toMatch(/outside the working folder/i)
+    expect(out).not.toMatch(/top secret/)
+    rmSync(outside, { recursive: true, force: true })
+  })
+
+  it('refuses writing through a symlinked directory that escapes, creating nothing outside', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'myto-fs-outside-'))
+    if (!trySymlink(outside, join(ROOT, 'out'), 'dir')) {
+      rmSync(outside, { recursive: true, force: true })
+      return
+    }
+    const res = await writeFileTool.run({ path: 'out/evil.txt', content: 'x' }, ctx())
+    expect(res).toMatch(/outside the working folder/i)
+    expect(existsSync(join(outside, 'evil.txt'))).toBe(false)
+    rmSync(outside, { recursive: true, force: true })
+  })
+
+  it('still allows a symlink that stays inside the workspace (follow-within-root)', async () => {
+    mkdirSync(join(ROOT, 'real'))
+    writeFileSync(join(ROOT, 'real', 'a.txt'), 'inside')
+    if (!trySymlink(join(ROOT, 'real'), join(ROOT, 'alias'), 'dir')) return
+    expect(await resolveInWorkspaceReal(ROOT, 'alias/a.txt')).not.toBeNull()
+    expect(await readFileTool.run({ path: 'alias/a.txt' }, ctx())).toBe('inside')
+  })
+
+  it('allows writing a brand-new file whose parent really exists', async () => {
+    mkdirSync(join(ROOT, 'sub'))
+    expect(await resolveInWorkspaceReal(ROOT, 'sub/new.txt')).toBe(resolve(ROOT, 'sub/new.txt'))
+  })
+
+  it('still refuses .. traversal and absolute paths at the real layer', async () => {
+    expect(await resolveInWorkspaceReal(ROOT, '../escape.txt')).toBeNull()
+    const abs = process.platform === 'win32' ? 'C:/Windows/system32' : '/etc/passwd'
+    expect(await resolveInWorkspaceReal(ROOT, abs)).toBeNull()
   })
 })
 
@@ -156,6 +234,33 @@ describe('edit_file', () => {
     expect(out).toMatch(/does not exist yet/i)
     expect(out).toMatch(/write_file/)
     expect(out).not.toMatch(/ENOENT/)
+  })
+})
+
+describe('utf8 round-trip (no encoding corruption)', () => {
+  // Symptom #6 from the fix brief: "some written content had corrupted characters."
+  // These are the exact glyphs a broken pipeline mangles — em/en dashes, curly quotes,
+  // arrows, accents, CJK, and a multi-byte emoji (a surrogate pair). write_file must
+  // persist them byte-for-byte and read_file must return them unchanged; this locks in
+  // the finding that the fs path is utf8 end-to-end (the decode is stream-safe too).
+  const TRICKY = 'em—dash, en–dash, "curly" ‘quotes’, arrow → café résumé, 日本語, 😀🎉'
+
+  it('write_file then read_file returns multi-byte content byte-for-byte', async () => {
+    const wrote = await writeFileTool.run({ path: 'u.txt', content: TRICKY }, ctx())
+    expect(wrote).toMatch(/Wrote/)
+    // On disk (independent of our own read tool) the bytes decode back to the original.
+    expect(readFileSync(join(ROOT, 'u.txt'), 'utf8')).toBe(TRICKY)
+    // And the read_file tool returns it unchanged — no mojibake, no replacement chars.
+    const readBack = await readFileTool.run({ path: 'u.txt' }, ctx())
+    expect(readBack).toBe(TRICKY)
+    expect(readBack).not.toContain('�') // the U+FFFD replacement char = corruption
+  })
+
+  it('edit_file preserves surrounding multi-byte content around a replacement', async () => {
+    await writeFileTool.run({ path: 'u.txt', content: `${TRICKY}\nMARKER\n${TRICKY}` }, ctx())
+    const out = await editFileTool.run({ path: 'u.txt', old: 'MARKER', new: 'réplacé→😀' }, ctx())
+    expect(out).toMatch(/1 replacement/)
+    expect(readFileSync(join(ROOT, 'u.txt'), 'utf8')).toBe(`${TRICKY}\nréplacé→😀\n${TRICKY}`)
   })
 })
 
