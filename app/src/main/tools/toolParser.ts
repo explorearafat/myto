@@ -187,21 +187,54 @@ function extractToolBlock(buf: string): { consumed: number; call: ToolCall } | n
   const lines = buf.split('\n')
   const openFence = /^(`{3,})/.exec(lines[0])
   const fenceLen = openFence ? openFence[1].length : 3
+  // A closing fence is any line that STARTS with a run of >= fenceLen backticks.
+  // We deliberately do NOT require the backticks to be alone on the line: weak
+  // models routinely glue the next sentence onto the close (```Two files done…),
+  // or even the next ```myto:tool fence. Requiring a bare close line made the
+  // parser miss those, hold the block open, and swallow every following tool call
+  // into one unparseable blob (the plan-stays-0/4 bug). See RC-6 in NOTES.md.
   let closeLine = -1
+  let runLen = 0
   for (let k = 1; k < lines.length; k++) {
-    const c = /^(`{3,})[ \t]*$/.exec(lines[k])
+    const c = /^(`{3,})/.exec(lines[k])
     if (c && c[1].length >= fenceLen) {
       closeLine = k
+      runLen = c[1].length
       break
     }
   }
   if (closeLine === -1) return null // not closed yet — hold everything
 
-  const block = lines.slice(0, closeLine + 1).join('\n')
+  // Glued open on the close line: the model wrote the close fence and the NEXT block's
+  // ```myto:tool opener with no newline between them, so they merge into one long
+  // backtick run (```\n```myto:tool → ``````myto:tool). The greedy match above would eat
+  // the whole run as the close and swallow the opener, dropping that next call (e.g. the
+  // update_plan the model batched right after a write). When consuming just the open-fence
+  // width leaves a ```myto:tool marker at the very start of the surplus (end-of-line counts
+  // as its terminator — the real newline was split off — but the ```myto:tool_result
+  // wrapper's "_" does NOT), close there and leave the opener for the next scan. RC-6.
+  if (runLen > fenceLen) {
+    const surplus = lines[closeLine].slice(fenceLen)
+    const after = surplus[MARKER.length]
+    if (surplus.startsWith(MARKER) && (after === undefined || isMarkerTerminator(after))) {
+      runLen = fenceLen
+    }
+  }
+
   const body = lines.slice(1, closeLine).join('\n')
-  // Skip the block and, when present, the single '\n' separating it from the rest.
-  let consumed = block.length
-  if (buf[consumed] === '\n') consumed++
+  // Byte offset of the start of the closing line, then of the char just past its
+  // backtick run. Anything after the run (glued prose or another fence) is left in
+  // the buffer for the caller's next scan — only the block itself is consumed.
+  let lineStart = 0
+  for (let k = 0; k < closeLine; k++) lineStart += lines[k].length + 1
+  const runEnd = lineStart + runLen
+  const block = buf.slice(0, runEnd)
+  // Clean close: only whitespace follows the backticks before the newline/EOF —
+  // swallow that trailing newline so we don't leak a blank line into the stream.
+  let consumed = runEnd
+  let w = runEnd
+  while (buf[w] === ' ' || buf[w] === '\t') w++
+  if (w >= buf.length || buf[w] === '\n') consumed = buf[w] === '\n' ? w + 1 : w
   return { consumed, call: { block, ...parseToolBody(body) } }
 }
 

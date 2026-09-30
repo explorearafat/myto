@@ -17,3 +17,9 @@ coverage/
 # reproducible from npm run build, so committing it bloats history for everyone.
 # dist/ (line 3) already covers the published copy; this covers the staging copy.
 /public/electron/
+
+# Third-party reference clone (OpenClaw, MIT) + local investigation/scratch docs.
+# Studied to harden Myto; never committed or pushed (its code stays out of our tree).
+/OpenClawSource/
+/GAP_ANALYSIS.md
+/NOTES.md

@@ -34,6 +34,14 @@ export interface StreamEvent {
   toolCall?: NativeToolCall
   /** True on the format's terminal event (OpenAI `[DONE]`; Anthropic has no sentinel). */
   done?: boolean
+  /**
+   * True when the model stopped because it hit its OUTPUT-token limit (OpenAI
+   * `finish_reason:"length"`, Anthropic `stop_reason:"max_tokens"`) — a cut-off, not a
+   * finished answer. Present only on a terminal event ({@link done} true). The reply loop
+   * surfaces it so the agentic loop auto-continues the cut-off write instead of reading the
+   * partial output as done (RC-2).
+   */
+  truncated?: boolean
 }
 
 /**
@@ -267,6 +275,9 @@ export const openAiAdapter: WireAdapter = {
     let name = ''
     let args = ''
     let seen = false
+    // Sticky: set the moment any choice reports finish_reason 'length' (the model hit its
+    // output-token cap). Rides the terminal [DONE] so the loop can auto-continue (RC-2).
+    let truncated = false
     const take = (): StreamEvent | null => {
       if (!seen || !name) return null
       seen = false
@@ -279,7 +290,7 @@ export const openAiAdapter: WireAdapter = {
           // Normally finish_reason already released the call; the combined shape only
           // matters for a stream that jumps straight to [DONE] with a call pending.
           const call = take()
-          return call ? { ...call, done: true } : { done: true }
+          return call ? { ...call, done: true, truncated } : { done: true, truncated }
         }
         let parsed: OpenAiStreamChunk
         try {
@@ -296,6 +307,8 @@ export const openAiAdapter: WireAdapter = {
           if (frag.function?.name) name = frag.function.name
           if (typeof frag.function?.arguments === 'string') args += frag.function.arguments
         }
+        // 'length' = stopped at the output-token limit; a cut-off, not an answer.
+        if (choice?.finish_reason === 'length') truncated = true
         if (choice?.finish_reason === 'tool_calls') {
           const call = take()
           if (call) return call
@@ -391,7 +404,7 @@ interface AnthropicStreamEvent {
   index?: number
   /** On `content_block_start`: the block being opened (a `tool_use` block carries id + name). */
   content_block?: { type?: string; id?: string; name?: string }
-  delta?: { type?: string; text?: string; thinking?: string; partial_json?: string }
+  delta?: { type?: string; text?: string; thinking?: string; partial_json?: string; stop_reason?: string }
   error?: { message?: string }
 }
 
@@ -483,6 +496,9 @@ export const anthropicAdapter: WireAdapter = {
     let name = ''
     let json = ''
     let inTool = false
+    // Sticky: set when message_delta reports stop_reason 'max_tokens' (output-token cap).
+    // Rides the terminal message_stop so the loop can auto-continue the cut-off (RC-2).
+    let truncated = false
     const emit = (): StreamEvent => {
       inTool = false
       const call: NativeToolCall = { id: id || `toolu_${Date.now().toString(36)}`, name, argsJson: json || '{}' }
@@ -508,6 +524,13 @@ export const anthropicAdapter: WireAdapter = {
           return null
         }
         if (parsed.type === 'content_block_stop' && inTool && name) return emit()
+        // message_delta carries the run's stop_reason; 'max_tokens' = cut-off at the limit.
+        if (parsed.type === 'message_delta' && parsed.delta?.stop_reason === 'max_tokens') {
+          truncated = true
+          return null
+        }
+        // message_stop is the terminal event — carry the sticky truncated flag out on it.
+        if (parsed.type === 'message_stop') return { done: true, truncated }
         return parseAnthropicEvent(parsed)
       },
       flush(): StreamEvent | null {

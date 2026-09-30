@@ -15,7 +15,7 @@ export type CommandId =
   | 'help'
   | 'clear'
   | 'cowork'
-  | 'chat'
+  | 'build'
   | 'plan'
   | 'verify'
   | 'model'
@@ -43,8 +43,8 @@ export interface SlashCommand {
 export const SLASH_COMMANDS: SlashCommand[] = [
   { id: 'help', name: 'help', hint: 'List the available slash commands' },
   { id: 'clear', name: 'clear', hint: 'Start a fresh chat', danger: true },
-  { id: 'cowork', name: 'cowork', hint: 'Switch to Cowork (agentic) mode' },
-  { id: 'chat', name: 'chat', hint: 'Switch back to plain Chat mode' },
+  { id: 'cowork', name: 'cowork', hint: 'Switch to Cowork — the all-rounder (browser, your files, sub-agents)' },
+  { id: 'build', name: 'build', hint: 'Switch to Build mode — scaffold & ship a project in a folder' },
   { id: 'plan', name: 'plan', hint: 'Toggle plan mode — plan first, approve before edits' },
   { id: 'verify', name: 'verify', hint: 'Set the Cowork verify command (opens Settings if empty)', arg: 'command' },
   { id: 'model', name: 'model', hint: 'Choose the model (opens Settings)' },

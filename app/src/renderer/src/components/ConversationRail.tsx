@@ -300,16 +300,16 @@ export function ConversationRail() {
               <span
                 title={
                   s.mode === 'cowork'
-                    ? 'Cowork session'
+                    ? 'Build session'
                     : s.mode === 'research'
-                      ? 'Research session'
+                      ? 'Cowork session'
                       : 'Chat session'
                 }
                 aria-label={
                   s.mode === 'cowork'
-                    ? 'Cowork session'
+                    ? 'Build session'
                     : s.mode === 'research'
-                      ? 'Research session'
+                      ? 'Cowork session'
                       : 'Chat session'
                 }
                 className="grid shrink-0 place-items-center text-muted/70"
@@ -400,7 +400,7 @@ export function ConversationRail() {
             title={
               modeLocked
                 ? "This chat's mode is fixed — start a new chat to switch"
-                : 'Research — 300+ professional agents, browser & your files, no folder needed'
+                : 'Cowork — the all-rounder: browser, your files & sub-agents, no folder needed'
             }
             className={
               'flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-[12px] font-medium transition-colors disabled:cursor-not-allowed ' +
@@ -418,7 +418,7 @@ export function ConversationRail() {
               />
               <circle cx="12.6" cy="12.6" r="1.4" stroke="currentColor" strokeWidth="1.2" />
             </svg>
-            Research
+            Cowork
           </button>
           <button
             type="button"
@@ -428,7 +428,7 @@ export function ConversationRail() {
             title={
               modeLocked
                 ? "This chat's mode is fixed — start a new chat to switch"
-                : 'Cowork — work across a folder on your computer'
+                : 'Build — scaffold & ship a real project in a folder on your computer'
             }
             className={
               'flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-[12px] font-medium transition-colors disabled:cursor-not-allowed ' +
@@ -446,7 +446,7 @@ export function ConversationRail() {
               />
               <path d="M8 8.2v2.6M6.7 9.5h2.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
             </svg>
-            Cowork
+            Build
           </button>
         </div>
         <button

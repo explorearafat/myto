@@ -525,6 +525,14 @@ export interface ProviderSettings {
    * as before". See {@link BackgroundSettings}.
    */
   background: BackgroundSettings
+  /**
+   * What the active model produces (Feature B). Absent/`undefined` means "auto-detect from
+   * the model id" — the safe default, under which every current chat model stays a chat
+   * model and nothing changes. Set it explicitly to `'image'` or `'video'` to force the
+   * media-generation path for a BYOK endpoint whose model id doesn't advertise its kind.
+   * See providers/model-kind and {@link ModelKind}.
+   */
+  modelKind?: ModelKind
 }
 
 /** A model advertised by a provider's list endpoint. */
@@ -573,6 +581,36 @@ export interface ChatImage {
   mediaType: string
   /** The image bytes, base64-encoded (no `data:...;base64,` prefix). */
   dataBase64: string
+}
+
+/**
+ * What kind of thing the active model produces (Feature B). A plain `chat` model
+ * streams text (every existing model); an `image`/`video` model turns the prompt into
+ * a picture or clip instead. Persisted on {@link ProviderSettings.modelKind}; when unset
+ * or `'auto'` the main process infers it from the model id (see providers/model-kind).
+ * This is what lets one BYOK endpoint drive text OR media generation — Myto is
+ * model-agnostic, so the turn's shape follows the model, not a hardcoded assumption.
+ */
+export type ModelKind = 'chat' | 'image' | 'video'
+
+/**
+ * A piece of media a generation model produced (Feature B) — the image/video answer to
+ * a prompt, carried out-of-band to the renderer on {@link CompletionChunk.media} and shown
+ * inline in the reply. Either `dataBase64` (bytes we fetched, the common `b64_json` case)
+ * or `url` (a link the provider returned) is present; `dataBase64` is preferred because it
+ * survives the provider expiring its temporary URLs.
+ */
+export interface GeneratedMedia {
+  /** Whether this is a still image or a video clip. */
+  kind: 'image' | 'video'
+  /** MIME type, e.g. 'image/png' | 'video/mp4'. */
+  mediaType: string
+  /** The bytes, base64-encoded (no `data:...;base64,` prefix). Present for fetched media. */
+  dataBase64?: string
+  /** A URL the provider returned, when it gave a link instead of bytes. */
+  url?: string
+  /** The prompt that produced it, kept for the caption / alt text. */
+  prompt?: string
 }
 
 /**
@@ -738,6 +776,14 @@ export interface CompletionChunk {
    * of mistaking the partial output for a completed turn. Absent on every non-truncated stop.
    */
   truncated?: boolean
+  /**
+   * Media a generation model produced this turn (Feature B) — the image(s)/video that
+   * answer the prompt when the active model is an `image`/`video` model, or the rasterized
+   * document pages a vision tool rendered (A2b). Carried out-of-band on its own chunk (empty
+   * `delta`); the renderer shows each item inline in the reply and (for generated answers)
+   * the main process also persists them as attachments. Absent on ordinary text turns.
+   */
+  media?: GeneratedMedia[]
 }
 
 /**

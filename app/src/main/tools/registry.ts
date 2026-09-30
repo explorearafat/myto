@@ -1,4 +1,4 @@
-import type { ChatMode, CommandRun, FileSnapshot, NativeToolSchema, PreviewTarget, ProviderSettings, TodoItem, ToolSideEffect } from '../../shared/types'
+import type { ChatImage, ChatMode, CommandRun, FileSnapshot, NativeToolSchema, PreviewTarget, ProviderSettings, TodoItem, ToolSideEffect } from '../../shared/types'
 import { toErrorMessage } from '../providers/http'
 import type { ToolCall } from './toolParser'
 import { webFetchTool, webSearchTool, wikiSearchTool } from './web'
@@ -14,6 +14,9 @@ import { detectRuntimesTool } from './runtimes'
 import { verifyFileTool } from './verify'
 import { scaffoldDeployTool } from './scaffold'
 import { createDocumentTool } from './document'
+import { createFileTool } from './create-file'
+import { documentReadTools } from './document-read'
+import { renderDocumentTool } from './document-raster'
 import { browserTools } from './browser'
 import type { BrowserSession } from '../cowork-browser-cdp'
 import { gitTools } from './git'
@@ -126,6 +129,30 @@ export interface ToolContext extends ToolGate {
    * in unit tests, where `create_document` falls back to writing the HTML and says so.
    */
   renderDocument?: (html: string, kind: import('../cowork-docgen').DocKind) => Promise<Uint8Array>
+  /**
+   * Feed image(s) a tool produced back to the MODEL as vision input for the next turn
+   * (A2b — a scanned PDF page rasterized to a picture the model can read, since it has no
+   * text layer to extract). The stream loop attaches them to the tool-result turn it sends
+   * back and also shows them to the user as {@link CompletionChunk.media}. `caption` is a
+   * short human note (e.g. "document.pdf pages 3–4"). Optional — absent outside the streaming
+   * loop and in unit tests, where a rasterizing tool degrades to a plain text note.
+   */
+  emitToolImages?: (images: ChatImage[], caption?: string) => void
+  /**
+   * Rasterize a PDF's pages to PNG data-URLs on a real Chromium canvas (A2b — the
+   * Electron-backed half of `render_document`, in document-raster-runtime.ts). Returns the
+   * doc's true page count, the pages actually rendered, and their data-URLs. `pages` is the
+   * tool's raw page field (a number, `"3-5"`, or absent → the first window) and `scale` its
+   * raw scale field, both interpreted by the pure raster-core. Optional — absent outside the
+   * streaming loop and in unit tests, where `render_document` degrades to a "needs the app
+   * runtime" note.
+   */
+  rasterizeDocument?: (
+    bytes: Uint8Array,
+    pages: unknown,
+    scale: unknown,
+    signal?: AbortSignal
+  ) => Promise<{ total: number; pages: number[]; dataUrls: string[] }>
 }
 
 /** One tool the model can call through the text protocol. */
@@ -168,6 +195,9 @@ const ALL_TOOLS: readonly ToolDef[] = [
   verifyFileTool,
   scaffoldDeployTool,
   createDocumentTool,
+  createFileTool,
+  ...documentReadTools,
+  renderDocumentTool,
   ...browserTools,
   editNotebookTool,
   ...searchTools,

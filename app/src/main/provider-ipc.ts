@@ -5,6 +5,7 @@ import type {
   ApprovalRequest,
   AskQuestion,
   QuestionRequest,
+  ChatImage,
   ChatMessage,
   ChatMode,
   CommandRun,
@@ -12,6 +13,7 @@ import type {
   CompletionResult,
   FileSnapshot,
   GatewayConfig,
+  GeneratedMedia,
   ListModelsResult,
   NativeToolCall,
   OllamaConfig,
@@ -24,12 +26,15 @@ import type {
 } from '../shared/types'
 import { createProvider, providerFromSettings } from './providers'
 import type { Provider } from './providers/provider'
+import { GatewayProvider } from './providers/gateway'
+import { detectModelKind } from './providers/model-kind'
 import { toErrorMessage, httpStatusOf, rateLimitRetryDelay, planFailover } from './providers/http'
 import { getSettings, saveSettings } from './settings'
 import {
   createStatusStripper,
   reasoningCaption,
   COWORK_SYSTEM_PROMPT,
+  ALLROUNDER_SYSTEM_PROMPT,
   coworkBrowserPrompt,
   FILE_PROTOCOL_SYSTEM_PROMPT,
   IDENTITY_SYSTEM_PROMPT,
@@ -66,17 +71,28 @@ import { detectRuntimesCached, summarizeRuntimes } from './cowork-runtimes'
 import { browserToolsEnabled } from './cowork-browser'
 import { createBrowserController, type BrowserController } from './cowork-browser-runtime'
 import { renderDocumentPdf } from './cowork-docgen-runtime'
+import { rasterizePdf } from './document-raster-runtime'
+import { capturePreviewImage } from './preview-capture-runtime'
+import { runningServerUrl } from './tools/devServer'
+import {
+  MAX_VISUAL_REVIEWS,
+  PREVIEW_ENTRY_CANDIDATES,
+  pickReviewTarget,
+  visualReviewInstruction,
+  type ExistingEntry
+} from './tools/preview-review-core'
 import type { BrowserSession } from './cowork-browser-cdp'
 import { readUserMemory } from './user-memory'
 import { materializeAttachments, type MaterializedAttachment } from './cowork-attachments'
+import { readVisionImages } from './vision-attachments'
 import { insertFileSnapshot } from './db/snapshots'
 import { approvalDetail, requiresApproval } from './tools/approvals'
 import { createToolCallParser, toolCallBlock, toolResultBlock, type ToolCall } from './tools/toolParser'
 import { executeArgv, formatRunResult, resolveShell } from './tools/runCode'
 import { resolveInWorkspace } from './tools/fs'
 import { statSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
 import { homedir } from 'node:os'
-import { resolveResearchAgent, buildAgentSystemPrompt, agentIdentityLine } from './agents/persona'
 
 /**
  * The browser tools that act on the page (click/type). They are always confirmed
@@ -353,14 +369,23 @@ export function registerProviderIpc(): void {
         command?: CommandRun
         thinking?: string
         thinkingReset?: boolean
+        media?: GeneratedMedia[]
       }): void => {
         if (!sender.isDestroyed()) {
           sender.send(IpcChannel.ProvidersStreamChunk, { streamId, ...chunk })
         }
       }
 
+      /**
+       * The most recent preview the model raised this run (via `preview`/`run_dev_server`),
+       * captured so the build-complete visual review can screenshot exactly what it last showed —
+       * see {@link pickReviewTarget}. Null until the model previews something.
+       */
+      let lastPreview: PreviewTarget | null = null
+
       /** Forward a preview the `preview` tool raised to the renderer's pane (Cowork). */
       const onPreview = (target: PreviewTarget): void => {
+        lastPreview = target
         send({ delta: '', done: false, preview: target })
       }
 
@@ -478,6 +503,62 @@ export function registerProviderIpc(): void {
         const settings = getSettings()
         const mode: ChatMode = request.mode ?? 'chat'
 
+        // Feature B — media generation. When the active model is an image/video model
+        // (auto-detected from its id; an explicit settings.modelKind overrides), this turn
+        // produces a picture/clip, not text — so it never reaches the chat/tool loop below.
+        // We fulfil the prompt against the user's OWN configured gateway (the capability they
+        // asked for — no third-party call), stream the result back as inline media, and end
+        // the turn. Every ordinary chat model classifies as 'chat' here, so nothing changes
+        // for them. Ollama can't generate media, so we say so plainly.
+        const modelKind = detectModelKind(modelId, settings.modelKind)
+        if (modelKind !== 'chat') {
+          let prompt = ''
+          for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === 'user') {
+              prompt = messages[i].content.trim()
+              break
+            }
+          }
+          if (!(provider instanceof GatewayProvider)) {
+            send({
+              delta:
+                'Image/video generation needs a gateway (BYOK) endpoint — the local Ollama provider can only generate text. Add an image or video model on the Myto website → Authentication page and select it here.',
+              done: false
+            })
+            send({ delta: '', done: true })
+            return
+          }
+          if (!prompt) {
+            send({ delta: `Type a prompt describing the ${modelKind} you want, then send.`, done: false })
+            send({ delta: '', done: true })
+            return
+          }
+          send({ delta: '', done: false, status: modelKind === 'video' ? 'Generating video…' : 'Generating image…' })
+          try {
+            const media =
+              modelKind === 'video'
+                ? await provider.generateVideo(modelId, prompt, {}, controller.signal)
+                : await provider.generateImages(modelId, prompt, {}, controller.signal)
+            if (controller.signal.aborted) return
+            send({ delta: '', done: false, status: '' })
+            if (media.length === 0) {
+              send({
+                delta: `The model returned no ${modelKind}. This endpoint may not support ${modelKind} generation (it exposes an OpenAI-style \`/${modelKind === 'video' ? 'videos' : 'images'}/generations\` route), or the prompt was declined.`,
+                done: false
+              })
+              send({ delta: '', done: true })
+              return
+            }
+            send({ delta: '', done: false, media })
+            send({ delta: '', done: true })
+          } catch (err) {
+            if (controller.signal.aborted) return
+            send({ delta: `Couldn't generate the ${modelKind}: ${toErrorMessage(err)}`, done: false })
+            send({ delta: '', done: true })
+          }
+          return
+        }
+
         // Session-level auto-compaction: a very long thread (loaded whole from the DB)
         // can crowd even a large context window. Before running the turn, if the
         // conversation is over the token ceiling, fold its older turns into one summary
@@ -490,6 +571,23 @@ export function registerProviderIpc(): void {
           convo = await compactConversation(convo, provider, modelId, controller.signal)
           if (controller.signal.aborted) return
           send({ delta: '', done: false, status: '' })
+        }
+        // Vision input: this turn's IMAGE attachments reach the active model inline, in
+        // EVERY mode — attaching an image means "look at this". Populate images on the
+        // latest user turn; the adapters expand it into the provider's native image block.
+        // Best-effort — oversized/unreadable images are skipped (still reachable as files
+        // in Cowork via materializeAttachments below), and a failure never blocks the reply.
+        if (request.sessionId) {
+          const visionImages = await readVisionImages(request.sessionId, request.afterMsgId ?? null)
+          if (controller.signal.aborted) return
+          if (visionImages.length > 0) {
+            for (let i = convo.length - 1; i >= 0; i--) {
+              if (convo[i].role === 'user') {
+                convo[i] = { ...convo[i], images: [...(convo[i].images ?? []), ...visionImages] }
+                break
+              }
+            }
+          }
         }
         // Mode shape. Research and Cowork are the two "agentic" modes (full tool loop,
         // unbounded budget, compaction). Research is the folderless, agent-driven surface:
@@ -593,14 +691,12 @@ export function registerProviderIpc(): void {
         // plan directive into baseSystem and arms the one-time plan gate in the loop below.
         const planActive = mode === 'cowork' && settings.cowork.planMode
 
-        // Research persona: the chosen professional agent (one of 300+ in the catalog),
-        // resolved from the persisted id with a fallback to the default generalist, and
-        // composed into a full system prompt on demand. In Research this REPLACES the
-        // generic Cowork prompt — buildAgentSystemPrompt already appends the folderless,
-        // full-tool working contract (RESEARCH_WORKING_PROMPT). Null outside Research.
-        const researchAgent = research ? resolveResearchAgent(settings.researchAgentId) : null
-        if (researchAgent) {
-          send({ delta: '', done: false, status: `${researchAgent.name} · ${researchAgent.categoryName}` })
+        // The all-rounder ("Cowork" in the UI, internally `research`) announces itself so
+        // the user sees the mode on the status line while it spins up. Its persona is a
+        // single fixed all-rounder prompt (ALLROUNDER_SYSTEM_PROMPT) — there is no per-run
+        // agent picker any more, so nothing to resolve here.
+        if (research) {
+          send({ delta: '', done: false, status: 'Cowork · all-rounder' })
         }
 
         /**
@@ -651,6 +747,38 @@ export function registerProviderIpc(): void {
           html: string,
           kind: import('./cowork-docgen').DocKind
         ): Promise<Uint8Array> => renderDocumentPdf(html, kind)
+
+        /**
+         * A2b — images a tool produced this round (a scanned PDF page `render_document`
+         * rasterized to a picture the model can read). They must ride on the SAME
+         * tool-result USER turn we push after the call, never a fresh consecutive user
+         * turn: providers require strict user/assistant alternation, and two user turns in
+         * a row is an HTTP 400. So the tool doesn't return images inline — it calls this to
+         * park them, and the loop drains {@link pendingToolImages} onto the tool-result turn
+         * (and mirrors them to the renderer as a `media` chunk so the user sees the pages).
+         */
+        let pendingToolImages: ChatImage[] = []
+        let pendingToolImageCaption: string | undefined
+        const emitToolImages = (images: ChatImage[], caption?: string): void => {
+          if (!images.length) return
+          pendingToolImages = pendingToolImages.concat(images)
+          if (caption && !pendingToolImageCaption) pendingToolImageCaption = caption
+        }
+
+        /**
+         * Rasterize a scanned PDF's pages to PNG data-URLs for the `render_document` tool —
+         * backed by pdf.js on a hidden Chromium canvas (document-raster-runtime.ts). Always
+         * wired in the running app (Electron is present), so the tool can turn a text-less PDF
+         * into images the vision model reads; only in unit tests — where this ctx field is
+         * absent — does the tool fall back to a "needs the app runtime" note.
+         */
+        const rasterizeDocument = (
+          bytes: Uint8Array,
+          pages: unknown,
+          scale: unknown,
+          signal?: AbortSignal
+        ): Promise<{ total: number; pages: number[]; dataUrls: string[] }> =>
+          rasterizePdf(bytes, pages, scale, signal)
 
         /**
          * User-configured lifecycle hooks (#9). PreToolUse runs a shell command BEFORE
@@ -1078,16 +1206,26 @@ export function registerProviderIpc(): void {
           }
         }
 
-        // Base system prompts: <status> narration + the file-card protocol. Applied
-        // only here, on the interactive stream — the non-streaming getCompletion
-        // path (auto-titles) never receives them.
+        // Base system prompts: <status> narration always, plus (in chat mode only) the
+        // file-card protocol. Applied only here, on the interactive stream — the
+        // non-streaming getCompletion path (auto-titles) never receives them.
         const baseSystem: ChatMessage[] = [
           // Identity FIRST, in every mode: pins the assistant to "Myto" so the
           // underlying gateway/model never leaks a foreign name (it was answering
           // "Kiro", then "Claude"). See IDENTITY_SYSTEM_PROMPT.
           { role: 'system', content: IDENTITY_SYSTEM_PROMPT },
           { role: 'system', content: STATUS_SYSTEM_PROMPT },
-          { role: 'system', content: FILE_PROTOCOL_SYSTEM_PROMPT },
+          // The file-card protocol (```lang path fenced blocks → downloadable cards) is a
+          // CHAT-ONLY mechanism: plain chat has no filesystem, so a fenced block with a path
+          // is the only way to "produce a file the user can save". In the agentic modes
+          // (Build/Cowork) that SAME block renders as a display-only card that writes NOTHING
+          // to disk — so teaching the protocol there makes the model emit each file as prose
+          // first, then re-write it with write_file: the whole file generated TWICE (≈2× the
+          // tokens and time — the exact waste the user reported). Those modes have write_file
+          // and must use it directly, so the protocol is injected for chat only.
+          ...(mode !== 'cowork' && !research
+            ? [{ role: 'system' as const, content: FILE_PROTOCOL_SYSTEM_PROMPT }]
+            : []),
           // Output style (#13): the user's chosen voice (concise/explanatory/learning),
           // applied in every mode. 'default' yields '' → the turn is omitted entirely.
           ...(outputStyleInstruction
@@ -1105,13 +1243,14 @@ export function registerProviderIpc(): void {
                 }
               ]
             : []),
-          // Cowork turns the assistant into a goal-driven agent over the folder; Research
-          // swaps in the chosen professional agent's persona, which carries its own
-          // folderless full-tool working contract (so no generic Cowork prompt on top).
+          // The two agentic modes each get their own working contract. `cowork` (shown as
+          // "Build") is the project-builder scoped to the working folder; `research` (shown
+          // as "Cowork") is the folderless all-rounder that hands whole-project creation off
+          // to Build. Both prompts push proactive sub-agent delegation.
           ...(mode === 'cowork'
             ? [{ role: 'system' as const, content: COWORK_SYSTEM_PROMPT }]
-            : research && researchAgent
-              ? [{ role: 'system' as const, content: buildAgentSystemPrompt(researchAgent) }]
+            : research
+              ? [{ role: 'system' as const, content: ALLROUNDER_SYSTEM_PROMPT }]
               : []),
           // Runtime awareness (Track 1): the detected interpreters + the exact command
           // for each, so a weaker model doesn't reach for `python3` on Windows. Sits
@@ -1187,13 +1326,10 @@ export function registerProviderIpc(): void {
         // pasted turn can't blow up every subsequent message.
         const lastUser = [...convo].reverse().find((m) => m.role === 'user')
         const goal = (lastUser?.content ?? '').trim()
-        // Persona anchor: in Research, reassert the chosen agent's identity at the top of
-        // every mid-run nudge so a long autonomous run can't drift out of character.
-        const agentPrefix = researchAgent ? `${agentIdentityLine(researchAgent)}\n` : ''
         const goalLine = goal
           ? `Remember, the user's request is: "${goal.length > 500 ? `${goal.slice(0, 500)}…` : goal}"\n\n`
           : ''
-        const goalReminder = agentPrefix + goalLine
+        const goalReminder = goalLine
         // Log this turn's goal to the project journal (Cowork memory).
         if (mode === 'cowork' && workspaceDir && goal) recordGoal(workspaceDir, goal)
 
@@ -1302,6 +1438,11 @@ export function registerProviderIpc(): void {
         // and whether it has passed (so a later natural-done doesn't re-run it needlessly).
         let verifyRounds = 0
         let verifyPassed = false
+
+        // Build-complete visual-review state: how many times this reply has screenshot-reviewed
+        // the preview. Capped at {@link MAX_VISUAL_REVIEWS} (1) so the look-at-your-work pass
+        // fires once and the run then finishes — it can never become an endless polish loop.
+        let visualReviewsDone = 0
 
         // Plan-mode gate state (#8): whether the user has approved the drafted plan this
         // reply. Until then the FIRST side-effecting tool is held for plan approval.
@@ -1738,6 +1879,65 @@ export function registerProviderIpc(): void {
               })
               continue
             }
+            // Build-complete visual self-review — "look at what you built" before declaring
+            // done. If this Cowork run produced something viewable, open its preview,
+            // screenshot that preview offscreen, and hand the picture back so the model can
+            // catch layout/style bugs a text-only view misses — then the verify gate below
+            // proves the fixes are green. Runs at most MAX_VISUAL_REVIEWS (1) times, so it
+            // finishes decisively rather than looping; only in Cowork, and only when a preview
+            // target resolves (a page it built, or a dev server it left up) — a non-web
+            // deliverable has nothing to look at and skips straight to verify/finish.
+            if (
+              agentic &&
+              mode === 'cowork' &&
+              workspaceDir &&
+              visualReviewsDone < MAX_VISUAL_REVIEWS
+            ) {
+              // Last resort when nothing was previewed and no server is up: a built HTML entry.
+              let existingEntry: ExistingEntry | null = null
+              for (const rel of PREVIEW_ENTRY_CANDIDATES) {
+                const abs = resolveInWorkspace(workspaceDir, rel)
+                if (abs && statSync(abs, { throwIfNoEntry: false })?.isFile()) {
+                  existingEntry = { rel, url: pathToFileURL(abs).toString() }
+                  break
+                }
+              }
+              const target = pickReviewTarget({
+                lastPreview,
+                runningServerUrl: runningServerUrl(workspaceDir),
+                existingEntry
+              })
+              if (target) {
+                visualReviewsDone++
+                onPreview(target) // raise it in the user's pane — SHOW the finished project
+                send({ delta: '', done: false, status: 'Reviewing the preview' })
+                const shot = await capturePreviewImage(target.url, controller.signal)
+                if (controller.signal.aborted) return
+                if (shot) {
+                  if (visible.trim()) history.push({ role: 'assistant', content: visible })
+                  send({
+                    delta: '',
+                    done: false,
+                    media: [
+                      {
+                        kind: 'image' as const,
+                        mediaType: shot.mediaType,
+                        dataBase64: shot.dataBase64,
+                        prompt: `Preview — ${target.title}`
+                      }
+                    ]
+                  })
+                  history.push({
+                    role: 'user',
+                    content: visualReviewInstruction(goalReminder, target.title),
+                    images: [shot]
+                  })
+                  continue
+                }
+                // Capture failed or came back blank — never block the finish on a flaky
+                // screenshot; fall through to the verify gate and finish exactly as before.
+              }
+            }
             // #16 Programmatic verify gate. Before accepting "done" in Cowork, run the
             // user's verify command (build/test/lint). Exit 0 → the run really is done;
             // non-zero → feed the failure back as a user turn and loop so the tools stay
@@ -1959,7 +2159,9 @@ export function registerProviderIpc(): void {
                     preToolUse,
                     postToolUse,
                     getBrowser,
-                    renderDocument
+                    renderDocument,
+                    emitToolImages,
+                    rasterizeDocument
                   })
           } else {
             result = await runTool(call, {
@@ -1974,7 +2176,9 @@ export function registerProviderIpc(): void {
                     preToolUse,
                     postToolUse,
                     getBrowser,
-                    renderDocument
+                    renderDocument,
+                    emitToolImages,
+                    rasterizeDocument
                   })
           }
           if (controller.signal.aborted) return
@@ -2031,6 +2235,26 @@ export function registerProviderIpc(): void {
             role: 'user',
             content: `Tool result for ${toolName}:\n${result}\n\n${goalReminder}Keep going until the request is fully done: call another tool if you still need to, or give your final answer once it is complete. Do not repeat an identical call. An empty or sparse result (e.g. a near-empty folder) is a starting point, not a reason to stop — build what was asked for.${progressDirective}${researchDirective}`
           })
+          // A2b: if the tool rendered page images this round (render_document on a scanned
+          // PDF), ride them on the tool-result user turn just pushed — the same turn, so
+          // user/assistant alternation holds — and mirror them to the renderer as a `media`
+          // chunk so the user sees the rendered pages inline. Drained once per round.
+          if (pendingToolImages.length > 0) {
+            const toolTurn = history[history.length - 1]
+            toolTurn.images = [...(toolTurn.images ?? []), ...pendingToolImages]
+            send({
+              delta: '',
+              done: false,
+              media: pendingToolImages.map((img) => ({
+                kind: 'image' as const,
+                mediaType: img.mediaType,
+                dataBase64: img.dataBase64,
+                prompt: pendingToolImageCaption
+              }))
+            })
+            pendingToolImages = []
+            pendingToolImageCaption = undefined
+          }
           // A distinct-target research loop that ignored the nudge and hit the hard cap:
           // stop the loop rather than let it research all the way to the turn ceiling. The
           // closing turn (below) makes the model answer with what it has.

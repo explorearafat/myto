@@ -3,11 +3,17 @@ import type {
   CompletionChunk,
   CompletionOptions,
   GatewayConfig,
+  GeneratedMedia,
   ListModelsResult,
   TestConnectionResult
 } from '../../shared/types'
 import { pickAdapter, type StreamEvent, type WireAdapter } from './adapters'
 import { collectCompletion } from './collect'
+import {
+  generateImages as generateImagesImpl,
+  generateVideo as generateVideoImpl,
+  type MediaGenOptions
+} from './image-gen'
 import {
   COMPLETION_TIMEOUT_MS,
   httpFetch,
@@ -66,6 +72,30 @@ export class GatewayProvider implements Provider {
    */
   supportsNativeTools(): boolean {
     return this.adapter.supportsNativeTools
+  }
+
+  /**
+   * Generate image(s) from a prompt (Feature B) — used when the active model is an
+   * image model. Hits the gateway's OpenAI-compatible `/images/generations` with the
+   * user's own key; see providers/image-gen. Only ever called for an image-kind turn.
+   */
+  async generateImages(
+    modelId: string,
+    prompt: string,
+    opts?: MediaGenOptions,
+    signal?: AbortSignal
+  ): Promise<GeneratedMedia[]> {
+    return generateImagesImpl(this.baseUrl, this.config, modelId, prompt, opts ?? {}, signal)
+  }
+
+  /** Best-effort video generation (Feature B); see providers/image-gen. */
+  async generateVideo(
+    modelId: string,
+    prompt: string,
+    opts?: MediaGenOptions,
+    signal?: AbortSignal
+  ): Promise<GeneratedMedia[]> {
+    return generateVideoImpl(this.baseUrl, this.config, modelId, prompt, opts ?? {}, signal)
   }
 
   async listModels(): Promise<ListModelsResult> {
@@ -242,7 +272,7 @@ export class GatewayProvider implements Provider {
       // A fully-assembled native tool call — forwarded internally only (it never
       // crosses IPC); the reply loop turns it into a ```myto:tool block and aborts.
       if (event.toolCall) onChunk({ delta: '', done: false, toolCall: event.toolCall })
-      if (event.done) onChunk({ delta: '', done: true })
+      if (event.done) onChunk({ delta: '', done: true, truncated: event.truncated })
     }
     await readSse(res.body, (data) => emit(parser.push(data)), guard.touch)
     // A stream that ended without the terminal marker that normally releases a tool

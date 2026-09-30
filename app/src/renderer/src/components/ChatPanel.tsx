@@ -8,7 +8,7 @@ import { useAuthUser } from '../lib/useAuthUser'
 import { Markdown } from './Markdown'
 import { FileCard } from './FileCard'
 import { ToolCard } from './ToolCard'
-import { parseFileBlocks, toolHeadline, countLines, type ToolSegment } from '../lib/fileBlocks'
+import { parseFileBlocks, countLines, type ToolSegment } from '../lib/fileBlocks'
 import { livenessNote, STALL_ALARM_MS } from '../lib/liveness'
 import {
   startDictation,
@@ -38,13 +38,6 @@ import type {
   ReasoningEffort,
   TodoItem
 } from '@shared/types'
-import {
-  searchAgents,
-  findAgent,
-  defaultAgent,
-  AGENT_COUNT,
-  type AgentSpec
-} from '@shared/agent-catalog'
 
 /** Human-readable byte size for an attachment chip (e.g. "12.4 KB"). */
 function formatBytes(bytes: number): string {
@@ -482,43 +475,6 @@ function UserMessage({ message, attachments }: MessageProps) {
 }
 
 /**
- * An assistant turn. Claude-Code-style flat turn: the reply renders directly on
- * the surface — no avatar, no name badge. Only the user's turn keeps a bubble, so
- * the two speakers still read distinctly (user = right-aligned pill, Myto = flat
- * full-width prose on the background). A small `pl-4` gives the prose a little
- * breathing room from the left edge without reintroducing a gutter.
- */
-/**
- * Caption for the live status line above a streaming reply. Prefers the model's
- * own `<status>` (streamed out-of-band and stripped from the text — see
- * main/status.ts); when a model emits none, falls back to a generic verb so the
- * line never sits empty — "Thinking" before any prose, "Writing" once it flows.
- */
-function statusCaption(message: ChatMessageUI, displayContent: string): string {
-  if (message.status) return message.status
-  return displayContent.length > 0 ? 'Writing' : 'Thinking'
-}
-
-/**
- * The Claude-style live status line: a small shimmering caption shown above a
- * still-streaming reply. Keyed on the caption so each change remounts the node
- * and replays the fade-in — a soft cross-fade rather than a jarring swap. The
- * parent renders it only while the reply is pending, so it disappears on done.
- */
-function StatusLine({ caption }: { caption: string }) {
-  return (
-    <div className="mb-1.5" aria-live="polite">
-      <span
-        key={caption}
-        className="myto-thinking myto-status-in inline-block text-[12px] font-medium"
-      >
-        {caption}
-      </span>
-    </div>
-  )
-}
-
-/**
  * The mid-reply permission prompt (Cowork). Shown when the model wants to run a
  * side-effecting tool and the permission tier is set to ask. Answering resumes the
  * blocked main-process loop (allow / allow for the rest of the task / deny).
@@ -830,8 +786,8 @@ function ThinkingBlock({ phase, live }: { phase: ThinkingPhase; live: boolean })
   const tokens = estimateTokens(phase.text)
   const startedAt = phase.startedAt ?? mountRef.current
   const label = live
-    ? `${thinkingWord(Date.now() - startedAt)} · ${tokens.toLocaleString()} tokens`
-    : `Thought for ${tokens.toLocaleString()} tokens`
+    ? `${thinkingWord(Date.now() - startedAt)} · ${fmtTokens(tokens)} tokens`
+    : `Thought for ${fmtTokens(tokens)} tokens`
   return (
     <div className="myto-step-in my-2">
       <button
@@ -897,6 +853,16 @@ function estimateTokens(text: string): number {
 }
 
 /**
+ * Compact token count for the reply's live readouts: exact below 1,000, then `N.Nk`
+ * from 1,000 up (2,157 → "2.2k", 1,000 → "1.0k") so the meta line stays short as a
+ * long turn runs the count up.
+ */
+function fmtTokens(n: number): string {
+  if (n < 1000) return n.toLocaleString()
+  return `${(n / 1000).toFixed(1)}k`
+}
+
+/**
  * The Claude-desktop-style meta line under a reply. While the reply streams it shows
  * the Myto mark drawing itself (a working heartbeat) ahead of a live elapsed clock and
  * token count; once the turn ends (finished or stopped) that readout gives way to a
@@ -914,12 +880,20 @@ function estimateTokens(text: string): number {
 function MessageMeta({
   content,
   pending,
-  activityAt
+  activityAt,
+  runningTasks = 0
 }: {
   content: string
   pending: boolean
   /** `Date.now()` of the run's last real output; drives the stall note while pending. */
   activityAt?: number
+  /**
+   * How many tasks are running right now. Shown at the end of the line as a
+   * slow-pulsing "N running task" so the live "working" signal sits with the
+   * elapsed/token readout at the foot of the reply — flowing under the latest
+   * output — rather than pinned above the whole message.
+   */
+  runningTasks?: number
 }) {
   const startRef = useRef<number>(Date.now())
   const [, forceTick] = useState(0)
@@ -950,13 +924,24 @@ function MessageMeta({
   const note = activityAt ? livenessNote(Date.now() - activityAt) : null
   const alarming = activityAt ? Date.now() - activityAt >= STALL_ALARM_MS : false
   // While working, the Myto mark redraws itself ~2×/second (a heartbeat) AHEAD of the
-  // live elapsed time and token count.
+  // live elapsed time and token count, and a slow-pulsing "N running task" closes the
+  // line — the working signal reads here, at the foot of the reply, under whatever the
+  // turn last produced. The line is set just under the reply's own size, a touch
+  // lighter, at the reply's opacity (not the dimmed grey of a finished turn's mark).
   return (
-    <div className="mt-1 flex items-center gap-2 text-[11px] tabular-nums text-muted/70">
+    <div className="mt-1 flex items-center gap-2 text-[12px] font-light tabular-nums text-text/90">
       <MytoMark size={13} draw title="Myto" className="shrink-0" />
       <span>{fmtElapsed(elapsed)}</span>
       <span aria-hidden="true">·</span>
-      <span>{tokens.toLocaleString()} tokens</span>
+      <span>{fmtTokens(tokens)} tokens</span>
+      {runningTasks > 0 && (
+        <>
+          <span aria-hidden="true">·</span>
+          <span className="myto-breathe" aria-live="polite">
+            {runningTasks} running task{runningTasks === 1 ? '' : 's'}
+          </span>
+        </>
+      )}
       {note && (
         <>
           <span aria-hidden="true">·</span>
@@ -976,6 +961,13 @@ type RenderItem =
   | { kind: 'tool'; tool: ToolSegment }
   | { kind: 'think'; phase: ThinkingPhase }
 
+/**
+ * An assistant turn. Claude-Code-style flat turn: the reply renders directly on
+ * the surface — no avatar, no name badge. Only the user's turn keeps a bubble, so
+ * the two speakers still read distinctly (user = right-aligned pill, Myto = flat
+ * full-width prose on the background). A small `pl-4` gives the prose a little
+ * breathing room from the left edge without reintroducing a gutter.
+ */
 function AssistantMessage({
   message,
   prevFileLines
@@ -995,17 +987,26 @@ function AssistantMessage({
     () => segments.some((s) => s.kind === 'tool' && FS_TOOL_NAMES.has(s.name ?? '')),
     [segments]
   )
-  // The tool currently running (its result hasn't come back yet), if any. Its
-  // friendly headline — "Listing folder", "Web search" — is what the live status
-  // line shows while it runs, so tool activity appears in the same place as the
-  // Thinking/Writing caption instead of only as a card badge below.
-  const activeToolCaption = useMemo(() => {
+  // How many tasks are running right now, for the live "N running task" readout at the
+  // foot of the reply (MessageMeta). The loop runs one tool at a time — or is thinking/
+  // writing between calls — so the usual count is 1; a live spawn_agents fans its `tasks`
+  // out to several sub-agents in parallel, so it reports that many. Zero once the turn
+  // ends (the meta line then collapses to the quiet mark). update_plan is the plan
+  // panel's bookkeeping, not a task, so it never counts.
+  const runningTasks = useMemo(() => {
+    if (!message.pending) return 0
     for (let i = segments.length - 1; i >= 0; i--) {
       const s = segments[i]
-      if (s.kind === 'tool' && s.name !== 'update_plan' && s.result === null) return toolHeadline(s)
+      if (s.kind === 'tool' && s.name !== 'update_plan' && s.result === null) {
+        if (s.name === 'spawn_agents' && s.input && typeof s.input === 'object') {
+          const tasks = (s.input as { tasks?: unknown }).tasks
+          if (Array.isArray(tasks) && tasks.length > 0) return tasks.length
+        }
+        return 1
+      }
     }
-    return null
-  }, [segments])
+    return 1
+  }, [segments, message.pending])
   // Interleave the reply's prose/file/tool segments with its thinking phases,
   // sliced by each phase's content offset (the phases sit on turn boundaries, so a
   // slice never splits a fence — see useChatStore/provider-ipc). Each tool step now
@@ -1050,10 +1051,6 @@ function AssistantMessage({
         </div>
       )}
 
-      {message.pending && (
-        <StatusLine caption={activeToolCaption ?? statusCaption(message, displayContent)} />
-      )}
-
       {(() => {
         // Walk the render items, handing each file card its previous same-path line
         // count by occurrence order. A plain counter (not the map index) keeps the
@@ -1088,7 +1085,12 @@ function AssistantMessage({
       {message.pendingQuestion && <QuestionPrompt question={message.pendingQuestion} />}
 
       {(message.pending || displayContent.length > 0) && (
-        <MessageMeta content={displayContent} pending={!!message.pending} activityAt={message.activityAt} />
+        <MessageMeta
+          content={displayContent}
+          pending={!!message.pending}
+          activityAt={message.activityAt}
+          runningTasks={runningTasks}
+        />
       )}
 
       {!message.pending && (displayContent.length > 0 || message.error != null) && (
@@ -1196,7 +1198,7 @@ function MainTopBar() {
             type="button"
             aria-label={terminalOpen ? 'Hide terminal' : 'Show terminal'}
             aria-pressed={terminalOpen}
-            title="Terminal — Cowork command output"
+            title="Terminal — Build command output"
             onClick={toggleTerminal}
             className={topIcon(terminalOpen)}
           >
@@ -1557,120 +1559,6 @@ function StyleMenu() {
   )
 }
 
-/** Search the full catalog and group the hits by category for the picker list. */
-function useAgentGroups(query: string): { id: string; name: string; agents: AgentSpec[] }[] {
-  return useMemo(() => {
-    const results = searchAgents(query, 400)
-    const map = new Map<string, { id: string; name: string; agents: AgentSpec[] }>()
-    for (const a of results) {
-      let g = map.get(a.category)
-      if (!g) {
-        g = { id: a.category, name: a.categoryName, agents: [] }
-        map.set(a.category, g)
-      }
-      g.agents.push(a)
-    }
-    return [...map.values()]
-  }, [query])
-}
-
-/**
- * The Research agent picker: a searchable popover over the {@link AGENT_COUNT}-strong
- * professional catalog (agent-catalog.ts), mirroring {@link EffortMenu}'s open/
- * outside-click shell but with a filter box and category-grouped results. The choice
- * persists as settings.researchAgentId and becomes Research's persona for the next
- * session. Only mounted in Research mode; Cowork ignores it.
- */
-function AgentMenu() {
-  const agentId = useAppStore((s) => s.settings.researchAgentId)
-  const setAgentId = useAppStore((s) => s.setResearchAgentId)
-  const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState('')
-  const ref = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
-  const current = findAgent(agentId) ?? defaultAgent()
-  const groups = useAgentGroups(query)
-
-  useEffect(() => {
-    if (!open) return
-    const onDown = (e: MouseEvent): void => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [open])
-
-  // Focus the filter box on open; clear the query on close so it reopens fresh.
-  useEffect(() => {
-    if (open) inputRef.current?.focus()
-    else setQuery('')
-  }, [open])
-
-  return (
-    <div ref={ref} className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        title={`${current.name} — ${current.tagline}. Click to pick from ${AGENT_COUNT} specialists.`}
-        className="flex max-w-[170px] items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-[12px] font-medium text-text/80 transition-colors hover:bg-surface-2"
-      >
-        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="shrink-0 text-muted">
-          <path d="M6 1l1.15 3.05L10.5 4.2 7.6 6.3l1 3.35L6 7.6 3.4 9.65l1-3.35L1.5 4.2l3.35-.15z" fill="currentColor" />
-        </svg>
-        <span className="truncate">{current.name}</span>
-        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="shrink-0 text-muted">
-          <path d="M3 4.5L6 7.5l3-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
-      {open && (
-        <div className="absolute bottom-full right-0 z-20 mb-1.5 flex max-h-[22rem] w-80 flex-col rounded-xl border border-border bg-surface p-1 shadow-lg">
-          <div className="p-1">
-            <input
-              ref={inputRef}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={`Search ${AGENT_COUNT} agents…`}
-              className="w-full rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-[12.5px] text-text placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-border"
-            />
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            {groups.length === 0 && (
-              <p className="px-2.5 py-3 text-center text-[12px] text-muted">No agent matches “{query}”.</p>
-            )}
-            {groups.map((g) => (
-              <div key={g.id}>
-                <p className="sticky top-0 bg-surface px-2.5 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted">
-                  {g.name}
-                </p>
-                {g.agents.map((a) => (
-                  <button
-                    key={a.id}
-                    type="button"
-                    onClick={() => {
-                      void setAgentId(a.id)
-                      setOpen(false)
-                    }}
-                    className={
-                      'flex w-full flex-col items-start gap-0.5 rounded-lg px-2.5 py-1.5 text-left transition-colors hover:bg-surface-2 ' +
-                      (a.id === current.id ? 'bg-surface-2' : '')
-                    }
-                  >
-                    <span className="text-[12.5px] font-medium text-text">
-                      {a.name}
-                      {a.id === current.id ? ' ✓' : ''}
-                    </span>
-                    <span className="line-clamp-1 text-[11px] text-muted">{a.tagline}</span>
-                  </button>
-                ))}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
 export function ChatPanel() {
   const messages = useChatStore((s) => s.messages)
   const attachments = useChatStore((s) => s.attachments)
@@ -1930,11 +1818,11 @@ export function ChatPanel() {
         return
       case 'cowork':
         setInput('')
-        setCoworkMode(true)
-        return
-      case 'chat':
-        setInput('')
         setCoworkMode(false)
+        return
+      case 'build':
+        setInput('')
+        setCoworkMode(true)
         return
       case 'plan':
         // Plan mode only means anything in Cowork, so arm Cowork alongside it.
@@ -2296,7 +2184,7 @@ export function ChatPanel() {
             title={
               hasFolder
                 ? workspaceDir
-                : 'Cowork works inside this folder — pick one to start. Required before you can send.'
+                : 'Build works inside this folder — pick one to start. Required before you can send.'
             }
             className={
               'flex items-center gap-1.5 rounded-[6px] bg-black px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:bg-neutral-800 ' +
@@ -2314,7 +2202,7 @@ export function ChatPanel() {
             <span className="max-w-[200px] truncate">{folderLabel || 'Select a working folder'}</span>
           </button>
           {needsFolder && (
-            <span className="ml-2 text-[11px] text-muted">Required to start Cowork</span>
+            <span className="ml-2 text-[11px] text-muted">Required to start Build</span>
           )}
         </div>
       )}
@@ -2404,8 +2292,8 @@ export function ChatPanel() {
                 ? 'Drop files to attach…'
                 : coworkMode
                   ? needsFolder
-                    ? 'Select a working folder to start Cowork…'
-                    : 'Give Cowork a goal…'
+                    ? 'Select a working folder to start Build…'
+                    : 'Give Build a goal…'
                   : placeholder
             }
             className="block max-h-40 min-h-6 w-full resize-none bg-transparent px-1 py-0.5 text-[14px] leading-6 text-text placeholder:text-muted focus:outline-none"
@@ -2446,7 +2334,6 @@ export function ChatPanel() {
           </div>
 
           <div className="flex items-center gap-1.5">
-            {!coworkMode && <AgentMenu />}
             <ModelSelector openUp />
             <EffortMenu />
             <StyleMenu />

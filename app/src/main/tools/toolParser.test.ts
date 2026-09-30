@@ -108,6 +108,50 @@ describe('createToolCallParser', () => {
     expect(calls[0].error).toBeNull()
   })
 
+  it('closes a tool block when prose is glued onto its closing fence (RC-6)', () => {
+    // claude-opus-style close: the model puts the next sentence on the SAME line as
+    // the closing ``` ("```Two files done…"). The block must still close at its own
+    // backtick run — parse the call, release the glued prose — instead of holding
+    // open and swallowing every following block (update_plan, the next write_file)
+    // into one unparseable blob. That swallowing is why the plan stayed 0/4 across
+    // every e2e run even when all files landed. See RC-6 in NOTES.md.
+    const parser = createToolCallParser()
+    const r = parser.push(
+      '```myto:tool\n{"tool":"write_file","input":{"path":"a.css","content":"body{}"}}\n' +
+        "```Two files done. Now I'll create app.js.\n"
+    )
+    expect(r.call?.name).toBe('write_file')
+    expect(r.call?.error).toBeNull()
+    expect((r.call?.input as { path: string }).path).toBe('a.css')
+    expect(parser.holdingBlock).toBe(false) // closed, not held open
+
+    // The glued prose is not lost, and the very next tool block still parses.
+    const r2 = parser.push('```myto:tool\n{"tool":"update_plan","input":{"todos":[]}}\n```\n')
+    expect(r.text + r2.text).toContain("Two files done. Now I'll create app.js.")
+    expect(r2.call?.name).toBe('update_plan')
+    expect(r2.call?.error).toBeNull()
+  })
+
+  it('splits a 6-backtick close fused to the next opener into two calls (RC-6)', () => {
+    // Worse glued form: the model omits the newline between one block's closing ``` and
+    // the next block's ```myto:tool opener, so they merge into a single ``````myto:tool run.
+    // The greedy close match would eat all six backticks and swallow the opener, dropping
+    // the batched call (the update_plan after a write — the plan-stays-0/4 bug). The close
+    // must stop at its own three backticks and leave the opener for the next drain.
+    const parser = createToolCallParser()
+    const src =
+      '```myto:tool\n{"tool":"write_file","input":{"path":"a.css","content":"body{}"}}\n' +
+      '``````myto:tool\n{"tool":"update_plan","input":{"todos":[]}}\n```\n'
+    const first = parser.push(src)
+    expect(first.call?.name).toBe('write_file')
+    expect(first.call?.error).toBeNull()
+    // The fused opener was NOT swallowed — draining the parser pulls the second call out.
+    const second = parser.push('')
+    expect(second.call?.name).toBe('update_plan')
+    expect(second.call?.error).toBeNull()
+    expect(parser.holdingBlock).toBe(false)
+  })
+
   it('keeps a glued fence intact when it splits across deltas at the backticks', () => {
     const parser = createToolCallParser()
     const first = parser.push('done it reliably.``')

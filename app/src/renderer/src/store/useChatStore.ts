@@ -7,6 +7,7 @@ import type {
   ChatMessage,
   ChatMode,
   CommandRun,
+  GeneratedMedia,
   PersistedSession,
   PreviewTarget,
   QuestionRequest,
@@ -17,6 +18,25 @@ import { takeReveal } from '../lib/reveal'
 import { usePreviewStore } from './usePreviewStore'
 import { useTerminalStore } from './useTerminalStore'
 import { useAppStore } from './useAppStore'
+
+/**
+ * Turn generation output (Feature B) or rasterized document pages (A2b) into Markdown that
+ * the existing reply pipeline renders and persists for free — no schema change, no rehydration
+ * path. An image becomes an inline `![alt](src)` (react-markdown renders `<img>`, `data:` URIs
+ * included); a video becomes a `[▶ …](src)` link, because our Markdown renderer escapes raw HTML
+ * and so can't embed a `<video>` player. `src` is the inline `data:` bytes when we have them
+ * (they survive the provider expiring temporary URLs) or the returned URL otherwise.
+ */
+function mediaToMarkdown(media: GeneratedMedia[]): string {
+  const parts: string[] = []
+  for (const m of media) {
+    const src = m.dataBase64 ? `data:${m.mediaType};base64,${m.dataBase64}` : m.url
+    if (!src) continue
+    const alt = (m.prompt ?? (m.kind === 'video' ? 'video' : 'image')).replace(/[\r\n]+/g, ' ').replace(/[[\]]/g, '').slice(0, 300)
+    parts.push(m.kind === 'video' ? `[▶ ${alt || 'video'}](${src})` : `![${alt}](${src})`)
+  }
+  return parts.length ? `\n\n${parts.join('\n\n')}\n\n` : ''
+}
 
 /**
  * How often (ms) buffered stream deltas are flushed into the rendered message.
@@ -768,6 +788,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       command?: CommandRun
       thinking?: string
       thinkingReset?: boolean
+      media?: GeneratedMedia[]
     }): void => {
       // Any chunk that carries real output is a sign of life — stamp the run so the
       // liveness note (MessageMeta) measures silence from the last actual progress,
@@ -781,7 +802,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         chunk.command ||
         chunk.preview ||
         chunk.approval ||
-        chunk.question
+        chunk.question ||
+        (chunk.media && chunk.media.length > 0)
       ) {
         run.lastActivityAt = Date.now()
       }
@@ -814,6 +836,13 @@ export const useChatStore = create<ChatState>((set, get) => {
       }
       // Myto published/updated its working plan — pin the live checklist on this turn.
       if (chunk.todos) setTodos(chunk.todos)
+      // Generated media (Feature B) or rasterized pages (A2b): fold into the reply as
+      // Markdown so it renders inline now and persists with the turn's prose (no separate
+      // media store / rehydration needed). Goes through the same buffer as text deltas.
+      if (chunk.media && chunk.media.length > 0) {
+        run.buffer += mediaToMarkdown(chunk.media)
+        scheduleFlush()
+      }
       if (chunk.delta) {
         run.buffer += chunk.delta
         scheduleFlush()

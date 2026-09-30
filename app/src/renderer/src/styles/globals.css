@@ -360,6 +360,25 @@ h3 {
 }
 
 /*
+ * A slow opacity "breathe" for the live "N running task" readout on the reply meta
+ * line — it eases down to a soft low and back up (never fully out) on a longer, gentler
+ * cadence than myto-blink, so the count reads as quietly, continuously working. Paused
+ * under reduced-motion (below).
+ */
+@keyframes myto-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+.myto-breathe {
+  animation: myto-breathe 2.4s ease-in-out infinite;
+}
+
+/*
  * The Myto mark "drawing itself" ~2× per second in the live reply meta line — a
  * working heartbeat that reads as motion (a stroke sweeping around the mark) rather
  * than a spinner. Each path is normalised to pathLength 1 (MytoMark's `draw` prop),
@@ -517,6 +536,10 @@ h3 {
     color: var(--color-muted);
   }
   .myto-blink {
+    animation: none;
+    opacity: 1;
+  }
+  .myto-breathe {
     animation: none;
     opacity: 1;
   }

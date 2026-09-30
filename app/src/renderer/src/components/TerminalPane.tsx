@@ -73,9 +73,9 @@ function ShellConsent({ onEnable }: { onEnable: () => void }) {
     <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
       <div className="text-[13px] font-medium text-text">Interactive shell</div>
       <p className="max-w-xs text-[12px] leading-5 text-muted">
-        This opens a real shell in your Cowork folder. Commands you type run directly on your
+        This opens a real shell in your Build folder. Commands you type run directly on your
         machine with no per-command approval &mdash; the same access you have in a normal
-        terminal. It stays scoped to the folder Cowork is working in.
+        terminal. It stays scoped to the folder Build is working in.
       </p>
       <button
         type="button"
@@ -84,7 +84,7 @@ function ShellConsent({ onEnable }: { onEnable: () => void }) {
       >
         Enable interactive shell
       </button>
-      <p className="text-[10px] text-muted">You can turn this off again in Settings &rsaquo; Cowork.</p>
+      <p className="text-[10px] text-muted">You can turn this off again in Settings &rsaquo; Tools.</p>
     </div>
   )
 }
@@ -138,7 +138,7 @@ export function TerminalPane() {
         </div>
         <div className="ml-2 min-w-0 flex-1">
           <div className="truncate text-[10px] text-muted" title={cwd ?? undefined}>
-            {folder ?? 'Myto Cowork'}
+            {folder ?? 'Myto Build'}
           </div>
         </div>
 
@@ -167,7 +167,7 @@ export function TerminalPane() {
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
           {entries.length === 0 ? (
             <div className="grid h-full place-items-center px-4 text-center text-[12px] text-muted">
-              No commands yet. Cowork&rsquo;s build, test and install output shows up here.
+              No commands yet. Build&rsquo;s build, test and install output shows up here.
             </div>
           ) : (
             entries.map((e, i) => (

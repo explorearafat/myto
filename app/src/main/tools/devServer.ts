@@ -44,10 +44,23 @@ interface RunningServer {
   command: string
   cwd: string
   id: string
+  /** The localhost URL it printed once detected, so the loop can preview/screenshot it later. */
+  url?: string
 }
 
 /** Live servers by absolute cwd — at most one per folder. */
 const servers = new Map<string, RunningServer>()
+
+/**
+ * The localhost URL of a dev server still running for `cwd`, or null. Lets the build-complete
+ * visual review (provider-ipc) screenshot a server the run left up without re-parsing output or
+ * reaching into this module's internals. Normalises the folder the same way `startDevServer`
+ * keys it (`resolve`) so a caller passing the raw workspaceDir still matches.
+ */
+export function runningServerUrl(cwd: string): string | null {
+  const s = servers.get(resolve(cwd))
+  return s?.url?.trim() ? s.url.trim() : null
+}
 
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;]*m/g
@@ -193,6 +206,7 @@ function startDevServer(command: string, cwd: string, ctx: ToolContext): Promise
       const url = detectUrl(output)
       if (!url) return
       previewed = true
+      server.url = url // remember it so the build-complete review can screenshot it later
       emit(true)
       const target: PreviewTarget = { kind: 'url', url, title: url }
       ctx.onPreview?.(target)

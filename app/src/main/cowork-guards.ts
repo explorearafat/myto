@@ -14,10 +14,16 @@
 export const MIN_UNSAVED_CODE_LINES = 10
 
 /**
- * Does this reply contain a substantial fenced code block? Used only once the loop's
- * "nothing was written this whole reply" fallback fires (buildsMade === 0), to tell a
- * genuine "here is the file's contents" prose-dump apart from a plain textual answer —
- * so the loop can nudge the model to actually call write_file exactly once.
+ * Does this reply contain a substantial fenced code block? Fires whenever the model
+ * ends a turn with no tool call but its reply carries a real file's worth of code, to
+ * tell a genuine "here is the file's contents" prose-dump apart from a plain textual
+ * answer — so the loop can nudge the model to actually call write_file.
+ *
+ * NOTE: this is deliberately NOT gated on buildsMade === 0. The commonest mid-build
+ * stall is the model writing file 1 with a tool call and then NARRATING files 2 and 3
+ * as prose; gating on "wrote nothing yet" let that slip through (the earlier fix only
+ * caught a reply that saved nothing at all). The loop now consults this on every silent
+ * turn, bounded by {@link MAX_CODE_PROSE_NUDGES} and reset on each real tool call.
  *
  * A fresh RegExp per call (not a shared `/…/g`) keeps `lastIndex` from leaking between
  * calls. The body is the capture between the opening fence's newline and the closing
@@ -28,6 +34,103 @@ export function looksLikeUnsavedCode(text: string): boolean {
     if (m[1].split('\n').length >= MIN_UNSAVED_CODE_LINES) return true
   }
   return false
+}
+
+/**
+ * How many times a run may nudge the model to save code it printed in chat instead of
+ * writing it (the {@link looksLikeUnsavedCode} guard). Bounds a genuinely stuck model
+ * that keeps narrating, but the loop resets the counter on every real tool call — so a
+ * legitimate multi-file build (write file 1, narrate file 2, get nudged, write file 2,
+ * narrate file 3, …) is never starved: only a CONSECUTIVE run of prose-dumps with no
+ * write between them can exhaust the cap.
+ */
+export const MAX_CODE_PROSE_NUDGES = 4
+
+/**
+ * A file the model printed in chat (a named, substantial fenced block) that was never
+ * saved. {@link extractNarratedFiles} pulls these out so the loop can write them to disk
+ * itself — the guaranteed cure for a model that keeps narrating file contents instead of
+ * calling write_file, which no amount of nudging reliably fixes on a weaker model.
+ */
+export interface NarratedFile {
+  path: string
+  content: string
+}
+
+/**
+ * File extensions we are willing to auto-persist from a narrated code block. Kept to
+ * source/asset text files a coding agent actually produces — never an executable or a
+ * dotfile-only name — so a stray fence can't cause us to write something surprising.
+ */
+const NARRATED_FILE_EXT =
+  'html?|css|scss|sass|less|js|mjs|cjs|jsx|ts|tsx|json|jsonc|md|markdown|txt|py|rb|go|rs|java|kt|c|h|cpp|hpp|cc|cs|php|sh|bash|zsh|yml|yaml|toml|ini|env|xml|svg|vue|svelte|sql|graphql|gql|astro|prisma|dockerfile'
+
+/**
+ * Matches a filename token ending in one of {@link NARRATED_FILE_EXT}, INCLUDING any
+ * leading `./`, `../`, or `/` path prefix so a traversal or absolute path is captured
+ * whole (and then rejected by {@link isSafeRelPath}) rather than silently trimmed to a
+ * safe-looking basename.
+ */
+const filenameMatcher = (): RegExp =>
+  new RegExp(`((?:\\.{0,2}/)*[A-Za-z0-9_][A-Za-z0-9_./-]*\\.(?:${NARRATED_FILE_EXT}))\\b`, 'gi')
+
+/**
+ * Is `p` a relative, traversal-free path we're willing to write? Mirrors, at the string
+ * level, what {@link ../tools/fs.resolveInWorkspace} enforces at the filesystem level —
+ * no absolute path, no drive letter, no `..` segment, no backslash — plus a length cap
+ * and a required extension, so auto-persist can only ever create a plain file inside the
+ * working folder. The fs sandbox is still the real chokepoint; this just filters early.
+ */
+export function isSafeRelPath(p: string): boolean {
+  if (typeof p !== 'string') return false
+  const t = p.trim()
+  if (!t || t.length > 200) return false
+  if (t.includes('\\') || t.includes('\0')) return false
+  if (t.startsWith('/') || /^[A-Za-z]:/.test(t)) return false
+  if (t.split('/').some((seg) => seg === '..' || seg === '.')) return false
+  if (!/\.[A-Za-z0-9]+$/.test(t)) return false
+  return true
+}
+
+/** First / last filename token in a string, or null. Fresh matcher each call (no leak). */
+const firstFilename = (s: string): string | null => {
+  const m = filenameMatcher().exec(s)
+  return m ? m[1] : null
+}
+const lastFilename = (s: string): string | null => {
+  let out: string | null = null
+  for (const m of s.matchAll(filenameMatcher())) out = m[1]
+  return out
+}
+
+/**
+ * Pull every clearly-named, substantial code block out of a Cowork reply so the loop can
+ * write it to disk when the model narrated it instead of calling write_file. For each
+ * fenced block of at least {@link MIN_UNSAVED_CODE_LINES} lines we look for the intended
+ * filename in three places, most reliable first: (1) the fence info string (a language
+ * tag followed by the name, e.g. "ts app.js"), (2) a leading comment on the block's first
+ * line — a line-comment, an HTML comment, or a hash comment naming the file — and (3) the
+ * last filename mentioned in the ~200 chars of prose right before the fence ("Here's
+ * styles.css:"). Only relative, traversal-free paths ({@link isSafeRelPath}) are kept.
+ * When the same path is narrated twice the later (more complete) copy wins. A block with
+ * no confidently-named target is skipped — the loop falls back to nudging for those.
+ */
+export function extractNarratedFiles(text: string): NarratedFile[] {
+  if (!text) return []
+  const byPath = new Map<string, string>()
+  const fence = /```([^\n]*)\n([\s\S]*?)```/g
+  let m: RegExpExecArray | null
+  while ((m = fence.exec(text)) !== null) {
+    const info = m[1].trim()
+    const body = m[2]
+    if (body.split('\n').length < MIN_UNSAVED_CODE_LINES) continue
+    const firstBodyLine = body.slice(0, body.indexOf('\n') === -1 ? body.length : body.indexOf('\n'))
+    const before = text.slice(Math.max(0, m.index - 200), m.index)
+    const path =
+      firstFilename(info) ?? firstFilename(firstBodyLine) ?? lastFilename(before)
+    if (path && isSafeRelPath(path)) byPath.set(path, body)
+  }
+  return [...byPath].map(([path, content]) => ({ path, content }))
 }
 
 /**
@@ -294,4 +397,74 @@ export const MAX_EMPTY_START = 3
  */
 export function looksLikeContentFreeReply(text: string): boolean {
   return !/[\p{L}\p{N}]/u.test(text)
+}
+
+/** Plan-incomplete "you still have open items" nudges allowed per run before the finish stands. */
+export const MAX_PLAN_INCOMPLETE = 3
+
+/**
+ * The shape the plan gate needs from a todo item — just a title and a status string. Kept
+ * structural (not the full {@link ../shared/types}.TodoItem) so this module stays
+ * dependency-free and the helpers can be unit-tested with plain literals.
+ */
+export interface PlanItemLike {
+  title?: string
+  status?: string
+}
+
+/**
+ * Does the plan still have work the model said it would do but hasn't finished? True once
+ * ANY item's status is not exactly `'done'` — pending, in_progress, cancelled, missing, or
+ * any unknown string all count as "not finished." This is the gate the loop was missing:
+ * a no-tool-call turn with the plan at e.g. 0/4 was read as a finished run (RC-1). An EMPTY
+ * plan returns false — the model never committed to a checklist, so there is nothing to
+ * hold the finish against (the other stall guards own that case). Pure so the loop wiring
+ * stays testable.
+ */
+export function planHasPending(plan: readonly PlanItemLike[]): boolean {
+  return plan.length > 0 && plan.some((t) => t.status !== 'done')
+}
+
+/**
+ * The titles of the not-done plan items, for the nudge message that lists what remains.
+ * Same "not exactly done" rule as {@link planHasPending}. An item with no usable title
+ * falls back to a positional `Step N` label (1-based over the FULL plan) so the model can
+ * still tell which entry is meant. Returns [] for an empty or fully-done plan.
+ */
+export function pendingPlanTitles(plan: readonly PlanItemLike[]): string[] {
+  const out: string[] = []
+  plan.forEach((t, i) => {
+    if (t.status !== 'done') out.push(t.title?.trim() || `Step ${i + 1}`)
+  })
+  return out
+}
+
+/**
+ * The relative file path a plan item is *about*, or null. A plan like "Create app.js with
+ * the chart logic" names its deliverable; RC-8 reconciliation uses that name to decide,
+ * from real disk state, whether the step is actually done — independent of whether the
+ * model remembered to call update_plan. Returns the first filename token (same matcher and
+ * safety filter as {@link extractNarratedFiles}) so only a relative, traversal-free path is
+ * ever returned; a title mentioning no file (e.g. "Verify in the preview pane") yields null.
+ */
+export function planFileTarget(title?: string): string | null {
+  if (!title) return null
+  const path = firstFilename(title)
+  return path && isSafeRelPath(path) ? path : null
+}
+
+/** Verbs that mark a plan step as a check-the-result action rather than a build action. */
+const VERIFY_VERB = /\b(verif|preview|test|check|confirm|review|open|validate|ensure|inspect|browse)/i
+
+/**
+ * Is this plan item a "verify the result" step with no file to produce — "Verify in the
+ * preview pane", "Test the theme toggle", "Open the app and confirm the chart renders"?
+ * RC-8 can only honestly auto-complete such a step once every file-producing step is done
+ * and its file exists on disk; a step that names a file ({@link planFileTarget}) is a build
+ * step no matter what verb it uses ("Create and test app.js") and is excluded here.
+ */
+export function isVerifyStep(title?: string): boolean {
+  if (!title) return false
+  if (planFileTarget(title)) return false
+  return VERIFY_VERB.test(title)
 }

@@ -27,7 +27,7 @@ const CRON_PRESETS: ReadonlyArray<{ cron: string; label: string }> = [
 
 const MODE_OPTIONS: ReadonlyArray<{ id: ChatMode; label: string; hint: string }> = [
   { id: 'chat', label: 'Chat', hint: 'A normal conversation' },
-  { id: 'cowork', label: 'Cowork', hint: 'Agentic — reads and writes files' }
+  { id: 'cowork', label: 'Build', hint: 'Agentic — reads and writes files in a folder' }
 ]
 
 /**
@@ -245,7 +245,7 @@ function TaskRow({
           <div className="flex items-center gap-2">
             <span className="truncate text-[13px] font-medium text-text">{task.name}</span>
             <span className="shrink-0 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-medium text-muted">
-              {task.mode === 'cowork' ? 'Cowork' : 'Chat'}
+              {task.mode === 'cowork' ? 'Build' : 'Chat'}
             </span>
             {!task.enabled && (
               <span className="shrink-0 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-medium text-muted">

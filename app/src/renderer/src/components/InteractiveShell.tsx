@@ -104,7 +104,7 @@ export function InteractiveShell() {
           term.write(
             `\r\n\x1b[31m${
               res.error === 'consent-required'
-                ? 'Interactive shell is disabled. Enable it in Settings → Cowork.'
+                ? 'Interactive shell is disabled. Enable it in Settings → Tools.'
                 : `Could not start shell: ${res.error ?? 'unknown error'}`
             }\x1b[0m\r\n`
           )
@@ -153,7 +153,7 @@ export function InteractiveShell() {
   if (!sessionId) {
     return (
       <div className="grid h-full place-items-center px-4 text-center text-[12px] text-muted">
-        Start a Cowork chat to open an interactive shell.
+        Start a Build chat to open an interactive shell.
       </div>
     )
   }

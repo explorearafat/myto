@@ -275,7 +275,7 @@ function ToolsPane() {
       </SettingRow>
       <SettingRow
         title="Response style"
-        description="How Myto writes back to you. Concise keeps it short; Explanatory narrates the “why” as it works; Learning leaves clearly-marked spots for you to fill in. Applies in both Chat and Cowork."
+        description="How Myto writes back to you. Concise keeps it short; Explanatory narrates the “why” as it works; Learning leaves clearly-marked spots for you to fill in. Applies across Chat, Cowork and Build."
       >
         <Segmented
           ariaLabel="Response style"
@@ -297,7 +297,7 @@ function ToolsPane() {
       </SettingRow>
       <SettingRow
         title="Interactive shell"
-        description="Enable the Shell tab in Cowork's Terminal pane — a real shell you type into, scoped to the working folder. Commands run directly on your machine with no per-command approval, so only enable it if you trust that access. Off by default."
+        description="Enable the Shell tab in Build's Terminal pane — a real shell you type into, scoped to the working folder. Commands run directly on your machine with no per-command approval, so only enable it if you trust that access. Off by default."
       >
         <Segmented
           ariaLabel="Interactive shell"
@@ -308,7 +308,7 @@ function ToolsPane() {
       </SettingRow>
       <SettingRow
         title="Browser"
-        description="Let Myto drive a web browser — read pages, fill forms, click through sites — working from a text outline, no vision needed. Works in both Chat and Cowork. In-app is a sandboxed window with no logins. System Chrome uses your own Chrome with your real logins: powerful, but Myto acts as you, so only pick it when you trust the task. Myto always asks before it clicks or types. Off by default."
+        description="Let Myto drive a web browser — read pages, fill forms, click through sites — working from a text outline, no vision needed. Works in both Cowork and Build. In-app is a sandboxed window with no logins. System Chrome uses your own Chrome with your real logins: powerful, but Myto acts as you, so only pick it when you trust the task. Myto always asks before it clicks or types. Off by default."
       >
         <Segmented
           ariaLabel="Browser"

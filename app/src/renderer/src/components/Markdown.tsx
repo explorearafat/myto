@@ -180,6 +180,21 @@ const components: Components = {
   },
   strong({ children }) {
     return <strong className="font-semibold text-text">{children}</strong>
+  },
+  // Inline images — generated pictures (Feature B) and rasterized document pages (A2b)
+  // arrive as Markdown `![alt](data:…|url)`. Constrain and frame them so a full-size
+  // generation doesn't overflow the reply column. `data:` sources render locally (no
+  // network); a remote URL loads normally. loading=lazy keeps a long reply light.
+  img({ src, alt }) {
+    if (typeof src !== 'string' || !src) return null
+    return (
+      <img
+        src={src}
+        alt={typeof alt === 'string' ? alt : ''}
+        loading="lazy"
+        className="my-2 max-h-[70vh] max-w-full rounded-lg border border-border/70"
+      />
+    )
   }
 }
 
