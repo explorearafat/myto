@@ -23,5 +23,5 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "exclude": ["app", "node_modules", "dist", "server.js"]
+  "exclude": ["app", "node_modules", "dist", "server.js", "OpenClawSource", "android", "apple", "linux", "windows", "mobile", "public", "download", "policy", "chat", "authentication"]
 }

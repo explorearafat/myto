@@ -116,8 +116,24 @@ const components: Components = {
   },
   code: CodeToken,
   // Open links in the OS browser (main-process setWindowOpenHandler routes
-  // window.open → shell.openExternal), never inside the app window.
+  // window.open → shell.openExternal), never inside the app window. One exception:
+  // a finished edited video (Feature media-edit) arrives as a `[▶ …](data:video/…)`
+  // link via mediaToMarkdown; render it as an inline <video controls> player so the
+  // user can watch the result in place rather than following a giant data: URL.
   a({ href, children }) {
+    if (
+      typeof href === 'string' &&
+      (href.startsWith('data:video/') || /\.(mp4|webm|mov|m4v|mkv)(?:[?#]|$)/i.test(href))
+    ) {
+      return (
+        <video
+          src={href}
+          controls
+          preload="metadata"
+          className="my-2 max-h-[70vh] max-w-full rounded-lg border border-border/70"
+        />
+      )
+    }
     return (
       <a
         href={href}

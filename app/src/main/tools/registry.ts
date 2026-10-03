@@ -1,4 +1,5 @@
-import type { ChatImage, ChatMode, CommandRun, FileSnapshot, NativeToolSchema, PreviewTarget, ProviderSettings, TodoItem, ToolSideEffect } from '../../shared/types'
+import type { ChatImage, ChatMode, CommandRun, CredentialInput, CredentialMeta, EditorEvent, FileSnapshot, GeneratedMedia, NativeToolSchema, PreviewTarget, ProviderSettings, TodoItem, ToolSideEffect } from '../../shared/types'
+import type { FfmpegProgress } from './ffmpeg-core'
 import { toErrorMessage } from '../providers/http'
 import type { ToolCall } from './toolParser'
 import { webFetchTool, webSearchTool, wikiSearchTool } from './web'
@@ -7,6 +8,7 @@ import { fsTools } from './fs'
 import { editNotebookTool } from './notebook'
 import { previewTool } from './preview'
 import { updatePlanTool } from './plan'
+import { presentPlanTool } from './present-plan'
 import { searchTools } from './search'
 import { runCommandTool } from './command'
 import { runDevServerTool } from './devServer'
@@ -26,6 +28,9 @@ import { askUserTool } from './ask'
 import { installConnectorTool, installSkillTool } from './install'
 import { rememberTool } from './remember'
 import { thinkTool } from './think'
+import { mediaEditTools } from './media-edit'
+import { visualEditTools } from './visual-edit'
+import { credentialTools } from './credentials'
 
 /**
  * The tool registry: the catalogue of tools the chat can use, the dispatcher that
@@ -153,6 +158,76 @@ export interface ToolContext extends ToolGate {
     scale: unknown,
     signal?: AbortSignal
   ) => Promise<{ total: number; pages: number[]; dataUrls: string[] }>
+  /**
+   * Push a human status line to the rolling activity indicator while a long media render
+   * runs (the FFmpeg tools call this with "Rendering 42% (3.1x)"). The stream loop turns it
+   * into a {@link CompletionChunk.status}. Optional — absent outside the streaming loop, where
+   * the media tools simply run without live progress.
+   */
+  onStatus?: (status: string) => void
+  /**
+   * Spawn the bundled ffmpeg with an argument ARRAY (never a shell) — the Electron half in
+   * ../ffmpeg-runtime.ts. `onProgress` streams `-progress` ticks (wired to {@link onStatus} by
+   * the tool), `cwd` sandboxes the escape-hatch `run_ffmpeg` to the working folder, and `signal`
+   * chains to the user's Stop. Optional — absent in unit tests, where the media tools degrade to
+   * a "needs the app runtime" note.
+   */
+  runFfmpeg?: (
+    args: string[],
+    opts?: {
+      onProgress?: (p: FfmpegProgress) => void
+      totalDurationSec?: number
+      signal?: AbortSignal
+      captureStdout?: boolean
+      cwd?: string
+    }
+  ) => Promise<{ exitCode: number | null; stderr: string; stdout: string }>
+  /** Probe a media file with the bundled ffprobe → raw ffprobe JSON stdout (the core parses it). */
+  probeMedia?: (absPath: string, signal?: AbortSignal) => Promise<string>
+  /** Transcribe an audio/video file → raw transcript JSON (local whisper.cpp or an API). */
+  transcribeAudio?: (absPath: string, signal?: AbortSignal) => Promise<string>
+  /**
+   * Surface finished output media (an edited video or image) to the user inline. The media tools
+   * call this with a small base64-encoded result; the stream loop turns it into a
+   * {@link CompletionChunk.media} chunk. Optional — absent outside the streaming loop, where the
+   * tool still returns the output path in its result text.
+   */
+  emitMedia?: (media: GeneratedMedia[]) => void
+  /**
+   * Drive the live "watch Myto edit" Editor pane (Build mode). The `edit_photo`/`edit_video`
+   * tools call this through an edit: open (source still) → script (the choreography the
+   * renderer animates) → progress (bake render bar) → baked (the real result). The stream
+   * loop turns each into a {@link CompletionChunk.editor} chunk. Optional — absent outside the
+   * streaming loop, where the tool still bakes the file and returns its path in the result.
+   */
+  onEditorEvent?: (event: EditorEvent) => void
+  /**
+   * Resolve the env a shell command should run with: the values of every stored credential whose
+   * scopes match a program in the command (credential-vault.ts). `run_command`, `git`, and
+   * `git_publish` spread it over `process.env` so a matching command (e.g. `git push`) carries the
+   * user's saved token with no secret ever in argv. Returns undefined when nothing matches. Optional
+   * — absent outside the streaming loop and in the read-only sub-agent, where no injection happens.
+   */
+  resolveCredentialEnv?: (command: string) => NodeJS.ProcessEnv | undefined
+  /**
+   * Scrub every secret value injected so far this run out of model-facing text (replacing it, and
+   * its url-encoded form, with a mask). The stream loop builds this from the accumulating set of
+   * injected secrets; {@link runTool} applies it to EVERY tool's result centrally, and command.ts /
+   * git.ts / publish.ts additionally apply it to their separate terminal-mirror channel. Optional —
+   * absent outside the streaming loop, where there is nothing to redact.
+   */
+  redactSecrets?: (text: string) => string
+  /**
+   * Store (or replace) a credential and resolve the updated metadata list — the `save_credential`
+   * tool's backend (credential-vault.ts). Throws when secure storage is unavailable or the input is
+   * invalid. Optional — absent outside the streaming loop and in unit tests, where the tool degrades
+   * to a note.
+   */
+  saveCredential?: (input: CredentialInput) => CredentialMeta[]
+  /** List saved credentials as metadata (names + scopes, never values) — the `list_credentials` backend. */
+  listCredentialMeta?: () => CredentialMeta[]
+  /** Delete one site's credential and resolve the updated metadata list — the `delete_credential` backend. */
+  deleteCredential?: (site: string) => CredentialMeta[]
 }
 
 /** One tool the model can call through the text protocol. */
@@ -205,13 +280,17 @@ const ALL_TOOLS: readonly ToolDef[] = [
   gitPublishTool,
   previewTool,
   updatePlanTool,
+  presentPlanTool,
   thinkTool,
   spawnAgentTool,
   spawnAgentsTool,
   askUserTool,
   installConnectorTool,
   installSkillTool,
-  rememberTool
+  rememberTool,
+  ...mediaEditTools,
+  ...visualEditTools,
+  ...credentialTools
 ]
 
 /** Lookup by name. Mutable only so tests can inject a fake tool; not written at runtime. */
@@ -301,16 +380,20 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<string>
       }
     }
     const result = await tool.run(call.input, ctx)
+    // Central redaction (defence-in-depth): scrub any injected secret value out of EVERY
+    // tool's model-facing output at the one dispatch chokepoint, so no individual tool can
+    // forget to. The per-run redactor masks only values actually injected this run.
+    const safe = ctx.redactSecrets ? ctx.redactSecrets(result) : result
     // PostToolUse hook (#9): observational only — its output is surfaced as a status
     // line by the loop, never merged into the result. Errors are ignored.
     if (ctx.postToolUse) {
       try {
-        await ctx.postToolUse(call, result)
+        await ctx.postToolUse(call, safe)
       } catch {
         // ignore — a post-hook is best-effort.
       }
     }
-    return result
+    return safe
   } catch (err) {
     return `The "${call.name}" tool failed: ${toErrorMessage(err)}`
   }

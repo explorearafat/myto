@@ -35,16 +35,18 @@ export interface TerminalState {
   /** Which tab is active — the agent transcript or the interactive shell. */
   tab: TerminalTab
   /**
-   * Record a command Myto ran (and reveal the pane), trimming to the cap. When the
-   * run carries an `id` that matches an existing entry, it REPLACES that entry in
-   * place — so a long-lived process (a dev server) can stream successive output
-   * snapshots under one id without piling up rows. A run with no id (or a new id) is
-   * appended, which keeps one-shot commands and older call sites behaving as before.
+   * Record a command Myto ran, trimming to the cap. When the run carries an `id` that
+   * matches an existing entry, it REPLACES that entry in place — so a long-lived
+   * process (a dev server) can stream successive output snapshots under one id without
+   * piling up rows. A run with no id (or a new id) is appended, which keeps one-shot
+   * commands and older call sites behaving as before.
    *
-   * Appends always snap the pane back to the `agent` tab: new agent output is the
-   * reason the pane popped up, so the user should land on it, not on a stale shell.
+   * `reveal` (default true) pops the pane open and snaps it to the `agent` tab — new
+   * agent output is the reason the pane popped up, so the user lands on it. The chat
+   * stream passes `reveal: false` while a dev-server preview is pinned, so the dev
+   * server's continuing log updates its row QUIETLY without yanking the pinned preview.
    */
-  append: (run: CommandRun) => void
+  append: (run: CommandRun, opts?: { reveal?: boolean }) => void
   /** Clear the transcript (keeps the pane open). */
   clear: () => void
   /** Show the pane without adding to it (the top-bar toggle). */
@@ -61,7 +63,7 @@ export const useTerminalStore = create<TerminalState>((set) => ({
   cwd: null,
   tab: 'agent',
 
-  append: (run) =>
+  append: (run, opts) =>
     set((s) => {
       // Upsert by id: an in-place replace when this id is already on screen (a
       // streaming dev server), else a plain append. No id always appends.
@@ -75,6 +77,9 @@ export const useTerminalStore = create<TerminalState>((set) => ({
         // Drop the oldest once past the cap so memory stays bounded.
         if (next.length > MAX_ENTRIES) next.splice(0, next.length - MAX_ENTRIES)
       }
+      // reveal:false keeps the pane's current open state + tab (a quiet background
+      // update while a preview is pinned); otherwise pop open on the agent tab.
+      if (opts?.reveal === false) return { entries: next, cwd: run.cwd ?? s.cwd }
       return { open: true, tab: 'agent', entries: next, cwd: run.cwd ?? s.cwd }
     }),
 

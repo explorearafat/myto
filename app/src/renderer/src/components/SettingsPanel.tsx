@@ -5,6 +5,7 @@ import { ConnectorsPane } from '@renderer/components/ConnectorsPane'
 import { SkillsPane } from '@renderer/components/SkillsPane'
 import { PluginsPane } from '@renderer/components/PluginsPane'
 import { ScheduledTasksPane } from '@renderer/components/ScheduledTasksPane'
+import { CredentialsPane } from '@renderer/components/CredentialsPane'
 
 /** The Settings window's left-rail categories. */
 type SettingsCategory =
@@ -15,6 +16,7 @@ type SettingsCategory =
   | 'skills'
   | 'plugins'
   | 'scheduled'
+  | 'credentials'
 
 /** Title + one-line subtitle shown in each category pane's header. */
 const CATEGORY_META: Record<SettingsCategory, { label: string; subtitle: string }> = {
@@ -36,6 +38,10 @@ const CATEGORY_META: Record<SettingsCategory, { label: string; subtitle: string 
   scheduled: {
     label: 'Scheduled',
     subtitle: 'Prompts Myto runs on a schedule, each in its own fresh session.'
+  },
+  credentials: {
+    label: 'Credentials',
+    subtitle: 'Save a token once; Myto uses it for matching terminal tasks — values stay hidden.'
   }
 }
 
@@ -111,6 +117,19 @@ function CategoryIcon({ id }: { id: SettingsCategory }): ReactNode {
           <path d="M8 4.75V8l2.25 1.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       )
+    case 'credentials':
+      return (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="5.25" cy="6.5" r="3" stroke="currentColor" strokeWidth="1.3" />
+          <path
+            d="M7.6 8.1 13 13.5M11 11.6l1.4-1.4M9.4 10l1.3-1.3"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )
   }
 }
 
@@ -121,6 +140,7 @@ const CATEGORY_ORDER: SettingsCategory[] = [
   'skills',
   'plugins',
   'scheduled',
+  'credentials',
   'appearance'
 ]
 
@@ -516,6 +536,7 @@ export function SettingsPanel() {
               {category === 'skills' && <SkillsPane />}
               {category === 'plugins' && <PluginsPane />}
               {category === 'scheduled' && <ScheduledTasksPane />}
+              {category === 'credentials' && <CredentialsPane />}
             </div>
           </div>
         </div>

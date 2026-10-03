@@ -102,8 +102,11 @@ describe('previewTool.run — urls', () => {
     const c = ctx()
     const msg = await previewTool.run({ url: 'http://localhost:5173' }, c)
     expect(c.previews).toHaveLength(1)
-    expect(c.previews[0]).toMatchObject({ kind: 'url', title: 'http://localhost:5173' })
-    expect(c.previews[0].url).toContain('localhost:5173')
+    expect(c.previews[0]).toMatchObject({
+      kind: 'url',
+      title: 'http://localhost:5173',
+      url: expect.stringContaining('localhost:5173')
+    })
     expect(msg).toContain('localhost:5173')
   })
 

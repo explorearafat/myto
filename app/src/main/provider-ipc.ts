@@ -11,6 +11,8 @@ import type {
   CommandRun,
   CompletionRequest,
   CompletionResult,
+  EditorEvent,
+  FileChange,
   FileSnapshot,
   GatewayConfig,
   GeneratedMedia,
@@ -40,6 +42,9 @@ import {
   IDENTITY_SYSTEM_PROMPT,
   outputStylePrompt,
   PLAN_MODE_SYSTEM_PROMPT,
+  AUTO_PLAN_SYSTEM_PROMPT,
+  MEDIA_EDITING_SYSTEM_PROMPT,
+  credentialsSystemPrompt,
   STATUS_SYSTEM_PROMPT
 } from './status'
 import { availableTools, lookupTool, runTool, toolSchemas, toolsSystemPrompt, type ToolGate } from './tools/registry'
@@ -72,6 +77,14 @@ import { browserToolsEnabled } from './cowork-browser'
 import { createBrowserController, type BrowserController } from './cowork-browser-runtime'
 import { renderDocumentPdf } from './cowork-docgen-runtime'
 import { rasterizePdf } from './document-raster-runtime'
+import { runFfmpeg, probeMedia, transcribeAudio } from './ffmpeg-runtime'
+import {
+  listCredentialMeta,
+  saveCredential,
+  deleteCredential,
+  resolveEnvForCommand
+} from './credential-vault'
+import { redactSecrets as redactSecretsCore } from './credential-vault-core'
 import { capturePreviewImage } from './preview-capture-runtime'
 import { runningServerUrl } from './tools/devServer'
 import {
@@ -86,6 +99,8 @@ import { readUserMemory } from './user-memory'
 import { materializeAttachments, type MaterializedAttachment } from './cowork-attachments'
 import { readVisionImages } from './vision-attachments'
 import { insertFileSnapshot } from './db/snapshots'
+import { looksLikeBigTask } from './cowork-plan-core'
+import { relative } from 'node:path'
 import { approvalDetail, requiresApproval } from './tools/approvals'
 import { createToolCallParser, toolCallBlock, toolResultBlock, type ToolCall } from './tools/toolParser'
 import { executeArgv, formatRunResult, resolveShell } from './tools/runCode'
@@ -367,9 +382,11 @@ export function registerProviderIpc(): void {
         preview?: PreviewTarget
         todos?: TodoItem[]
         command?: CommandRun
+        fileChange?: FileChange
         thinking?: string
         thinkingReset?: boolean
         media?: GeneratedMedia[]
+        editor?: EditorEvent
       }): void => {
         if (!sender.isDestroyed()) {
           sender.send(IpcChannel.ProvidersStreamChunk, { streamId, ...chunk })
@@ -416,6 +433,15 @@ export function registerProviderIpc(): void {
        * fault must never break the live reply, so it is swallowed.
        */
       const snapRunId = `run-${streamId}`
+      /**
+       * The working folder, captured once it is computed below (it lives in a deeper
+       * block than this callback), so {@link onFileSnapshot} can report each change to
+       * the live Working-tree pane as a workspace-RELATIVE path rather than an absolute
+       * one. Null leaves the path as-is.
+       */
+      let fileChangeRoot: string | null = null
+      /** Whole-version line count (null/'' → 0), matching FileCard's +added/−removed convention. */
+      const lineCount = (s: string | null | undefined): number => (s ? s.split('\n').length : 0)
       const onFileSnapshot = (snapshot: FileSnapshot): void => {
         if (!request.sessionId) return
         try {
@@ -428,6 +454,26 @@ export function registerProviderIpc(): void {
           })
         } catch {
           // A snapshot only powers rewind; never let a DB hiccup break the run.
+        }
+        // ALSO forward the change to the renderer's live Working-tree pane (Feature 2):
+        // a workspace-relative, forward-slashed path plus whole-version line counts. The
+        // store upserts by path, so a file touched repeatedly shows once with its latest
+        // counts. Display-only — a failure here must never break the run.
+        try {
+          const rel = fileChangeRoot ? relative(fileChangeRoot, snapshot.path) : snapshot.path
+          const relPosix = rel.split(/[/\\]+/).filter(Boolean).join('/') || snapshot.path
+          send({
+            delta: '',
+            done: false,
+            fileChange: {
+              path: relPosix,
+              kind: snapshot.kind,
+              added: lineCount(snapshot.after),
+              removed: lineCount(snapshot.before)
+            }
+          })
+        } catch {
+          // Live-tree forwarding is cosmetic; swallow and carry on.
         }
       }
 
@@ -605,6 +651,9 @@ export function registerProviderIpc(): void {
         // never prompt for a name mid-run (that old per-message "name the folder?" ask
         // is gone). A still-empty workspaceDir just leaves the fs tools dormant.
         const workspaceDir = research ? homedir() : settings.cowork.workspaceDir.trim() || null
+        // Hand the working folder to onFileSnapshot (declared above, in an outer block) so
+        // live file-change chunks carry workspace-relative paths for the Working-tree pane.
+        fileChangeRoot = workspaceDir
         // Research arms the full agent runtime by default (the mandate: every one of the
         // 300+ specialists drives the browser and reaches the user's files without any
         // opt-in dance). We synthesise an "effective settings" whose cowork.workspaceDir is
@@ -663,6 +712,12 @@ export function registerProviderIpc(): void {
           }
           if (controller.signal.aborted) return
         }
+        // Saved-credential awareness (vault): the names/scopes/usage of secrets saved for
+        // this folder, so the agent knows it can run `git push` etc. without asking the
+        // user to paste a token. Values are NEVER included (there is no path to read one
+        // back). Computed once here; '' when none, which omits the system turn below.
+        const credentialsPrompt =
+          agentic && workspaceDir ? credentialsSystemPrompt(listCredentialMeta(workspaceDir)) : ''
         // Global (user-level) memory: cross-project facts/preferences the user saved,
         // injected in EVERY mode (chat and cowork) so they always apply. Best-effort.
         const userMemory = readUserMemory(recallQuery)
@@ -686,10 +741,16 @@ export function registerProviderIpc(): void {
         // Output style (#13): the persisted global voice preference, resolved to its
         // system instruction once ('' for 'default') and injected into baseSystem below.
         const outputStyleInstruction = outputStylePrompt(settings.outputStyle)
-        // Plan mode (#8): a Cowork-only gate. When on, the agent must research + draft a
-        // plan and win the user's approval before the first write/exec tool. Injects the
-        // plan directive into baseSystem and arms the one-time plan gate in the loop below.
-        const planActive = mode === 'cowork' && settings.cowork.planMode
+        // Plan mode (#8): a Cowork-only gate. When on, the agent must research, present a
+        // plan with present_plan, and win the user's approval before the first write/exec
+        // tool. Injects the plan directive into baseSystem and arms the plan gate in the
+        // loop below. TWO triggers: the explicit Plan-mode toggle, OR — toggle off — an
+        // auto-detected substantial build (looksLikeBigTask), so a big ask ("build a
+        // portfolio site") still gets a plan-first pass while small edits proceed directly.
+        const latestUserText = ([...convo].reverse().find((m) => m.role === 'user')?.content ?? '').trim()
+        const autoPlan =
+          mode === 'cowork' && !settings.cowork.planMode && !!workspaceDir && looksLikeBigTask(latestUserText)
+        const planActive = (mode === 'cowork' && settings.cowork.planMode) || autoPlan
 
         // The all-rounder ("Cowork" in the UI, internally `research`) announces itself so
         // the user sees the mode on the status line while it spins up. Its persona is a
@@ -779,6 +840,60 @@ export function registerProviderIpc(): void {
           signal?: AbortSignal
         ): Promise<{ total: number; pages: number[]; dataUrls: string[] }> =>
           rasterizePdf(bytes, pages, scale, signal)
+
+        /**
+         * The video/photo editing tools' native half (tools/media-edit.ts). All pure arg
+         * building + edit-plan validation lives in tools/ffmpeg-core.ts; these just surface
+         * progress and finished output to the renderer. `onStatus` pushes a human caption
+         * ("Rendering 42% (3.1x)") to the rolling status line, exactly like a <status> tag;
+         * `emitMedia` shows an edited video/image inline as a `media` chunk — sent straight to
+         * the renderer, not parked like vision stills, since it's for the user to watch, never
+         * model input. The spawn wrappers (`runFfmpeg`/`probeMedia`/`transcribeAudio`) are the
+         * bundled-binary half (ffmpeg-runtime.ts); only in unit tests, where these ctx fields
+         * are absent, do the media tools degrade to a "needs the app runtime" note.
+         */
+        const onStatus = (status: string): void => {
+          if (status.trim()) send({ delta: '', done: false, status })
+        }
+        const emitMedia = (media: GeneratedMedia[]): void => {
+          if (media.length) send({ delta: '', done: false, media })
+        }
+        /**
+         * Drive the live Editor pane (Build "watch Myto edit"). The edit_photo/edit_video tools
+         * push open → script → progress → baked through this; each rides out-of-band on its own
+         * chunk (empty delta) exactly like {@link emitMedia}, and never blocks the loop.
+         */
+        const onEditorEvent = (editor: EditorEvent): void => {
+          send({ delta: '', done: false, editor })
+        }
+
+        /**
+         * Per-run credential bridge (vault). Two closures sharing ONE accumulating set of the
+         * secret values actually injected so far this run — the least-exposure principle: only
+         * a value that was really placed into some command's env could appear in that command's
+         * output, so that set is exactly what the redactor must mask. The set only grows (never
+         * reset mid-run) and nothing is added unless {@link resolveCredentialEnv} truly injected
+         * it, so a just-saved-but-never-used secret is never put at risk of surfacing.
+         *
+         * `resolveCredentialEnv` is handed to the exec tools (run_command/git/git_publish): it
+         * returns the scoped env for a command and records the values it injected. `redactSecrets`
+         * is the single scrubber the registry runs over EVERY tool's model-facing return, and the
+         * exec tools additionally run it over their Terminal-pane mirror (a separate channel).
+         */
+        const injectedSecrets = new Set<string>()
+        const resolveCredentialEnv = (command: string): NodeJS.ProcessEnv | undefined => {
+          if (!workspaceDir) return undefined
+          const env = resolveEnvForCommand(workspaceDir, command)
+          if (env) {
+            for (const v of Object.values(env)) {
+              // Short, word-like values aren't real secrets and masking them would blank out
+              // ordinary output; redactSecretsCore skips <4 too, so this just keeps the set tidy.
+              if (typeof v === 'string' && v.length >= 4) injectedSecrets.add(v)
+            }
+          }
+          return env
+        }
+        const redactSecrets = (text: string): string => redactSecretsCore(text, injectedSecrets)
 
         /**
          * User-configured lifecycle hooks (#9). PreToolUse runs a shell command BEFORE
@@ -1252,6 +1367,20 @@ export function registerProviderIpc(): void {
             : research
               ? [{ role: 'system' as const, content: ALLROUNDER_SYSTEM_PROMPT }]
               : []),
+          // Video/photo editing (bundled FFmpeg): how to drive the media tools well —
+          // probe → gather → one edit plan → render → verify, frames sparingly. Added in
+          // both agentic modes once a working folder is set, which is exactly when the
+          // media tools (tools/media-edit.ts, gated on fsAvailable) are advertised.
+          ...((mode === 'cowork' || research) && workspaceDir
+            ? [{ role: 'system' as const, content: MEDIA_EDITING_SYSTEM_PROMPT }]
+            : []),
+          // Saved credentials (vault): tell the agent which services it already holds keys
+          // for — names/scopes/usage only, never a value — so it runs the normal command
+          // instead of asking the user to paste a token again. Added in both agentic modes
+          // once a working folder has credentials saved (the only place they're scoped to).
+          ...(credentialsPrompt
+            ? [{ role: 'system' as const, content: credentialsPrompt }]
+            : []),
           // Runtime awareness (Track 1): the detected interpreters + the exact command
           // for each, so a weaker model doesn't reach for `python3` on Windows. Sits
           // right after the Cowork prompt that tells it to script deliverables.
@@ -1272,7 +1401,12 @@ export function registerProviderIpc(): void {
             : []),
           // Plan mode (#8): plan-first directive, right after the Cowork agent prompt so
           // it overrides the "ACT, don't narrate" bias until the user approves the plan.
-          ...(planActive ? [{ role: 'system' as const, content: PLAN_MODE_SYSTEM_PROMPT }] : []),
+          // The explicit toggle gets the firm PLAN_MODE prompt; the auto-detected big-task
+          // path gets the lighter AUTO_PLAN prompt (which lets the model skip planning if
+          // the task turns out small), so toggle-off never nags a one-liner.
+          ...(planActive
+            ? [{ role: 'system' as const, content: autoPlan ? AUTO_PLAN_SYSTEM_PROMPT : PLAN_MODE_SYSTEM_PROMPT }]
+            : []),
           // Inject the project journal so the agent continues rather than repeats.
           ...(coworkMemory
             ? [
@@ -2161,7 +2295,18 @@ export function registerProviderIpc(): void {
                     getBrowser,
                     renderDocument,
                     emitToolImages,
-                    rasterizeDocument
+                    rasterizeDocument,
+                    onStatus,
+                    emitMedia,
+                    onEditorEvent,
+                    runFfmpeg,
+                    probeMedia,
+                    transcribeAudio,
+                    resolveCredentialEnv,
+                    redactSecrets,
+                    saveCredential: workspaceDir ? (input) => saveCredential(workspaceDir, input) : undefined,
+                    listCredentialMeta: workspaceDir ? () => listCredentialMeta(workspaceDir) : undefined,
+                    deleteCredential: workspaceDir ? (site) => deleteCredential(workspaceDir, site) : undefined
                   })
           } else {
             result = await runTool(call, {
@@ -2178,11 +2323,48 @@ export function registerProviderIpc(): void {
                     getBrowser,
                     renderDocument,
                     emitToolImages,
-                    rasterizeDocument
+                    rasterizeDocument,
+                    onStatus,
+                    emitMedia,
+                    onEditorEvent,
+                    runFfmpeg,
+                    probeMedia,
+                    transcribeAudio,
+                    resolveCredentialEnv,
+                    redactSecrets,
+                    saveCredential: workspaceDir ? (input) => saveCredential(workspaceDir, input) : undefined,
+                    listCredentialMeta: workspaceDir ? () => listCredentialMeta(workspaceDir) : undefined,
+                    deleteCredential: workspaceDir ? (site) => deleteCredential(workspaceDir, site) : undefined
                   })
           }
           if (controller.signal.aborted) return
           send({ delta: toolResultBlock(toolName, result), done: false })
+
+          // present_plan approval (#8, Feature 1): the plan is now rendered in the preview
+          // pane. While a plan gate is active and not yet approved, pause and ask the user to
+          // approve it before any write/exec tool. Approve → unlock the build (planApproved);
+          // "Keep planning" → feed the revise request back so the model re-presents a revised
+          // plan, looping with tools still gated. This is the plan-DOCUMENT gate; the generic
+          // first-side-effect gate above (L~2228) stays as a backstop if the model skips it.
+          if (call.name === 'present_plan' && planActive && !planApproved) {
+            send({ delta: '', done: false, status: 'Plan ready — waiting for your approval' })
+            const decision = await requestApproval('present_plan', 'write', 'Review the plan', true)
+            if (controller.signal.aborted) return
+            const assistantTurn = (visible.trimEnd() ? `${visible.trimEnd()}\n` : '') + call.block
+            history.push({ role: 'assistant', content: assistantTurn })
+            if (decision === 'deny') {
+              const revise =
+                'The user reviewed the plan and wants changes before anything is written or run. Revise the plan and call present_plan again with the updated plan, then wait for approval. Do not write, edit, delete, or run anything yet.'
+              history.push({ role: 'user', content: `Tool result for present_plan:\n${result}\n\n${revise}\n\n${goalReminder}` })
+              continue
+            }
+            planApproved = true
+            const proceed =
+              'The user approved the plan. Proceed now: execute it step by step, tracking progress with update_plan, and carry it through to a finished, verified result. Do not ask whether to continue.'
+            history.push({ role: 'user', content: `Tool result for present_plan:\n${result}\n\n${proceed}\n\n${goalReminder}` })
+            continue
+          }
+
           // Journal meaningful actions (writes/edits/deletes/commands/code) so the next
           // turn knows they happened and doesn't repeat them (Cowork memory).
           if (mode === 'cowork' && workspaceDir) recordToolAction(workspaceDir, call, result)

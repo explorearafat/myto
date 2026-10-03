@@ -130,12 +130,16 @@ export async function executeCode(
   code: string,
   signal: AbortSignal,
   cwd?: string,
-  timeoutMs: number = RUN_TIMEOUT_MS
+  timeoutMs: number = RUN_TIMEOUT_MS,
+  extraEnv?: NodeJS.ProcessEnv
 ): Promise<RunResult> {
+  // Base env: the JS path runs the bundled Node via ELECTRON_RUN_AS_NODE; everything
+  // else inherits the normal environment. `extraEnv` (scoped credential values resolved
+  // by the caller) is layered on top so a matching command carries the user's saved
+  // secret — in the child's ENV only, never on argv.
+  const baseEnv = spec.electronNode ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : process.env
   return executeArgv(spec.cmd, [spec.flag, code], signal, {
-    // The JS path runs the bundled Node via ELECTRON_RUN_AS_NODE; everything else
-    // inherits the normal environment.
-    env: spec.electronNode ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : process.env,
+    env: extraEnv ? { ...baseEnv, ...extraEnv } : baseEnv,
     cwd,
     timeoutMs
   })

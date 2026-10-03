@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { usePreviewStore, currentTarget } from '../store/usePreviewStore'
+import { Markdown } from './Markdown'
 
 /**
  * Myto's preview pane (Cowork): a small browser beside the chat that Myto drives
@@ -61,7 +62,8 @@ export function PreviewPane() {
   const close = usePreviewStore((s) => s.close)
   const openExternal = usePreviewStore((s) => s.openExternal)
 
-  const url = target?.url ?? ''
+  const url = target && 'url' in target ? target.url : ''
+  const isMarkdown = target?.kind === 'markdown'
   const guestKey = `${url}#${reloadNonce}`
 
   // A quiet top loading bar while the guest fetches. Reset whenever the guest
@@ -69,15 +71,41 @@ export function PreviewPane() {
   // a ref callback — safe, unlike calling methods on the element imperatively.
   const [loading, setLoading] = useState(true)
   useEffect(() => setLoading(true), [guestKey])
+
+  // did-fail-load retry (Feature 3): a dev server can be a beat slow to actually serve
+  // after it prints its URL, so the first webview load can hit connection-refused. Ride
+  // it out with a few bounded reloads (each a store reload() → new guestKey → clean
+  // remount, never an imperative reload() on the element — that's what crashed this
+  // panel before). The counter resets on every fresh navigation/manual reload.
+  const MAX_RETRIES = 3
+  const RETRY_DELAY_MS = 700
+  const retriesRef = useRef(0)
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    retriesRef.current = 0
+    return () => {
+      if (retryTimer.current) clearTimeout(retryTimer.current)
+    }
+  }, [guestKey])
+
   const attach = useRef<((el: PreviewGuest | null) => void) | null>(null)
   attach.current = (el): void => {
     if (!el) return
     // Enable Chromium's built-in viewer (so a file:// PDF renders in-pane). Set as
     // a plain attribute — React would serialise a `plugins` JSX prop wrong.
     el.setAttribute('plugins', '')
-    const stop = (): void => setLoading(false)
-    el.addEventListener('did-stop-loading', stop)
-    el.addEventListener('did-fail-load', stop)
+    el.addEventListener('did-stop-loading', () => {
+      setLoading(false)
+      retriesRef.current = 0 // a clean load clears the retry budget
+    })
+    el.addEventListener('did-fail-load', () => {
+      setLoading(false)
+      // Only retry real URLs (not file previews), and only a bounded number of times.
+      if (!url.startsWith('http') || retriesRef.current >= MAX_RETRIES) return
+      retriesRef.current += 1
+      if (retryTimer.current) clearTimeout(retryTimer.current)
+      retryTimer.current = setTimeout(() => reload(), RETRY_DELAY_MS)
+    })
   }
 
   return (
@@ -110,36 +138,40 @@ export function PreviewPane() {
           <div className="truncate text-[12px] font-medium text-text" title={target?.title}>
             {target?.title || 'Preview'}
           </div>
-          <div className="text-[10px] text-muted">Myto preview</div>
+          <div className="text-[10px] text-muted">{isMarkdown ? 'Plan for review' : 'Myto preview'}</div>
         </div>
 
-        <PaneButton label="Back" disabled={index <= 0} onClick={back}>
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M10 3L5 8l5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </PaneButton>
-        <PaneButton label="Forward" disabled={index >= historyLen - 1} onClick={forward}>
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </PaneButton>
-        <PaneButton label="Reload" onClick={reload}>
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path
-              d="M13 8a5 5 0 1 1-1.5-3.5M13 2.5V5h-2.5"
-              stroke="currentColor"
-              strokeWidth="1.4"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </PaneButton>
-        <PaneButton label="Open in my browser" onClick={openExternal}>
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M6.5 3H3.5A1 1 0 0 0 2.5 4v8.5a1 1 0 0 0 1 1H12a1 1 0 0 0 1-1v-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-            <path d="M9.5 2.5H13.5V6.5M13 3L7.5 8.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </PaneButton>
+        {!isMarkdown && (
+          <>
+            <PaneButton label="Back" disabled={index <= 0} onClick={back}>
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M10 3L5 8l5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </PaneButton>
+            <PaneButton label="Forward" disabled={index >= historyLen - 1} onClick={forward}>
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </PaneButton>
+            <PaneButton label="Reload" onClick={reload}>
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path
+                  d="M13 8a5 5 0 1 1-1.5-3.5M13 2.5V5h-2.5"
+                  stroke="currentColor"
+                  strokeWidth="1.4"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </PaneButton>
+            <PaneButton label="Open in my browser" onClick={openExternal}>
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M6.5 3H3.5A1 1 0 0 0 2.5 4v8.5a1 1 0 0 0 1 1H12a1 1 0 0 0 1-1v-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M9.5 2.5H13.5V6.5M13 3L7.5 8.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </PaneButton>
+          </>
+        )}
         <PaneButton label="Close preview" onClick={close}>
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -152,9 +184,14 @@ export function PreviewPane() {
         {loading && <div className="myto-preview-bar h-full w-1/3 bg-primary/70" />}
       </div>
 
-      {/* The guest. Keyed remounts on navigate/reload keep it purely prop-driven. */}
+      {/* The guest. A plan (markdown) renders as scrollable rich text; a url/file
+          renders in the keyed <webview> whose remounts keep it purely prop-driven. */}
       <div className="min-h-0 flex-1 bg-white">
-        {url ? (
+        {target && target.kind === 'markdown' ? (
+          <div className="h-full overflow-auto bg-bg px-5 py-4">
+            <Markdown content={target.markdown} />
+          </div>
+        ) : url ? (
           <webview
             key={guestKey}
             ref={(el) => attach.current?.(el as unknown as PreviewGuest | null)}

@@ -376,18 +376,28 @@ export type ToolSideEffect = 'write' | 'exec'
  * `preview` tool and carried on a {@link CompletionChunk} so it rides the same
  * stream as the reply; the renderer opens the side pane on it. A `file` target is
  * a working-folder artifact (an HTML page, a PDF, an image, a chart) already
- * resolved to a `file://` URL; a `url` target is a localhost/remote page (a plan,
- * a running dev server) — both load in the same isolated `partition="preview"`
- * webview guest.
+ * resolved to a `file://` URL; a `url` target is a localhost/remote page (a running
+ * dev server) — both load in the same isolated `partition="preview"` webview guest.
+ * A `markdown` target carries in-memory markdown (a plan document) rendered directly
+ * in the pane instead of a webview — it has no URL.
  */
-export interface PreviewTarget {
-  /** Whether this points at a working-folder file or a web URL — drives the icon/label. */
-  kind: 'file' | 'url'
-  /** The URL the preview webview loads: a `file://…` URL for files, or the http(s) URL. */
-  url: string
-  /** A short human label for the pane header (the relative path, or the URL). */
-  title: string
-}
+export type PreviewTarget =
+  | {
+      /** Whether this points at a working-folder file or a web URL — drives the icon/label. */
+      kind: 'file' | 'url'
+      /** The URL the preview webview loads: a `file://…` URL for files, or the http(s) URL. */
+      url: string
+      /** A short human label for the pane header (the relative path, or the URL). */
+      title: string
+    }
+  | {
+      /** An in-memory markdown document (e.g. a plan) rendered in the pane, no webview. */
+      kind: 'markdown'
+      /** The markdown source to render. */
+      markdown: string
+      /** A short human label for the pane header. */
+      title?: string
+    }
 
 /** Where a plan step stands. Drives the checklist icon in the plan panel. */
 export type TodoStatus = 'pending' | 'in_progress' | 'done'
@@ -613,6 +623,208 @@ export interface GeneratedMedia {
   prompt?: string
 }
 
+// EDITOR_TYPES_MARKER
+
+/**
+ * The "watch Myto edit" feature (Build mode): a dedicated Editor pane that opens when Myto
+ * edits a photo or video and animates HOW it edits — a Lightroom-style panel for photos, a
+ * CapCut-style timeline for videos — then shows the REAL FFmpeg-baked result. The types
+ * below are the wire + choreography model, all pure (no Electron, no renderer).
+ */
+
+/** A point on a tone curve, normalized 0..1 on both axes (x = input level, y = output). */
+export interface CurvePoint {
+  /** Input level, 0 (black) .. 1 (white). */
+  x: number
+  /** Output level the curve maps `x` to, 0..1. */
+  y: number
+}
+
+/** The eight HSL colour bands Lightroom exposes (and the renderer draws as wheels). */
+export type HslBand = 'red' | 'orange' | 'yellow' | 'green' | 'aqua' | 'blue' | 'purple' | 'magenta'
+
+/** A per-band HSL tweak; each field is -100..100 with 0 = unchanged. */
+export interface HslAdjust {
+  /** Hue rotation for this band. */
+  hue: number
+  /** Saturation change for this band. */
+  sat: number
+  /** Luminance change for this band. */
+  lum: number
+}
+
+/** A crop rectangle in normalized 0..1 coordinates relative to the source frame. */
+export interface CropRect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+/**
+ * A full Lightroom-style photo adjustment set. Every Basic field is -100..100 with 0 =
+ * neutral; the renderer animates each from its neutral baseline to the target (so the user
+ * watches the slider glide + the live preview respond), and `photo-core.ts` maps the whole
+ * set to ONE FFmpeg filter chain for the authoritative bake.
+ */
+export interface PhotoAdjust {
+  exposure: number
+  contrast: number
+  highlights: number
+  shadows: number
+  whites: number
+  blacks: number
+  /** White balance: warm (+) / cool (−). */
+  temp: number
+  /** Tint: magenta (+) / green (−). */
+  tint: number
+  vibrance: number
+  saturation: number
+  clarity: number
+  /** Output sharpening amount, 0..100. */
+  sharpen: number
+  /** Vignette: darken (−) / lighten (+) the corners. */
+  vignette: number
+  /** Optional explicit tone curve — RGB composite and/or per channel, points sorted by x. */
+  curve?: { rgb?: CurvePoint[]; r?: CurvePoint[]; g?: CurvePoint[]; b?: CurvePoint[] }
+  /** Optional per-band HSL mixer; omitted bands are neutral. */
+  hsl?: Partial<Record<HslBand, HslAdjust>>
+  /** Optional crop rectangle (normalized). */
+  crop?: CropRect
+  /** Optional rotation in degrees (clockwise). */
+  rotate?: number
+}
+// EDITOR_TYPES_MARKER2
+
+/** Which editor panel a step addresses — drives the active UI tab and where the cursor goes. */
+export type EditorPanel = 'basic' | 'curve' | 'hsl' | 'crop' | 'timeline' | 'text' | 'audio' | 'effects'
+
+/** A kept segment of the source video on the timeline's video track (times in seconds). */
+export interface EditorClip {
+  id: string
+  track: 'video'
+  /** Position on the output timeline. */
+  startSec: number
+  endSec: number
+  /** Where this clip maps into the source media. */
+  sourceStartSec: number
+  sourceEndSec: number
+  /** Playback speed multiplier (1 = normal). */
+  speed?: number
+  /** A named colour-grade/filter preset applied to the clip. */
+  grade?: string
+  label?: string
+}
+
+/** A styled caption/title block on the text track (times in seconds). */
+export interface EditorTextClip {
+  id: string
+  track: 'text'
+  startSec: number
+  endSec: number
+  text: string
+  /** Normalized 0..1 position of the text anchor. */
+  x?: number
+  y?: number
+  fontSize?: number
+  color?: string
+  /** Draw a background box behind the text. */
+  box?: boolean
+}
+
+/** A block on the audio track (the source audio or added music). */
+export interface EditorAudioClip {
+  id: string
+  track: 'audio'
+  startSec: number
+  endSec: number
+  label?: string
+  /** Volume percent, 0..200. */
+  volume?: number
+  muted?: boolean
+}
+
+/** One track in the CapCut-style timeline. */
+export interface EditorTrack {
+  kind: 'video' | 'text' | 'audio'
+  clips: Array<EditorClip | EditorTextClip | EditorAudioClip>
+}
+
+/** The whole timeline the VideoEditor renders and the playhead sweeps across. */
+export interface EditorTimeline {
+  durationSec: number
+  tracks: EditorTrack[]
+}
+// EDITOR_TYPES_MARKER3
+
+/**
+ * One choreography step — the atomic "thing Myto does" that the renderer animates so the
+ * user watches the edit happen. Each references a control by a SEMANTIC id (e.g.
+ * 'exposure', 'clip-0', 'text-1'); the renderer owns the pixel geometry (it looks up the
+ * control's live DOM rect to glide the virtual cursor there). `atMs` is the step's start on
+ * the animation clock; `durationMs` how long it animates. Discriminated on `type`.
+ */
+export type EditorStep =
+  | { type: 'panel-switch'; panel: EditorPanel; atMs: number }
+  | { type: 'cursor-move'; control: string; atMs: number; durationMs: number }
+  | { type: 'set-slider'; control: string; from: number; to: number; atMs: number; durationMs: number }
+  | { type: 'draw-curve'; channel: 'rgb' | 'r' | 'g' | 'b'; points: CurvePoint[]; atMs: number; durationMs: number }
+  | { type: 'set-hsl'; band: HslBand; field: 'hue' | 'sat' | 'lum'; from: number; to: number; atMs: number; durationMs: number }
+  | { type: 'playhead'; from: number; to: number; atMs: number; durationMs: number }
+  | { type: 'add-clip'; clip: EditorClip; atMs: number }
+  | { type: 'split'; track: string; atSec: number; atMs: number }
+  | { type: 'add-text'; clip: EditorTextClip; atMs: number }
+  | { type: 'transition'; name: string; atSec: number; atMs: number }
+  | { type: 'render'; atMs: number }
+
+/**
+ * The full choreography an `edit_photo`/`edit_video` call produces — the ordered steps the
+ * renderer plays to animate the edit, plus (video) the timeline it builds up. Pure, built by
+ * `editor-script-core.ts`; `totalMs` is the wall-clock length of the whole animation.
+ */
+export interface EditorScript {
+  kind: 'photo' | 'video'
+  steps: EditorStep[]
+  /** The CapCut timeline (video kind only). */
+  timeline?: EditorTimeline
+  totalMs: number
+  /** The target photo adjustment (photo kind) so the renderer can show the final values. */
+  target?: PhotoAdjust
+}
+
+/**
+ * An out-of-band event from an `edit_photo`/`edit_video` run that drives the live Editor
+ * pane (Build mode) — the "watch Myto edit" channel. Carried on {@link
+ * CompletionChunk.editor}; never blocks the loop. `sourcePreview`/`resultPreview` are full
+ * `data:image/...;base64,...` URLs ready for an `<img src>`. Discriminated on `phase`:
+ *  - open: the pane opens on the source still (a downscaled photo, or a video poster frame).
+ *  - script: the choreography to animate.
+ *  - progress: FFmpeg bake progress, a 0..100 render bar.
+ *  - baked: the REAL result still, plus for video the workspace path + a `file://` url the
+ *    Preview pane can play.
+ *  - error: the edit failed; the pane shows the message.
+ */
+export type EditorEvent =
+  | {
+      phase: 'open'
+      kind: 'photo' | 'video'
+      title: string
+      sourcePreview: string
+      width?: number
+      height?: number
+      durationSec?: number
+    }
+  | { phase: 'script'; script: EditorScript }
+  | { phase: 'progress'; pct: number; label: string }
+  | {
+      phase: 'baked'
+      kind: 'photo' | 'video'
+      resultPreview: string
+      outputPath?: string
+      url?: string
+    }
+  | { phase: 'error'; message: string }
+
 /**
  * A completed NATIVE (provider) tool call assembled from a streaming response (#15).
  * The gateway's per-stream parser accumulates the provider's tool-call fragments —
@@ -742,6 +954,13 @@ export interface CompletionChunk {
    */
   command?: CommandRun
   /**
+   * A file the agent just created/edited/deleted (Cowork), derived from the same
+   * `ctx.onFileSnapshot` capture that powers rewind. Present only on the chunk that
+   * reports it (empty `delta`); the renderer upserts it into the live Working-tree
+   * pane. Non-blocking like {@link preview}. Absent otherwise.
+   */
+  fileChange?: FileChange
+  /**
    * Raw chain-of-thought accumulated so far for the CURRENT thinking phase (Cowork
    * and chat with a reasoning model). Unlike {@link reasoning} — the per-delta scrap
    * that only becomes a status caption — this is the full snapshot the renderer shows
@@ -784,6 +1003,13 @@ export interface CompletionChunk {
    * the main process also persists them as attachments. Absent on ordinary text turns.
    */
   media?: GeneratedMedia[]
+  /**
+   * An event from a live photo/video edit (Build mode), raised by `edit_photo`/`edit_video`.
+   * Present only on the chunk that reports it (empty `delta`); the renderer drives the Editor
+   * pane with it (open → script → progress → baked). Non-blocking like {@link preview}.
+   * Absent on every turn that isn't a watchable media edit.
+   */
+  editor?: EditorEvent
 }
 
 /**
@@ -811,6 +1037,24 @@ export interface CommandRun {
 
 /** What kind of mutation a {@link FileSnapshot} captured. */
 export type FileSnapshotKind = 'write' | 'edit' | 'delete'
+
+/**
+ * A single file mutation surfaced to the live Working-tree pane (Build mode). Unlike
+ * {@link FileSnapshot} it carries no file bytes — only the workspace-relative path
+ * (forward-slashed), the kind, and `+added −removed` line counts (whole-version
+ * counts, matching the inline file cards). The pane fetches the actual before/after
+ * text on demand via {@link SessionsApi.fileDiff} when a file is clicked.
+ */
+export interface FileChange {
+  /** Workspace-relative path with forward slashes (e.g. `src/app.ts`). */
+  path: string
+  /** Whether the file was created/overwritten, edited in place, or deleted. */
+  kind: FileSnapshotKind
+  /** Lines in the new version (0 for a delete). */
+  added: number
+  /** Lines in the prior version (0 for a fresh create). */
+  removed: number
+}
 
 /**
  * A before/after capture of one file a Cowork mutation tool touched (#1 checkpoints
@@ -1071,6 +1315,16 @@ export interface SessionsApi {
    * create or no snapshot exists — the card then shows an all-additions view.
    */
   snapshotBefore: (sessionId: string, after: string) => Promise<string | null>
+  /**
+   * The before/after text of the most recent change to a working-folder file, for the
+   * Working-tree pane's click-to-diff (Build mode). `path` is workspace-relative (as a
+   * {@link FileChange} carries it); main reconstructs the absolute path against the
+   * current working folder and reads the latest `file_snapshots` row for it. Any saved
+   * credential values are scrubbed from the result (defence-in-depth). `null` when no
+   * snapshot exists for that path. A fresh create returns `{ before: '', … }`; a delete
+   * returns `{ …, after: '' }`.
+   */
+  fileDiff: (sessionId: string, path: string) => Promise<{ before: string; after: string } | null>
 }
 
 /** Result of a browser-mediated sign-in: the relayed Google ID token, or why it failed. */
@@ -1127,6 +1381,60 @@ export interface CoworkApi {
    * their behalf. Resolves once the window is shown (focuses it if already open).
    */
   openBrowserSetup: () => Promise<void>
+}
+
+/**
+ * A saved credential as it is SAFE to show the renderer and the model: the service
+ * slug, a human label, the NAMES of the environment variables it carries, the command
+ * scopes that trigger injection, and a usage note — but never the secret values. The
+ * values live only in the main process's encrypted store (credential-vault.ts); this is
+ * the only credential shape that ever crosses the IPC boundary outward.
+ */
+export interface CredentialMeta {
+  /** Service slug the credential is filed under (e.g. "github", "vercel"). */
+  site: string
+  /** Human label shown in the UI (defaults to the site). */
+  label: string
+  /** The names of the environment variables this credential sets (values withheld). */
+  varNames: string[]
+  /** Command program names that trigger injection (e.g. ["git","gh"]). */
+  scopes: string[]
+  /** Free-text note on how/when this credential is used. */
+  usageNote: string
+}
+
+/**
+ * The input the renderer (masked Settings form) or the `save_credential` tool hands to
+ * the vault to store a credential. This is the ONE direction a secret value travels over
+ * IPC — renderer → main → encrypted store — and it never comes back out: reads return
+ * {@link CredentialMeta}. `scopes` may be omitted (the vault defaults them from the site).
+ */
+export interface CredentialInput {
+  /** Service name; normalised to a slug by the vault. */
+  site: string
+  /** Optional human label (defaults to the slug). */
+  label?: string
+  /** The environment variables to inject, with their secret values. */
+  env: Record<string, string>
+  /** Optional command program names that trigger injection; defaulted from the site when absent. */
+  scopes?: string[]
+  /** Optional note on how/when this credential is used. */
+  usageNote?: string
+}
+
+/**
+ * The credential vault surface. Lets the Settings pane list, save, and delete per-site
+ * credentials. {@link save} and {@link delete} resolve the resulting {@link CredentialMeta}
+ * list so the UI replaces its state in one step. Values are write-only: they go in through
+ * {@link save} and are never returned.
+ */
+export interface CredentialsApi {
+  /** List saved credentials as metadata (names + scopes + usage, never values). */
+  list: () => Promise<CredentialMeta[]>
+  /** Save (or replace) one site's credential; resolves the updated meta list. */
+  save: (input: CredentialInput) => Promise<CredentialMeta[]>
+  /** Delete one site's credential; resolves the updated meta list. */
+  delete: (site: string) => Promise<CredentialMeta[]>
 }
 
 /**
@@ -1377,6 +1685,8 @@ export interface MytoApi {
   scheduledTasks: ScheduledTasksApi
   /** Interactive terminal (#2): a real PTY per session (spawn/write/resize/kill + data/exit). */
   terminal: TerminalApi
+  /** Credential vault: list/save/delete per-site secrets Myto injects into matching terminal commands. */
+  credentials: CredentialsApi
 }
 
 // ---------------------------------------------------------------------------

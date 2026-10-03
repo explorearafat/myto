@@ -26,7 +26,9 @@ import {
   setMessageFeedback
 } from './db/sessions'
 import { rewindSession } from './rewind'
-import { findSnapshotBefore } from './db/snapshots'
+import { findSnapshotBefore, latestSnapshotByPath } from './db/snapshots'
+import { listCredentials } from './credential-vault'
+import { redactSecrets } from './credential-vault-core'
 
 /**
  * Wires the session-persistence IPC. Query-style ops use handle/invoke;
@@ -141,6 +143,28 @@ export function registerSessionIpc(): void {
         return findSnapshotBefore(sessionId, after)
       } catch (err) {
         console.error('[myto] snapshotBefore failed:', err)
+        return null
+      }
+    }
+  )
+
+  // Working-tree diff (Feature 2): the latest before/after text of a file the build
+  // touched, by its workspace-relative path. The Files pane fetches this when a row is
+  // clicked and renders it with DiffView. Defence-in-depth: scrub any stored credential
+  // value that a build may have written into a file, so a diff can never surface a secret
+  // (the central runTool redactor only covers the live run, not this later read).
+  ipcMain.handle(
+    IpcChannel.SessionsFileDiff,
+    (_event, sessionId: string, path: string): { before: string; after: string } | null => {
+      try {
+        const snap = latestSnapshotByPath(sessionId, path)
+        if (!snap) return null
+        const ws = getSettings().cowork.workspaceDir.trim()
+        const values = ws ? listCredentials(ws).flatMap((c) => Object.values(c.env)) : []
+        const scrub = (s: string | null): string => (s ? redactSecrets(s, values) : '')
+        return { before: scrub(snap.before), after: scrub(snap.after) }
+      } catch (err) {
+        console.error('[myto] fileDiff failed:', err)
         return null
       }
     }

@@ -74,7 +74,9 @@ const api: MytoApi = {
     rewind: (sessionId, afterMsgId) =>
       ipcRenderer.invoke(IpcChannel.SessionsRewind, sessionId, afterMsgId),
     snapshotBefore: (sessionId, after) =>
-      ipcRenderer.invoke(IpcChannel.SessionsSnapshotBefore, sessionId, after)
+      ipcRenderer.invoke(IpcChannel.SessionsSnapshotBefore, sessionId, after),
+    fileDiff: (sessionId, path) =>
+      ipcRenderer.invoke(IpcChannel.SessionsFileDiff, sessionId, path)
   },
   projects: {
     list: () => ipcRenderer.invoke(IpcChannel.ProjectsList),
@@ -108,6 +110,11 @@ const api: MytoApi = {
     pickWorkspace: () => ipcRenderer.invoke(IpcChannel.CoworkPickWorkspace),
     listFiles: (query: string) => ipcRenderer.invoke(IpcChannel.CoworkListFiles, query),
     openBrowserSetup: () => ipcRenderer.invoke(IpcChannel.BrowserOpenSetup)
+  },
+  credentials: {
+    list: () => ipcRenderer.invoke(IpcChannel.CredentialsList),
+    save: (input) => ipcRenderer.invoke(IpcChannel.CredentialsSave, input),
+    delete: (site) => ipcRenderer.invoke(IpcChannel.CredentialsDelete, site)
   },
   preview: {
     openExternal: (url) => ipcRenderer.send(IpcChannel.PreviewOpenExternal, url)

@@ -18,6 +18,12 @@ asarUnpack:
   # packaged app loads it from app.asar.unpacked, the failure that only bites outside `dev`.
   - node_modules/@lydell/node-pty/**
   - node_modules/@lydell/node-pty-*/**
+  # ffmpeg-static / ffprobe-static ship a platform binary that the video/photo editing
+  # tools spawn (ffmpeg-runtime.ts). A binary cannot be executed from inside the asar
+  # archive, and ffmpeg-static reports its in-asar path — the runtime rewrites
+  # app.asar → app.asar.unpacked, which only works if the binary is actually unpacked here.
+  - node_modules/ffmpeg-static/**
+  - node_modules/ffprobe-static/**
   - '**/*.node'
 win:
   target:

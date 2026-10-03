@@ -2,6 +2,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { useChatStore, type ChatMessageUI, type OutgoingAttachment, type ThinkingPhase } from '../store/useChatStore'
 import { usePreviewStore } from '../store/usePreviewStore'
 import { useTerminalStore } from '../store/useTerminalStore'
+import { useFilesStore } from '../store/useFilesStore'
+import { useEditorStore } from '../store/useEditorStore'
 import { useSessionStore } from '../store/useSessionStore'
 import { useAppStore } from '../store/useAppStore'
 import { useAuthUser } from '../lib/useAuthUser'
@@ -1131,14 +1133,20 @@ function MainTopBar() {
   // they only show in Cowork mode. Chat mode is a plain conversation — no builder, no
   // command pane, no in-app browser — so the whole group is hidden there.
   const coworkMode = useChatStore((s) => s.coworkMode)
-  // The two right-hand side panes. Opening one closes the other so the toggles stay
-  // honest (AppLayout renders a single slot with terminal precedence).
+  // The three right-hand side panes. Opening one closes the other two so the toggles
+  // stay honest (AppLayout renders a single slot; a pinned preview aside, last-opened wins).
   const previewOpen = usePreviewStore((s) => s.open)
   const revealPreview = usePreviewStore((s) => s.reveal)
   const closePreview = usePreviewStore((s) => s.close)
   const terminalOpen = useTerminalStore((s) => s.open)
   const showTerminal = useTerminalStore((s) => s.show)
   const closeTerminal = useTerminalStore((s) => s.close)
+  const filesOpen = useFilesStore((s) => s.open)
+  const showFiles = useFilesStore((s) => s.show)
+  const closeFiles = useFilesStore((s) => s.close)
+  const editorOpen = useEditorStore((s) => s.open)
+  const showEditor = useEditorStore((s) => s.show)
+  const closeEditor = useEditorStore((s) => s.close)
 
   const dnaActive = composerMode === 'builder'
   const dnaLabel = dnaActive ? 'Back to plain text' : 'Prompt DNA — build a structured prompt'
@@ -1147,6 +1155,8 @@ function MainTopBar() {
     else {
       revealPreview()
       closeTerminal()
+      closeFiles()
+      closeEditor()
     }
   }
   const toggleTerminal = (): void => {
@@ -1154,6 +1164,26 @@ function MainTopBar() {
     else {
       showTerminal()
       closePreview()
+      closeFiles()
+      closeEditor()
+    }
+  }
+  const toggleFiles = (): void => {
+    if (filesOpen) closeFiles()
+    else {
+      showFiles()
+      closePreview()
+      closeTerminal()
+      closeEditor()
+    }
+  }
+  const toggleEditor = (): void => {
+    if (editorOpen) closeEditor()
+    else {
+      showEditor()
+      closePreview()
+      closeTerminal()
+      closeFiles()
     }
   }
   const topIcon = (active: boolean): string =>
@@ -1209,6 +1239,22 @@ function MainTopBar() {
           </button>
           <button
             type="button"
+            aria-label={filesOpen ? 'Hide working tree' : 'Show working tree'}
+            aria-pressed={filesOpen}
+            title="Working tree — files Build is changing"
+            onClick={toggleFiles}
+            className={topIcon(filesOpen)}
+          >
+            {/* A node-tree glyph — a hierarchy of boxes, distinct from terminal/preview. */}
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="2" y="2" width="4" height="3.2" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+              <rect x="10" y="6.4" width="4" height="3.2" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+              <rect x="10" y="10.8" width="4" height="3.2" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+              <path d="M4 5.2v7.2h6M4 8h6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
             aria-label={previewOpen ? 'Hide preview' : 'Show preview'}
             aria-pressed={previewOpen}
             title="Preview — Myto's in-app browser"
@@ -1219,6 +1265,22 @@ function MainTopBar() {
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.3" />
               <path d="M6.6 5.4 11 8l-4.4 2.6V5.4Z" fill="currentColor" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            aria-label={editorOpen ? 'Hide editor' : 'Show editor'}
+            aria-pressed={editorOpen}
+            title="Editor — watch Myto edit photos & video"
+            onClick={toggleEditor}
+            className={topIcon(editorOpen)}
+          >
+            {/* Lightroom-style adjustment sliders — three tracks with offset knobs. */}
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M3 4h10M3 8h10M3 12h10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+              <circle cx="6" cy="4" r="1.6" fill="var(--color-bg,currentColor)" stroke="currentColor" strokeWidth="1.3" />
+              <circle cx="10" cy="8" r="1.6" fill="var(--color-bg,currentColor)" stroke="currentColor" strokeWidth="1.3" />
+              <circle cx="5" cy="12" r="1.6" fill="var(--color-bg,currentColor)" stroke="currentColor" strokeWidth="1.3" />
             </svg>
           </button>
         </div>

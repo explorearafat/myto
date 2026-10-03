@@ -7,6 +7,8 @@ import type {
   ChatMessage,
   ChatMode,
   CommandRun,
+  EditorEvent,
+  FileChange,
   GeneratedMedia,
   PersistedSession,
   PreviewTarget,
@@ -17,6 +19,8 @@ import type { PromptBlock } from '@shared/types/prompt-builder'
 import { takeReveal } from '../lib/reveal'
 import { usePreviewStore } from './usePreviewStore'
 import { useTerminalStore } from './useTerminalStore'
+import { useFilesStore } from './useFilesStore'
+import { useEditorStore } from './useEditorStore'
 import { useAppStore } from './useAppStore'
 
 /**
@@ -786,9 +790,11 @@ export const useChatStore = create<ChatState>((set, get) => {
       preview?: PreviewTarget
       todos?: TodoItem[]
       command?: CommandRun
+      fileChange?: FileChange
       thinking?: string
       thinkingReset?: boolean
       media?: GeneratedMedia[]
+      editor?: EditorEvent
     }): void => {
       // Any chunk that carries real output is a sign of life — stamp the run so the
       // liveness note (MessageMeta) measures silence from the last actual progress,
@@ -800,9 +806,11 @@ export const useChatStore = create<ChatState>((set, get) => {
         chunk.thinkingReset ||
         chunk.todos ||
         chunk.command ||
+        chunk.fileChange ||
         chunk.preview ||
         chunk.approval ||
         chunk.question ||
+        chunk.editor ||
         (chunk.media && chunk.media.length > 0)
       ) {
         run.lastActivityAt = Date.now()
@@ -822,17 +830,53 @@ export const useChatStore = create<ChatState>((set, get) => {
       if (chunk.question) setQuestion(chunk.question)
       // Myto opened something in its preview pane — drive the (global) pane. Not
       // scoped to this run: the pane is a standalone surface, like a browser window.
-      // Closing the terminal keeps the two right-hand panes from stacking.
+      // A preview always wins its slot: show it (which pins a url/markdown target) and
+      // close the other two panes so they don't stack.
       if (chunk.preview) {
         usePreviewStore.getState().show(chunk.preview)
         useTerminalStore.getState().close()
+        useFilesStore.getState().close()
+        useEditorStore.getState().close()
       }
-      // Myto ran a shell command — append it to the Terminal pane and bring that pane
-      // to the front. The two right-hand panes are mutually exclusive, so closing the
-      // preview here (rather than inside either store) keeps them from stacking.
+      // Myto ran a shell command — append it to the Terminal pane. The right-hand panes
+      // are mutually exclusive, so normally this takes the slot (reveal + close the
+      // others). But while a preview OR the editor is PINNED (a live dev server / a plan
+      // under review / an edit mid-play-or-bake), the continuing log must NOT steal the
+      // slot: append quietly (reveal:false) and leave the pinned pane up.
       if (chunk.command) {
-        useTerminalStore.getState().append(chunk.command)
-        usePreviewStore.getState().close()
+        const pinned = usePreviewStore.getState().pinned || useEditorStore.getState().pinned
+        useTerminalStore.getState().append(chunk.command, { reveal: !pinned })
+        if (!pinned) {
+          usePreviewStore.getState().close()
+          useFilesStore.getState().close()
+          useEditorStore.getState().close()
+        }
+      }
+      // Myto created/edited/deleted a file — upsert it into the live Working-tree pane.
+      // Same no-steal rule as commands: while a preview or the editor is pinned, a
+      // hot-reload write updates the tree quietly without yanking the pinned pane;
+      // otherwise it takes the slot.
+      if (chunk.fileChange) {
+        const pinned = usePreviewStore.getState().pinned || useEditorStore.getState().pinned
+        useFilesStore.getState().append(chunk.fileChange, { reveal: !pinned })
+        if (!pinned) {
+          usePreviewStore.getState().close()
+          useTerminalStore.getState().close()
+          useEditorStore.getState().close()
+        }
+      }
+      // Myto is editing a photo/video — drive the "watch me edit" pane. A fresh edit
+      // (phase 'open') takes the slot like a preview, closing the other panes; later
+      // phases (script/progress/baked/error) just update it in place. The store pins the
+      // slot while playing/baking so the no-steal rules above keep the editor on screen,
+      // and unpins on baked/error.
+      if (chunk.editor) {
+        useEditorStore.getState().apply(chunk.editor)
+        if (chunk.editor.phase === 'open') {
+          usePreviewStore.getState().close()
+          useTerminalStore.getState().close()
+          useFilesStore.getState().close()
+        }
       }
       // Myto published/updated its working plan — pin the live checklist on this turn.
       if (chunk.todos) setTodos(chunk.todos)
@@ -1158,14 +1202,17 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     setDraftMode: (mode) => {
       set({ draftMode: mode, coworkMode: mode === 'cowork' })
-      // The top-bar DNA/Terminal/Preview icons are Cowork affordances; leaving Cowork
-      // (to Chat or Research) would strand anything they drove with no visible toggle.
-      // Tidy on the way out: drop the composer back to plain text and close both side
-      // panes. (Research is folderless and drives its own preview via the preview tool.)
+      // The top-bar DNA/Terminal/Preview/Files/Editor icons are Cowork affordances;
+      // leaving Cowork (to Chat or Research) would strand anything they drove with no
+      // visible toggle. Tidy on the way out: drop the composer back to plain text and
+      // close all four side panes (closing the preview/editor also clears their pin).
+      // (Research is folderless and drives its own preview via the preview tool.)
       if (mode !== 'cowork') {
         set({ composerMode: 'text' })
         usePreviewStore.getState().close()
         useTerminalStore.getState().close()
+        useFilesStore.getState().close()
+        useEditorStore.getState().close()
       }
       // An explicit selection is the "last-used mode": remember it so the next new
       // chat opens here (Task 7). Fire-and-forget — the persist is best-effort and the

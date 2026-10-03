@@ -103,6 +103,36 @@ export function findSnapshotBefore(sessionId: string, after: string): string | n
   return row?.before_content ?? null
 }
 
+/**
+ * The latest before/after bytes of a file identified by its WORKSPACE-RELATIVE path
+ * (forward slashes) — what the live Working-tree pane needs to render a diff when the
+ * user clicks a file row. The stored `path` is absolute with OS separators, so we match
+ * by suffix: normalise both to forward slashes and take the newest snapshot whose
+ * absolute path equals, or ends with `/`+, the relative path. Suffix matching keeps this
+ * root-independent (Build vs. research use different roots) without needing to reconstruct
+ * the absolute path here. Returns null when the file has no snapshot yet.
+ */
+export function latestSnapshotByPath(
+  sessionId: string,
+  relPath: string
+): { before: string | null; after: string | null } | null {
+  const needle = relPath.replace(/\\/g, '/').replace(/^\/+/, '')
+  if (!needle) return null
+  const rows = getDb()
+    .prepare(
+      `SELECT path, before_content, after_content FROM file_snapshots
+         WHERE session_id = ? ORDER BY id DESC`
+    )
+    .all(sessionId) as unknown as Pick<SnapshotRow, 'path' | 'before_content' | 'after_content'>[]
+  for (const r of rows) {
+    const norm = r.path.replace(/\\/g, '/')
+    if (norm === needle || norm.endsWith(`/${needle}`)) {
+      return { before: r.before_content, after: r.after_content }
+    }
+  }
+  return null
+}
+
 /** Delete snapshot rows for a session with id greater than `afterId` (used after a rewind). */
 export function deleteFileSnapshotsAfter(sessionId: string, afterId: number): void {
   getDb().prepare(`DELETE FROM file_snapshots WHERE session_id = ? AND id > ?`).run(sessionId, afterId)

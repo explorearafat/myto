@@ -1,9 +1,11 @@
 import { BrowserWindow, dialog, ipcMain } from 'electron'
 import { IpcChannel } from '../shared/ipc'
+import type { CredentialInput, CredentialMeta } from '../shared/types'
 import { getSettings } from './settings'
 import { listWorkspaceFiles } from './tools/search'
 import { resolveInWorkspace } from './tools/fs'
 import { openBrowserSetup } from './cowork-browser-setup'
+import { listCredentialMeta, saveCredential, deleteCredential } from './credential-vault'
 
 /*
  * Cowork working-folder picker.
@@ -60,11 +62,44 @@ async function listFiles(query: unknown): Promise<string[]> {
   }
 }
 
+/**
+ * The Cowork working folder the credential vault is scoped to, or null when none is
+ * chosen. Credentials live in that folder's git-ignored `.data/<site>/`, so with no
+ * folder there is nowhere to read or write them.
+ */
+function currentWorkspaceDir(): string | null {
+  const dir = getSettings().cowork.workspaceDir.trim()
+  return dir || null
+}
+
 export function registerCoworkIpc(): void {
   ipcMain.handle(IpcChannel.CoworkPickWorkspace, (event) => pickWorkspace(event))
   ipcMain.handle(IpcChannel.CoworkListFiles, (_event, query: unknown) => listFiles(query))
   // Open the human-driven "Setup Myto Browser" window (manual logins on the shared profile).
   ipcMain.handle(IpcChannel.BrowserOpenSetup, () => {
     openBrowserSetup()
+  })
+
+  // Credential vault (Settings › Credentials). These are the mirror image of the
+  // `save_credential` / `list_credentials` / `delete_credential` chat tools: the Settings
+  // UI drives the SAME per-site encrypted store, scoped to the Cowork working folder.
+  // Only masked metadata (CredentialMeta — no secret values) ever crosses back to the
+  // renderer; the plaintext lives solely in the main process on its way into safeStorage.
+  ipcMain.handle(IpcChannel.CredentialsList, (): CredentialMeta[] => {
+    const dir = currentWorkspaceDir()
+    return dir ? listCredentialMeta(dir) : []
+  })
+  ipcMain.handle(IpcChannel.CredentialsSave, (_event, input: CredentialInput): CredentialMeta[] => {
+    const dir = currentWorkspaceDir()
+    // No folder chosen → nowhere to store it. Reject so the UI shows a clear reason
+    // rather than silently dropping the secret. saveCredential also throws when
+    // safeStorage is unavailable or the input is malformed (no plaintext fallback).
+    if (!dir) throw new Error('Choose a Cowork working folder before saving a credential.')
+    return saveCredential(dir, input)
+  })
+  ipcMain.handle(IpcChannel.CredentialsDelete, (_event, site: unknown): CredentialMeta[] => {
+    const dir = currentWorkspaceDir()
+    if (!dir) return []
+    return deleteCredential(dir, typeof site === 'string' ? site : '')
   })
 }

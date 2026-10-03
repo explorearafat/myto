@@ -22,6 +22,16 @@ import type { PreviewTarget } from '@shared/types'
 export interface PreviewState {
   /** Whether the pane is on screen. */
   open: boolean
+  /**
+   * Whether this preview is PINNED to the side slot (Feature 3, no-steal). A live
+   * dev-server (`kind:'url'`) or a plan under review (`kind:'markdown'`) pins the
+   * slot: while pinned, the chat stream's continuing command output and hot-reload
+   * file writes update their panes QUIETLY (reveal:false) instead of yanking the
+   * preview away. Cleared when the user closes the preview (an explicit "show me
+   * something else"), so the slot is free again. A one-shot `kind:'file'` preview
+   * never pins. See the no-steal wiring in useChatStore.onChunk + AppLayout.
+   */
+  pinned: boolean
   /** Everything Myto has shown, oldest first (the back/forward stack). */
   history: PreviewTarget[]
   /** Cursor into {@link history}: which target is currently displayed (-1 = none). */
@@ -33,8 +43,12 @@ export interface PreviewState {
    * Show a target (from the `preview` tool): open the pane and navigate to it. If it
    * is the same URL already showing, this is treated as a reload instead of a new
    * history entry, so re-previewing a file Myto just rewrote refreshes in place.
+   * A markdown target (a plan) always opens fresh — it has no URL to dedupe on — and
+   * pins the slot; url targets pin too; a file target leaves the slot unpinned.
    */
   show: (target: PreviewTarget) => void
+  /** Set the pin flag directly (mode/session change clears it; see useChatStore). */
+  setPinned: (pinned: boolean) => void
   /** Step back through history (no-op at the start). */
   back: () => void
   /** Step forward through history (no-op at the end). */
@@ -59,6 +73,7 @@ export function currentTarget(state: PreviewState): PreviewTarget | null {
 
 export const usePreviewStore = create<PreviewState>((set, get) => ({
   open: false,
+  pinned: false,
   history: [],
   index: -1,
   reloadNonce: 0,
@@ -66,16 +81,26 @@ export const usePreviewStore = create<PreviewState>((set, get) => ({
   show: (target) => {
     const { history, index } = get()
     const current = index >= 0 ? history[index] : null
-    // Re-showing the same URL is a refresh, not a new step.
-    if (current && current.url === target.url) {
-      set((s) => ({ open: true, reloadNonce: s.reloadNonce + 1 }))
+    // A url (dev server) or markdown (plan) target pins the slot; a file preview doesn't.
+    const pinned = target.kind === 'url' || target.kind === 'markdown'
+    // Re-showing the same URL is a refresh, not a new step. Markdown has no URL, so it
+    // never dedupes (two plans must each open fresh, not collapse on undefined===undefined).
+    if (
+      target.kind !== 'markdown' &&
+      current &&
+      'url' in current &&
+      current.url === target.url
+    ) {
+      set((s) => ({ open: true, pinned, reloadNonce: s.reloadNonce + 1 }))
       return
     }
     // Browser semantics: drop any forward entries, then append and move the cursor.
     const trimmed = history.slice(0, index + 1)
     trimmed.push(target)
-    set({ open: true, history: trimmed, index: trimmed.length - 1 })
+    set({ open: true, pinned, history: trimmed, index: trimmed.length - 1 })
   },
+
+  setPinned: (pinned) => set({ pinned }),
 
   back: () => {
     const { index } = get()
@@ -89,12 +114,22 @@ export const usePreviewStore = create<PreviewState>((set, get) => ({
 
   reload: () => set((s) => ({ reloadNonce: s.reloadNonce + 1 })),
 
-  reveal: () => set({ open: true }),
+  // Reopening via the top-bar toggle re-pins a live dev-server/plan preview (so its
+  // continuing output still can't steal the slot) but leaves a one-shot file unpinned.
+  reveal: () =>
+    set((s) => {
+      const t = s.index >= 0 ? s.history[s.index] : null
+      return { open: true, pinned: t?.kind === 'url' || t?.kind === 'markdown' }
+    }),
 
-  close: () => set({ open: false }),
+  // Closing frees the slot: an explicit close is the user asking for something else,
+  // so the pin is released and later command/file output can take the slot again.
+  close: () => set({ open: false, pinned: false }),
 
   openExternal: () => {
     const target = currentTarget(get())
-    if (target) window.myto.preview.openExternal(target.url)
+    // Only url/file targets have a URL to open; a markdown plan is in-memory, nothing
+    // to hand to the OS browser.
+    if (target && 'url' in target) window.myto.preview.openExternal(target.url)
   }
 }))

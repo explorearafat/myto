@@ -72,7 +72,8 @@ const mytoMock: MytoApi = {
     rewind: vi
       .fn()
       .mockResolvedValue({ ok: true, filesRestored: 0, filesDeleted: 0, messagesRemoved: 0 }),
-    snapshotBefore: vi.fn().mockResolvedValue(null)
+    snapshotBefore: vi.fn().mockResolvedValue(null),
+    fileDiff: vi.fn().mockResolvedValue(null)
   },
   projects: {
     list: vi.fn().mockResolvedValue([]),
@@ -125,6 +126,11 @@ const mytoMock: MytoApi = {
     pickWorkspace: vi.fn().mockResolvedValue(null),
     listFiles: vi.fn().mockResolvedValue([]),
     openBrowserSetup: vi.fn().mockResolvedValue(undefined)
+  },
+  credentials: {
+    list: vi.fn().mockResolvedValue([]),
+    save: vi.fn().mockResolvedValue([]),
+    delete: vi.fn().mockResolvedValue([])
   },
   preview: {
     openExternal: vi.fn()

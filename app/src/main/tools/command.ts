@@ -49,7 +49,12 @@ export const runCommandTool: ToolDef = {
     const spec = resolveShell()
     const cwd = ctx.workspaceDir ? resolve(ctx.workspaceDir) : undefined
     if (!cwd) return 'run_command: no working folder is set.'
-    const result = await executeCode(spec, command, ctx.signal, cwd, COMMAND_TIMEOUT_MS)
+    // Scoped credential injection: a saved secret enters the child's ENV only when this
+    // command's leading program matches the credential's scope (GH_TOKEN for `git`/`gh`,
+    // not for `npm install`). The value lives in the child env, never on argv, and never
+    // in the model-facing return (redacted centrally in runTool).
+    const injected = ctx.resolveCredentialEnv?.(command)
+    const result = await executeCode(spec, command, ctx.signal, cwd, COMMAND_TIMEOUT_MS, injected)
     // Mirror the run to the renderer's Terminal pane (Cowork): the raw combined
     // output, or the spawn error / a placeholder when there was none. This is
     // display-only — the model still reads the formatted result returned below.
@@ -57,7 +62,11 @@ export const runCommandTool: ToolDef = {
       ? result.spawnError
       : [result.stdout, result.stderr].map((s) => s.trimEnd()).filter(Boolean).join('\n') ||
         (result.timedOut ? `(timed out after ${COMMAND_TIMEOUT_MS / 1000}s)` : '(no output)')
-    ctx.onCommand?.({ id: commandRunId(), command, output, exitCode: result.spawnError ? null : result.exitCode, cwd })
+    // The Terminal pane is a SEPARATE channel the central runTool redactor never sees, so
+    // scrub any injected secret out of the mirrored output here too (e.g. a command that
+    // echoed its own env). No-op when no redactor/secret is in play.
+    const safeOutput = ctx.redactSecrets?.(output) ?? output
+    ctx.onCommand?.({ id: commandRunId(), command, output: safeOutput, exitCode: result.spawnError ? null : result.exitCode, cwd })
     return formatRunResult(`command "${command}"`, result, COMMAND_TIMEOUT_MS)
   }
 }

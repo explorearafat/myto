@@ -52,9 +52,11 @@ export function pickReviewTarget(opts: {
   lastPreview: PreviewTarget | null
   runningServerUrl: string | null
   existingEntry: ExistingEntry | null
-}): PreviewTarget | null {
+}): Exclude<PreviewTarget, { kind: 'markdown' }> | null {
   const { lastPreview, runningServerUrl, existingEntry } = opts
-  if (lastPreview) return lastPreview
+  // A markdown target (a plan document) has no URL to screenshot — skip it so the
+  // review only ever points at a real page/file/dev-server.
+  if (lastPreview && lastPreview.kind !== 'markdown') return lastPreview
   if (runningServerUrl && runningServerUrl.trim()) {
     return { kind: 'url', url: runningServerUrl.trim(), title: runningServerUrl.trim() }
   }

@@ -16,7 +16,7 @@
  * Nemotron/Claude, and Ollama) gets the same behaviour for free.
  */
 
-import type { BrowserTarget } from '../shared/types'
+import type { BrowserTarget, CredentialMeta } from '../shared/types'
 
 /** The tags the model wraps a status caption in. */
 const OPEN = '<status>'
@@ -252,19 +252,90 @@ export function coworkBrowserPrompt(target: BrowserTarget | undefined): string {
 }
 
 /**
+ * Prepended (in both agentic modes, when a working folder is set) so the agent knows
+ * how to drive the video/photo editing tools well. The model never touches pixels or
+ * audio itself — it calls small typed tools and the bundled FFmpeg does the work
+ * (tools/media-edit.ts). This teaches the workflow — probe first, gather context, write
+ * ONE edit plan, confirm anything expensive/destructive, render, then verify — and the
+ * two cost rules that keep it cheap: frames sparingly, and one render not many.
+ */
+export const MEDIA_EDITING_SYSTEM_PROMPT = [
+  'VIDEO & PHOTO EDITING: you can edit video and images with real tools (bundled FFmpeg does the work; you never touch pixels or audio yourself — you call the tools). Everything stays inside the working folder, and edits NEVER overwrite the input — each tool writes a new file under myto-edits/ and tells you its path.',
+  'The tools:',
+  '- probe_video — read a media file\'s duration, size, format, and streams (resolution, fps, codecs, audio channels). Read-only. ALWAYS probe an unfamiliar input first.',
+  '- extract_frames — pull a few still frames out so you can SEE the video (they come back to you as images). Use it to check content or verify a result; ask for only a handful.',
+  '- transcribe_audio — speech → timed text segments (for subtitles, or to find what to cut). Needs local whisper.cpp or a transcription API to be configured; it says so if not.',
+  '- detect_silence — find the silent gaps (for auto-cutting dead air). Read-only.',
+  '- trim_clip — keep one time range. concat_clips — join clips end to end. resize_or_crop — change resolution/aspect (e.g. a 9:16 vertical reel). mix_audio — add or replace an audio/music track. add_subtitles — burn subtitles (from an SRT or from timed segments) onto the video.',
+  '- apply_edit_plan — do SEVERAL operations in ONE render from a small JSON plan (trim, remove silence, resize, subtitles, music …). PREFER THIS for anything multi-step: it is one encode instead of many, so it is far faster and keeps quality. Re-encoding the same video over and over with separate tools is slow and lossy — reach for apply_edit_plan instead.',
+  '- run_ffmpeg — an escape hatch for an FFmpeg command the other tools cannot express. Args only (no shell), paths relative to the folder. Use it only when nothing above fits.',
+  '- edit_photo / edit_video — the WATCHABLE editors, and what you should REACH FOR when the user asks you to edit THIS photo or video (a look, a colour grade, a short reel). ONE call opens a live Editor pane and the user watches Myto work: for a photo a Lightroom-style panel (the cursor glides across Exposure / Contrast / Temp…, the tone curve draws itself, the HSL bands turn), for a video a CapCut-style timeline (clips laid onto the track, the playhead sweeping, titles appearing) — and then the SAME call runs the real FFmpeg bake and shows the authoritative before/after result (video also opens in the Preview pane to play). Pass the WHOLE edit in that one structured call — all the photo adjustments, or the full clip + text + grade plan — rather than narrating steps across many calls; a single call drives the entire watchable session.',
+  'When to use which: for a creative edit the user is watching, prefer edit_photo / edit_video — they are the "watch me edit" experience the user wants. Use the lower-level tools above (probe_video first, then trim_clip / apply_edit_plan / add_subtitles …) for headless or batch jobs, for probing, or for an operation the two editors do not cover.',
+  'Workflow: probe the input first; gather what you need (extract_frames to see it, transcribe_audio / detect_silence to find cuts or build subtitles); decide the steps and, when there is more than one, write a single apply_edit_plan; render; then VERIFY — probe the output and pull a frame or two to confirm it is what the user asked for before you report done.',
+  'A long render streams progress to the status line and the finished video appears inline for the user. Before an expensive or clearly destructive render (a long or full-length encode, or anything the user may not have intended), say what you are about to do first. Keep going until the edit is actually produced and verified — do not hand back a plan you never ran.'
+].join('\n')
+
+/**
+ * Prepended (both agentic modes, when a working folder is set AND the folder has saved
+ * credentials) so the agent KNOWS it already holds the keys for certain services and can
+ * just run the normal command. The whole point of the vault is "give Myto the token once →
+ * it does the terminal task on its own," which only works if the model knows the token is
+ * there and does NOT ask the user to paste it again or export it by hand.
+ *
+ * Built dynamically from the saved {@link CredentialMeta} list — var NAMES, scopes, and
+ * usage notes only. It NEVER contains a secret value (there is no path to read one back),
+ * so putting it in the system prompt leaks nothing. Returns '' when there are none, so the
+ * caller omits the turn entirely.
+ */
+export function credentialsSystemPrompt(metas: CredentialMeta[]): string {
+  if (!metas.length) return ''
+  const lines = [
+    'SAVED CREDENTIALS: this working folder has secrets saved in Myto\'s encrypted vault. You do NOT see the values and never will — but when you run a terminal command whose program matches a credential\'s scope, Myto injects that credential into the command\'s environment automatically. So just run the normal command; do not ask the user to paste a token, export a variable, or log in by hand.',
+    'What is saved here (names and scopes only — the values are hidden):'
+  ]
+  for (const m of metas) {
+    const vars = m.varNames.join(', ') || '(no variables)'
+    const scopes = m.scopes.join(', ') || '(no scopes)'
+    const note = m.usageNote ? ` — ${m.usageNote}` : ''
+    lines.push(`- ${m.label} [${m.site}]: provides ${vars} for commands scoped to ${scopes}${note}`)
+  }
+  lines.push(
+    'Example: with a GitHub credential scoped to git/gh, `git push` and `gh repo create` just work — the token is supplied for you, only for those commands (it is NOT exposed to e.g. `npm install`).',
+    'The values are redacted out of everything you read back (command output included), so if you ever see "••••" that is a secret being masked — never try to reconstruct or print it. To add or change a credential, point the user to Settings › Credentials (or use save_credential); to see what is saved, use list_credentials.'
+  )
+  return lines.join('\n')
+}
+
+/**
  * Prepended (Cowork + plan mode only, #8) so the agent plans before it acts. It rides
  * the SAME tool loop and approval machinery already in place: the model researches
- * read-only and drafts a checklist with update_plan, and the moment it reaches for a
- * write/exec tool the loop stops and asks the user to approve the plan (see the plan gate
- * in provider-ipc.ts). This prompt tells the model to expect that gate and to spend the
- * time before it planning rather than editing, so the approval lands on a real plan.
+ * read-only, then calls `present_plan` with a COMPLETE markdown plan, which Myto renders
+ * in the preview pane and gates on the user's approval before any write/exec tool runs
+ * (see the present_plan approval in provider-ipc.ts). This prompt tells the model to
+ * expect that gate and to spend the time before it planning rather than editing, so the
+ * approval lands on a real, readable plan.
  */
 export const PLAN_MODE_SYSTEM_PROMPT = [
-  'PLAN MODE IS ON. Before you change anything, produce a plan and let the user approve it.',
-  '- First understand the task: read the relevant files and research what you need (read-only tools only — list_dir, read_file, search_code, find_files, the web tools, spawn_agent).',
-  '- Then call update_plan with an ordered, concrete checklist of the steps you intend to take. Make it specific to THIS task — real file names and actions, not vague headings.',
-  '- Do NOT write, edit, or delete files, run code, or run commands yet. When you first reach for a write/exec tool, Myto will pause and ask the user to approve the plan; on approval you proceed normally, on rejection you revise the plan and wait again.',
-  '- So: gather context, present a clear plan (a short prose summary plus the update_plan checklist), and stop there. Once approved, carry the plan through to a finished, verified result.'
+  'PLAN MODE IS ON. Before you change anything, present a plan and let the user approve it.',
+  '- First understand the task: read the relevant files and research what you need (read-only tools only — list_dir, read_file, search_code, find_files, the web tools, spawn_agent). Do NOT write, edit, or delete files, run code, or run commands during this phase.',
+  '- Then call present_plan ONCE with a COMPLETE plan as markdown: what you will build, your approach, the concrete step-by-step actions (real file names, not vague headings), and how you will verify it works. Myto shows that plan to the user in the preview pane and asks them to approve it.',
+  '- After you call present_plan, STOP and wait. On approval you proceed and build normally; on rejection the user wants changes — revise and call present_plan again with the updated plan, then wait once more.',
+  '- Only AFTER the plan is approved do you start executing. From then on, track your progress with update_plan (the live checklist you tick off step by step) as you carry the plan through to a finished, verified result.',
+  '- present_plan is the readable plan DOCUMENT shown for approval; update_plan is the live checklist during execution. Use present_plan first, update_plan while working.'
+].join('\n')
+
+/**
+ * Prepended (Cowork, plan TOGGLE OFF) when a turn's prompt looks like a substantial build
+ * (looksLikeBigTask in cowork-plan-core.ts). Lighter than {@link PLAN_MODE_SYSTEM_PROMPT}:
+ * the user did not ask to plan, so this only nudges the model to show a brief plan first
+ * for a genuinely large job, and explicitly lets it skip straight to building when the task
+ * turns out to be small — the auto-plan path must never nag a one-liner behind an approval.
+ */
+export const AUTO_PLAN_SYSTEM_PROMPT = [
+  'This request looks like a substantial build. Before diving in, give the user a quick chance to steer:',
+  '- Do a little read-only research first if it helps (read_file, search_code, the web tools), then call present_plan ONCE with a brief but complete markdown plan: what you will build, your approach, the main steps, and how you will verify it. Myto shows it in the preview pane for the user to approve.',
+  '- After calling present_plan, wait. On approval, build it through to a finished, verified result, tracking steps with update_plan. On rejection, revise and present_plan again.',
+  '- If, once you look closer, the task is actually small or a quick edit, you do NOT need a plan — skip present_plan and just do it. Only plan first when the work is genuinely large.'
 ].join('\n')
 
 /**

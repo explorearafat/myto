@@ -47,6 +47,8 @@ export const IpcChannel = {
   SessionsRewind: 'sessions:rewind',
   /** Renderer → main (invoke): the pre-change bytes for a file card's overwrite diff (#5). */
   SessionsSnapshotBefore: 'sessions:snapshot-before',
+  /** Renderer → main (invoke): before/after text of a working-tree file, for the Files pane diff. */
+  SessionsFileDiff: 'sessions:file-diff',
 
   // Projects (chat-first redesign)
   /** Renderer → main (invoke): list all projects with chat counts. */
@@ -94,6 +96,17 @@ export const IpcChannel = {
   CoworkPickWorkspace: 'cowork:pick-workspace',
   /** Renderer → main (invoke): list workspace-relative paths matching an `@file` query. */
   CoworkListFiles: 'cowork:list-files',
+
+  // Credential vault (per-site secrets): saved once in the workspace's git-ignored,
+  // safeStorage-encrypted `.data/<site>/` and auto-injected (scoped by command program)
+  // into terminal tools so Myto can push/deploy on the user's behalf. Values NEVER cross
+  // this boundary toward the renderer — only masked metadata (site/label/var names/scopes).
+  /** Renderer → main (invoke): list saved credentials as masked metadata (no values). */
+  CredentialsList: 'credentials:list',
+  /** Renderer → main (invoke): save (or replace) one site's credential; resolves masked metadata. */
+  CredentialsSave: 'credentials:save',
+  /** Renderer → main (invoke): delete one site's credential; resolves the remaining metadata. */
+  CredentialsDelete: 'credentials:delete',
 
   // Myto browser setup: open a standalone, interactive browser window on the same
   // persistent profile the in-app browser tools drive, so the user can log into

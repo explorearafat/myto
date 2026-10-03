@@ -24,9 +24,12 @@ import type { ToolContext, ToolDef } from './registry'
  * All of them are gated by {@link fsAvailable}: git only makes sense in Cowork with a
  * chosen working folder, which is also the repo they act on (via `cwd`). `git` and
  * `gh` resolve from PATH and inherit `process.env`, so the user's own credential
- * manager / `GH_TOKEN` applies. Note: these are NON-interactive (no stdin) — a
- * command that would prompt for a passphrase or password will hang until it times
- * out, so credentials must be pre-configured.
+ * manager / `GH_TOKEN` applies — and, on top of that, a vault credential scoped to
+ * `git` is injected into the child env for the duration of the command (see
+ * {@link ToolContext.resolveCredentialEnv}), so "save the token once → Myto pushes on
+ * its own" works without the user re-exporting anything. Note: these are
+ * NON-interactive (no stdin) — a command that would prompt for a passphrase or
+ * password will hang until it times out, so credentials must be pre-configured.
  */
 
 /** Version-control commands (a fetch/push over the network) can be slow — give them room. */
@@ -50,13 +53,23 @@ function gitRunId(): string {
 async function runGit(args: string[], ctx: ToolContext): Promise<string> {
   const cwd = ctx.workspaceDir ? resolve(ctx.workspaceDir) : undefined
   if (!cwd) return 'git tools need a working folder to be set.'
-  const result = await executeArgv('git', args, ctx.signal, { cwd, timeoutMs: GIT_TIMEOUT_MS })
-  mirrorToTerminal(`git ${args.join(' ')}`, result, cwd, ctx)
+  const command = `git ${args.join(' ')}`
+  // Scoped credential injection: a saved secret (e.g. GH_TOKEN scoped to `git`/`gh`)
+  // enters git's ENV only when this command's leading program matches that scope — this
+  // is THE path behind "give Myto the GitHub token once → it pushes on its own". The value
+  // lives in the child env, never on argv, and is redacted out of all model-facing text.
+  const injected = ctx.resolveCredentialEnv?.(command)
+  const result = await executeArgv('git', args, ctx.signal, {
+    cwd,
+    timeoutMs: GIT_TIMEOUT_MS,
+    env: injected ? { ...process.env, ...injected } : undefined
+  })
+  mirrorToTerminal(command, result, cwd, ctx)
   // A missing `git` executable surfaces as a spawn error; give the model an actionable message.
   if (result.spawnError) {
     return `Could not run git: ${result.spawnError}. Is git installed and on PATH?`
   }
-  return formatRunResult(`git ${args.join(' ')}`, result, GIT_TIMEOUT_MS)
+  return formatRunResult(command, result, GIT_TIMEOUT_MS)
 }
 
 /** Push the raw combined output to the renderer's Terminal pane (display-only). */
@@ -65,7 +78,10 @@ function mirrorToTerminal(command: string, result: RunResult, cwd: string, ctx: 
     ? result.spawnError
     : [result.stdout, result.stderr].map((s) => s.trimEnd()).filter(Boolean).join('\n') ||
       (result.timedOut ? `(timed out after ${GIT_TIMEOUT_MS / 1000}s)` : '(no output)')
-  ctx.onCommand?.({ id: gitRunId(), command, output, exitCode: result.spawnError ? null : result.exitCode, cwd })
+  // The Terminal pane is a SEPARATE channel the central runTool redactor never sees, so
+  // scrub any injected secret here too (e.g. a token echoed in a remote URL on error).
+  const safeOutput = ctx.redactSecrets?.(output) ?? output
+  ctx.onCommand?.({ id: gitRunId(), command, output: safeOutput, exitCode: result.spawnError ? null : result.exitCode, cwd })
 }
 
 /** Read a trimmed string field out of a tool input, or null. */

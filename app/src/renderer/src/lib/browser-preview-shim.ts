@@ -119,7 +119,8 @@ function installShim(): void {
       resetMessage: () => {},
       rewind: () =>
         Promise.resolve({ ok: true, filesRestored: 0, filesDeleted: 0, messagesRemoved: 0 }),
-      snapshotBefore: () => Promise.resolve(null)
+      snapshotBefore: () => Promise.resolve(null),
+      fileDiff: () => Promise.resolve(null)
     },
     projects: {
       list: () => Promise.resolve([...projects]),
@@ -206,6 +207,12 @@ function installShim(): void {
       listFiles: () => Promise.resolve([]),
       // No Electron BrowserWindow in the browser preview; opening the setup window is a no-op.
       openBrowserSetup: () => Promise.resolve()
+    },
+    credentials: {
+      // No credential vault in the browser preview: an empty, inert list.
+      list: () => Promise.resolve([]),
+      save: () => Promise.resolve([]),
+      delete: () => Promise.resolve([])
     },
     preview: {
       // No OS shell in the browser preview; opening externally is a no-op.

@@ -33,6 +33,12 @@ import type { ToolContext, ToolDef } from './registry'
 
 /** How long to wait for a URL (or early exit) before returning to the model anyway. */
 const URL_GRACE_MS = 25_000
+/**
+ * Once a URL is detected, how long to poll it for an HTTP response before opening the
+ * preview anyway. A dev server often prints its URL a beat before it accepts
+ * connections, so opening immediately can hit connection-refused; this rides that out.
+ */
+const READY_POLL_MS = 10_000
 /** Keep the streamed transcript bounded (characters); we keep the newest output. */
 const OUTPUT_CAP = 12_000
 /** Min interval between Terminal-pane updates while output streams in. */
@@ -89,6 +95,30 @@ export function detectUrl(text: string): string | null {
     return `${scheme}://localhost${port}${path}`
   }
   return null
+}
+
+/**
+ * Poll `url` with GETs until it returns ANY HTTP response (even a 404/500 means the
+ * server is listening and serving) or the bounded deadline passes. Resolves `true` on
+ * the first response, `false` on timeout or user abort — the caller opens the preview
+ * either way (the webview has its own did-fail-load retry), so this only avoids the
+ * common case of opening on a connection-refused the instant the URL is printed.
+ */
+async function waitForHttpOk(url: string, signal: AbortSignal, deadlineMs: number): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, deadlineMs)
+  const PER_ATTEMPT_MS = 1500
+  const RETRY_GAP_MS = 250
+  while (!signal.aborted && Date.now() < deadline) {
+    try {
+      // redirect:'manual' keeps it cheap; any resolved response = the server answered.
+      await fetch(url, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(PER_ATTEMPT_MS) })
+      return true
+    } catch {
+      // Connection refused / reset / per-attempt timeout — not ready yet; back off and retry.
+      await new Promise((r) => setTimeout(r, RETRY_GAP_MS))
+    }
+  }
+  return false
 }
 
 /** Kill a server best-effort, tree-killing on Windows where child procs detach. */
@@ -207,12 +237,20 @@ function startDevServer(command: string, cwd: string, ctx: ToolContext): Promise
       if (!url) return
       previewed = true
       server.url = url // remember it so the build-complete review can screenshot it later
+      clearTimeout(timer) // we have a URL now — cancel the "no URL yet" fallback before polling
       emit(true)
-      const target: PreviewTarget = { kind: 'url', url, title: url }
-      ctx.onPreview?.(target)
-      finish(
-        `Started "${command}" — it's serving at ${url}, now open in the preview pane. The server keeps running in the background and its output streams to the Terminal pane.`
-      )
+      // Wait until the server actually answers before opening the preview, so the
+      // webview never lands on a connection-refused the instant the URL is printed.
+      // Bounded; if it times out we open anyway and lean on the pane's did-fail-load retry.
+      void (async () => {
+        await waitForHttpOk(url, ctx.signal, READY_POLL_MS)
+        if (settled) return // a user Stop or an early process exit beat us here
+        const target: PreviewTarget = { kind: 'url', url, title: url }
+        ctx.onPreview?.(target)
+        finish(
+          `Started "${command}" — it's serving at ${url}, now open in the preview pane. The server keeps running in the background and its output streams to the Terminal pane.`
+        )
+      })()
     }
     child.stdout?.on('data', onData)
     child.stderr?.on('data', onData)
