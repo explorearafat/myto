@@ -1,10 +1,10 @@
-import { createInterface } from 'node:readline'
 import { spawn } from 'node:child_process'
 import { configHint, isConfigured, loadConfig, resolveWorkspace, saveUserConfig, userConfigPath, type MytoCliConfig } from './config'
-import { runAgentLoop } from './loop'
+import { runAgentLoop, setThinking, thinkingOn } from './loop'
 import { createProvider } from '@app/main/providers'
 import * as ui from './ui'
 import * as tui from './tui'
+import * as input from './input'
 
 declare const MYTO_CLI_VERSION: string
 const VERSION = typeof MYTO_CLI_VERSION === 'string' ? MYTO_CLI_VERSION : '0.0.0'
@@ -19,6 +19,7 @@ const SLASH: { name: string; desc: string }[] = [
   { name: '/dir', desc: 'Switch the working folder: /dir <path>' },
   { name: '/copy', desc: 'Copy the last answer to the clipboard' },
   { name: '/retry', desc: 'Re-run the last task' },
+  { name: '/think', desc: 'Toggle the live thinking stream on/off' },
   { name: '/update', desc: 'Update Myto to the latest version' },
   { name: '/clear', desc: 'Clear the screen' },
   { name: '/help', desc: 'Show this command list' },
@@ -168,17 +169,6 @@ function notConfiguredMessage(cfg: MytoCliConfig): string {
   )
 }
 
-/** Ask one line with a fresh readline, so interactive menus own stdin between prompts. */
-function ask(promptStr: string): Promise<string> {
-  return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout })
-    rl.question(promptStr, (ans) => {
-      rl.close()
-      resolve(ans)
-    })
-  })
-}
-
 /** One-shot run (`myto "<task>"`). Returns the process exit code. */
 async function runOnce(task: string, dir?: string): Promise<number> {
   const cfg = loadConfig()
@@ -316,15 +306,25 @@ async function repl(dir?: string): Promise<number> {
       case 'update':
         await cmdUpdate()
         return false
+      case 'think':
+        setThinking(!thinkingOn())
+        process.stdout.write(
+          thinkingOn() ? p.green(`${ui.sym.check} thinking stream on\n`) : p.dim('  thinking stream off\n')
+        )
+        return false
       default:
         process.stdout.write(p.red(`  unknown command /${cmd}`) + p.dim(' — type / for the menu\n'))
         return false
     }
   }
 
-  const promptStr = ui.colorOn ? `\n${p.green('▌')} ` : '\n> '
   for (;;) {
-    const line = (await ask(promptStr)).trim()
+    const raw = await input.readTask(SLASH)
+    if (raw === null) {
+      await handleSlash('quit', '')
+      break
+    }
+    const line = raw.trim()
     if (!line) continue
     if (line.startsWith('/')) {
       const parts = line.slice(1).split(/\s+/)

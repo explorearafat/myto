@@ -39,6 +39,18 @@ declare const MYTO_CLI_VERSION: string
 const CLI_VERSION = typeof MYTO_CLI_VERSION === 'string' ? MYTO_CLI_VERSION : '0.0.0'
 
 /**
+ * Thinking mode: when on (the default), the model's streamed reasoning is shown
+ * live under a dim "Thinking" bullet as it arrives. `/think` in the REPL flips it.
+ */
+let SHOW_THINKING = true
+export function setThinking(on: boolean): void {
+  SHOW_THINKING = on
+}
+export function thinkingOn(): boolean {
+  return SHOW_THINKING
+}
+
+/**
  * The CLI agent loop: the terminal twin of the desktop app's Cowork loop.
  *
  * One `run` is: stream a generation, parse ```myto:tool calls out of it (the SAME
@@ -325,13 +337,29 @@ async function streamTurn(
     parser // one parser per attempt: a retried turn re-parses from scratch
     const p = createToolCallParser()
     const calls: ToolCall[] = []
+    let thinking = false // mid-reasoning stream, so we can close the block cleanly
     try {
       await opts.provider.streamCompletion(
         opts.modelId,
         history,
         (chunk: Omit<CompletionChunk, 'streamId'>) => {
-          if (chunk.reasoning) return // thinking is not reply text
+          if (chunk.reasoning) {
+            // Live "thinking": stream the model's reasoning, dim and indented, as
+            // it arrives — the terminal twin of the app's thinking view.
+            if (SHOW_THINKING) {
+              if (!thinking) {
+                process.stdout.write('\n' + tui.bullet('Thinking', '', 'think') + '\n  ')
+                thinking = true
+              }
+              process.stdout.write(c.dim(chunk.reasoning.replace(/\n/g, '\n  ')))
+            }
+            return
+          }
           if (chunk.delta) {
+            if (thinking) {
+              process.stdout.write('\n')
+              thinking = false
+            }
             const r = p.push(chunk.delta)
             if (r.text) {
               visible += r.text
@@ -349,6 +377,7 @@ async function streamTurn(
         },
         signal
       )
+      if (thinking) process.stdout.write('\n')
       // Drain anything still buffered (a call whose close fence landed in the
       // final delta, or a truncated open block → keep as text, not lost).
       const tail = p.flush()
