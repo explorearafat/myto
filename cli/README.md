@@ -49,7 +49,7 @@ To install from disk without the registry (offline / air-gapped):
 
 ```
 cd cli && npm pack
-npm install -g ./mytocode-1.0.0.tgz
+npm install -g ./mytocode-1.1.0.tgz
 ```
 
 ## Configure (first run)

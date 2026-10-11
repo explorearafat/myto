@@ -33,6 +33,10 @@ import {
 } from '@app/main/cowork-guards'
 import type { Provider } from '@app/main/providers/provider'
 import type { MytoCliConfig } from './config'
+import * as tui from './tui'
+
+declare const MYTO_CLI_VERSION: string
+const CLI_VERSION = typeof MYTO_CLI_VERSION === 'string' ? MYTO_CLI_VERSION : '0.0.0'
 
 /**
  * The CLI agent loop: the terminal twin of the desktop app's Cowork loop.
@@ -62,30 +66,98 @@ const c = {
   green: (s: string): string => (isTty ? `\x1b[32m${s}\x1b[0m` : s)
 }
 
-/** Emit a completed tool call to the terminal as the model executes it. */
-function printToolCall(call: ToolCall): void {
-  const rec = (call.input && typeof call.input === 'object' ? call.input : {}) as Record<string, unknown>
-  let detail = ''
-  if (typeof rec.path === 'string') detail = rec.path
-  else if (typeof rec.command === 'string') detail = rec.command
-  else if (typeof rec.query === 'string') detail = rec.query
-  else if (typeof rec.pattern === 'string') detail = rec.pattern
-  else if (typeof rec.url === 'string') detail = rec.url
-  process.stdout.write(c.cyan(`  ⚙ ${call.name}${detail ? ` ${detail}` : ''}\n`))
+/** "0.4s" / "1.2s" / "320ms" — compact duration for a step's right-hand meta. */
+function fmtMs(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)}s` : `${ms}ms`
 }
 
-/** Emit a finished tool result, size-capped, as an indented dim block. */
-function printToolResult(name: string, result: string): void {
-  const cap = 600
-  const body = result.length > cap ? `${result.slice(0, cap)}\n… (+${result.length - cap} chars)` : result
-  process.stdout.write(
-    c.dim(
-      body
-        .split('\n')
-        .map((l) => `  │ ${l}`)
-        .join('\n') + '\n'
-    )
+/** A human verb + target for a tool call, shown as the step's label. */
+function stepLabel(call: ToolCall): string {
+  const rec = (call.input && typeof call.input === 'object' ? call.input : {}) as Record<string, unknown>
+  const path = typeof rec.path === 'string' ? rec.path : ''
+  const s = (k: string): string => (typeof rec[k] === 'string' ? (rec[k] as string) : '')
+  switch (call.name) {
+    case 'write_file': return `Writing ${c.bold(path)}`
+    case 'edit_file': return `Editing ${c.bold(path)}`
+    case 'delete_file': return `Deleting ${c.bold(path)}`
+    case 'read_file': return `Reading ${path}`
+    case 'list_dir': return `Inspecting ${path || 'folder'}`
+    case 'find_files': return `Finding ${s('pattern') || s('query')}`
+    case 'search_code': return `Searching ${s('pattern') || s('query')}`
+    case 'run_command': return `Running ${c.bold(s('command'))}`
+    case 'run_code': return 'Running code'
+    case 'web_search': return `Searching web · ${s('query')}`
+    case 'web_fetch': return `Fetching ${s('url')}`
+    case 'wiki_search': return `Wiki · ${s('query')}`
+    case 'update_plan': return 'Planning'
+    case 'think': return 'Thinking'
+    default: return call.name ?? 'tool'
+  }
+}
+
+/** The lines a write/edit call wrote (for the diff card + the changes tally). */
+function contentLines(call: ToolCall): string[] | null {
+  const rec = (call.input && typeof call.input === 'object' ? call.input : {}) as Record<string, unknown>
+  return typeof rec.content === 'string' ? rec.content.split('\n') : null
+}
+
+/** Detect the dispatcher/sandbox failure strings so a bad step reads as failed. */
+function stepFailed(result: string): boolean {
+  return /(is outside the working folder|tool failed:|Unknown tool "|did not parse|not available right now|was refused)/i.test(
+    result
   )
+}
+
+/** Render one executed step as a Claude-style bullet (plan → TODOs, writes → diff card). */
+function renderStep(call: ToolCall, result: string, ms: number): void {
+  const failed = stepFailed(result)
+  const name = call.name
+  if (name === 'update_plan') {
+    process.stdout.write('\n' + tui.todos(parsePlanItems(call.input)) + '\n')
+    return
+  }
+  if (name === 'think') {
+    const rec = call.input as Record<string, unknown>
+    const thought = typeof rec.thought === 'string' ? rec.thought : typeof rec.text === 'string' ? rec.text : ''
+    process.stdout.write('\n' + tui.bullet('Thinking', thought.slice(0, 400), 'think') + '\n')
+    return
+  }
+  const label = `${stepLabel(call)}${ms ? '  ' + fmtMs(ms) : ''}`
+  const lines = contentLines(call)
+  if ((name === 'write_file' || name === 'edit_file') && lines && !failed) {
+    const rec = call.input as Record<string, unknown>
+    const path = typeof rec.path === 'string' ? rec.path : 'file'
+    process.stdout.write('\n' + tui.bullet(label, '', 'act') + '\n')
+    const shown: tui.DiffLine[] = lines.slice(0, 14).map((t, i) => ({ n: i + 1, type: 'add', text: t }))
+    if (lines.length > 14) shown.push({ type: 'ctx', text: `… +${lines.length - 14} more lines` })
+    for (const l of tui.diffBlock(path, shown)) process.stdout.write(l + '\n')
+    return
+  }
+  const cap = 240
+  const body = result.length > cap ? `${result.slice(0, cap)} …` : result
+  process.stdout.write('\n' + tui.bullet(label, body.split('\n').slice(0, 4).join('\n'), failed ? 'fail' : 'act') + '\n')
+}
+
+/** Coax a plan/update_plan payload into a {done,text} checklist, defensively. */
+function parsePlanItems(input: unknown): { done: boolean; text: string }[] {
+  const rec = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
+  const arr = [rec.plan, rec.steps, rec.todos, rec.items].find(Array.isArray) as unknown[] | undefined
+  if (arr) {
+    return arr
+      .map((it) => {
+        if (typeof it === 'string') return { done: false, text: it }
+        const o = (it && typeof it === 'object' ? it : {}) as Record<string, unknown>
+        return { done: /done|complete|✓|checked/i.test(String(o.status ?? '')), text: String(o.title ?? o.text ?? o.step ?? '') }
+      })
+      .filter((x) => x.text)
+  }
+  const s = typeof rec.plan === 'string' ? rec.plan : typeof rec.content === 'string' ? rec.content : ''
+  return s
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 20)
+    .map((l) => ({ done: /^[-*]\s*\[x\]/i.test(l), text: l.replace(/^[-*]\s*(\[.\]\s*)?/, '').replace(/^\d+[.)]\s*/, '') }))
 }
 
 export interface LoopOptions {
@@ -376,8 +448,21 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
   const carried: ToolCall[] = []
   let finalText = ''
   const TOOLS = cliTools()
+  // Per-run tally for the closing summary card.
+  const changed = new Set<string>()
+  let linesAdded = 0
 
-  process.stdout.write(c.dim(`\n(myto · ${opts.modelId} · ${workspaceDir})\n\n`))
+  process.stdout.write(
+    '\n' +
+      tui.runHeader({
+        version: CLI_VERSION,
+        task: opts.task,
+        model: opts.modelId,
+        workspace: workspaceDir,
+        byok: true
+      }) +
+      '\n'
+  )
 
   while (turns < MAX_TOOL_TURNS) {
     turns++
@@ -405,10 +490,16 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
 
     if (call) {
       // Execute. The dispatcher never throws; errors come back as strings.
+      const t0 = Date.now()
       const result = await runCliTool(call, ctx, TOOLS)
       toolCalls++
-      printToolCall(call)
-      printToolResult(call.name ?? 'tool', result)
+      renderStep(call, result, Date.now() - t0)
+      if ((call.name === 'write_file' || call.name === 'edit_file') && !stepFailed(result)) {
+        const rec = call.input as Record<string, unknown>
+        if (typeof rec.path === 'string') changed.add(rec.path)
+        const cl = contentLines(call)
+        if (cl) linesAdded += cl.length
+      }
       // Track the call signature for oscillation detection.
       guards.recentSigs.push(`${call.name}:${JSON.stringify(call.input ?? {}).slice(0, 200)}`)
       if (guards.recentSigs.length > OSCILLATION_WINDOW * 2) guards.recentSigs.shift()
@@ -476,8 +567,11 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
         for (const f of files) {
           const synth: ToolCall = { block: '', name: 'write_file', input: { path: f.path, content: f.content }, error: null }
           const res = await runCliTool(synth, ctx, TOOLS)
-          printToolCall(synth)
-          printToolResult('write_file', res)
+          renderStep(synth, res, 0)
+          if (!stepFailed(res)) {
+            changed.add(f.path)
+            linesAdded += f.content.split('\n').length
+          }
           wrote = true
         }
         if (wrote) {
@@ -553,6 +647,10 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
 
   if (turns >= MAX_TOOL_TURNS && !finalText) {
     finalText = 'Stopped: reached the tool-turn ceiling before finishing.'
+  }
+  if (toolCalls > 0) {
+    const tests = /(\d+\s*\/\s*\d+|all)\s+tests?\s+pass|tests?\s+pass(?:ed)?(?:\s*·?\s*\d+\/\d+)?/i.exec(finalText)?.[0]
+    process.stdout.write(tui.summary({ files: changed.size, add: linesAdded, del: 0, turns, tests }) + '\n')
   }
   opts.onDone?.(finalText)
   return { finalText, turns, toolCalls }

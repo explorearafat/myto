@@ -1,42 +1,62 @@
 import { createInterface } from 'node:readline'
-import { configHint, isConfigured, loadConfig, resolveWorkspace, saveUserConfig, userConfigPath } from './config'
-import { runAgentLoop, cliSettings } from './loop'
+import { spawn } from 'node:child_process'
+import { configHint, isConfigured, loadConfig, resolveWorkspace, saveUserConfig, userConfigPath, type MytoCliConfig } from './config'
+import { runAgentLoop } from './loop'
 import { createProvider } from '@app/main/providers'
-
-const HELP = `
-${'Myto CLI'} — the Myto agent in your terminal.
-
-USAGE
-  myto                          Interactive session in the current folder
-  myto "<task>"                 One-shot task in the current folder
-  myto --dir <path> "<task>"    One-shot task in a specific folder
-  myto config [options]         Save provider config to ~/.myto/config.json
-  myto models                   List models the configured endpoint serves
-  myto --version                Print the CLI version
-  myto help                     This help
-
-CONFIG (first run)
-  myto config --base-url https://api.openai.com/v1 --api-key sk-… --model gpt-4o-mini
-  myto config --base-url https://api.anthropic.com/v1 --api-key sk-ant-… --model claude-sonnet-4-5
-  myto config --ollama-url http://localhost:11434 --model llama3.1:8b
-  Or via environment: MYTO_BASE_URL, MYTO_API_KEY, MYTO_MODEL, MYTO_PROVIDER,
-  MYTO_AUTH_SCHEMA, MYTO_AUTH_HEADER, MYTO_OLLAMA_URL, MYTO_DIR
-
-BEHAVIOUR
-  The agent works directly on your project folder: it can read, create, edit and
-  search files, run shell commands, and fetch/search the web until your task is
-  done. Config resolves from: environment > ~/.myto/config.json > the Myto
-  desktop app's saved settings.
-`.trim() + '\n'
+import * as ui from './ui'
+import * as tui from './tui'
 
 declare const MYTO_CLI_VERSION: string
 const VERSION = typeof MYTO_CLI_VERSION === 'string' ? MYTO_CLI_VERSION : '0.0.0'
+
+const msg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+/** Slash commands available inside an interactive session (also the `/` palette). */
+const SLASH: { name: string; desc: string }[] = [
+  { name: '/model', desc: 'Pick the model — interactive menu' },
+  { name: '/models', desc: 'List the models the endpoint serves' },
+  { name: '/config', desc: 'Show the current provider config' },
+  { name: '/dir', desc: 'Switch the working folder: /dir <path>' },
+  { name: '/copy', desc: 'Copy the last answer to the clipboard' },
+  { name: '/retry', desc: 'Re-run the last task' },
+  { name: '/update', desc: 'Update Myto to the latest version' },
+  { name: '/clear', desc: 'Clear the screen' },
+  { name: '/help', desc: 'Show this command list' },
+  { name: '/quit', desc: 'Exit Myto' }
+]
+
+/** Colourful `myto help` — the static command reference shown outside a session. */
+function helpText(): string {
+  const p = ui.paint
+  const row = (name: string, desc: string): string => `  ${p.cyan(name.padEnd(30))}${p.dim(desc)}`
+  return [
+    ui.banner(VERSION),
+    p.bold('USAGE'),
+    row('myto', 'Interactive session in the current folder'),
+    row('myto "<task>"', 'One-shot task in the current folder'),
+    row('myto --dir <path> "<task>"', 'One-shot task in a specific folder'),
+    row('myto config [options]', 'Save provider config to ~/.myto/config.json'),
+    row('myto models', 'List models the configured endpoint serves'),
+    row('myto update', 'Download/update Myto to the latest version'),
+    row('myto --version', 'Print the CLI version'),
+    '',
+    p.bold('CONFIG') + p.dim('  (first run)'),
+    p.dim('  myto config --base-url https://api.openai.com/v1 --api-key sk-… --model gpt-4o-mini'),
+    p.dim('  myto config --ollama-url http://localhost:11434 --model llama3.1:8b'),
+    p.dim('  Env: MYTO_BASE_URL · MYTO_API_KEY · MYTO_MODEL · MYTO_PROVIDER · MYTO_OLLAMA_URL · MYTO_DIR'),
+    '',
+    p.bold('IN A SESSION') + p.dim('  — type a task, or / for the command menu'),
+    SLASH.map((s) => `  ${p.cyan(s.name.padEnd(10))}${p.dim(s.desc)}`).join('\n'),
+    ''
+  ].join('\n')
+}
 
 interface Args {
   oneShot?: string
   dir?: string
   config?: Record<string, string | undefined>
   models?: boolean
+  update?: boolean
   help?: boolean
   version?: boolean
 }
@@ -51,9 +71,9 @@ function parseArgs(argv: string[]): Args {
     else if (a === 'help') args.help = true
     else if (a === '--dir' || a === '-d') args.dir = argv[++i]
     else if (a === 'models') args.models = true
+    else if (a === 'update' || a === 'upgrade') args.update = true
     else if (a === 'config') {
       args.config = {}
-      // Consume the config subcommand's flags.
       while (i + 1 < argv.length && argv[i + 1].startsWith('--')) {
         const flag = argv[++i]
         const key = flag.replace(/^--/, '')
@@ -66,24 +86,64 @@ function parseArgs(argv: string[]): Args {
   return args
 }
 
+function providerFromSettingsLike(cfg: MytoCliConfig) {
+  return createProvider(cfg.activeProvider, cfg.activeProvider === 'ollama' ? cfg.ollama : cfg.gateway)
+}
+
+/** `myto update` — self-update by reinstalling the published package globally. */
+function cmdUpdate(): Promise<number> {
+  const p = ui.paint
+  process.stdout.write(p.dim('Updating ') + p.cyan('mytocode') + p.dim(' to the latest version…\n'))
+  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+  return new Promise((resolve) => {
+    const child = spawn(npm, ['install', '-g', 'mytocode@latest'], { stdio: 'inherit' })
+    child.on('error', (err) => {
+      process.stderr.write(
+        p.red(`Update failed: ${msg(err)}\n`) + p.dim('Run it yourself: npm install -g mytocode@latest\n')
+      )
+      resolve(1)
+    })
+    child.on('close', (code) => {
+      if (code === 0) {
+        process.stdout.write(
+          p.green(`${ui.sym.check} Updated. `) + p.dim('Run ') + p.cyan('myto --version') + p.dim(' to confirm.\n')
+        )
+        resolve(0)
+      } else {
+        process.stderr.write(p.red(`Update exited with code ${code ?? 1}.\n`))
+        resolve(code ?? 1)
+      }
+    })
+  })
+}
+
 async function cmdModels(): Promise<number> {
-  const cfg = loadConfig()
-  const provider = providerFromSettingsLike(cfg)
+  const provider = providerFromSettingsLike(loadConfig())
   const list = await provider.listModels()
   if (!list.ok) {
-    process.stderr.write(`Could not list models: ${list.error ?? 'unknown error'}\n`)
+    process.stderr.write(ui.paint.red(`Could not list models: ${list.error ?? 'unknown error'}\n`))
     return 1
   }
   if (list.models.length === 0) {
-    process.stdout.write('The endpoint serves no models (or lists none).\n')
+    process.stdout.write(ui.paint.dim('The endpoint serves no models (or lists none).\n'))
     return 0
   }
-  for (const m of list.models) process.stdout.write(`${m.id}${m.name !== m.id ? `  (${m.name})` : ''}\n`)
+  for (const m of list.models) {
+    process.stdout.write(`  ${ui.paint.cyan(m.id)}${m.name !== m.id ? ui.paint.dim(`  (${m.name})`) : ''}\n`)
+  }
   return 0
 }
 
-function providerFromSettingsLike(cfg: ReturnType<typeof loadConfig>) {
-  return createProvider(cfg.activeProvider, cfg.activeProvider === 'ollama' ? cfg.ollama : cfg.gateway)
+function printConfig(cfg: MytoCliConfig): void {
+  const p = ui.paint
+  process.stdout.write(`  ${p.dim('provider')}  ${p.cyan(cfg.activeProvider)}\n`)
+  if (cfg.activeProvider === 'gateway') {
+    process.stdout.write(`  ${p.dim('base-url')}  ${cfg.gateway.baseUrl || p.red('(not set)')}\n`)
+    process.stdout.write(`  ${p.dim('api-key ')}  ${cfg.gateway.apiKey ? '••••' + cfg.gateway.apiKey.slice(-4) : p.red('(not set)')}\n`)
+  } else {
+    process.stdout.write(`  ${p.dim('ollama  ')}  ${cfg.ollama.baseUrl}\n`)
+  }
+  process.stdout.write(`  ${p.dim('model   ')}  ${cfg.modelId ? p.cyan(cfg.modelId) : p.red('(not set)')}\n`)
 }
 
 async function cmdConfig(patch: Record<string, string | undefined>): Promise<number> {
@@ -94,67 +154,185 @@ async function cmdConfig(patch: Record<string, string | undefined>): Promise<num
     provider: patch.provider === 'gateway' || patch.provider === 'ollama' ? patch.provider : undefined,
     ollamaUrl: patch['ollama-url']
   })
-  process.stdout.write(`Saved ${userConfigPath()}\n`)
-  process.stdout.write(`  provider: ${saved.activeProvider}\n`)
-  if (saved.activeProvider === 'gateway') {
-    process.stdout.write(`  base-url: ${saved.gateway.baseUrl}\n`)
-    process.stdout.write(`  api-key:  ${saved.gateway.apiKey ? '••••' + saved.gateway.apiKey.slice(-4) : '(not set)'}\n`)
-  } else {
-    process.stdout.write(`  ollama:   ${saved.ollama.baseUrl}\n`)
-  }
-  process.stdout.write(`  model:    ${saved.modelId || '(not set)'}\n`)
+  process.stdout.write(ui.paint.green(`${ui.sym.check} Saved `) + ui.paint.dim(userConfigPath()) + '\n')
+  printConfig(saved)
   return 0
 }
 
-/** One agent run (one-shot or one REPL turn). Returns the exit code. */
-async function runOnce(task: string, dir?: string, extraSystem?: string): Promise<number> {
+function notConfiguredMessage(cfg: MytoCliConfig): string {
+  return (
+    ui.paint.red('Myto is not configured yet.\n\n') +
+    ui.paint.dim(configHint(cfg)) +
+    '\n\n' +
+    ui.paint.dim('Or set env vars: MYTO_BASE_URL, MYTO_API_KEY, MYTO_MODEL.\n')
+  )
+}
+
+/** Ask one line with a fresh readline, so interactive menus own stdin between prompts. */
+function ask(promptStr: string): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout })
+    rl.question(promptStr, (ans) => {
+      rl.close()
+      resolve(ans)
+    })
+  })
+}
+
+/** One-shot run (`myto "<task>"`). Returns the process exit code. */
+async function runOnce(task: string, dir?: string): Promise<number> {
   const cfg = loadConfig()
   if (!isConfigured(cfg)) {
-    process.stderr.write(
-      `Myto is not configured yet.\n\n${configHint(cfg)}\n\nOr set env vars: MYTO_BASE_URL, MYTO_API_KEY, MYTO_MODEL.\n`
-    )
+    process.stderr.write(notConfiguredMessage(cfg))
     return 1
   }
-  const workspace = resolveWorkspace(dir)
-  const provider = providerFromSettingsLike(cfg)
   const result = await runAgentLoop({
-    provider,
+    provider: providerFromSettingsLike(cfg),
     modelId: cfg.modelId,
-    workspaceDir: workspace,
-    task,
-    systemExtra: extraSystem
+    workspaceDir: resolveWorkspace(dir),
+    task
   })
   process.stdout.write('\n')
   return result.finalText.startsWith('Error:') ? 1 : 0
 }
 
 async function repl(dir?: string): Promise<number> {
-  const cfg = loadConfig()
+  let cfg = loadConfig()
   if (!isConfigured(cfg)) {
-    process.stderr.write(
-      `Myto is not configured yet.\n\n${configHint(cfg)}\n\nOr set env vars: MYTO_BASE_URL, MYTO_API_KEY, MYTO_MODEL.\n`
-    )
+    process.stderr.write(notConfiguredMessage(cfg))
     return 1
   }
-  const workspace = resolveWorkspace(dir)
-  process.stdout.write(`Myto CLI — working folder ${workspace}\nType your task, or /quit to exit.\n`)
-  const rl = createInterface({ input: process.stdin, output: process.stdout })
-  for (;;) {
-    const line: string = await new Promise((resolve) => rl.question('\nyou › ', resolve))
-    const t = line.trim()
-    if (!t) continue
-    if (t === '/quit' || t === '/exit') break
-    if (t === '/help') {
-      process.stdout.write('/quit  exit · /help  this help\n')
-      continue
-    }
+  let workspace = resolveWorkspace(dir)
+  let lastAnswer = ''
+  let lastTask = ''
+  const p = ui.paint
+
+  const SUGGESTIONS = [
+    'Explain this codebase',
+    'Build a dashboard from a spec file',
+    'Add tests and run them',
+    'Find opportunities to refactor'
+  ]
+  const showWelcome = (): void => {
+    process.stdout.write(
+      tui.welcome(
+        {
+          version: VERSION,
+          provider: cfg.activeProvider === 'ollama' ? 'Ollama (local)' : 'OpenAI-compatible',
+          providerUrl: cfg.activeProvider === 'ollama' ? cfg.ollama.baseUrl : cfg.gateway.baseUrl,
+          model: cfg.modelId,
+          ready: isConfigured(cfg),
+          workspace
+        },
+        SUGGESTIONS
+      )
+    )
+  }
+  showWelcome()
+
+  const runTask = async (t: string): Promise<void> => {
+    lastTask = t
     try {
-      await runOnce(t, dir)
+      const res = await runAgentLoop({
+        provider: providerFromSettingsLike(cfg),
+        modelId: cfg.modelId,
+        workspaceDir: workspace,
+        task: t
+      })
+      lastAnswer = res.finalText
     } catch (err) {
-      process.stderr.write(`Run failed: ${err instanceof Error ? err.message : String(err)}\n`)
+      process.stderr.write(p.red(`Run failed: ${msg(err)}\n`))
     }
   }
-  rl.close()
+
+  const pickModel = async (): Promise<void> => {
+    process.stdout.write(p.dim('  fetching models…\n'))
+    const list = await providerFromSettingsLike(cfg).listModels()
+    if (!list.ok || list.models.length === 0) {
+      process.stdout.write(p.red(`  could not list models${list.ok ? '' : ': ' + (list.error ?? '')}\n`))
+      return
+    }
+    const choice = await ui.select(
+      'Select a model',
+      list.models.map((m) => ({ label: m.id, hint: m.name !== m.id ? m.name : undefined, value: m.id }))
+    )
+    if (!choice) return
+    cfg = saveUserConfig({ model: choice })
+    process.stdout.write(p.green(`${ui.sym.check} model → `) + p.cyan(choice) + '\n')
+  }
+
+  const handleSlash = async (cmd: string, arg: string): Promise<boolean> => {
+    switch (cmd) {
+      case '':
+      case 'commands': {
+        const choice = await ui.select(
+          'Slash commands',
+          SLASH.map((s) => ({ label: s.name, hint: s.desc, value: s.name }))
+        )
+        if (choice) return handleSlash(choice.slice(1), '')
+        return false
+      }
+      case 'quit':
+      case 'exit':
+        process.stdout.write(p.dim('  bye ') + p.magenta(ui.sym.spark) + '\n')
+        return true
+      case 'help':
+        process.stdout.write(SLASH.map((s) => `  ${p.cyan(s.name.padEnd(10))}${p.dim(s.desc)}`).join('\n') + '\n')
+        return false
+      case 'clear':
+        process.stdout.write('\x1b[2J\x1b[3J\x1b[H')
+        showWelcome()
+        return false
+      case 'models':
+        await cmdModels()
+        return false
+      case 'config':
+        printConfig(cfg)
+        return false
+      case 'model':
+        await pickModel()
+        return false
+      case 'dir':
+        if (!arg) {
+          process.stdout.write(`  ${p.gray(workspace)}\n`)
+        } else {
+          workspace = resolveWorkspace(arg)
+          process.stdout.write(p.green(`${ui.sym.check} folder → `) + p.gray(workspace) + '\n')
+        }
+        return false
+      case 'copy': {
+        if (!lastAnswer.trim()) {
+          process.stdout.write(p.dim('  nothing to copy yet\n'))
+          return false
+        }
+        const ok = await ui.copyToClipboard(lastAnswer)
+        process.stdout.write(ok ? p.green(`${ui.sym.check} copied the last answer\n`) : p.red('  no clipboard tool found\n'))
+        return false
+      }
+      case 'retry':
+        if (!lastTask) process.stdout.write(p.dim('  no previous task\n'))
+        else await runTask(lastTask)
+        return false
+      case 'update':
+        await cmdUpdate()
+        return false
+      default:
+        process.stdout.write(p.red(`  unknown command /${cmd}`) + p.dim(' — type / for the menu\n'))
+        return false
+    }
+  }
+
+  const promptStr = ui.colorOn ? `\n${p.green('▌')} ` : '\n> '
+  for (;;) {
+    const line = (await ask(promptStr)).trim()
+    if (!line) continue
+    if (line.startsWith('/')) {
+      const parts = line.slice(1).split(/\s+/)
+      if (await handleSlash(parts[0] || '', parts.slice(1).join(' '))) break
+      continue
+    }
+    await runTask(line)
+  }
   return 0
 }
 
@@ -165,18 +343,19 @@ async function main(): Promise<number> {
     return 0
   }
   if (args.help) {
-    process.stdout.write(HELP + '\n')
+    process.stdout.write(helpText() + '\n')
     return 0
   }
   if (args.config) return cmdConfig(args.config)
   if (args.models) return cmdModels()
+  if (args.update) return cmdUpdate()
 
   // Abort in-flight streams on Ctrl-C (second Ctrl-C kills hard).
   let interrupted = 0
   process.on('SIGINT', () => {
     interrupted++
     if (interrupted >= 2) process.exit(130)
-    process.stderr.write('\n(again to force quit)\n')
+    process.stderr.write(ui.paint.dim('\n(again to force quit)\n'))
   })
 
   if (args.oneShot) return runOnce(args.oneShot, args.dir)
@@ -186,6 +365,6 @@ async function main(): Promise<number> {
 main()
   .then((code) => process.exit(code))
   .catch((err) => {
-    process.stderr.write(`myto: ${err instanceof Error ? err.message : String(err)}\n`)
+    process.stderr.write(ui.paint.red(`myto: ${msg(err)}\n`))
     process.exit(1)
   })
