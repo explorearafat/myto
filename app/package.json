@@ -1,8 +1,9 @@
 {
   "name": "myto",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Myto — a premium desktop AI coding workspace",
   "author": "Myto",
+  "homepage": "https://mytocode.vercel.app",
   "license": "MIT",
   "main": "./out/main/index.js",
   "exports": {
