@@ -1,6 +1,8 @@
-import { ArrowRight, Download } from 'lucide-react';
-import { LINKS, PLATFORMS, RELEASE, type Platform } from '../data';
+import { useState } from 'react';
+import { ArrowRight, Check, Copy, Download, Terminal } from 'lucide-react';
+import { CLI, LINKS, PLATFORMS, RELEASE, type Platform } from '../data';
 import { useReveals } from '../lib/reveal';
+import { copyToClipboard } from '../lib/clipboard';
 import { AndroidMark, WindowsMark } from './PlatformIcons';
 import { MytoMark } from './MytoMark';
 import { Footer } from './Footer';
@@ -98,6 +100,108 @@ function PlatformBlock({ platform, flip }: { platform: Platform; flip: boolean }
   );
 }
 
+/*
+ * A dark terminal card for a shell command, with a hover/focus copy button.
+ * Copies the raw command (no leading `$`), so paste-and-run just works. Multi-
+ * line commands are shown verbatim; the copy carries the newlines.
+ */
+function CommandCard({ command, label }: { command: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = async () => {
+    const ok = await copyToClipboard(command);
+    if (!ok) return;
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  };
+  return (
+    <div className="group relative mt-4 overflow-hidden rounded-xl border border-[#2a2823] bg-[#1a1917]">
+      {label ? (
+        <div className="border-b border-[#2a2823] px-4 py-2 font-mono text-[11px] uppercase tracking-[0.14em] text-[#8a857a]">
+          {label}
+        </div>
+      ) : null}
+      <pre className="overflow-x-auto px-4 py-3.5 pr-24 font-mono text-[13px] leading-relaxed text-[#e8e5dd]">
+        <code>{command}</code>
+      </pre>
+      <button
+        type="button"
+        onClick={onCopy}
+        aria-label={copied ? 'Copied' : 'Copy command'}
+        className="absolute right-2.5 top-2.5 inline-flex items-center gap-1.5 rounded-md border border-[#39362f] bg-[#232119] px-2.5 py-1.5 text-[12px] font-medium text-[#c9c4b8] transition-colors duration-150 hover:bg-[#2b2820] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4a463d]"
+      >
+        {copied ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : <Copy className="h-3.5 w-3.5" aria-hidden="true" />}
+        {copied ? 'Copied' : 'Copy'}
+      </button>
+    </div>
+  );
+}
+
+/*
+ * The terminal CLI block on the download page. One command installs `myto`
+ * globally from the tarball this site serves (no npm account, no clone), then
+ * point it at a model and run it in any folder. A dark command card contrasts
+ * with the page's warm platform blocks; each card copies its raw command.
+ */
+function CliSection() {
+  return (
+    <section id="cli" className="border-t border-[#e9e6dd] bg-[#faf9f5]">
+      <div className="mx-auto max-w-5xl px-6 py-16 sm:py-20">
+        <div data-reveal className="flex items-center gap-3">
+          <span className="flex h-11 w-11 items-center justify-center rounded-xl border border-[#e3e1d8] bg-[#f0efe9] text-[#141413]">
+            <Terminal className="h-[21px] w-[21px]" aria-hidden="true" />
+          </span>
+          <h2 className="font-display font-normal text-[28px] tracking-[-0.01em] text-[#141413]">
+            Terminal
+          </h2>
+          <span className="font-mono text-[13px] text-[#9c988e]">v{CLI.version}</span>
+        </div>
+        <p data-reveal className="mt-6 max-w-[62ch] text-[15.5px] leading-relaxed text-[#544f46]">
+          Prefer the keyboard? The{' '}
+          <code className="rounded bg-[#eceae2] px-1.5 py-0.5 font-mono text-[13px] text-[#141413]">myto</code>{' '}
+          agent runs in your terminal — it reads your project, edits with your approval, runs your
+          build and verifies its work. One command to install, on macOS, Linux and Windows.
+        </p>
+
+        <div data-reveal className="mt-8 grid gap-x-10 gap-y-8 sm:grid-cols-2">
+          <div>
+            <h3 className="font-display text-[18px] text-[#141413]">1 · Install globally</h3>
+            <p className="mt-2 text-[14px] leading-relaxed text-[#6b675e]">
+              Adds the{' '}
+              <code className="font-mono text-[13px] text-[#141413]">myto</code>{' '}
+              command to your PATH. Requires {CLI.node}.
+            </p>
+            <CommandCard label="Terminal" command={CLI.install} />
+          </div>
+          <div>
+            <h3 className="font-display text-[18px] text-[#141413]">2 · Point it at a model</h3>
+            <p className="mt-2 text-[14px] leading-relaxed text-[#6b675e]">
+              Any OpenAI-compatible endpoint, or a local Ollama.
+            </p>
+            <CommandCard label="Pick one" command={'myto config --base-url https://api.openai.com/v1 --api-key sk-… --model gpt-4o-mini'} />
+          </div>
+        </div>
+        <div data-reveal className="mt-8">
+          <h3 className="font-display text-[18px] text-[#141413]">3 · Run it in any project</h3>
+          <CommandCard command={'cd your-project\nmyto "add dark mode to the settings page"'} />
+        </div>
+
+        <p data-reveal className="mt-6 max-w-[70ch] text-[13px] leading-relaxed text-[#6b675e]">
+          Already set up the desktop app? The CLI reuses its saved settings — just run{' '}
+          <code className="font-mono text-[12.5px] text-[#141413]">myto</code>. You can also{' '}
+          <a
+            href={CLI.tarballPath}
+            className="font-medium text-[#141413] underline decoration-[#cbc6ba] underline-offset-2 transition-colors duration-150 hover:decoration-[#141413]"
+          >
+            download the tarball
+          </a>{' '}
+          and install from disk:{' '}
+          <code className="font-mono text-[12.5px] text-[#141413]">npm install -g ./mytocode-{CLI.version}.tgz</code>.
+        </p>
+      </div>
+    </section>
+  );
+}
+
 export function DownloadPage() {
   // The same single scroll-reveal observer the product page uses.
   useReveals();
@@ -145,6 +249,9 @@ export function DownloadPage() {
             ))}
           </div>
         </section>
+
+        {/* The terminal CLI — install globally, point at a model, run anywhere. */}
+        <CliSection />
 
         {/* One quiet closing line, then back to the product page. */}
         <section className="border-t border-[#e9e6dd]">

@@ -30,6 +30,27 @@ export const RELEASE = {
   size: '131 MB',
 };
 
+/**
+ * The terminal CLI. It's published to npm as `mytocode` (the bare name `myto`
+ * was blocked by npm as too similar to existing packages), but the command it
+ * installs is still `myto`. Bump `version` when a new build ships and refresh
+ * the served tarball in public/cli so the offline install stays in step.
+ */
+export const CLI = {
+  /** The command users actually type after installing. */
+  command: 'myto',
+  /** Published npm package name. */
+  pkg: 'mytocode',
+  version: '1.0.0',
+  /** Node runtime the bundled `dist/cli.js` targets. */
+  node: 'Node.js 20 or newer',
+  /** The one-line global install from the npm registry. */
+  install: 'npm install -g mytocode',
+  /** Offline fallback: the signed tarball this site serves (Vite copies public/ to root). */
+  tarballPath: '/cli/mytocode-1.0.0.tgz',
+};
+
+
 export interface Platform {
   name: string;
   /** Short status, shown as-is next to the name. */

@@ -5,10 +5,13 @@ reads, creates, edits and searches files, runs shell commands, and fetches/
 searches the web — until your task is done.
 
 ```
-npm install -g myto
+npm install -g mytocode
 cd your-project
 myto "add dark mode to the settings page"
 ```
+
+> Published on npm as **`mytocode`** — the bare name `myto` is blocked as too
+> similar to existing packages. The installed command is still `myto`.
 
 ## Build (from this repo)
 
@@ -25,9 +28,9 @@ npm test             # vitest: loop + config suites
 npm run build        # esbuild -> dist/cli.js
 ```
 
-## Publish (enables `npm install -g myto`)
+## Publish (enables `npm install -g mytocode`)
 
-The package publishes under the public name `myto`. To release a new version:
+The package publishes under the public name `mytocode`. To release a new version:
 
 ```
 npm login                  # once per machine
@@ -42,11 +45,11 @@ belt-and-braces check rather than a requirement. (It is deliberately *not*
 flag the package as having install scripts for no benefit — the tarball already
 contains the built `dist/cli.js`.)
 
-Until it is on the npm registry, install straight from this repo:
+To install from disk without the registry (offline / air-gapped):
 
 ```
 cd cli && npm pack
-npm install -g ./myto-1.0.0.tgz
+npm install -g ./mytocode-1.0.0.tgz
 ```
 
 ## Configure (first run)
