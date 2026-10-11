@@ -494,6 +494,23 @@ h3 {
 .myto-fade-in {
   animation: myto-fade-in 0.24s ease-out both;
 }
+/* The ToolsLauncher dropdown unfolding downward from its launcher icon: a one-shot
+ * entrance (keyframe, not a transition) so it always reaches full height/opacity —
+ * origin-top scaleY reads as a vertical expand. */
+@keyframes myto-tools-unfold {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scaleY(0.62);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+}
+.myto-tools-unfold {
+  transform-origin: top center;
+  animation: myto-tools-unfold 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
 /* A calm "press" affordance any interactive control can opt into (item 18). */
 .myto-press {
   transition:
@@ -557,6 +574,7 @@ h3 {
   .myto-view-in,
   .myto-tab-in,
   .myto-drawer-in,
+  .myto-tools-unfold,
   .myto-fade-in {
     animation-duration: 0.01ms;
   }

@@ -1115,26 +1115,58 @@ function Message({
   )
 }
 
+/* The side-pane tool glyphs, reused by the ToolsLauncher both in its collapsed
+ * launcher (showing whichever pane is active) and in the expanded vertical menu. */
+const TOOL_ICONS: Record<string, ReactNode> = {
+  terminal: (
+    <svg width="18" height="18" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M3 4 7 8l-4 4M8.5 12h4.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  files: (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="2" y="2" width="4" height="3.2" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+      <rect x="10" y="6.4" width="4" height="3.2" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+      <rect x="10" y="10.8" width="4" height="3.2" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M4 5.2v7.2h6M4 8h6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  preview: (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M6.6 5.4 11 8l-4.4 2.6V5.4Z" fill="currentColor" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+    </svg>
+  ),
+  editor: (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M3 4h10M3 8h10M3 12h10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      <circle cx="6" cy="4" r="1.6" fill="var(--color-bg,currentColor)" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="10" cy="8" r="1.6" fill="var(--color-bg,currentColor)" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="5" cy="12" r="1.6" fill="var(--color-bg,currentColor)" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  )
+}
+
+/* The collapsed launcher's own glyph (shown when no pane is open): a 2×2 grid
+ * that reads as "all the tools live behind this one icon." */
+const TOOLS_LAUNCH_GLYPH: ReactNode = (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+    <rect x="2.2" y="2.2" width="4.6" height="4.6" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+    <rect x="9.2" y="2.2" width="4.6" height="4.6" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+    <rect x="2.2" y="9.2" width="4.6" height="4.6" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+    <rect x="9.2" y="9.2" width="4.6" height="4.6" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+  </svg>
+)
+
 /**
- * The main surface's top strip. On the right: Prompt DNA (the structured-prompt
- * builder toggle) and the two side-pane toggles — Terminal and Preview. On the
- * left, only when the rail is collapsed, a control to reopen it. (The old dark-mode
- * toggle moved to Customize › Appearance; theme still follows the OS by default.)
+ * A single launcher icon that replaces the old horizontal row of side-pane
+ * toggles. Hovering it (or clicking, for touch / keyboard) unfolds a vertical
+ * menu of every tool — Terminal, Working tree, Preview, Editor — using a
+ * grid-rows 0fr→1fr transition so the panel literally expands downward. Only
+ * one side pane can be open at a time, so the launcher doubles as a status
+ * light: it shows the active pane's own glyph (tinted) when one is open.
  */
-function MainTopBar() {
-  const railOpen = useAppStore((s) => s.railOpen)
-  const toggleRail = useAppStore((s) => s.toggleRail)
-  // Prompt DNA: flips the composer between the plain textarea and the structured
-  // PromptBuilder. `composerMode` is global store state, so the button lives here in
-  // the top bar (Task 3) while the builder it controls renders down in the composer.
-  const composerMode = useChatStore((s) => s.composerMode)
-  const setComposerMode = useChatStore((s) => s.setComposerMode)
-  // These three icons (Prompt DNA / Terminal / Preview) are Cowork affordances, so
-  // they only show in Cowork mode. Chat mode is a plain conversation — no builder, no
-  // command pane, no in-app browser — so the whole group is hidden there.
-  const coworkMode = useChatStore((s) => s.coworkMode)
-  // The three right-hand side panes. Opening one closes the other two so the toggles
-  // stay honest (AppLayout renders a single slot; a pinned preview aside, last-opened wins).
+function ToolsLauncher() {
   const previewOpen = usePreviewStore((s) => s.open)
   const revealPreview = usePreviewStore((s) => s.reveal)
   const closePreview = usePreviewStore((s) => s.close)
@@ -1148,44 +1180,117 @@ function MainTopBar() {
   const showEditor = useEditorStore((s) => s.show)
   const closeEditor = useEditorStore((s) => s.close)
 
+  const [open, setOpen] = useState(false)
+  // A short close delay tolerates the pointer crossing the gap between the
+  // launcher and the panel without the menu collapsing out from under it.
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const cancelClose = (): void => {
+    if (closeTimer.current) {
+      clearTimeout(closeTimer.current)
+      closeTimer.current = null
+    }
+  }
+  const scheduleClose = (): void => {
+    cancelClose()
+    closeTimer.current = setTimeout(() => setOpen(false), 140)
+  }
+  useEffect(() => cancelClose, [])
+
+  // Opening any pane closes the other three, mirroring AppLayout's single slot.
+  const only =
+    (show: () => void) =>
+    (): void => {
+      show()
+      closePreview()
+      closeTerminal()
+      closeFiles()
+      closeEditor()
+    }
+  const tools = [
+    { key: 'terminal', label: 'Terminal', hint: 'Build command output', isOpen: terminalOpen, open: only(showTerminal), close: closeTerminal },
+    { key: 'files', label: 'Working tree', hint: 'Files Build is changing', isOpen: filesOpen, open: only(showFiles), close: closeFiles },
+    { key: 'preview', label: 'Preview', hint: "Myto's in-app browser", isOpen: previewOpen, open: only(revealPreview), close: closePreview },
+    { key: 'editor', label: 'Editor', hint: 'Watch Myto edit photos & video', isOpen: editorOpen, open: only(showEditor), close: closeEditor }
+  ]
+  const active = tools.find((t) => t.isOpen)
+  const select = (t: (typeof tools)[number]): void => {
+    if (t.isOpen) t.close()
+    else t.open()
+    setOpen(false)
+  }
+  return (
+    <div
+      className="relative"
+      onMouseEnter={() => { cancelClose(); setOpen(true) }}
+      onMouseLeave={scheduleClose}
+      onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOpen(false) }}
+      onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false) }}
+    >
+      <button
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="Tools"
+        title="Tools — Terminal, Working tree, Preview, Editor"
+        onClick={() => setOpen((v) => !v)}
+        className={
+          'grid h-7 w-7 place-items-center rounded-md transition-colors ' +
+          (active || open ? 'bg-surface-2 text-text' : 'text-muted hover:bg-surface-2 hover:text-text')
+        }
+      >
+        {active ? TOOL_ICONS[active.key] : TOOLS_LAUNCH_GLYPH}
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full z-50 pt-1.5">
+          <div role="menu" className="myto-tools-unfold min-w-[11.5rem] rounded-xl border border-border/70 bg-surface/95 p-1 shadow-xl shadow-black/25 backdrop-blur-sm">
+              {tools.map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={t.isOpen}
+                  title={t.hint}
+                  onClick={() => select(t)}
+                  className={
+                    'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12.5px] transition-colors ' +
+                    (t.isOpen ? 'bg-surface-2 text-text' : 'text-muted hover:bg-surface-2 hover:text-text')
+                  }
+                >
+                  <span className="grid h-5 w-5 shrink-0 place-items-center">{TOOL_ICONS[t.key]}</span>
+                  <span className="flex-1 font-medium">{t.label}</span>
+                  <span className={'h-1.5 w-1.5 rounded-full transition-colors ' + (t.isOpen ? 'bg-primary' : 'bg-transparent')} />
+                </button>
+              ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The main surface's top strip. On the right: Prompt DNA (the structured-prompt
+ * builder toggle) and the ToolsLauncher — a single icon that unfolds vertically on
+ * hover to reveal the side-pane tools (Terminal, Working tree, Preview, Editor). On
+ * the left, only when the rail is collapsed, a control to reopen it. (The old
+ * dark-mode toggle moved to Customize › Appearance; theme still follows the OS.)
+ */
+function MainTopBar() {
+  const railOpen = useAppStore((s) => s.railOpen)
+  const toggleRail = useAppStore((s) => s.toggleRail)
+  // Prompt DNA: flips the composer between the plain textarea and the structured
+  // PromptBuilder. `composerMode` is global store state, so the button lives here in
+  // the top bar (Task 3) while the builder it controls renders down in the composer.
+  const composerMode = useChatStore((s) => s.composerMode)
+  const setComposerMode = useChatStore((s) => s.setComposerMode)
+  // Prompt DNA and the ToolsLauncher are Cowork (Build) affordances, so they only
+  // show in Cowork mode. Chat mode is a plain conversation — no builder, no command
+  // pane, no in-app browser — so the whole group is hidden there. The side-pane tools
+  // themselves now live in <ToolsLauncher/>, which owns their store wiring.
+  const coworkMode = useChatStore((s) => s.coworkMode)
+
   const dnaActive = composerMode === 'builder'
   const dnaLabel = dnaActive ? 'Back to plain text' : 'Prompt DNA — build a structured prompt'
-  const togglePreview = (): void => {
-    if (previewOpen) closePreview()
-    else {
-      revealPreview()
-      closeTerminal()
-      closeFiles()
-      closeEditor()
-    }
-  }
-  const toggleTerminal = (): void => {
-    if (terminalOpen) closeTerminal()
-    else {
-      showTerminal()
-      closePreview()
-      closeFiles()
-      closeEditor()
-    }
-  }
-  const toggleFiles = (): void => {
-    if (filesOpen) closeFiles()
-    else {
-      showFiles()
-      closePreview()
-      closeTerminal()
-      closeEditor()
-    }
-  }
-  const toggleEditor = (): void => {
-    if (editorOpen) closeEditor()
-    else {
-      showEditor()
-      closePreview()
-      closeTerminal()
-      closeFiles()
-    }
-  }
   const topIcon = (active: boolean): string =>
     'grid h-7 w-7 place-items-center rounded-md transition-colors ' +
     (active ? 'bg-surface-2 text-text' : 'text-muted hover:bg-surface-2 hover:text-text')
@@ -1224,65 +1329,7 @@ function MainTopBar() {
               <path d="M5.6 4.5h4.8M4.7 8h6.6M5.6 11.5h4.8" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
             </svg>
           </button>
-          <button
-            type="button"
-            aria-label={terminalOpen ? 'Hide terminal' : 'Show terminal'}
-            aria-pressed={terminalOpen}
-            title="Terminal — Build command output"
-            onClick={toggleTerminal}
-            className={topIcon(terminalOpen)}
-          >
-            {/* Bare `>_` prompt glyph — no window box, a touch larger than its neighbours. */}
-            <svg width="18" height="18" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M3 4 7 8l-4 4M8.5 12h4.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            aria-label={filesOpen ? 'Hide working tree' : 'Show working tree'}
-            aria-pressed={filesOpen}
-            title="Working tree — files Build is changing"
-            onClick={toggleFiles}
-            className={topIcon(filesOpen)}
-          >
-            {/* A node-tree glyph — a hierarchy of boxes, distinct from terminal/preview. */}
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <rect x="2" y="2" width="4" height="3.2" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
-              <rect x="10" y="6.4" width="4" height="3.2" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
-              <rect x="10" y="10.8" width="4" height="3.2" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
-              <path d="M4 5.2v7.2h6M4 8h6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            aria-label={previewOpen ? 'Hide preview' : 'Show preview'}
-            aria-pressed={previewOpen}
-            title="Preview — Myto's in-app browser"
-            onClick={togglePreview}
-            className={topIcon(previewOpen)}
-          >
-            {/* Media-player style play button — a filled triangle in a ring. */}
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.3" />
-              <path d="M6.6 5.4 11 8l-4.4 2.6V5.4Z" fill="currentColor" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            aria-label={editorOpen ? 'Hide editor' : 'Show editor'}
-            aria-pressed={editorOpen}
-            title="Editor — watch Myto edit photos & video"
-            onClick={toggleEditor}
-            className={topIcon(editorOpen)}
-          >
-            {/* Lightroom-style adjustment sliders — three tracks with offset knobs. */}
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M3 4h10M3 8h10M3 12h10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-              <circle cx="6" cy="4" r="1.6" fill="var(--color-bg,currentColor)" stroke="currentColor" strokeWidth="1.3" />
-              <circle cx="10" cy="8" r="1.6" fill="var(--color-bg,currentColor)" stroke="currentColor" strokeWidth="1.3" />
-              <circle cx="5" cy="12" r="1.6" fill="var(--color-bg,currentColor)" stroke="currentColor" strokeWidth="1.3" />
-            </svg>
-          </button>
+          <ToolsLauncher />
         </div>
       )}
     </div>
