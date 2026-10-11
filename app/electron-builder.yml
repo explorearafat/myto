@@ -112,12 +112,13 @@ linux:
   synopsis: Local-first AI coding workspace
   description: Myto is a local-first AI coding workspace — read your project, edit with approval, run the build, and edit video and photos, all in one window.
   desktop:
-    Name: Myto
-    Comment: Local-first AI coding workspace
-    Categories: Development;IDE;
-    Keywords: ai;code;editor;workspace;developer;
-    StartupWMClass: Myto
-    Terminal: 'false'
+    entry:
+      Name: Myto
+      Comment: Local-first AI coding workspace
+      Categories: Development;IDE;
+      Keywords: ai;code;editor;workspace;developer;
+      StartupWMClass: Myto
+      Terminal: 'false'
   artifactName: ${productName}.${ext}
 
 deb:

@@ -25,6 +25,10 @@ coverage/
 /NOTES.md
 .myto/
 
+# Local scratch: a demo project the `myto` CLI built, copied here only so the
+# browser preview can serve it. Generated, never committed.
+/.demo/
+
 # Phantom entry: `nul` is a reserved Windows device name, so git's lstat on it
 # always "succeeds" and reports an untracked `nul` even when no such file exists
 # on disk. Ignore it so a stray shell redirect can never surface as a change.
