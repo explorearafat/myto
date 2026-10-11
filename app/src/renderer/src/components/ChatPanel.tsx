@@ -989,12 +989,13 @@ function AssistantMessage({
     () => segments.some((s) => s.kind === 'tool' && FS_TOOL_NAMES.has(s.name ?? '')),
     [segments]
   )
-  // How many tasks are running right now, for the live "N running task" readout at the
-  // foot of the reply (MessageMeta). The loop runs one tool at a time — or is thinking/
-  // writing between calls — so the usual count is 1; a live spawn_agents fans its `tasks`
-  // out to several sub-agents in parallel, so it reports that many. Zero once the turn
-  // ends (the meta line then collapses to the quiet mark). update_plan is the plan
-  // panel's bookkeeping, not a task, so it never counts.
+  // How many background tasks are running right now, for the live "N running task"
+  // readout at the foot of the reply (MessageMeta). A task is an in-flight tool call:
+  // the loop runs one at a time, so the usual count is 1; a live spawn_agents fans its
+  // `tasks` out to several sub-agents in parallel, so it reports that many. When the
+  // turn is pending but NOTHING is in flight (the model is thinking or writing the
+  // reply), the count is 0 so the readout hides — no phantom "1 running task".
+  // update_plan is the plan panel's bookkeeping, not a task, so it never counts.
   const runningTasks = useMemo(() => {
     if (!message.pending) return 0
     for (let i = segments.length - 1; i >= 0; i--) {
@@ -1007,7 +1008,7 @@ function AssistantMessage({
         return 1
       }
     }
-    return 1
+    return 0
   }, [segments, message.pending])
   // Interleave the reply's prose/file/tool segments with its thinking phases,
   // sliced by each phase's content offset (the phases sit on turn boundaries, so a
