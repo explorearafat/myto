@@ -621,6 +621,13 @@ export interface GeneratedMedia {
   url?: string
   /** The prompt that produced it, kept for the caption / alt text. */
   prompt?: string
+  /**
+   * Workspace-relative path of the on-disk file these bytes were read from,
+   * when the media was produced locally (an FFmpeg edit result). Rides along
+   * so the reply can offer an "Open folder" action; the main process
+   * re-validates it against the working folder before revealing anything.
+   */
+  localPath?: string
 }
 
 // EDITOR_TYPES_MARKER
@@ -1355,6 +1362,8 @@ export type FileSaveResult =
  */
 export interface FilesApi {
   save: (name: string, content: string) => Promise<FileSaveResult>
+  /** Reveal a working-folder file in the OS file manager (the "Open folder" action). */
+  revealInFolder: (path: string) => void
 }
 
 /**

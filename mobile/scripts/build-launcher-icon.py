@@ -8,16 +8,9 @@ OUT = MOBILE / "assets" / "icon"
 
 SIZE = 1024
 SS = 4
-
-# Monochrome Myto palette: near-white mark on charcoal.
 MARK = (240, 240, 236)  # #F0F0EC
 BG = (24, 24, 24)       # #181818
 
-# The Myto mark — a mitochondria drawn in a 512x512 frame, rotated 12 about (256,256). This
-# mirrors lib/widgets/myto_mark.dart and public/myto-mark.svg exactly so every surface shows the
-# same geometry: two continuous organic bean contours (the double membrane) with four rounded
-# finger-like cristae folding in from the lower wall. Each membrane is (start, [(c1, c2, end), ...])
-# closed back to start; cristae are single cubics (start, c1, c2, end, width).
 ROT = 12.0
 CX = CY = 256.0
 OUTER = ((100, 260), [

@@ -39,3 +39,96 @@ nsis:
   # Version-less, space-less name so the public download link is permanent across
   # releases: github.com/<repo>/releases/latest/download/Myto-Setup.exe
   artifactName: ${productName}-Setup.exe
+
+# ---------------------------------------------------------------------------
+# macOS — dmg (drag-to-Applications) + zip (for tooling that wants a raw bundle).
+#
+# Built PER ARCHITECTURE on separate runners, never as one universal binary:
+# ffmpeg-static and @lydell/node-pty each resolve a *host-arch* native binary at
+# install time, so a single `npm ci` can only carry one architecture's ffmpeg and
+# pty addon. The CI matrix builds x64 (Intel) and arm64 (Apple silicon) jobs and
+# publishes the two as distinct artifacts; the download page offers both.
+#
+# Signing: this project has no Developer ID certificate, so `identity: null` makes
+# electron-builder skip Developer ID signing. arm64 additionally *requires* at
+# least an ad-hoc signature or the app will not launch at all, so
+# scripts/macos-finalize.mjs re-signs ad-hoc (`codesign -s -`) after packaging and
+# rebuilds the dmg/zip from the signed bundle if the build came out unsigned.
+# Gatekeeper therefore warns on first open — the macOS counterpart to the
+# SmartScreen warning the self-signed Windows installer already shows.
+# Notarization is deliberately off: it needs the same certificate we do not have.
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+  icon: resources/icon.icns
+  identity: null
+  notarize: false
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.inherit.plist
+  minimumSystemVersion: '11.0'
+  extendInfo:
+    LSApplicationCategoryType: public.app-category.developer-tools
+    NSMicrophoneUsageDescription: Myto uses the microphone for voice input in the chat composer.
+    NSCameraUsageDescription: Myto uses the camera when you attach a photo to a message.
+  # Architecture stays in the name because it decides which file the user needs;
+  # the pair is stable across releases, so the site links to
+  # releases/latest/download/Myto-arm64.dmg and .../Myto-x64.dmg.
+  artifactName: ${productName}-${arch}.${ext}
+
+dmg:
+  title: ${productName} ${version}
+  # The dmg itself is left unsigned too — signing a disk image requires the same
+  # Developer ID certificate as the app inside it.
+  sign: false
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+# ---------------------------------------------------------------------------
+# Linux — AppImage (distro-agnostic, no install), deb, rpm, and a plain tar.gz.
+# Artifact names deliberately drop the version (matching Myto-Setup.exe) so
+# releases/latest/download/Myto.AppImage is a permanent link across releases.
+linux:
+  target:
+    - AppImage
+    - deb
+    - rpm
+    - tar.gz
+  # A directory of size-named PNGs (256x256.png, 512x512.png, ...) — Linux does
+  # not read .icns/.ico. Generated from resources/icon-1024.png by
+  # scripts/build-platform-icons.py and committed, so CI needs no icon tooling.
+  icon: resources/icons
+  category: Development
+  executableName: myto
+  maintainer: Myto <explorearafat@users.noreply.github.com>
+  synopsis: Local-first AI coding workspace
+  description: Myto is a local-first AI coding workspace — read your project, edit with approval, run the build, and edit video and photos, all in one window.
+  desktop:
+    Name: Myto
+    Comment: Local-first AI coding workspace
+    Categories: Development;IDE;
+    Keywords: ai;code;editor;workspace;developer;
+    StartupWMClass: Myto
+    Terminal: 'false'
+  artifactName: ${productName}.${ext}
+
+deb:
+  # Electron's own baseline. Kept explicit so a minimal container image still
+  # resolves the GTK/NSS stack the renderer links against.
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libsecret-1-0

@@ -1,0 +1,52 @@
+{
+  "name": "myto",
+  "version": "1.0.0",
+  "description": "The Myto coding agent in your terminal — reads your project, edits with approval, runs your build, and verifies its work.",
+  "keywords": [
+    "ai",
+    "agent",
+    "coding-agent",
+    "cli",
+    "llm",
+    "openai",
+    "anthropic",
+    "ollama",
+    "developer-tools"
+  ],
+  "license": "MIT",
+  "author": "Myto",
+  "homepage": "https://github.com/explorearafat/myto#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/explorearafat/myto.git",
+    "directory": "cli"
+  },
+  "bugs": {
+    "url": "https://github.com/explorearafat/myto/issues"
+  },
+  "bin": {
+    "myto": "dist/cli.js"
+  },
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node dist/cli.js",
+    "test": "vitest run",
+    "prepublishOnly": "node build.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "vitest": "^5.0.0"
+  }
+}

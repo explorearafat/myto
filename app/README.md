@@ -75,7 +75,9 @@ tools work across every provider Myto supports (Claude, Gemini, GLM, DeepSeek, â
 outputs are sandboxed to the working folder (symlink-safe, fail-closed); Myto **never
 overwrites the source** â€” results are written to a `myto-edits/` subfolder with unique
 names. Failures return a short, readable message with the FFmpeg stderr tail, not a raw log.
-A finished video is previewed inline in the reply as a `<video controls>` player.
+A finished video is previewed inline in the reply as a `<video controls>` player, with an
+**Open folder** action that reveals the file in the OS file manager (the path is
+re-validated against the working folder in the main process before revealing).
 
 **Transcription config.** `transcribe_audio` resolves a backend from the environment (no
 Settings UI):

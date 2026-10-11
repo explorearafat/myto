@@ -90,6 +90,8 @@ export const IpcChannel = {
   // File download (file cards): save a single generated file to disk via native Save As.
   /** Renderer → main (invoke): open a Save As dialog and write a generated file. */
   FilesSave: 'files:save',
+  /** Renderer → main (send): reveal a working-folder file in the OS file manager. */
+  FilesRevealInFolder: 'files:reveal-in-folder',
 
   // Cowork (agentic mode): pick the working folder the filesystem tools are scoped to.
   /** Renderer → main (invoke): open a folder picker; resolves the chosen path or null. */

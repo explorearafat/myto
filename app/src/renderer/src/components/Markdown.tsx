@@ -121,6 +121,29 @@ const components: Components = {
   // link via mediaToMarkdown; render it as an inline <video controls> player so the
   // user can watch the result in place rather than following a giant data: URL.
   a({ href, children }) {
+    // The "Open folder" action for a file the editing tools produced (media-edit):
+    // mediaToMarkdown emits it as a `myto-reveal:` link carrying the workspace-relative
+    // path. The main process re-validates the path against the working folder before
+    // revealing it in the OS file manager. A malformed encoding falls through to
+    // ordinary link rendering rather than throwing.
+    if (typeof href === 'string' && href.startsWith('myto-reveal:')) {
+      let target: string | undefined
+      try {
+        target = decodeURIComponent(href.slice('myto-reveal:'.length))
+      } catch { /* malformed encoding — render as a plain link instead */ }
+      if (target) {
+        const path = target
+        return (
+          <button
+            type="button"
+            onClick={() => window.myto.files.revealInFolder(path)}
+            className="my-1 rounded-md border border-border/70 px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:bg-surface hover:text-text"
+          >
+            Open folder
+          </button>
+        )
+      }
+    }
     if (
       typeof href === 'string' &&
       (href.startsWith('data:video/') || /\.(mp4|webm|mov|m4v|mkv)(?:[?#]|$)/i.test(href))

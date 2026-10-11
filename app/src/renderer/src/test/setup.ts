@@ -120,7 +120,8 @@ const mytoMock: MytoApi = {
     signInWithGoogle: vi.fn().mockResolvedValue({ ok: false, error: '' })
   },
   files: {
-    save: vi.fn().mockResolvedValue({ ok: false, canceled: true })
+    save: vi.fn().mockResolvedValue({ ok: false, canceled: true }),
+    revealInFolder: vi.fn()
   },
   cowork: {
     pickWorkspace: vi.fn().mockResolvedValue(null),

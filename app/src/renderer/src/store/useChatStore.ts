@@ -38,6 +38,13 @@ function mediaToMarkdown(media: GeneratedMedia[]): string {
     if (!src) continue
     const alt = (m.prompt ?? (m.kind === 'video' ? 'video' : 'image')).replace(/[\r\n]+/g, ' ').replace(/[[\]]/g, '').slice(0, 300)
     parts.push(m.kind === 'video' ? `[▶ ${alt || 'video'}](${src})` : `![${alt}](${src})`)
+    // "Open folder" action for files the editing tools wrote to disk: a
+    // `myto-reveal:` link the Markdown renderer turns into a button that
+    // asks the main process to reveal the (re-validated) file in the OS
+    // file manager. The path rides along as a workspace-relative string.
+    if (m.localPath) {
+      parts.push(`[Open folder](myto-reveal:${encodeURIComponent(m.localPath)})`)
+    }
   }
   return parts.length ? `\n\n${parts.join('\n\n')}\n\n` : ''
 }

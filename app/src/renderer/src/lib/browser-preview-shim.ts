@@ -198,7 +198,9 @@ function installShim(): void {
       signInWithGoogle: () => Promise.resolve({ ok: false as const, error: '' })
     },
     files: {
-      save: () => Promise.resolve({ ok: false as const, canceled: true as const })
+      save: () => Promise.resolve({ ok: false as const, canceled: true as const }),
+      // No OS file manager in the browser preview; reveal is a no-op.
+      revealInFolder: () => undefined
     },
     cowork: {
       // The browser preview has no native folder dialog; report "cancelled".

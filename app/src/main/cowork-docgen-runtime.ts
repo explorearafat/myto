@@ -56,7 +56,6 @@ export async function renderHtmlToPdf(html: string, options: PdfRenderOptions): 
       printBackground: options.printBackground,
       pageSize: options.pageSize,
       margins: {
-        marginType: 'custom',
         top: options.margins.top,
         bottom: options.margins.bottom,
         left: options.margins.left,

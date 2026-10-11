@@ -104,7 +104,8 @@ const api: MytoApi = {
     signInWithGoogle: () => ipcRenderer.invoke(IpcChannel.AuthSignInWithGoogle)
   },
   files: {
-    save: (name, content) => ipcRenderer.invoke(IpcChannel.FilesSave, name, content)
+    save: (name, content) => ipcRenderer.invoke(IpcChannel.FilesSave, name, content),
+    revealInFolder: (path) => ipcRenderer.send(IpcChannel.FilesRevealInFolder, path)
   },
   cowork: {
     pickWorkspace: () => ipcRenderer.invoke(IpcChannel.CoworkPickWorkspace),

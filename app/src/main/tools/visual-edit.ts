@@ -262,7 +262,7 @@ export const editPhotoTool: ToolDef = {
           const s = await stat(outAbs)
           if (s.size <= INLINE_PREVIEW_CAP) {
             const bytes = await readFile(outAbs)
-            ctx.emitMedia([{ kind: 'image', mediaType: IMAGE_MIME[ext] ?? 'image/jpeg', dataBase64: bytes.toString('base64'), prompt: `edit ${rel}` }])
+            ctx.emitMedia([{ kind: 'image', mediaType: IMAGE_MIME[ext] ?? 'image/jpeg', dataBase64: bytes.toString('base64'), prompt: `edit ${rel}`, localPath: outRel }])
           }
         } catch { /* inline preview is best-effort; the path is always in the result */ }
       }
@@ -388,7 +388,7 @@ export const editVideoTool: ToolDef = {
           const s = await stat(outAbs)
           if (s.size <= INLINE_PREVIEW_CAP) {
             const bytes = await readFile(outAbs)
-            ctx.emitMedia([{ kind: 'video', mediaType: VIDEO_MIME[ext] ?? 'video/mp4', dataBase64: bytes.toString('base64'), prompt: `edit ${plan.input}` }])
+            ctx.emitMedia([{ kind: 'video', mediaType: VIDEO_MIME[ext] ?? 'video/mp4', dataBase64: bytes.toString('base64'), prompt: `edit ${plan.input}`, localPath: outRel }])
           }
         } catch { /* inline preview is best-effort; the path is always in the result */ }
       }

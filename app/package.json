@@ -23,6 +23,10 @@
     "test:watch": "vitest",
     "pack:dir": "npm run build && electron-builder --dir",
     "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac --publish never && node scripts/macos-finalize.mjs",
+    "dist:mac:x64": "npm run build && electron-builder --mac --x64 --publish never && node scripts/macos-finalize.mjs",
+    "dist:mac:arm64": "npm run build && electron-builder --mac --arm64 --publish never && node scripts/macos-finalize.mjs",
+    "dist:linux": "npm run build && electron-builder --linux --publish never",
     "preview:web": "vite --config vite.preview.config.ts"
   },
   "dependencies": {

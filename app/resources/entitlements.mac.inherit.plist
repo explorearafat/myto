@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  Entitlements for the child processes Electron spawns (Renderer, GPU, Utility,
+  and the plugin helpers) — mac.entitlementsInherit in electron-builder.yml.
+
+  This is deliberately a subclass of entitlements.mac.plist: child processes
+  never need the device.* permissions (they do not talk to the mic or camera
+  directly; the main process brokers that), so granting them there would widen
+  the attack surface for no benefit. They do need the same cs.* JIT exceptions,
+  because each renderer runs its own V8 isolate.
+
+  Kept as a separate file rather than a symlink so the two can diverge later
+  (e.g. if a future child process needs its own exception).
+-->
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

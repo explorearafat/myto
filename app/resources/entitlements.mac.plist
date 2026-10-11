@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  Entitlements for the main Myto.app bundle on macOS.
+
+  electron-builder.yml points mac.entitlements at this file, so it has to exist
+  or the macOS job dies before packaging. It applies whether the build is
+  Developer-ID signed or (as today, with no certificate) ad-hoc signed — the
+  entitlements are recorded in the signature either way.
+
+  The cs.* keys are the standard Electron hardened-runtime set: without them the
+  V8 JIT cannot allocate writable-executable pages and the renderer crashes on
+  launch. disable-library-validation and allow-dyld-environment-variables are
+  required because asarUnpack ships native addons (@lydell/node-pty, ffmpeg) that
+  are not signed by the same team as the app; the library validation check would
+  otherwise refuse to load them.
+
+  The device.* keys match the Info.plist usage strings configured under mac.extendInfo
+  (NSMicrophoneUsageDescription / NSCameraUsageDescription) — the usage string
+  prompts the user, but the entitlement is what actually grants access.
+-->
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+  <key>com.apple.security.device.camera</key>
+  <true/>
+</dict>
+</plist>

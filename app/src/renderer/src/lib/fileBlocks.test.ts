@@ -21,13 +21,6 @@ function toolAt(segments: Segment[], index: number): ToolSegment {
   return seg
 }
 
-/**
- * The parser's whole job is to separate genuine "here is a file to save" blocks
- * from everything else, without disturbing everything else. So the cases that
- * matter are the boundaries: a path-tagged block becomes a card, a bare snippet
- * stays prose, and a block still streaming in is flagged incomplete so the card
- * can show it being written rather than waiting for the close.
- */
 describe('parseFileBlocks', () => {
   it('leaves a reply with no fences as a single prose segment (today’s behaviour)', () => {
     const segments = parseFileBlocks('Just a plain answer.\n\nWith two paragraphs.')
@@ -131,12 +124,6 @@ describe('parseFileBlocks', () => {
   })
 })
 
-/**
- * Tool use rides the reply as two adjacent fenced blocks — a `myto:tool` call and
- * a `myto:tool_result <name>` result (written by main/tools). The parser coalesces
- * them into a single card, shows a call still waiting on its result as "running",
- * and must not disturb the file/prose parsing around it.
- */
 describe('parseFileBlocks — tool segments', () => {
   it('coalesces a call and its result into one tool segment', () => {
     const md = [
@@ -206,8 +193,6 @@ describe('parseFileBlocks — tool segments', () => {
   })
 
   it('survives a result block that itself contains a fenced code block', () => {
-    // main/tools widens the result fence past any inner backtick run, so an inner
-    // ``` never closes the block early.
     const md = [
       '````myto:tool_result web_fetch',
       'Example:',

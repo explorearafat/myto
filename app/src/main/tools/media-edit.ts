@@ -149,7 +149,7 @@ async function tryProbe(ctx: ToolContext, abs: string): Promise<MediaInfo | null
 }
 
 /** Surface a finished output file to the user inline (small renderable files only); best-effort. */
-async function emitOutput(ctx: ToolContext, abs: string, prompt: string): Promise<void> {
+async function emitOutput(ctx: ToolContext, abs: string, rel: string, prompt: string): Promise<void> {
   if (!ctx.emitMedia) return
   const kind = mediaKindFor(extOf(abs))
   if (!kind) return
@@ -157,7 +157,9 @@ async function emitOutput(ctx: ToolContext, abs: string, prompt: string): Promis
     const s = await stat(abs)
     if (s.size > INLINE_PREVIEW_CAP) return
     const bytes = await readFile(abs)
-    ctx.emitMedia([{ kind: kind.kind, mediaType: kind.mediaType, dataBase64: bytes.toString('base64'), prompt }])
+    // `localPath` rides along so the reply can offer an "Open folder" action;
+    // the main process re-validates it against the working folder first.
+    ctx.emitMedia([{ kind: kind.kind, mediaType: kind.mediaType, dataBase64: bytes.toString('base64'), prompt, localPath: rel }])
   } catch { /* preview is best-effort; the path is always in the result text */ }
 }
 
@@ -244,7 +246,7 @@ export const trimClipTool: ToolDef = {
     if (typeof out === 'string') return out
     try {
       await runEncode(ctx, buildTrimArgs(r.abs, out.abs, start, end, o.reencode === true), 'Trimming', end - start)
-      await emitOutput(ctx, out.abs, `trim ${r.rel}`)
+      await emitOutput(ctx, out.abs, out.rel, `trim ${r.rel}`)
       return `Trimmed ${fmtDur(end - start)} → ${await describeOutput(ctx, out.rel, out.abs)}`
     } catch (err) {
       return `trim_clip failed: ${toErrorMessage(err)}`
@@ -280,7 +282,7 @@ export const concatClipsTool: ToolDef = {
     try {
       list = await writeTemp(buildConcatListContent(abs), 'txt')
       await runEncode(ctx, buildConcatArgs(list, out.abs, o.reencode === true), 'Joining clips')
-      await emitOutput(ctx, out.abs, `concat ${abs.length} clips`)
+      await emitOutput(ctx, out.abs, out.rel, `concat ${abs.length} clips`)
       return `Joined ${abs.length} clips → ${await describeOutput(ctx, out.rel, out.abs)}`
     } catch (err) {
       return `concat_clips failed: ${toErrorMessage(err)}`
@@ -448,7 +450,7 @@ export const addSubtitlesTool: ToolDef = {
       sub = await writeTemp(srt, 'srt')
       const info = await tryProbe(ctx, r.abs)
       await runEncode(ctx, buildSubtitleBurnArgs(r.abs, out.abs, sub, readStr(o.style) ?? undefined), 'Burning subtitles', info?.durationSec)
-      await emitOutput(ctx, out.abs, `subtitles ${r.rel}`)
+      await emitOutput(ctx, out.abs, out.rel, `subtitles ${r.rel}`)
       return `Burned subtitles → ${await describeOutput(ctx, out.rel, out.abs)}`
     } catch (err) {
       return `add_subtitles failed: ${toErrorMessage(err)}`
@@ -485,7 +487,7 @@ export const mixAudioTool: ToolDef = {
     try {
       const info = await tryProbe(ctx, rv.abs)
       await runEncode(ctx, buildMixAudioArgs(rv.abs, ra.abs, out.abs, mode, clampVolume(o.volume, 1)), 'Mixing audio', info?.durationSec)
-      await emitOutput(ctx, out.abs, `${mode} audio`)
+      await emitOutput(ctx, out.abs, out.rel, `${mode} audio`)
       return `Mixed audio (${mode}) → ${await describeOutput(ctx, out.rel, out.abs)}`
     } catch (err) {
       return `mix_audio failed: ${toErrorMessage(err)}`
@@ -519,7 +521,7 @@ export const resizeOrCropTool: ToolDef = {
     try {
       const info = await tryProbe(ctx, r.abs)
       await runEncode(ctx, buildResizeCropArgs(r.abs, out.abs, o.aspect_ratio, mode), `Reframing to ${o.aspect_ratio}`, info?.durationSec)
-      await emitOutput(ctx, out.abs, `${o.aspect_ratio} ${mode}`)
+      await emitOutput(ctx, out.abs, out.rel, `${o.aspect_ratio} ${mode}`)
       return `Reframed to ${o.aspect_ratio} (${mode}) → ${await describeOutput(ctx, out.rel, out.abs)}`
     } catch (err) {
       return `resize_or_crop failed: ${toErrorMessage(err)}`
@@ -557,7 +559,7 @@ export const applyEditPlanTool: ToolDef = {
       }
       const info = await tryProbe(ctx, r.abs)
       await runEncode(ctx, buildEditPlanArgs(r.abs, out.abs, res.plan, subAbs), 'Rendering edit', info?.durationSec)
-      await emitOutput(ctx, out.abs, 'edit plan')
+      await emitOutput(ctx, out.abs, out.rel, 'edit plan')
       const ops = res.plan.operations.map((op) => op.op).join(' → ')
       return `Rendered edit (${ops}) → ${await describeOutput(ctx, out.rel, out.abs)}`
     } catch (err) {
@@ -603,7 +605,7 @@ export const runFfmpegTool: ToolDef = {
       const outRel = readStr(o.output)
       const outAbs = outRel ? resolveInWorkspace(ctx.workspaceDir, outRel) : null
       if (outRel && outAbs) {
-        await emitOutput(ctx, outAbs, 'ffmpeg output')
+        await emitOutput(ctx, outAbs, outRel, 'ffmpeg output')
         return `ffmpeg finished → ${await describeOutput(ctx, outRel, outAbs)}`
       }
       return 'ffmpeg finished successfully.'
