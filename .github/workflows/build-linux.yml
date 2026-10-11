@@ -1,0 +1,57 @@
+name: Build Linux App
+
+# Publish Myto.AppImage, Myto.deb, Myto.rpm and Myto.tar.gz whenever you push a
+# version tag (e.g. v0.7.1), or run it manually from the Actions tab — the Linux
+# mirror of build-windows.yml. Artifact names drop the version (see
+# app/electron-builder.yml) so /releases/latest/download/Myto.AppImage is a
+# permanent link across releases.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      # electron-builder's rpm target shells out to the `rpmbuild` toolchain, which
+      # is not on the ubuntu-latest image by default. AppImage/deb/tar.gz need no
+      # extra packages. Harmless if the base image ever starts shipping rpm.
+      - name: Install rpm tooling
+        working-directory: ${{ github.workspace }}
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Linux packages
+        run: npm run dist:linux
+
+      - name: Publish AppImage, deb, rpm and tar.gz to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            app/release/Myto.AppImage
+            app/release/Myto.deb
+            app/release/Myto.rpm
+            app/release/Myto.tar.gz
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
