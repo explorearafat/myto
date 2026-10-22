@@ -7,6 +7,7 @@ import 'services/auth_service.dart';
 import 'services/byok_service.dart';
 import 'services/conversation_store.dart';
 import 'services/studio_store.dart';
+import 'services/team_chat_store.dart';
 import 'theme.dart';
 
 class MytoApp extends StatelessWidget {
@@ -31,6 +32,9 @@ class MytoApp extends StatelessWidget {
         ChangeNotifierProvider<ByokService>.value(value: byok),
         ChangeNotifierProvider<ConversationStore>.value(value: store),
         ChangeNotifierProvider<StudioStore>.value(value: studio),
+        ChangeNotifierProvider<TeamChatStore>.value(
+          value: TeamChatStore(store, studio),
+        ),
       ],
       child: MaterialApp(
         title: 'Myto',

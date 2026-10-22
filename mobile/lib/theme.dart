@@ -412,7 +412,7 @@ ThemeData _build({
       ),
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(TeamlyRadius.pill),
-        borderSide: BorderSide(color: accent, width: 1.5),
+        borderSide: BorderSide.none,
       ),
     ),
     snackBarTheme: SnackBarThemeData(

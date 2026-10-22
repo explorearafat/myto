@@ -91,6 +91,18 @@ class ConversationStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Import a conversation built outside the store (e.g. a channel-marked
+  /// agent/room thread from TeamChatStore) and persist it. Deduplicates by id.
+  void import(Conversation conversation) {
+    final existing = _conversations.where((c) => c.id == conversation.id).toList();
+    for (final e in existing) {
+      _conversations.remove(e);
+    }
+    _conversations.insert(0, conversation);
+    notifyListeners();
+    _persist();
+  }
+
   void delete(String id) {
     _conversations.removeWhere((c) => c.id == id);
     if (_active.id == id) {

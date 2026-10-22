@@ -43,6 +43,42 @@ class StudioStore extends ChangeNotifier {
   final List<AgentTeam> _teams = [];
   List<AgentTeam> get teams => List.unmodifiable(_teams);
 
+  /// Create a user-built room and add it to the Rooms list.
+  AgentTeam createTeam({
+    required String name,
+    required List<String> roles,
+    required List<String> agentIds,
+  }) {
+    final team = AgentTeam(
+      id: 'team-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
+      name: name.trim().isEmpty ? 'New room' : name.trim(),
+      roles: List<String>.from(roles),
+      agentIds: List<String>.from(agentIds),
+      memberCount: agentIds.length,
+    );
+    _teams.insert(0, team);
+    notifyListeners();
+    _persist();
+    return team;
+  }
+
+  /// Remove a room (custom rooms only; the seeded catalogue is fixed).
+  void removeTeam(String id) {
+    final before = _teams.length;
+    _teams.removeWhere((t) => t.id == id);
+    if (_teams.length != before) {
+      notifyListeners();
+      _persist();
+    }
+  }
+
+  AgentTeam? teamById(String id) {
+    for (final t in _teams) {
+      if (t.id == id) return t;
+    }
+    return null;
+  }
+
   /// Search over name + description, case-insensitive.
   List<Agent> searchAgents(String query, {required AgentSource source}) {
     final q = query.trim().toLowerCase();

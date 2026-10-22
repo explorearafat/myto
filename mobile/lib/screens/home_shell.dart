@@ -44,7 +44,7 @@ class _HomeShellState extends State<HomeShell> {
         index: _tab,
         children: <Widget>[
           const ChatScreen(),
-          AgentsScreen(onOpenChat: () => _go(0)),
+          const AgentsScreen(),
           const DiscoverScreen(),
           const MemoryScreen(),
           const ArtifactsScreen(),
