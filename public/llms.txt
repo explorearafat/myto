@@ -11,8 +11,8 @@
 
 ## Product facts
 
-- Platform: Windows 10 and 11 (64-bit) and Android are supported today; macOS and Linux are planned. A browser build is available at https://mytocode.vercel.app.
-- Current release: v0.1.5, published 30 August 2026, a 116 MB Windows installer (Myto-Setup.exe); a native Android APK ships alongside it.
+- Platform: Windows 10 and 11 (64-bit), Android, Linux and macOS are all supported today. A browser build is available at https://mytocode.vercel.app.
+- Current release: v0.8.0 — a Windows installer (Myto-Setup.exe), a native Android APK (myto.apk), Linux packages (Myto.deb, Myto.rpm, Myto.AppImage) and macOS builds (Myto-arm64.dmg, Myto-arm64.zip) ship together from GitHub Releases.
 - Price: the app is free; the only cost is whatever model provider you choose to use.
 - Privacy: Myto is local-first — it works from your project on your machine, with the integrations you configure.
 - Models: a local Ollama endpoint (http://localhost:11434 by default) or any OpenAI-compatible endpoint configured in Settings. Reasoning effort is a per-turn setting from low to max.
@@ -45,9 +45,9 @@ The chat (/chat) is a separate document styled like a full chat app — a left s
 
 - Download page: /download
 - Chat: /chat
-- Download (Windows, direct): https://github.com/explorearafat/myto-dist/releases/latest/download/Myto-Setup.exe
-- Download (Android, direct): https://github.com/explorearafat/myto-dist/releases/latest/download/myto.apk
-- All releases: https://github.com/explorearafat/myto-dist/releases/latest
+- Download (Windows, direct): https://github.com/explorearafat/myto/releases/latest/download/Myto-Setup.exe
+- Download (Android, direct): https://github.com/explorearafat/myto/releases/latest/download/myto.apk
+- All releases: https://github.com/explorearafat/myto/releases/latest
 - Try in browser: https://mytocode.vercel.app
 
 ## Reading guidance

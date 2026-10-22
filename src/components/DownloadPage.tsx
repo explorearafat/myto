@@ -264,7 +264,7 @@ export function DownloadPage() {
                 rel="noopener noreferrer"
                 className="font-medium text-[#141413] no-underline underline decoration-[#cbc6ba] underline-offset-2 transition-colors duration-150 hover:decoration-[#141413]"
               >
-                myto-dist releases page
+                releases page
               </a>
               . Myto needs a model to talk to — a local Ollama, or any OpenAI-compatible endpoint.
             </p>

@@ -3,19 +3,19 @@
 // that must not drift — links, the current release, and the platform matrix.
 
 export const LINKS = {
-  // Myto is closed-source. The source repo is private, and private-repo release
-  // assets are not anonymously downloadable — so every public download points at
-  // the `myto-dist` mirror, which holds only the built installers, never source.
-  /** Direct Windows installer (public downloads mirror). */
-  download: 'https://github.com/explorearafat/myto-dist/releases/latest/download/Myto-Setup.exe',
-  /** Native Android APK (public downloads mirror). */
-  androidApk: 'https://github.com/explorearafat/myto-dist/releases/latest/download/myto.apk',
+  // The `myto` repo is public, so its release assets are anonymously
+  // downloadable — every download link points straight at the latest release
+  // there, and updates automatically whenever a new tag ships.
+  /** Direct Windows installer (latest GitHub release). */
+  download: 'https://github.com/explorearafat/myto/releases/latest/download/Myto-Setup.exe',
+  /** Native Android APK (latest GitHub release). */
+  androidApk: 'https://github.com/explorearafat/myto/releases/latest/download/myto.apk',
   /** The platform chooser — where the header/footer Download links point. */
   downloadPage: '/download',
   /** The Myto chat — a full chat interface, client-side, that answers questions about Myto. */
   chatPage: '/chat',
-  /** All published installers (downloads mirror — no source). */
-  releases: 'https://github.com/explorearafat/myto-dist/releases/latest',
+  /** All published installers (latest GitHub release). */
+  releases: 'https://github.com/explorearafat/myto/releases/latest',
   /** Live web build — try it with zero install. */
   web: 'https://mytocode.vercel.app',
 };
@@ -25,9 +25,9 @@ export const LINKS = {
  * new tag ships, or the download page will quietly understate the version.
  */
 export const RELEASE = {
-  version: 'v0.5.0',
-  date: '23 September 2026',
-  size: '131 MB',
+  version: 'v0.8.0',
+  date: '22 October 2026',
+  size: '265 MB',
 };
 
 /**
@@ -82,7 +82,7 @@ export const PLATFORMS: Platform[] = [
     body: 'A native chat app, built with Flutter — sign in, pick a model, and stream replies on your phone. Like the Windows build it is self-signed, so Android asks you to allow the install the first time.',
     href: LINKS.androidApk,
     cta: 'Download the APK',
-    size: '53 MB',
+    size: '55 MB',
   },
   {
     name: 'Windows',
@@ -93,7 +93,7 @@ export const PLATFORMS: Platform[] = [
     note: 'Self-signed, so SmartScreen warns on first run: click More info, then Run anyway.',
     href: LINKS.download,
     cta: 'Download the installer',
-    size: '129 MB',
+    size: '265 MB',
   },
   {
     name: 'iOS',

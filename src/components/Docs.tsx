@@ -239,7 +239,8 @@ function Faq() {
       </p>
       <p className="max-w-[62ch]">
         <span className="font-medium text-[#141413]">Where is the source?</span> Myto is
-        closed-source; the builds are served from the public myto-dist mirror.
+        closed-source; the builds are served from the public{' '}
+        <DocLink href={LINKS.releases}>releases page</DocLink>.
       </p>
     </Prose>
   );

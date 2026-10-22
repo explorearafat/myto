@@ -23,5 +23,5 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "exclude": ["app", "cli", "node_modules", "dist", "server.js", "OpenClawSource", "android", "apple", "linux", "windows", "mobile", "public", "download", "policy", "chat", "authentication"]
+  "exclude": ["app", "cli", "node_modules", "dist", "server.js", "OpenClawSource", "android", "apple", "linux", "windows", "mobile", "public", "download", "policy", "chat", "authentication", "ForPhotoEditing", "ForVideoEditing", "uploads"]
 }
