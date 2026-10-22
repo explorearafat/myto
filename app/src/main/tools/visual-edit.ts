@@ -16,7 +16,7 @@ import { join, dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { toErrorMessage } from '../providers/http'
 import type { ToolDef, ToolContext } from './registry'
-import type { ToolSideEffect, PhotoAdjust, EditorEvent, EditorScript } from '../../shared/types'
+import type { ToolSideEffect, PhotoAdjust, EditorEvent, EditorScript, StudioVideoPlan } from '../../shared/types'
 import { fsAvailable, resolveInWorkspace, resolveInWorkspaceReal } from './fs'
 import {
   deriveOutputRel, extOf, buildFrameAtArgs, parseProbe, segmentsToSrt,
@@ -24,9 +24,12 @@ import {
 } from './ffmpeg-core'
 import { validatePhotoAdjust, buildPhotoEditArgs } from './photo-core'
 import { photoScript, videoScript } from './editor-script-core'
+import { runCritique } from '../editor-vision'
 
 /** Tools that spawn a process / touch the filesystem flag 'exec' so Build prompts for them. */
 const EXEC: ToolSideEffect = 'exec'
+/** How many vision critique → re-bake passes an edit runs when the model gives a `goal`. */
+const AGENT_AUTOFIX_PASSES = 2
 /** Largest result re-shown inline / as a data: preview (bytes). Mirrors media-edit's cap. */
 const INLINE_PREVIEW_CAP = 32 * 1024 * 1024
 /** Longest edge (px) of the downscaled source/result stills carried as data: images. */
@@ -175,19 +178,22 @@ function summarizePlan(plan: EditPlan): string {
 const EDIT_PHOTO_DESC =
   'Edit a photo in a live Lightroom-style editor the user WATCHES: one call opens the Editor pane, ' +
   'animates every adjustment (cursor, sliders, tone curve, HSL), then bakes the real result for a ' +
-  'before/after. Fill the "adjust" object (each Basic field −100..100, 0 = neutral). Use this for ANY photo edit.'
+  'before/after. Fill the "adjust" object (each Basic field −100..100, 0 = neutral). Pass an optional ' +
+  '"goal" (what the edit should achieve) and Myto reviews the baked result with vision and fixes it. ' +
+  'Use this for ANY photo edit.'
 
 export const editPhotoTool: ToolDef = {
   name: 'edit_photo',
   description: EDIT_PHOTO_DESC,
-  usage: '{"path": "shots/beach.jpg", "adjust": {"exposure": 25, "contrast": 15, "temp": 20, "vibrance": 30, "clarity": 15}}',
+  usage: '{"path": "shots/beach.jpg", "adjust": {"exposure": 25, "contrast": 15, "temp": 20, "vibrance": 30, "clarity": 15}, "goal": "warm golden-hour look"}',
   sideEffect: EXEC,
   schema: {
     type: 'object',
     properties: {
       path: { type: 'string' },
       output: { type: 'string' },
-      adjust: { type: 'object' }
+      adjust: { type: 'object' },
+      goal: { type: 'string' }
     },
     required: ['path', 'adjust']
   },
@@ -204,7 +210,7 @@ export const editPhotoTool: ToolDef = {
     }
     const parsed = validatePhotoAdjust(o.adjust)
     if (!parsed.ok) return `edit_photo: ${parsed.error}.`
-    const adjust = parsed.adjust
+    let adjust = parsed.adjust
 
     if (!ctx.runFfmpeg || !ctx.workspaceDir) return needsRuntime('edit_photo')
     const emit = (e: EditorEvent): void => ctx.onEditorEvent?.(e)
@@ -253,8 +259,39 @@ export const editPhotoTool: ToolDef = {
 
       // 4) baked — authoritative result still for the before/after compare.
       emit({ phase: 'progress', pct: 100, label: 'Done' })
-      const resultPreview = await renderPreview(ctx, outAbs)
+      let resultPreview = (await renderPreview(ctx, outAbs)) ?? ""
       emit({ phase: 'baked', kind: 'photo', resultPreview: resultPreview ?? '', outputPath: outRel })
+
+      // 4b) Self-correct — when a goal is given, Myto reviews the baked result with a vision
+      //     model and re-bakes a correction (visibly: a fresh choreography replays each pass),
+      //     up to a small cap. Degrades silently to the single pass when no model can review.
+      let corrections = ''
+      const goal = readStr(o.goal)
+      if (goal && resultPreview) {
+        for (let pass = 1; pass <= AGENT_AUTOFIX_PASSES; pass++) {
+          const verdict = await runCritique({ goal, kind: 'photo', resultPreview, current: adjust, pass }, ctx.signal)
+          if (!verdict.ok) break
+          if (verdict.done || !verdict.adjust) {
+            if (verdict.note) corrections = ` Reviewed: ${verdict.note}`
+            break
+          }
+          adjust = verdict.adjust
+          ctx.onStatus?.(`Refining (pass ${pass})`)
+          emit({ phase: 'script', script: photoScript(adjust) })
+          emit({ phase: 'progress', pct: 20, label: 'Refining…' })
+          const refine = await ctx.runFfmpeg(buildPhotoEditArgs(inputAbs, outAbs, adjust), {
+            signal: ctx.signal,
+            onProgress: (p: FfmpegProgress) => {
+              if (p.percent != null) emit({ phase: 'progress', pct: Math.max(20, Math.min(99, p.percent)), label: 'Refining…' })
+            }
+          })
+          if (refine.exitCode !== 0) break
+          emit({ phase: 'progress', pct: 100, label: 'Done' })
+          resultPreview = (await renderPreview(ctx, outAbs)) ?? ""
+          emit({ phase: 'baked', kind: 'photo', resultPreview: resultPreview ?? '', outputPath: outRel })
+          corrections = ` Refined to match “${goal}”: ${verdict.note}`
+        }
+      }
 
       // 5) also drop the result inline in chat (small files only), best-effort.
       if (ctx.emitMedia) {
@@ -268,7 +305,7 @@ export const editPhotoTool: ToolDef = {
       }
 
       const size = await stat(outAbs).then((s) => fmtBytes(s.size)).catch(() => '')
-      return `Edited ${rel} (${summarizeAdjust(adjust)}) → ${outRel}${size ? ` — ${size}` : ''}. Shown in the editor with a before/after compare.`
+      return `Edited ${rel} (${summarizeAdjust(adjust)}) → ${outRel}${size ? ` — ${size}` : ''}. Shown in the editor with a before/after compare.${corrections}`
     } catch (err) {
       const msg = toErrorMessage(err)
       ctx.onEditorEvent?.({ phase: 'error', message: msg })
@@ -286,12 +323,12 @@ const EDIT_VIDEO_DESC =
   'builds the timeline (video/text/audio tracks), animates the edit (clips drop in, playhead sweeps, ' +
   'grade shifts, captions appear), then bakes the real result for a before/after. Give "input" + an ' +
   '"operations" array (segments/trim, speed, resize, colorGrade, filter, text, transition, volume, mute). ' +
-  'Use this for ANY video edit.'
+  'Pass an optional "goal" and Myto reviews the baked result with vision and fixes it. Use this for ANY video edit.'
 
 export const editVideoTool: ToolDef = {
   name: 'edit_video',
   description: EDIT_VIDEO_DESC,
-  usage: '{"input": "clips/raw.mp4", "operations": [{"op":"trim","start":0,"end":15},{"op":"speed","factor":1.25},{"op":"filter","name":"cinematic"},{"op":"text","text":"Summer","start":0,"end":3,"y":"bottom","box":true},{"op":"resize","aspect":"9:16"}]}',
+  usage: '{"input": "clips/raw.mp4", "operations": [{"op":"trim","start":0,"end":15},{"op":"speed","factor":1.25},{"op":"filter","name":"cinematic"},{"op":"text","text":"Summer","start":0,"end":3,"y":"bottom","box":true},{"op":"resize","aspect":"9:16"}], "goal": "punchy 9:16 reel"}',
   sideEffect: EXEC,
   schema: {
     type: 'object',
@@ -299,7 +336,8 @@ export const editVideoTool: ToolDef = {
       input: { type: 'string' },
       output: { type: 'string' },
       operations: { type: 'array' },
-      plan: { type: 'object' }
+      plan: { type: 'object' },
+      goal: { type: 'string' }
     },
     required: ['operations']
   },
@@ -308,7 +346,7 @@ export const editVideoTool: ToolDef = {
     const o = obj(input)
     const res = validateEditPlan(o.plan && typeof o.plan === 'object' ? o.plan : o)
     if (!res.ok) return `edit_video: ${res.error}.`
-    const plan = res.plan
+    let plan = res.plan
 
     const inputAbs = ctx.workspaceDir ? await resolveInWorkspaceReal(ctx.workspaceDir, plan.input) : null
     if (!inputAbs) return `edit_video: "${plan.input}" is outside the working folder, or does not exist, and was refused.`
@@ -379,8 +417,46 @@ export const editVideoTool: ToolDef = {
 
       // 4) baked — result poster + the workspace path + a file:// url the Preview pane can play.
       emit({ phase: 'progress', pct: 100, label: 'Done' })
-      const resultPreview = await renderPreview(ctx, outAbs, 0)
+      let resultPreview = (await renderPreview(ctx, outAbs, 0)) ?? ""
       emit({ phase: 'baked', kind: 'video', resultPreview: resultPreview ?? '', outputPath: outRel, url: pathToFileURL(outAbs).href })
+
+      // 4b) Self-correct — when a goal is given, Myto reviews the baked result with a vision
+      //     model and re-bakes the corrected plan (reusing the resolved subtitle/font), visibly
+      //     replaying the timeline each pass. Silent single-pass fallback when no model reviews.
+      let corrections = ''
+      const goal = readStr(o.goal)
+      if (goal && resultPreview) {
+        for (let pass = 1; pass <= AGENT_AUTOFIX_PASSES; pass++) {
+          const verdict = await runCritique(
+            { goal, kind: 'video', resultPreview, current: plan as unknown as StudioVideoPlan, pass },
+            ctx.signal
+          )
+          if (!verdict.ok) break
+          if (verdict.done || !verdict.plan) {
+            if (verdict.note) corrections = ` Reviewed: ${verdict.note}`
+            break
+          }
+          const rev = validateEditPlan({ ...verdict.plan, output: outRel })
+          if (!rev.ok) break
+          plan = rev.plan
+          ctx.onStatus?.(`Refining (pass ${pass})`)
+          const refreshed = videoScript(plan, durationSec)
+          emit({ phase: 'script', script: refreshed })
+          emit({ phase: 'progress', pct: 10, label: 'Refining…' })
+          const refine = await ctx.runFfmpeg(buildEditPlanArgs(inputAbs, outAbs, plan, subAbs, fontAbs), {
+            signal: ctx.signal,
+            totalDurationSec: refreshed.timeline?.durationSec || outDurationSec,
+            onProgress: (p: FfmpegProgress) => {
+              if (p.percent != null) emit({ phase: 'progress', pct: Math.max(10, Math.min(99, p.percent)), label: 'Refining…' })
+            }
+          })
+          if (refine.exitCode !== 0) break
+          emit({ phase: 'progress', pct: 100, label: 'Done' })
+          resultPreview = (await renderPreview(ctx, outAbs, 0)) ?? ""
+          emit({ phase: 'baked', kind: 'video', resultPreview: resultPreview ?? '', outputPath: outRel, url: pathToFileURL(outAbs).href })
+          corrections = ` Refined to match “${goal}”: ${verdict.note}`
+        }
+      }
 
       // 5) also drop the result inline in chat (small files only), best-effort.
       if (ctx.emitMedia) {
@@ -395,7 +471,7 @@ export const editVideoTool: ToolDef = {
 
       const size = await stat(outAbs).then((s) => fmtBytes(s.size)).catch(() => '')
       const fontNote = hasText && !fontAbs ? ' (captions shown live; no system font found to bake them in)' : ''
-      return `Edited ${plan.input} (${summarizePlan(plan)}) → ${outRel}${size ? ` — ${size}` : ''}. Shown in the editor; play the result in the Preview pane.${fontNote}`
+      return `Edited ${plan.input} (${summarizePlan(plan)}) → ${outRel}${size ? ` — ${size}` : ''}. Shown in the editor; play the result in the Preview pane.${fontNote}${corrections}`
     } catch (err) {
       const msg = toErrorMessage(err)
       ctx.onEditorEvent?.({ phase: 'error', message: msg })

@@ -163,6 +163,16 @@ const mytoMock: MytoApi = {
     kill: vi.fn(),
     onData: vi.fn().mockReturnValue(() => {}),
     onExit: vi.fn().mockReturnValue(() => {})
+  },
+  editor: {
+    listMedia: vi.fn().mockResolvedValue([]),
+    openPhoto: vi.fn().mockResolvedValue(null),
+    openVideo: vi.fn().mockResolvedValue(null),
+    frameAt: vi.fn().mockResolvedValue(null),
+    bakePhoto: vi.fn().mockResolvedValue({ ok: false, error: 'unavailable' }),
+    bakeVideo: vi.fn().mockResolvedValue({ ok: false, error: 'unavailable' }),
+    critique: vi.fn().mockResolvedValue({ ok: false, note: '', done: true, reason: 'unavailable' }),
+    onBakeProgress: vi.fn().mockReturnValue(() => {})
   }
 }
 

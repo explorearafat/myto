@@ -177,6 +177,24 @@ const api: MytoApi = {
         ipcRenderer.removeListener(IpcChannel.TerminalExit, listener)
       }
     }
+  },
+  editor: {
+    listMedia: () => ipcRenderer.invoke(IpcChannel.EditorListMedia),
+    openPhoto: (path) => ipcRenderer.invoke(IpcChannel.EditorOpenPhoto, path),
+    bakePhoto: (path, adjust, jobId, output) =>
+      ipcRenderer.invoke(IpcChannel.EditorBakePhoto, path, adjust, jobId, output),
+    openVideo: (path) => ipcRenderer.invoke(IpcChannel.EditorOpenVideo, path),
+    frameAt: (path, atSec) => ipcRenderer.invoke(IpcChannel.EditorFrameAt, path, atSec),
+    bakeVideo: (plan, jobId) => ipcRenderer.invoke(IpcChannel.EditorBakeVideo, plan, jobId),
+    critique: (req) => ipcRenderer.invoke(IpcChannel.EditorCritique, req),
+    onBakeProgress: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, p: Parameters<typeof callback>[0]) =>
+        callback(p)
+      ipcRenderer.on(IpcChannel.EditorBakeProgress, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.EditorBakeProgress, listener)
+      }
+    }
   }
 }
 

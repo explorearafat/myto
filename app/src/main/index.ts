@@ -16,6 +16,7 @@ import { registerVoiceIpc } from './voice-ipc'
 import { registerScreenshotIpc } from './screenshot-ipc'
 import { registerScheduledTasksIpc } from './scheduled-tasks-ipc'
 import { registerTerminalIpc } from './terminal-ipc'
+import { registerEditorIpc } from './editor-ipc'
 import { syncSkills } from './skills/manager'
 import { discoverSkills } from './skills/discovery'
 import type { SkillConfig } from '../shared/types'
@@ -151,6 +152,7 @@ app.whenReady().then(() => {
   registerScreenshotIpc()
   registerScheduledTasksIpc()
   registerTerminalIpc()
+  registerEditorIpc()
 
   createWindow()
 

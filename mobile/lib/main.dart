@@ -6,6 +6,7 @@ import 'firebase_options.dart';
 import 'services/auth_service.dart';
 import 'services/byok_service.dart';
 import 'services/conversation_store.dart';
+import 'services/studio_store.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,7 +17,12 @@ Future<void> main() async {
   final store = ConversationStore();
   await store.load();
 
-  runApp(MytoApp(auth: auth, byok: byok, store: store));
+  // The four-teamly tabs' data — seeded from the reference screenshots on first
+  // run, then the user's own deltas persisted on-device.
+  final studio = StudioStore();
+  await studio.load();
+
+  runApp(MytoApp(auth: auth, byok: byok, store: store, studio: studio));
 }
 
 Future<bool> _initFirebase() async {

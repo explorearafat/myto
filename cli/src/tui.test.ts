@@ -21,12 +21,12 @@ describe('welcome frame', () => {
 })
 
 describe('runHeader frame', () => {
-  it('echoes the task and the model', () => {
+  it('echoes the task and the model without reprinting the folder', () => {
     const out = plain(runHeader({ version: '1.1.0', task: 'do a thing', model: 'gpt-4o', workspace: '/w', byok: true }))
     expect(out).toContain('do a thing')
     expect(out).toContain('gpt-4o')
     expect(out).toContain('BYOK')
-    expect(out).toContain('/w')
+    expect(out).not.toContain('/w')
   })
 })
 

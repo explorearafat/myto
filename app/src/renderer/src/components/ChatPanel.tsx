@@ -1145,6 +1145,13 @@ const TOOL_ICONS: Record<string, ReactNode> = {
       <circle cx="10" cy="8" r="1.6" fill="var(--color-bg,currentColor)" stroke="currentColor" strokeWidth="1.3" />
       <circle cx="5" cy="12" r="1.6" fill="var(--color-bg,currentColor)" stroke="currentColor" strokeWidth="1.3" />
     </svg>
+  ),
+  studio: (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="2" y="3" width="12" height="10" rx="1.3" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="5.5" cy="6.5" r="1.1" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M2.5 11l3.2-3 2.3 2 3-3.2 2.5 2.4" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
   )
 }
 
@@ -1180,6 +1187,9 @@ function ToolsLauncher() {
   const editorOpen = useEditorStore((s) => s.open)
   const showEditor = useEditorStore((s) => s.show)
   const closeEditor = useEditorStore((s) => s.close)
+  const launcherOpen = useEditorStore((s) => s.launcherOpen)
+  const openLauncher = useEditorStore((s) => s.openLauncher)
+  const closeLauncher = useEditorStore((s) => s.closeLauncher)
 
   const [open, setOpen] = useState(false)
   // A short close delay tolerates the pointer crossing the gap between the
@@ -1211,7 +1221,8 @@ function ToolsLauncher() {
     { key: 'terminal', label: 'Terminal', hint: 'Build command output', isOpen: terminalOpen, open: only(showTerminal), close: closeTerminal },
     { key: 'files', label: 'Working tree', hint: 'Files Build is changing', isOpen: filesOpen, open: only(showFiles), close: closeFiles },
     { key: 'preview', label: 'Preview', hint: "Myto's in-app browser", isOpen: previewOpen, open: only(revealPreview), close: closePreview },
-    { key: 'editor', label: 'Editor', hint: 'Watch Myto edit photos & video', isOpen: editorOpen, open: only(showEditor), close: closeEditor }
+    { key: 'editor', label: 'Editor', hint: 'Watch Myto edit photos & video', isOpen: editorOpen, open: only(showEditor), close: closeEditor },
+    { key: 'studio', label: 'Studio', hint: 'Edit a photo or video yourself', isOpen: launcherOpen, open: openLauncher, close: closeLauncher }
   ]
   const active = tools.find((t) => t.isOpen)
   const select = (t: (typeof tools)[number]): void => {

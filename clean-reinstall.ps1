@@ -88,7 +88,7 @@ Write-Host "  Temp directories cleaned" -ForegroundColor Green
 # Step 4: Build new installer
 Write-Host ""
 Write-Host "[4/6] Building fresh installer..." -ForegroundColor Yellow
-Set-Location "C:\Users\ARAFAT\OneDrive\Desktop\Sylor\app"
+Set-Location "C:\Users\ARAFAT\OneDrive\Desktop\Myto\app"
 npm run dist:win
 if ($LASTEXITCODE -eq 0) {
     Write-Host "  Build completed" -ForegroundColor Green
@@ -100,7 +100,7 @@ if ($LASTEXITCODE -eq 0) {
 # Step 5: Install fresh
 Write-Host ""
 Write-Host "[5/6] Installing Myto..." -ForegroundColor Yellow
-$installerPath = "C:\Users\ARAFAT\OneDrive\Desktop\Sylor\app\release\Myto-Setup.exe"
+$installerPath = "C:\Users\ARAFAT\OneDrive\Desktop\Myto\app\release\Myto-Setup.exe"
 if (Test-Path $installerPath) {
     Start-Process -FilePath $installerPath -ArgumentList '/S' -Wait
     Start-Sleep -Seconds 2

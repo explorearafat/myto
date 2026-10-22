@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { TitleBar } from '@renderer/components/TitleBar'
 import { SplashScreen } from '@renderer/components/SplashScreen'
 import { SettingsPanel } from '@renderer/components/SettingsPanel'
+import { StudioLauncher } from '@renderer/components/StudioLauncher'
 import { AppLayout } from '@renderer/components/layout/AppLayout'
 import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
 import { useAppStore } from '@renderer/store/useAppStore'
@@ -73,6 +74,7 @@ export default function App() {
         </ErrorBoundary>
         {settingsOpen && <SettingsPanel />}
       </div>
+      <StudioLauncher />
       <SplashScreen />
     </div>
   )

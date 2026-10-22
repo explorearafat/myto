@@ -174,7 +174,28 @@ export const IpcChannel = {
   /** Main → renderer: a chunk of PTY output for a session. */
   TerminalData: 'terminal:data',
   /** Main → renderer: a session's PTY exited (carries the exit code). */
-  TerminalExit: 'terminal:exit'
+  TerminalExit: 'terminal:exit',
+
+  // Myto Studio (manual photo/video editing): the user opens a workspace media file and
+  // edits it by hand with the same ffmpeg cores the agent's edit_photo/edit_video use, then
+  // bakes the authoritative result. A vision-capable model (when configured) critiques the
+  // result against a goal so Myto can self-correct.
+  /** Renderer → main (invoke): list workspace image + video files the Studio can open. */
+  EditorListMedia: 'editor:list-media',
+  /** Renderer → main (invoke): open a photo; resolves a downscaled still + dimensions. */
+  EditorOpenPhoto: 'editor:open-photo',
+  /** Renderer → main (invoke): bake a photo adjust; resolves the authoritative result. */
+  EditorBakePhoto: 'editor:bake-photo',
+  /** Renderer → main (invoke): open a video; resolves a poster frame + dimensions + duration. */
+  EditorOpenVideo: 'editor:open-video',
+  /** Renderer → main (invoke): a single poster frame of a video at a time, as a data: URL. */
+  EditorFrameAt: 'editor:frame-at',
+  /** Renderer → main (invoke): bake a video edit plan; resolves the result + a file:// url. */
+  EditorBakeVideo: 'editor:bake-video',
+  /** Renderer → main (invoke): critique a baked result against a goal with a vision model. */
+  EditorCritique: 'editor:critique',
+  /** Main → renderer: a bake-progress tick (carries the caller's jobId). */
+  EditorBakeProgress: 'editor:bake-progress'
 } as const
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel]

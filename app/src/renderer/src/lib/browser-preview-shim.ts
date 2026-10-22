@@ -55,6 +55,45 @@ function installShim(): void {
     attachments: []
   })
 
+  // ── Studio preview fakes (so the manual editor is demoable without ffmpeg) ──
+  const bakeListeners = new Set<(p: { jobId: string; pct: number; label: string }) => void>()
+  const emitBake = (jobId: string): void => {
+    ;[20, 60, 100].forEach((pct, i) =>
+      setTimeout(
+        () => bakeListeners.forEach((cb) => cb({ jobId, pct, label: pct === 100 ? 'Done' : 'Rendering…' })),
+        i * 140
+      )
+    )
+  }
+  let sampleCache = ''
+  const samplePhoto = (): string => {
+    if (sampleCache) return sampleCache
+    const c = document.createElement('canvas')
+    c.width = 960
+    c.height = 640
+    const x = c.getContext('2d')
+    if (!x) return ''
+    const sky = x.createLinearGradient(0, 0, 0, 640)
+    sky.addColorStop(0, '#2a3a6b')
+    sky.addColorStop(0.5, '#e8803a')
+    sky.addColorStop(1, '#f6c67a')
+    x.fillStyle = sky
+    x.fillRect(0, 0, 960, 640)
+    x.fillStyle = '#ffd98a'
+    x.beginPath()
+    x.arc(480, 360, 90, 0, Math.PI * 2)
+    x.fill()
+    x.fillStyle = 'rgba(18,18,36,0.85)'
+    x.fillRect(0, 470, 960, 170)
+    x.fillStyle = 'rgba(18,18,36,0.6)'
+    for (let i = 0; i < 6; i++) {
+      const w = 60 + i * 18
+      x.fillRect(70 + i * 150, 470 - (40 + (i % 3) * 55), w, 200)
+    }
+    sampleCache = c.toDataURL('image/jpeg', 0.9)
+    return sampleCache
+  }
+
   const api: MytoApi = {
     window: {
       minimize: () => {},
@@ -252,6 +291,32 @@ function installShim(): void {
       kill: () => {},
       onData: () => () => {},
       onExit: () => () => {}
+    },
+    editor: {
+      // The browser preview has no ffmpeg/workspace, so the Studio is faked just enough to
+      // exercise the UI: a generated sample image stands in for an opened file, "bake" echoes
+      // it back through a couple of progress ticks, and "critique" returns a canned verdict.
+      listMedia: () =>
+        Promise.resolve([
+          { path: 'samples/sunset.jpg', kind: 'photo' as const },
+          { path: 'samples/clip.mp4', kind: 'video' as const }
+        ]),
+      openPhoto: () => Promise.resolve({ preview: samplePhoto(), width: 960, height: 640 }),
+      openVideo: () => Promise.resolve({ preview: samplePhoto(), width: 1280, height: 720, durationSec: 12 }),
+      frameAt: () => Promise.resolve(samplePhoto()),
+      bakePhoto: (_path, _adjust, jobId) => {
+        emitBake(jobId)
+        return Promise.resolve({ ok: true as const, outputPath: 'myto-edits/sunset-edit.jpg', resultPreview: samplePhoto(), url: '' })
+      },
+      bakeVideo: (_plan, jobId) => {
+        emitBake(jobId)
+        return Promise.resolve({ ok: true as const, outputPath: 'myto-edits/clip-reel.mp4', resultPreview: samplePhoto(), url: '' })
+      },
+      critique: () => Promise.resolve({ ok: true, note: 'Looks warm and balanced — matches your goal.', done: true }),
+      onBakeProgress: (cb) => {
+        bakeListeners.add(cb)
+        return () => bakeListeners.delete(cb)
+      }
     }
   }
 

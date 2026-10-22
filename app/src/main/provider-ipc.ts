@@ -721,13 +721,15 @@ export function registerProviderIpc(): void {
         // Global (user-level) memory: cross-project facts/preferences the user saved,
         // injected in EVERY mode (chat and cowork) so they always apply. Best-effort.
         const userMemory = readUserMemory(recallQuery)
-        // Attachments → working folder (Cowork): the user's uploaded files live under
-        // userData/attachments/… which the sandboxed fs tools can't reach. Copy THIS
-        // turn's into <workspace>/uploads/ so the agent opens them directly by path
-        // instead of failing to find them, and note them in the system head below.
-        // Best-effort and Cowork-only; never blocks the reply.
+        // Attachments → working folder: the user's uploaded files live under
+        // userData/attachments/… which the sandboxed fs tools (and edit_photo/edit_video)
+        // can't reach. Copy THIS turn's into <workspace>/uploads/ so the agent opens them
+        // directly by path instead of hunting the disk, and note them in the system head
+        // below. Runs in BOTH agentic modes — Build (cowork, chosen folder) AND Cowork
+        // (research, home root) — so "edit this photo" on an attachment works in either.
+        // Best-effort; never blocks the reply.
         let attachedFiles: MaterializedAttachment[] = []
-        if (mode === 'cowork' && workspaceDir && request.sessionId) {
+        if (agentic && workspaceDir && request.sessionId) {
           attachedFiles = await materializeAttachments(
             request.sessionId,
             request.afterMsgId ?? null,

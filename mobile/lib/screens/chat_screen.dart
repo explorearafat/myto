@@ -5,19 +5,24 @@ import 'package:provider/provider.dart';
 
 import '../models/chat.dart';
 import '../models/byok_config.dart';
+import '../models/agent.dart';
 import '../services/auth_service.dart';
 import '../services/byok_service.dart';
 import '../services/chat_client.dart';
 import '../services/conversation_store.dart';
+import '../services/studio_store.dart';
 import '../theme.dart';
 import '../widgets/chat_composer.dart';
 import '../widgets/chat_empty_state.dart';
-import '../widgets/conversation_drawer.dart';
 import '../widgets/effort_picker.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/model_picker.dart';
 import '../widgets/myto_mark.dart';
+import '../widgets/teamly/kit.dart';
+import '../widgets/teamly/parts.dart';
 
+/// The Chat tab — the app's inbox and hub, laid out exactly like the reference:\n///
+///   [avatar] [Teamly AI]                              [+]\n///   [🔍 Search]                                      search pill\n///   Little T — Your YouTube Short is ready!  Tue     agent notification row\n///   ⌄ PINNED · 1\n///   Teamly Agent ✔ — You are now friends\n///   ⌄ CHATS · 15\n///   AI Feature Build Room — AI Engineer, Prompt Eng... (stacked avatars)\n///   Code Review Guild — Code Reviewer, Senior Devel...\n///   Software Architect — You are now friends\n///   ...\n///\n/// Tapping a row opens that thread (the classic Myto conversation UI below the\n/// list); the back button returns to the list. All streaming/auth plumbing is\n/// unchanged from the original single-screen app.
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
 
@@ -26,7 +31,7 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  // -- original streaming machinery (unchanged) -------------------------------
   final ChatClient _client = ChatClient();
   final ScrollController _scroll = ScrollController();
   final TextEditingController _composer = TextEditingController();
@@ -34,17 +39,13 @@ class _ChatScreenState extends State<ChatScreen> {
   StreamSubscription<ChatEvent>? _sub;
   bool _streaming = false;
   ChatMessage? _pending;
-
-  // Reasoning-effort selection from the composer chip. 'auto' → send nothing (model default);
-  // low/medium/high → forwarded to the gateway as `reasoningEffort`.
   String _effort = 'auto';
-
-  // Streaming tokens arrive far faster than the screen needs to repaint. We append
-  // each token straight into the message model (cheap) and only rebuild on a throttle,
-  // so a fast reply repaints ~15×/s instead of once per token — the difference between
-  // a smooth stream and the whole transcript re-laying-out on every character.
   Timer? _flushTimer;
   bool _dirty = false;
+
+  // -- new shell state --------------------------------------------------------
+  bool _inThread = false;
+  String _query = '';
 
   @override
   void dispose() {
@@ -80,8 +81,6 @@ class _ChatScreenState extends State<ChatScreen> {
         .map((m) => m.toWire())
         .toList();
 
-    // Chat against the account's own endpoint. If the stored model was removed, fall back to the
-    // first available one.
     final modelId = cfg.models.any((m) => m.id == store.active.modelId)
         ? store.active.modelId
         : cfg.models.first.id;
@@ -100,7 +99,6 @@ class _ChatScreenState extends State<ChatScreen> {
       (event) {
         switch (event) {
           case ChatToken(:final text):
-            // Mutate the model now (no rebuild); repaint on the throttle below.
             assistant.content += text;
             _scheduleFlush();
           case ChatDone():
@@ -114,9 +112,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  /// Coalesce streamed tokens into a single repaint every ~66ms. Without this every
-  /// token triggers a full `setState`, rebuilding the whole transcript (and re-parsing
-  /// the streaming message's Markdown/tool blocks) — the main cause of streaming lag.
   void _scheduleFlush() {
     _dirty = true;
     if (_flushTimer != null) return;
@@ -136,7 +131,6 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _finish() {
     if (!_streaming) return;
-    // Flush any tokens buffered since the last throttled repaint.
     _flushTimer?.cancel();
     _flushTimer = null;
     _dirty = false;
@@ -176,19 +170,39 @@ class _ChatScreenState extends State<ChatScreen> {
     if (chosen != null) store.setActiveModel(chosen);
   }
 
+  // -- shell transitions ------------------------------------------------------
+
+  /// Open a saved conversation (from the Chats group) and enter the thread.
+  void _openConversation(String id) {
+    if (_streaming) _stop();
+    _store.openConversation(id);
+    setState(() => _inThread = true);
+    _scrollToBottom();
+  }
+
+  /// Fresh draft + thread.
   void _newChat() {
     if (_streaming) _stop();
     _store.newChat();
     _composer.clear();
-    _scaffoldKey.currentState?.closeDrawer();
-    setState(() {});
+    setState(() => _inThread = true);
   }
 
-  void _openConversation(String id) {
+  void _backToList() {
     if (_streaming) _stop();
-    _store.openConversation(id);
-    _scaffoldKey.currentState?.closeDrawer();
-    _scrollToBottom();
+    _store.newChat();
+    _composer.clear();
+    setState(() => _inThread = false);
+  }
+
+  /// Chat button on an agent row → befriend + start a thread with them.
+  void _chatWithAgent(Agent agent, StudioStore studio) {
+    if (!studio.isFriend(agent.id)) {
+      studio.toggleFriend(agent.id);
+      _snack('You are now friends with ${agent.name}.');
+    }
+    _store.newChat();
+    setState(() => _inThread = true);
   }
 
   void _scrollToBottom() {
@@ -235,8 +249,23 @@ class _ChatScreenState extends State<ChatScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  String? _firstName(AuthService auth) {
+    if (auth.user == null) return null;
+    final name = auth.displayName.trim();
+    if (name.isEmpty || name == 'Guest') return null;
+    return name.split(RegExp(r'\s+')).first;
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_inThread) return _buildThread(context);
+    return _buildList(context);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Thread: the original conversation UI, restyled to the Teamly surface.
+  // ---------------------------------------------------------------------------
+  Widget _buildThread(BuildContext context) {
     final palette = Theme.of(context).palette;
     final store = context.watch<ConversationStore>();
     final auth = context.watch<AuthService>();
@@ -253,50 +282,53 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     return Scaffold(
-      key: _scaffoldKey,
-      drawer: ConversationDrawer(onSelect: _openConversation, onNewChat: _newChat),
       appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_rounded),
+          tooltip: 'Back to chats',
+          onPressed: _backToList,
+        ),
         title: Row(
           mainAxisSize: MainAxisSize.min,
-          children: [
+          children: <Widget>[
             MytoMark(size: 22, color: palette.text),
             const SizedBox(width: 8),
-            Text(
-              'Myto',
-              style: TextStyle(color: palette.text, fontSize: 18, fontWeight: FontWeight.w600),
+            Flexible(
+              child: Text(
+                store.active.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: palette.text, fontSize: 18, fontWeight: FontWeight.w600),
+              ),
             ),
           ],
         ),
+        actions: <Widget>[
+          Padding(
+            padding: const EdgeInsets.only(right: TeamlySpace.s4),
+            child: Center(child: TeamlyFab(icon: Icons.add_rounded, onPressed: _newChat)),
+          ),
+        ],
       ),
       body: Column(
-        children: [
+        children: <Widget>[
           Expanded(
             child: !configured
                 ? _SetupPrompt(palette: palette)
                 : messages.isEmpty
-                ? ChatEmptyState(firstName: _firstName(auth))
-                : ListView.builder(
-                    controller: _scroll,
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                    itemCount: messages.length,
-                    itemBuilder: (context, i) {
-                      final m = messages[i];
-                      return TweenAnimationBuilder<double>(
-                        key: ObjectKey(m),
-                        tween: Tween(begin: 0, end: 1),
-                        duration: const Duration(milliseconds: 280),
-                        curve: Curves.easeOutCubic,
-                        builder: (context, t, child) => Opacity(
-                          opacity: t.clamp(0.0, 1.0),
-                          child: Transform.translate(offset: Offset(0, (1 - t) * 10), child: child),
-                        ),
-                        child: MessageBubble(
-                          message: m,
-                          streaming: _streaming && identical(m, _pending),
-                        ),
-                      );
-                    },
-                  ),
+                    ? ChatEmptyState(firstName: _firstName(auth))
+                    : ListView.builder(
+                        controller: _scroll,
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                        itemCount: messages.length,
+                        itemBuilder: (context, i) {
+                          final m = messages[i];
+                          return MessageBubble(
+                            message: m,
+                            streaming: _streaming && identical(m, _pending),
+                          );
+                        },
+                      ),
           ),
           if (configured)
             ChatComposer(
@@ -315,16 +347,231 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
     );
   }
-  String? _firstName(AuthService auth) {
-    if (auth.user == null) return null;
-    final name = auth.displayName.trim();
-    if (name.isEmpty || name == 'Guest') return null;
-    return name.split(RegExp(r'\s+')).first;
+
+  // ---------------------------------------------------------------------------
+  // List: the reference Chat tab.
+  // ---------------------------------------------------------------------------
+  Widget _buildList(BuildContext context) {
+    final palette = Theme.of(context).palette;
+    final store = context.watch<ConversationStore>();
+    final studio = context.watch<StudioStore>();
+    final auth = context.watch<AuthService>();
+
+    final q = _query.trim().toLowerCase();
+    final conversations = store.conversations
+        .where((c) => q.isEmpty || c.title.toLowerCase().contains(q))
+        .toList(growable: false);
+
+    return Scaffold(
+      appBar: AppBar(
+        leading: Padding(
+          padding: const EdgeInsets.only(left: TeamlySpace.s3),
+          child: Center(
+            child: auth.photoURL != null
+                ? ClipOval(
+                    child: Image.network(auth.photoURL!, width: 34, height: 34, fit: BoxFit.cover),
+                  )
+                : TeamlyAvatar(pastelIndex: 1, size: 34),
+          ),
+        ),
+        centerTitle: true,
+        title: const Text('Teamly AI'),
+        actions: <Widget>[
+          Padding(
+            padding: const EdgeInsets.only(right: TeamlySpace.s4),
+            child: Center(child: TeamlyFab(icon: Icons.add_rounded, onPressed: _newChat)),
+          ),
+        ],
+      ),
+      body: Column(
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
+            child: TeamlySearch(
+              hint: 'Search',
+              onChanged: (v) => setState(() => _query = v),
+            ),
+          ),
+          const SizedBox(height: TeamlySpace.s2),
+          Expanded(
+            child: ListView(
+              children: <Widget>[
+                _notificationRow(context, palette),
+                TeamlyGroupHeader(
+                  label: 'Pinned',
+                  count: 1,
+                  onToggle: () {},
+                ),
+                if (studio.agents.isNotEmpty)
+                  _agentRow(context, studio.agents.firstWhere(
+                    (a) => a.id == 'content-creator',
+                    orElse: () => studio.agents.first,
+                  ), studio),
+                TeamlyGroupHeader(
+                  label: 'Chats',
+                  count: conversations.length,
+                  onToggle: () {},
+                ),
+                if (conversations.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.all(TeamlySpace.s6),
+                    child: Text(
+                      'Your conversations will appear here.',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: TeamlyColors.ink300, fontSize: 14),
+                    ),
+                  )
+                else
+                  ...conversations.map((c) => _conversationRow(context, c)),
+                const SizedBox(height: TeamlySpace.s6),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Little T — the agent completion notification, pinned above everything.
+  Widget _notificationRow(BuildContext context, MytoPalette palette) {
+    return TeamlyCard(
+      onTap: _newChat,
+      padding: const EdgeInsets.all(TeamlySpace.s4),
+      child: Row(
+        children: <Widget>[
+          TeamlyAvatar(
+            pastelIndex: 0,
+            size: 44,
+            badgeIcon: Icons.play_arrow_rounded,
+          ),
+          const SizedBox(width: TeamlySpace.s3),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  'Little T',
+                  style: TextStyle(
+                    color: palette.text,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                const Text(
+                  'Your YouTube Short is ready! 🐦⚡',
+                  style: TextStyle(color: TeamlyColors.ink500, fontSize: 14),
+                ),
+              ],
+            ),
+          ),
+          const Text(
+            'Tue',
+            style: TextStyle(color: TeamlyColors.ink300, fontSize: 12),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _agentRow(BuildContext context, Agent agent, StudioStore studio) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
+      child: TeamlyCard(
+        onTap: () => _chatWithAgent(agent, studio),
+        padding: const EdgeInsets.all(TeamlySpace.s4),
+        child: Row(
+          children: <Widget>[
+            TeamlyAvatar(pastelIndex: agent.pastelIndex, size: 44, dot: agent.friends),
+            const SizedBox(width: TeamlySpace.s3),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    agent.name,
+                    style: TextStyle(
+                      color: TeamlyColors.ink900,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    agent.friends ? 'You are now friends' : 'Say hi',
+                    style: const TextStyle(color: TeamlyColors.ink500, fontSize: 13),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.check_circle_rounded, size: 18, color: TeamlyColors.green500),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _conversationRow(BuildContext context, Conversation c) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter, vertical: 4),
+      child: TeamlyCard(
+        onTap: () => _openConversation(c.id),
+        padding: const EdgeInsets.all(TeamlySpace.s4),
+        child: Row(
+          children: <Widget>[
+            TeamlyStackedAvatars(pastelIndices: const <int>[2, 0], size: 40),
+            const SizedBox(width: TeamlySpace.s3),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    c.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: TeamlyColors.ink900,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    c.messages.isEmpty
+                        ? 'New chat'
+                        : c.messages.last.content.replaceAll(RegExp(r'\s+'), ' '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: TeamlyColors.ink500, fontSize: 13),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: TeamlySpace.s2),
+            Text(
+              _timeLabel(c.updatedAt),
+              style: const TextStyle(color: TeamlyColors.ink300, fontSize: 11),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _timeLabel(DateTime at) {
+    final now = DateTime.now();
+    if (now.difference(at).inMinutes < 1) return 'now';
+    if (now.difference(at).inMinutes < 60) return '${now.difference(at).inMinutes}m';
+    if (at.day == now.day) {
+      final h = at.hour % 12 == 0 ? 12 : at.hour % 12;
+      return '$h:${at.minute.toString().padLeft(2, '0')}';
+    }
+    return '${at.day}/${at.month}';
   }
 }
 
-/// Shown when the account has no bring-your-own-key config yet: chat can't run until the user adds
-/// their provider and a model on the website's Authentication page.
+/// Shown when the account has no bring-your-own-key config yet: chat can't run
+/// until the user adds their provider and a model on the website.
 class _SetupPrompt extends StatelessWidget {
   const _SetupPrompt({required this.palette});
 
@@ -337,7 +584,7 @@ class _SetupPrompt extends StatelessWidget {
         padding: const EdgeInsets.all(32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
-          children: [
+          children: <Widget>[
             Icon(Icons.key_rounded, size: 40, color: palette.muted),
             const SizedBox(height: 16),
             Text(

@@ -7,6 +7,8 @@ import { cssFilterFor, vignetteOpacity } from '../lib/editor-preview'
 import { PhotoEditor } from './PhotoEditor'
 import { VideoEditor } from './VideoEditor'
 import { VirtualCursor } from './VirtualCursor'
+import { StudioPhoto } from './StudioPhoto'
+import { StudioVideo } from './StudioVideo'
 
 /**
  * Myto's "watch me edit" pane (Build mode). It plays back a photo/video edit Myto is
@@ -158,13 +160,24 @@ function EditorStage({ live }: { live: PhotoAdjust | null }): ReactNode {
 export function EditorPane(): ReactNode {
   const kind = useEditorStore((s) => s.kind)
   const title = useEditorStore((s) => s.title)
+  const mode = useEditorStore((s) => s.mode)
   const progress = useEditorStore((s) => s.progress)
   const error = useEditorStore((s) => s.error)
   const close = useEditorStore((s) => s.close)
+  const closeManual = useEditorStore((s) => s.closeManual)
   const player = useEditorPlayer()
   const bodyRef = useRef<HTMLDivElement | null>(null)
 
-  const kindLabel = kind === 'photo' ? 'Photo · Lightroom' : kind === 'video' ? 'Video · CapCut' : 'Editor'
+  const manualMode = mode === 'manual'
+  const kindLabel = manualMode
+    ? kind === 'photo'
+      ? 'Photo · Studio'
+      : 'Video · Studio'
+    : kind === 'photo'
+      ? 'Photo · Lightroom'
+      : kind === 'video'
+        ? 'Video · CapCut'
+        : 'Editor'
   const live = player.playback?.adjust ?? null
 
   return (
@@ -187,17 +200,22 @@ export function EditorPane(): ReactNode {
           <div className="truncate text-[12px] font-medium text-text">{title || 'Editor'}</div>
           <div className="text-[10px] text-muted">{kindLabel}</div>
         </div>
-        <PaneButton label="Close editor" onClick={close}>
+        <PaneButton label="Close editor" onClick={manualMode ? closeManual : close}>
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
           </svg>
         </PaneButton>
       </div>
 
-      {/* Body: the center stage beside the (photo) Lightroom panel, with Myto's virtual
-          cursor overlaid across the whole body so it can glide onto any control. */}
+      {/* Body: the manual Studio (user-driven) or the agent's "watch me edit" playback. */}
       <div ref={bodyRef} className="relative flex min-h-0 flex-1 overflow-hidden">
-        {kind === 'video' ? (
+        {manualMode ? (
+          kind === 'video' ? (
+            <StudioVideo />
+          ) : (
+            <StudioPhoto />
+          )
+        ) : kind === 'video' ? (
           <VideoEditor player={player} />
         ) : (
           <>
@@ -205,10 +223,10 @@ export function EditorPane(): ReactNode {
             {kind === 'photo' && <PhotoEditor player={player} />}
           </>
         )}
-        <VirtualCursor player={player} bodyRef={bodyRef} />
+        {!manualMode && <VirtualCursor player={player} bodyRef={bodyRef} />}
       </div>
-      {progress && <RenderBar pct={progress.pct} label={progress.label} />}
-      {error && (
+      {!manualMode && progress && <RenderBar pct={progress.pct} label={progress.label} />}
+      {!manualMode && error && (
         <div className="shrink-0 border-t border-border bg-red-500/10 px-3 py-2 text-[11px] text-red-500">
           {error}
         </div>

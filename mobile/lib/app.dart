@@ -1,19 +1,27 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import 'screens/chat_screen.dart';
+import 'screens/home_shell.dart';
 import 'screens/sign_in_screen.dart';
 import 'services/auth_service.dart';
 import 'services/byok_service.dart';
 import 'services/conversation_store.dart';
+import 'services/studio_store.dart';
 import 'theme.dart';
 
 class MytoApp extends StatelessWidget {
-  const MytoApp({super.key, required this.auth, required this.byok, required this.store});
+  const MytoApp({
+    super.key,
+    required this.auth,
+    required this.byok,
+    required this.store,
+    required this.studio,
+  });
 
   final AuthService auth;
   final ByokService byok;
   final ConversationStore store;
+  final StudioStore studio;
 
   @override
   Widget build(BuildContext context) {
@@ -22,6 +30,7 @@ class MytoApp extends StatelessWidget {
         ChangeNotifierProvider<AuthService>.value(value: auth),
         ChangeNotifierProvider<ByokService>.value(value: byok),
         ChangeNotifierProvider<ConversationStore>.value(value: store),
+        ChangeNotifierProvider<StudioStore>.value(value: studio),
       ],
       child: MaterialApp(
         title: 'Myto',
@@ -47,6 +56,8 @@ class _Gate extends StatelessWidget {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
     final authed = context.select<AuthService, bool>((a) => a.isAuthed);
-    return authed ? const ChatScreen() : const SignInScreen();
+    // Signed-in users land on the five-tab Teamly shell — Chat is the first tab,
+    // exactly as the reference app opens on Chat.
+    return authed ? const HomeShell() : const SignInScreen();
   }
 }

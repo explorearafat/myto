@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Teamly AI — Design &amp; Theme Style Guide</title>
+<style>
+  :root{
+    /* brand */
+    --green-500:#00C951; --green-600:#00B548; --green-700:#18964D;
+    --green-050:#EAFBF1; --green-link:#06A046;
+    /* surfaces */
+    --bg-app:#FAFBFD; --bg-app-alt:#F1F4F9; --surface:#FFFFFF;
+    --surface-chip:#F5F6FA; --surface-paper:#F1F0EB; --surface-tint:#F3F4F6;
+    --divider:#EEEEEE;
+    /* ink */
+    --ink-900:#111727; --ink-800:#191919; --ink-700:#3A4149;
+    --ink-500:#6B7280; --ink-300:#B9BABE; --ink-teal:#355F55;
+    /* identity accents */
+    --accent-pink:#EB4899; --accent-cyan:#07B6D5;
+    --accent-amber:#FACC15; --accent-violet:#A755F7;
+    /* pastels + stage */
+    --pastel-amber:#FEE1A7; --pastel-pink:#FFE0EF; --pastel-blue:#BDE7FF;
+    --pastel-mint:#EAFBF3; --stage-black:#191919;
+    /* type */
+    --font-sans:'Inter',-apple-system,'Segoe UI',sans-serif;
+    --font-serif:'Source Serif 4',Georgia,serif;
+    --font-mono:'JetBrains Mono','SF Mono',ui-monospace,monospace;
+    /* space + radius */
+    --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px;
+    --space-5:20px; --space-6:24px; --space-8:32px;
+    --radius-pill:999px; --radius-lg:24px; --radius-md:18px;
+    --radius-sm:12px; --radius-xs:8px;
+    /* elevation */
+    --elev-1:0 1px 2px rgba(17,23,39,.04);
+    --elev-2:0 4px 16px rgba(17,23,39,.06);
+    --elev-3:0 8px 28px rgba(17,23,39,.10);
+    --elev-green:0 6px 16px rgba(0,201,81,.28);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:var(--font-sans);
+    color:var(--ink-900);
+    background:var(--bg-app);
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:48px 24px 96px}
+
+  /* ---------- page hero ---------- */
+  .hero{margin-bottom:56px}
+  .hero .branddot{
+    display:inline-flex;align-items:center;gap:10px;
+    background:var(--green-050);color:var(--green-700);
+    font-size:13px;font-weight:600;letter-spacing:.04em;
+    padding:7px 14px;border-radius:var(--radius-pill);margin-bottom:20px;
+  }
+  .hero .branddot i{width:9px;height:9px;border-radius:50%;background:var(--green-500);display:block}
+  .hero h1{font-size:40px;font-weight:700;letter-spacing:-.02em;line-height:1.1}
+  .hero p{color:var(--ink-500);font-size:17px;max-width:640px;margin-top:14px}
+  .hero .oneliner{
+    margin-top:26px;background:var(--surface);border-radius:var(--radius-md);
+    padding:20px 24px;box-shadow:var(--elev-2);font-family:var(--font-serif);
+    font-size:19px;color:var(--ink-700);border-left:4px solid var(--green-500);
+  }
+
+  /* ---------- section shell ---------- */
+  section{margin-bottom:56px}
+  .sec-head{display:flex;align-items:baseline;gap:12px;margin-bottom:6px}
+  .sec-num{
+    font-family:var(--font-mono);font-size:12px;font-weight:600;color:var(--green-700);
+    background:var(--green-050);padding:3px 9px;border-radius:var(--radius-sm);
+  }
+  .sec-head h2{font-size:24px;font-weight:700;letter-spacing:-.01em}
+  .sec-sub{color:var(--ink-500);font-size:14px;margin-bottom:24px}
+
+  .card{
+    background:var(--surface);border-radius:var(--radius-lg);
+    padding:24px;box-shadow:var(--elev-2);
+  }
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+  @media(max-width:820px){.grid2,.grid3,.grid4{grid-template-columns:1fr}}
+
+  .label{font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-300)}
+
+  /* ---------- colour swatches ---------- */
+  .swatch{border-radius:var(--radius-md);overflow:hidden;box-shadow:var(--elev-1);background:var(--surface)}
+  .swatch .chip{height:88px;display:flex;align-items:flex-end;padding:10px}
+  .swatch .chip span{
+    font-family:var(--font-mono);font-size:11px;font-weight:600;
+    background:rgba(255,255,255,.9);color:var(--ink-900);
+    padding:2px 8px;border-radius:var(--radius-sm);
+  }
+  .swatch .info{padding:12px 14px}
+  .swatch .info b{font-size:13px;display:block}
+  .swatch .info small{color:var(--ink-500);font-size:12px;display:block;margin-top:2px}
+  .swatch .info code{font-family:var(--font-mono);font-size:11px;color:var(--ink-500)}
+
+  .rulebox{
+    background:var(--surface-paper);border-radius:var(--radius-md);padding:18px 20px;
+    margin-top:16px;font-size:14px;color:var(--ink-700);
+    display:flex;gap:12px;align-items:flex-start;
+  }
+  .rulebox .dot{width:10px;height:10px;border-radius:50%;background:var(--green-500);margin-top:6px;flex:none}
+  .rulebox.warn{background:#FFF4F4}
+  .rulebox.warn .dot{background:#E5484D}
+
+  /* ---------- type scale ---------- */
+  .typescale .row{display:flex;align-items:baseline;gap:20px;padding:16px 0;border-bottom:1px solid var(--divider)}
+  .typescale .row:last-child{border-bottom:none}
+  .typescale .meta{
+    font-family:var(--font-mono);font-size:11px;color:var(--ink-300);
+    width:210px;flex:none;line-height:1.6;
+  }
+  .t-display{font-family:var(--font-serif);font-size:35px;font-weight:700;letter-spacing:-.02em;line-height:1.12}
+  .t-h1{font-size:22px;font-weight:700;letter-spacing:-.01em}
+  .t-h2{font-size:19px;font-weight:700}
+  .t-h3{font-size:16px;font-weight:600}
+  .t-body{font-size:15px;color:var(--ink-500)}
+  .t-sm{font-size:13px;color:var(--ink-500)}
+  .t-eyebrow{font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-teal)}
+
+  /* ---------- spacing / radius / elevation ---------- */
+  .bars{display:flex;align-items:flex-end;gap:14px;height:120px}
+  .bars .b{display:flex;flex-direction:column;align-items:center;gap:8px;flex:1}
+  .bars .b i{display:block;width:100%;max-width:44px;background:var(--green-500);border-radius:4px 4px 0 0}
+  .bars .b small{font-family:var(--font-mono);font-size:10px;color:var(--ink-500)}
+
+  .radii{display:flex;gap:18px;flex-wrap:wrap}
+  .radii .r{text-align:center}
+  .radii .r i{display:block;width:90px;height:64px;background:var(--surface-chip);border:1px solid var(--divider)}
+  .radii .r small{font-family:var(--font-mono);font-size:10px;color:var(--ink-500);display:block;margin-top:8px}
+
+  .elevs{display:flex;gap:20px;flex-wrap:wrap}
+  .elevs .e{background:var(--surface);border-radius:var(--radius-md);padding:22px 18px;text-align:center;min-width:120px}
+  .elevs .e small{font-family:var(--font-mono);font-size:10px;color:var(--ink-500)}
+
+  /* ---------- component demos ---------- */
+  .demo{background:var(--bg-app-alt);border-radius:var(--radius-lg);padding:28px;display:flex;flex-direction:column;gap:20px}
+  .chiprail{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px}
+  .chip{white-space:nowrap;height:40px;padding:0 18px;border-radius:var(--radius-pill);background:var(--surface-chip);color:var(--ink-700);font-size:14px;font-weight:500;display:inline-flex;align-items:center;gap:8px;border:none;cursor:pointer}
+  .chip.active{background:var(--green-500);color:#fff;height:44px;font-weight:600;box-shadow:var(--elev-green)}
+  .chip.neutral{background:var(--surface);box-shadow:var(--elev-1)}
+
+  .search{background:var(--surface);border-radius:var(--radius-pill);height:52px;box-shadow:var(--elev-1);display:flex;align-items:center;gap:12px;padding:0 20px;color:var(--ink-300);font-size:15px}
+  .search svg{flex:none}
+
+  .agentcard{background:var(--surface);border-radius:var(--radius-lg);box-shadow:var(--elev-2);padding:20px;display:flex;align-items:center;gap:16px}
+  .agentcard .disc{width:72px;height:72px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-size:30px}
+  .agentcard .txt{flex:1;min-width:0}
+  .agentcard .txt b{font-size:19px;font-weight:700}
+  .agentcard .txt p{color:var(--ink-500);font-size:15px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+
+  .btn-primary{background:var(--green-500);color:#fff;border:none;border-radius:var(--radius-pill);height:44px;padding:0 26px;font-size:15px;font-weight:600;box-shadow:var(--elev-green);cursor:pointer;white-space:nowrap}
+  .btn-primary:active{background:var(--green-600)}
+  .btn-fab{width:48px;height:48px;border-radius:50%;background:var(--green-500);color:#fff;border:none;font-size:24px;box-shadow:var(--elev-green);cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .btn-secondary{background:var(--surface);color:var(--ink-900);border:1px solid var(--divider);border-radius:var(--radius-pill);height:36px;padding:0 16px;font-family:var(--font-mono);font-size:12px;cursor:pointer}
+  .btn-icon{width:40px;height:40px;border-radius:50%;background:var(--surface);border:1px solid var(--divider);color:var(--ink-500);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px}
+  .btn-link{background:none;border:none;color:var(--green-link);font-weight:600;font-size:15px;cursor:pointer}
+
+  .tag{background:var(--green-050);color:var(--green-700);font-size:12px;font-weight:600;padding:5px 11px;border-radius:var(--radius-pill);display:inline-flex;align-items:center;gap:6px}
+  .badgecircle{width:18px;height:18px;border-radius:50%;background:var(--green-500);color:#fff;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center}
+
+  .docpanel{background:var(--surface-paper);border-radius:var(--radius-md);padding:22px}
+  .docpanel .statusline{display:flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:13px;color:var(--ink-900)}
+  .docpanel .statusline i{width:8px;height:8px;border-radius:50%;background:var(--green-500)}
+  .docpanel .savenote{font-family:var(--font-mono);font-size:12px;color:var(--ink-500);margin:6px 0 14px}
+  .docpanel .toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px}
+  .docpanel h3{font-family:var(--font-serif);font-size:27px;font-weight:700;line-height:1.15;margin:12px 0 10px;letter-spacing:-.01em}
+  .docpanel .sub{color:var(--ink-700);font-size:15px}
+
+  .topicrow{display:flex;align-items:center;gap:14px;padding:12px 0}
+  .topicrow .tile{width:52px;height:52px;border-radius:var(--radius-md);display:flex;align-items:center;justify-content:center;color:#fff;font-size:20px;flex:none}
+  .topicrow b{font-size:16px;font-weight:600;display:block}
+  .topicrow span{font-size:13px;color:var(--ink-500)}
+
+  .grouphdr{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-300);padding:14px 0 6px}
+
+  .statrow{display:flex;align-items:center;gap:18px;color:var(--ink-500);font-size:14px}
+  .statrow .sparkle{margin-left:auto;width:40px;height:40px;border-radius:50%;background:var(--green-500);color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:var(--elev-green)}
+
+  /* ---------- bottom nav demo ---------- */
+  .phone{
+    width:300px;border-radius:34px;background:var(--bg-app);
+    box-shadow:var(--elev-3);overflow:hidden;border:1px solid var(--divider)
+  }
+  .phone .nav{display:flex;background:var(--surface);border-top:1px solid var(--divider);padding:10px 0 14px}
+  .phone .nav .item{flex:1;text-align:center;color:var(--ink-300);font-size:11px;font-weight:500}
+  .phone .nav .item .ic{font-size:20px;display:block;margin-bottom:3px;position:relative}
+  .phone .nav .item.active{color:var(--green-700);font-weight:600}
+  .phone .nav .item .bdg{position:absolute;top:-4px;right:calc(50% - 16px);width:16px;height:16px;border-radius:50%;background:var(--green-500);color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center}
+
+  /* ---------- do/dont ---------- */
+  .dodont{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:820px){.dodont{grid-template-columns:1fr}}
+  .dodont .col{background:var(--surface);border-radius:var(--radius-lg);padding:22px;box-shadow:var(--elev-2)}
+  .dodont .col h4{font-size:15px;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+  .dodont .col ul{list-style:none;display:flex;flex-direction:column;gap:10px}
+  .dodont .col li{font-size:14px;color:var(--ink-700);display:flex;gap:10px;line-height:1.45}
+  .dodont .col li i{font-style:normal;font-weight:700;flex:none}
+  .dodont .do li i{color:var(--green-500)}
+  .dodont .dont li i{color:#E5484D}
+
+  .footnote{margin-top:64px;padding-top:24px;border-top:1px solid var(--divider);color:var(--ink-500);font-size:13px}
+  a{color:var(--green-link);text-decoration:none}
+  a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- HERO -->
+  <div class="hero">
+    <div class="branddot"><i></i> Teamly AI · Design System</div>
+    <h1>Design &amp; Theme Style Guide</h1>
+    <p>Every token below was sampled pixel-by-pixel from the five attached screenshots.
+      This page renders the system live, so you can see it rather than just read it.</p>
+    <div class="oneliner">
+      Flat, friendly, pill-heavy, mostly white — with a green that means “go”.
+    </div>
+  </div>
+
+  <!-- 01 COLOUR -->
+  <section>
+    <div class="sec-head"><span class="sec-num">01</span><h2>Colour</h2></div>
+    <div class="sec-sub">One accent, monochrome everywhere else. Measured, not guessed.</div>
+
+    <div class="label" style="margin-bottom:12px">Brand green family</div>
+    <div class="grid4" style="margin-bottom:24px">
+      <div class="swatch"><div class="chip" style="background:#00C951"><span>#00C951</span></div><div class="info"><b>--green-500</b><small>Primary fill / active</small><code>buttons, chips, tabs</code></div></div>
+      <div class="swatch"><div class="chip" style="background:#00B548"><span>#00B548</span></div><div class="info"><b>--green-600</b><small>Pressed state</small><code>button :active</code></div></div>
+      <div class="swatch"><div class="chip" style="background:#18964D"><span>#18964D</span></div><div class="info"><b>--green-700</b><small>Green <em>text</em></small><code>active nav label</code></div></div>
+      <div class="swatch"><div class="chip" style="background:#EAFBF1"><span>#EAFBF1</span></div><div class="info"><b>--green-050</b><small>Tag fill</small><code>“Agent generated”</code></div></div>
+    </div>
+
+    <div class="rulebox">
+      <span class="dot"></span>
+      <span><b>The #1 rule of this system:</b> <code>#00C951</code> is a <b>fill</b> colour, never a text colour
+      (white-on-green = 2.3:1, fails). When green must be text, drop to <code>#18964D</code>.
+      Proof: the active nav label is <code>#18964D</code> while the button beside it is <code>#00C951</code>.</span>
+    </div>
+
+    <div class="label" style="margin:32px 0 12px">Surfaces &amp; neutrals</div>
+    <div class="grid4" style="margin-bottom:24px">
+      <div class="swatch"><div class="chip" style="background:#FAFBFD;border-bottom:1px solid #EEEEEE"><span>#FAFBFD</span></div><div class="info"><b>--bg-app</b><small>App canvas</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#F1F4F9"><span>#F1F4F9</span></div><div class="info"><b>--bg-app-alt</b><small>Secondary band</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#FFFFFF;border-bottom:1px solid #EEEEEE"><span>#FFFFFF</span></div><div class="info"><b>--surface</b><small>Cards &amp; rows</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#F5F6FA"><span>#F5F6FA</span></div><div class="info"><b>--surface-chip</b><small>Neutral chip</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#F1F0EB"><span>#F1F0EB</span></div><div class="info"><b>--surface-paper</b><small>Warm-paper document</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#F3F4F6"><span>#F3F4F6</span></div><div class="info"><b>--surface-tint</b><small>Pressed row</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#EEEEEE"><span>#EEEEEE</span></div><div class="info"><b>--divider</b><small>1 px hairlines</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#191919"><span style="background:rgba(255,255,255,.9)">#191919</span></div><div class="info"><b>--stage-black</b><small>Video letterbox</small></div></div>
+    </div>
+
+    <div class="label" style="margin-bottom:12px">Ink (text)</div>
+    <div class="grid4" style="margin-bottom:24px">
+      <div class="swatch"><div class="chip" style="background:#111727"><span style="background:rgba(255,255,255,.9)">#111727</span></div><div class="info"><b>--ink-900</b><small>Headings</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#3A4149"><span style="background:rgba(255,255,255,.9)">#3A4149</span></div><div class="info"><b>--ink-700</b><small>Body copy</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#6B7280"><span style="background:rgba(255,255,255,.9)">#6B7280</span></div><div class="info"><b>--ink-500</b><small>Descriptions</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#B9BABE"><span>#B9BABE</span></div><div class="info"><b>--ink-300</b><small>Placeholder / meta</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#355F55"><span style="background:rgba(255,255,255,.9)">#355F55</span></div><div class="info"><b>--ink-teal</b><small>Editorial eyebrow</small></div></div>
+    </div>
+
+    <div class="label" style="margin-bottom:12px">Identity accents — Memory topic tiles only</div>
+    <div class="grid4" style="margin-bottom:24px">
+      <div class="swatch"><div class="chip" style="background:#EB4899"><span style="background:rgba(255,255,255,.9)">#EB4899</span></div><div class="info"><b>--accent-pink</b><small>Overview</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#07B6D5"><span style="background:rgba(255,255,255,.9)">#07B6D5</span></div><div class="info"><b>--accent-cyan</b><small>My Profile</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#FACC15"><span>#FACC15</span></div><div class="info"><b>--accent-amber</b><small>Next Actions</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#A755F7"><span style="background:rgba(255,255,255,.9)">#A755F7</span></div><div class="info"><b>--accent-violet</b><small>My Artifacts</small></div></div>
+    </div>
+
+    <div class="label" style="margin-bottom:12px">Avatar pastels</div>
+    <div class="grid4">
+      <div class="swatch"><div class="chip" style="background:#FEE1A7"><span>#FEE1A7</span></div><div class="info"><b>--pastel-amber</b><small>Content Creator</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#FFE0EF"><span>#FFE0EF</span></div><div class="info"><b>--pastel-pink</b><small>Frontend Developer</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#BDE7FF"><span>#BDE7FF</span></div><div class="info"><b>--pastel-blue</b><small>Backend / AI Engineer</small></div></div>
+      <div class="swatch"><div class="chip" style="background:#EAFBF3"><span>#EAFBF3</span></div><div class="info"><b>--pastel-mint</b><small>Agent-generated tag</small></div></div>
+    </div>
+
+    <div class="rulebox" style="margin-top:24px">
+      <span class="dot"></span>
+      <span><b>Observed usage ratio:</b> white / near-white <b>88%</b> · soft grey chips &amp; dividers <b>7%</b>
+      · brand green fill <b>4%</b> · identity accents <b>1%</b>. The palette is monochrome + one accent —
+      <b>do not add a second brand hue.</b></span>
+    </div>
+  </section>
+
+  <!-- 02 TYPOGRAPHY -->
+  <section>
+    <div class="sec-head"><span class="sec-num">02</span><h2>Typography</h2></div>
+    <div class="sec-sub">Three families, used with intent: UI sans, editorial serif (documents only), mono (document controls).</div>
+    <div class="card typescale">
+      <div class="row"><div class="meta">--fs-display<br>35px · 700 · −0.02em<br>SERIF — document headline</div><div class="t-display">Software engineering: the week agentic coding became the default</div></div>
+      <div class="row"><div class="meta">--fs-h1<br>22px · 700 · −0.01em</div><div class="t-h1">Teamly AI · Home</div></div>
+      <div class="row"><div class="meta">--fs-h2<br>19px · 700</div><div class="t-h2">Frontend Developer</div></div>
+      <div class="row"><div class="meta">--fs-h3<br>16px · 600</div><div class="t-h3">Little T · Overview</div></div>
+      <div class="row"><div class="meta">--fs-body<br>15px · 400 · ink-500</div><div class="t-body">Expert content strategist and creator for multi-platform campaigns.</div></div>
+      <div class="row"><div class="meta">--fs-sm<br>13px · 400 · ink-500</div><div class="t-sm">Created Oct 20, 11:08 PM · #getting-started</div></div>
+      <div class="row"><div class="meta">--fs-eyebrow<br>11px · 600 · +0.12em<br>UPPERCASE · ink-teal</div><div class="t-eyebrow">Weekly industry brief · Technology &amp; Software</div></div>
+    </div>
+    <div class="rulebox" style="margin-top:16px">
+      <span class="dot"></span>
+      <span><b>Hierarchy rule:</b> titles are <code>--ink-900</code>, descriptions <code>--ink-500</code>, meta <code>--ink-300</code>.
+      <b>Never bold a description</b> — hierarchy comes from colour and size, not weight.</span>
+    </div>
+  </section>
+
+  <!-- 03 SPACING RADIUS ELEVATION -->
+  <section>
+    <div class="sec-head"><span class="sec-num">03</span><h2>Spacing, radius &amp; elevation</h2></div>
+    <div class="sec-sub">4 pt base · soft-pill corner language · shadows barely visible.</div>
+    <div class="grid2">
+      <div class="card">
+        <div class="label" style="margin-bottom:18px">Spacing scale (4 pt base)</div>
+        <div class="bars">
+          <div class="b"><i style="height:16px"></i><small>4</small></div>
+          <div class="b"><i style="height:32px"></i><small>8</small></div>
+          <div class="b"><i style="height:48px"></i><small>12</small></div>
+          <div class="b"><i style="height:64px"></i><small>16</small></div>
+          <div class="b"><i style="height:80px"></i><small>20</small></div>
+          <div class="b"><i style="height:96px"></i><small>24</small></div>
+          <div class="b"><i style="height:120px"></i><small>32</small></div>
+        </div>
+        <div class="rulebox" style="margin-top:18px"><span class="dot"></span><span>Screen gutter is a consistent <b>16 px</b> on every screen; card padding <b>20 px</b>; gap between cards <b>12–16 px</b>.</span></div>
+      </div>
+      <div class="card">
+        <div class="label" style="margin-bottom:18px">Radius language</div>
+        <div class="radii">
+          <div class="r"><i style="border-radius:999px"></i><small>pill · 999</small></div>
+          <div class="r"><i style="border-radius:24px"></i><small>lg · 24</small></div>
+          <div class="r"><i style="border-radius:18px"></i><small>md · 18</small></div>
+          <div class="r"><i style="border-radius:12px"></i><small>sm · 12</small></div>
+          <div class="r"><i style="border-radius:8px"></i><small>xs · 8</small></div>
+        </div>
+        <div class="label" style="margin:26px 0 18px">Elevation (all ≤ 6% opacity)</div>
+        <div class="elevs">
+          <div class="e" style="box-shadow:none;border:1px solid var(--divider)"><small>elev-0</small></div>
+          <div class="e" style="box-shadow:var(--elev-1)"><small>elev-1</small></div>
+          <div class="e" style="box-shadow:var(--elev-2)"><small>elev-2</small></div>
+          <div class="e" style="box-shadow:var(--elev-3)"><small>elev-3</small></div>
+          <div class="e" style="box-shadow:var(--elev-green);background:var(--green-500);color:#fff"><small style="color:#fff">elev-green</small></div>
+        </div>
+      </div>
+    </div>
+    <div class="rulebox" style="margin-top:16px">
+      <span class="dot"></span>
+      <span>White cards on <code>#FAFBFD</code> are separated mostly by <b>radius + whitespace</b>, not shadow.
+      Keep shadows under 6% opacity — heavier shadows instantly break the look.</span>
+    </div>
+  </section>
+
+  <!-- 04 COMPONENTS -->
+  <section>
+    <div class="sec-head"><span class="sec-num">04</span><h2>Core components</h2></div>
+    <div class="sec-sub">The reusable parts of the app, rendered at real size.</div>
+
+    <div class="demo">
+      <div class="label">Search field — always sits directly under the header</div>
+      <div class="search">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#B9BABE" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        Search posts, creators...
+      </div>
+
+      <div class="label" style="margin-top:4px">Filter chip rail — horizontally scrolling, selected = green &amp; slightly taller</div>
+      <div class="chiprail">
+        <button class="chip active">All ⟳</button>
+        <button class="chip neutral">Trending</button>
+        <button class="chip neutral">Webpage</button>
+        <button class="chip neutral">Mini Game</button>
+        <button class="chip neutral">Image</button>
+        <button class="chip neutral">Data Analysis</button>
+      </div>
+
+      <div class="label" style="margin-top:4px">Status tag · count badge · meta counter</div>
+      <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+        <span class="tag">✧ Agent generated</span>
+        <span style="color:var(--ink-300);font-size:12px;font-weight:600;letter-spacing:.06em">VIDEO</span>
+        <span class="badgecircle">1</span>
+        <span style="background:rgba(255,255,255,.8);color:var(--ink-900);font-size:12px;font-weight:600;padding:3px 10px;border-radius:var(--radius-pill)">1/2</span>
+      </div>
+
+      <div class="label" style="margin-top:4px">Agent row card — the most repeated component in the app</div>
+      <div class="agentcard">
+        <div class="disc" style="background:var(--pastel-pink)">🤖</div>
+        <div class="txt">
+          <b>Frontend Developer</b>
+          <p>Expert frontend developer specializing in modern web technologies, component architecture and performance.</p>
+        </div>
+        <button class="btn-primary">Chat</button>
+      </div>
+      <div class="agentcard">
+        <div class="disc" style="background:var(--pastel-blue)">🤖</div>
+        <div class="txt">
+          <b>AI Engineer</b>
+          <p>Expert AI/ML engineer specializing in machine learning model development and deployment.</p>
+        </div>
+        <button class="btn-primary">Chat</button>
+      </div>
+
+      <div class="label" style="margin-top:4px">Buttons — primary pill · FAB · secondary mono · icon · link</div>
+      <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+        <button class="btn-primary">Chat</button>
+        <button class="btn-primary">+ Create My Own Agent</button>
+        <button class="btn-fab">+</button>
+        <button class="btn-secondary">Export .md</button>
+        <button class="btn-icon">💬</button>
+        <button class="btn-icon">✈</button>
+        <button class="btn-icon">⋯</button>
+        <button class="btn-link">+ New</button>
+      </div>
+
+      <div class="label" style="margin-top:4px">Collapsible group header</div>
+      <div class="grouphdr">⌄ Chats · 15</div>
+      <div class="grouphdr" style="padding-top:0">⌄ Getting started 3</div>
+
+      <div class="label" style="margin-top:4px">Memory topic row — the only place solid accent colour appears</div>
+      <div class="card" style="padding:8px 20px">
+        <div class="topicrow"><div class="tile" style="background:var(--accent-pink)">▦</div><div><b>Overview</b><span>All topics &amp; how they connect</span></div></div>
+        <div class="topicrow"><div class="tile" style="background:var(--accent-cyan)">👤</div><div><b>My Profile</b><span>Your work &amp; life profile</span></div></div>
+        <div class="topicrow"><div class="tile" style="background:var(--accent-amber)">📅</div><div><b>Next Actions</b><span>Anticipated upcoming</span></div></div>
+        <div class="topicrow"><div class="tile" style="background:var(--accent-violet)">◈</div><div><b>My Artifacts</b><span>All deliverables agents made</span></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 05 SIGNATURE DOCUMENT PANEL -->
+  <section>
+    <div class="sec-head"><span class="sec-num">05</span><h2>The signature moment</h2></div>
+    <div class="sec-sub">The Feed “document inside the app” — warm paper, mono controls, serif headline, teal kicker.</div>
+    <div class="grid2">
+      <div class="docpanel">
+        <div class="statusline"><i></i> Co-editable brief</div>
+        <div class="savenote">All changes save locally in this browser</div>
+        <div class="toolbar">
+          <button class="btn-secondary">Edit</button>
+          <button class="btn-secondary">Comment</button>
+          <button class="btn-secondary">Export .md</button>
+          <button class="btn-secondary">Print / PDF</button>
+          <button class="btn-secondary">Reset</button>
+        </div>
+        <div class="t-eyebrow">Weekly industry brief · Technology &amp; Software</div>
+        <h3>Software engineering: the week agentic coding became the default</h3>
+        <div class="sub">Seven days of evidence that code generation is no longer the exception…</div>
+      </div>
+      <div class="card" style="display:flex;flex-direction:column;justify-content:center;gap:14px">
+        <div class="label">Feed post footer</div>
+        <b style="font-size:15px">Weekly Industry Brief for Software Engineers in Technology &amp; Softwares</b>
+        <div class="statrow">♡ 12 · 🔖 0 · 💬 1 · ✈<span class="sparkle">✧</span></div>
+        <div style="color:var(--ink-500);font-size:14px">This co-editable weekly industry brief provides a concise overview of key developments for software engineers…</div>
+        <div class="rulebox" style="background:var(--bg-app-alt);margin-top:6px">
+          <span class="dot"></span>
+          <span>The <b>sparkle FAB</b> = “generate / remix from this post” — it turns consumption into production.</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 06 BOTTOM NAV -->
+  <section>
+    <div class="sec-head"><span class="sec-num">06</span><h2>Bottom navigation</h2></div>
+    <div class="sec-sub">Identical on all five screens — 5 destinations, same order, same icons.</div>
+    <div style="display:flex;gap:32px;align-items:flex-start;flex-wrap:wrap">
+      <div class="phone">
+        <div class="nav">
+          <div class="item active"><span class="ic">💬</span>Chat</div>
+          <div class="item"><span class="ic">🤖</span>Agents</div>
+          <div class="item"><span class="ic">🧭</span>Discover</div>
+          <div class="item"><span class="ic">🧠<span class="bdg">1</span></span>Memory</div>
+          <div class="item"><span class="ic">▤</span>Artifacts</div>
+        </div>
+      </div>
+      <div class="card" style="flex:1;min-width:280px">
+        <div class="topicrow" style="padding-top:0"><div class="tile" style="width:40px;height:40px;background:var(--bg-app-alt);color:var(--ink-900);font-size:16px">1</div><div><b>Chat</b><span>Inbox &amp; hub for all agent interaction</span></div></div>
+        <div class="topicrow"><div class="tile" style="width:40px;height:40px;background:var(--bg-app-alt);color:var(--ink-900);font-size:16px">2</div><div><b>Agents</b><span>Browse &amp; hire agents, build your own</span></div></div>
+        <div class="topicrow"><div class="tile" style="width:40px;height:40px;background:var(--bg-app-alt);color:var(--ink-900);font-size:16px">3</div><div><b>Discover</b><span>Read + co-edit agent-made documents</span></div></div>
+        <div class="topicrow"><div class="tile" style="width:40px;height:40px;background:var(--bg-app-alt);color:var(--ink-900);font-size:16px">4</div><div><b>Memory</b><span>Auto-built private knowledge base</span></div></div>
+        <div class="topicrow"><div class="tile" style="width:40px;height:40px;background:var(--bg-app-alt);color:var(--ink-900);font-size:16px">5</div><div><b>Artifacts</b><span>Collect everything agents produced</span></div></div>
+        <div class="rulebox" style="margin-top:14px"><span class="dot"></span><span>Spec: height ≈ 72 px + safe area · <code>--surface</code> background · hairline <code>--divider</code> on top · inactive <code>--ink-300</code> · active <code>--green-700</code>.</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 07 LAYOUT GRID -->
+  <section>
+    <div class="sec-head"><span class="sec-num">07</span><h2>Layout grid</h2></div>
+    <div class="sec-sub">Every one of the five screens follows the same four-zone skeleton.</div>
+    <div class="card" style="display:flex;gap:24px;flex-wrap:wrap">
+      <div style="flex:1;min-width:260px;background:var(--bg-app);border-radius:var(--radius-md);padding:20px;display:flex;flex-direction:column;gap:10px;min-height:340px">
+        <div style="background:var(--surface);border-radius:var(--radius-sm);padding:12px;font-size:13px;font-weight:600;box-shadow:var(--elev-1)">1 · Header / tabs <span style="color:var(--ink-300);font-weight:400">sticky 44–56 px</span></div>
+        <div style="background:var(--surface);border-radius:var(--radius-sm);padding:12px;font-size:13px;font-weight:600;box-shadow:var(--elev-1)">2 · Search + filter chips <span style="color:var(--ink-300);font-weight:400">sticky 52 + 56</span></div>
+        <div style="flex:1;background:var(--surface-chip);border-radius:var(--radius-sm);padding:12px;font-size:13px;font-weight:600;display:flex;align-items:center;justify-content:center;color:var(--ink-500)">3 · Scroll body &nbsp;(flex: 1)</div>
+        <div style="background:var(--surface);border-radius:var(--radius-sm);padding:12px;font-size:13px;font-weight:600;box-shadow:var(--elev-1)">4 · Bottom navigation <span style="color:var(--ink-300);font-weight:400">72 px + safe area</span></div>
+      </div>
+      <div style="flex:1;min-width:260px">
+        <ul style="list-style:none;display:flex;flex-direction:column;gap:12px;font-size:14px;color:var(--ink-700)">
+          <li>• One column, single scroll region — <b>16 px gutters</b>, <b>20 px card padding</b>.</li>
+          <li>• Zones 1 &amp; 2 stay <b>sticky</b>; only zone 3 scrolls.</li>
+          <li>• Chip rails scroll <b>edge-to-edge</b> and clip the last chip as a “there is more” cue.</li>
+          <li>• Header FAB sits top-right in zone 1, above the search field.</li>
+          <li>• Touch targets ≥ <b>44 × 44 px</b>; agent row min-height 72 px.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 08 ACCESSIBILITY -->
+  <section>
+    <div class="sec-head"><span class="sec-num">08</span><h2>Accessibility</h2></div>
+    <div class="sec-sub">Contrast checked against WCAG; the green is the only risky token.</div>
+    <div class="card">
+      <div class="grid4" style="text-align:center;margin-bottom:22px">
+        <div><div style="font-size:26px;font-weight:700;color:#111727">16.6:1</div><small style="color:var(--ink-500);font-size:12px">ink-900 on white<br>✅ AAA</small></div>
+        <div><div style="font-size:26px;font-weight:700;color:#6B7280">4.8:1</div><small style="color:var(--ink-500);font-size:12px">ink-500 on white<br>✅ AA</small></div>
+        <div><div style="font-size:26px;font-weight:700;color:#18964D">3.9:1</div><small style="color:var(--ink-500);font-size:12px">green-700 on white<br>✅ AA large / 600</small></div>
+        <div><div style="font-size:26px;font-weight:700;color:#E5484D">2.3:1</div><small style="color:var(--ink-500);font-size:12px">white on green-500<br>⚠️ fails small text</small></div>
+      </div>
+      <div class="rulebox warn"><span class="dot"></span><span>Never render white text smaller than <b>14 px / 600</b> on <code>#00C951</code>. For small green labels, use <code>--green-700</code> on white instead.</span></div>
+      <div class="rulebox" style="margin-top:12px"><span class="dot"></span><span>Never encode state with colour alone — pair the green dot with a word (“NEW”, “Agent generated”) and the active tab with an underline as well as colour.</span></div>
+    </div>
+  </section>
+
+  <!-- 09 DO / DONT -->
+  <section>
+    <div class="sec-head"><span class="sec-num">09</span><h2>Do &amp; Don’t</h2></div>
+    <div class="sec-sub">The rules that keep the look intact.</div>
+    <div class="dodont">
+      <div class="col do">
+        <h4>✅ Do</h4>
+        <ul>
+          <li><i>✓</i> Keep ~88% of the screen white / near-white</li>
+          <li><i>✓</i> Use green only for action + active state</li>
+          <li><i>✓</i> Fill with <code>--green-500</code>, write with <code>--green-700</code></li>
+          <li><i>✓</i> 24 px radius cards, pill chips</li>
+          <li><i>✓</i> Grey descriptions, light meta — hierarchy via colour</li>
+          <li><i>✓</i> Serif headline + mono controls <em>inside documents</em></li>
+          <li><i>✓</i> Pastel discs behind mascot avatars</li>
+          <li><i>✓</i> Shadows ≤ 6% opacity</li>
+        </ul>
+      </div>
+      <div class="col dont">
+        <h4>❌ Don’t</h4>
+        <ul>
+          <li><i>✕</i> Fill backgrounds with colour blocks</li>
+          <li><i>✕</i> Use green for decoration or borders</li>
+          <li><i>✕</i> Put white small text on <code>--green-500</code></li>
+          <li><i>✕</i> Square corners / 4 px radii</li>
+          <li><i>✕</i> Bold descriptions for hierarchy</li>
+          <li><i>✕</i> Use serif anywhere in the app chrome</li>
+          <li><i>✕</i> Recolour the mascots themselves</li>
+          <li><i>✕</i> Heavy drop shadows or dark borders</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 10 CSS TOKENS -->
+  <section>
+    <div class="sec-head"><span class="sec-num">10</span><h2>Drop-in CSS tokens</h2></div>
+    <div class="sec-sub">Copy-paste this into any project to start building in the Teamly look.</div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <pre style="margin:0;padding:24px;overflow-x:auto;background:#111727;color:#E6E8EC;font-family:var(--font-mono);font-size:12.5px;line-height:1.7"><code>:root{
+  /* brand */
+  --green-500:#00C951; --green-600:#00B548; --green-700:#18964D;
+  --green-050:#EAFBF1; --green-link:#06A046;
+
+  /* surfaces */
+  --bg-app:#FAFBFD; --bg-app-alt:#F1F4F9; --surface:#FFFFFF;
+  --surface-chip:#F5F6FA; --surface-paper:#F1F0EB; --surface-tint:#F3F4F6;
+  --divider:#EEEEEE;
+
+  /* ink */
+  --ink-900:#111727; --ink-800:#191919; --ink-700:#3A4149;
+  --ink-500:#6B7280; --ink-300:#B9BABE; --ink-teal:#355F55;
+
+  /* identity accents */
+  --accent-pink:#EB4899; --accent-cyan:#07B6D5;
+  --accent-amber:#FACC15; --accent-violet:#A755F7;
+
+  /* pastels + stage */
+  --pastel-amber:#FEE1A7; --pastel-pink:#FFE0EF; --pastel-blue:#BDE7FF;
+  --pastel-mint:#EAFBF3; --stage-black:#191919;
+
+  /* type */
+  --font-sans:'Inter',-apple-system,'Segoe UI',sans-serif;
+  --font-serif:'Source Serif 4',Georgia,serif;
+  --font-mono:'JetBrains Mono','SF Mono',ui-monospace,monospace;
+  --fs-display:35px; --fs-h1:22px; --fs-h2:19px; --fs-h3:16px;
+  --fs-body:15px; --fs-sm:13px; --fs-eyebrow:11px; --fs-nav:11px; --fs-btn:15px;
+
+  /* space + radius */
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px;
+  --space-5:20px; --space-6:24px; --space-8:32px;
+  --radius-pill:999px; --radius-lg:24px; --radius-md:18px;
+  --radius-sm:12px; --radius-xs:8px;
+
+  /* elevation */
+  --elev-1:0 1px 2px rgba(17,23,39,.04);
+  --elev-2:0 4px 16px rgba(17,23,39,.06);
+  --elev-3:0 8px 28px rgba(17,23,39,.10);
+  --elev-green:0 6px 16px rgba(0,201,81,.28);
+}</code></pre>
+    </div>
+  </section>
+
+  <div class="footnote">
+    Generated from the five attached Teamly AI screenshots · full written specs in
+    <a href="design-and-theme.md">design-and-theme.md</a> ·
+    screenshot-by-screenshot breakdown in <a href="screen-analysis-report.md">screen-analysis-report.md</a>.
+  </div>
+
+</div>
+</body>
+</html>

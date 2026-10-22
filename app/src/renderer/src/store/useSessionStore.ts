@@ -30,13 +30,19 @@ function clip(text: string): string {
  * when the prompt has no usable text (e.g. an attachment-only turn), so the caller
  * can skip renaming.
  */
+/** 3–5 words, Title Cased from the first prompt — e.g. "Fix Login Bug". */
+function titleCaseWords(words: string[]): string {
+  return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ')
+}
 export function deriveTitle(prompt: string): string {
-  const firstLine = prompt
-    .split('\n')
-    .map((line) => line.trim())
-    .find((line) => line.length > 0)
+  const firstLine = prompt.split('\n').map((l) => l.trim()).find((l) => l.length > 0)
   if (!firstLine) return ''
-  return clip(firstLine)
+  const cleaned = firstLine.replace(/[^a-zA-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim()
+  const words = cleaned.split(' ').filter(Boolean).slice(0, 5)
+  if (words.length <= 2) return clip(firstLine)
+  const core = words.slice(0, Math.min(5, Math.max(3, words.length)))
+  const title = titleCaseWords(core)
+  return title || clip(firstLine)
 }
 
 /**
@@ -227,15 +233,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   autoName: async (prompt) => {
     const title = deriveTitle(prompt)
     if (!title) return
-    const { activeSessionId, sessions } = get()
+    const { activeSessionId } = get()
     if (!activeSessionId) return
-    const active = sessions.find((s) => s.id === activeSessionId)
-    // Only title a fresh, still-default session; never overwrite a real title.
+    let sessions = get().sessions
+    let active = sessions.find((s) => s.id === activeSessionId)
+    if (!active) {
+      sessions = await window.myto.sessions.list(get().activeProjectId)
+      set({ sessions })
+      active = sessions.find((s) => s.id === activeSessionId)
+    }
     if (!active || active.title !== DEFAULT_SESSION_TITLE) return
-
-    // The title is taken from the first message and then left fixed. No AI
-    // re-title pass follows — that used to change the name after the fact, which
-    // is exactly the "session name auto-changes" behaviour we're removing.
     await get().rename(activeSessionId, title)
   },
 

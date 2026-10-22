@@ -832,6 +832,143 @@ export type EditorEvent =
     }
   | { phase: 'error'; message: string }
 
+// ── Myto Studio: manual editing (user-driven) + agent self-correction ──────────
+//
+// The same Lightroom/CapCut surfaces the agent drives, but opened and operated BY THE
+// USER. The renderer talks to the main process over `window.myto.editor` (EditorApi): it
+// opens a source still, bakes the authoritative result with the SAME ffmpeg cores the
+// agent uses, and (when a vision-capable model is configured) asks Myto to critique the
+// baked result against a goal so it can self-correct. All wire-shaped (no Electron here).
+
+/** A workspace media file the Studio picker lists. */
+export interface StudioMediaItem {
+  /** Workspace-relative path (POSIX separators). */
+  path: string
+  kind: 'photo' | 'video'
+}
+
+/** Result of opening a source file in the Studio: a downscaled preview + source metadata. */
+export interface StudioOpenResult {
+  /** `data:image/jpeg;base64,…` downscaled still (photo) or poster frame (video). */
+  preview: string
+  width?: number
+  height?: number
+  /** Video only: source duration in seconds (for the timeline scale). */
+  durationSec?: number
+}
+
+/** The aspect ratios the Studio reframe control offers (mirrors ffmpeg-core's AspectRatio). */
+export type StudioAspect = '9:16' | '16:9' | '1:1' | '4:5' | '4:3' | '3:4' | '2:1'
+
+/**
+ * One video operation the manual Studio timeline builds — a renderer-facing mirror of the
+ * main-process `EditOp` (ffmpeg-core.ts). The renderer builds these from UI gestures; the
+ * main process re-validates with `validateEditPlan` before baking, so this is a convenience
+ * shape, not a trust boundary.
+ */
+export type StudioVideoOp =
+  | { op: 'trim'; start: number; end: number }
+  | { op: 'speed'; factor: number }
+  | { op: 'resize'; aspect: StudioAspect; mode: 'crop' | 'pad' | 'stretch' }
+  | { op: 'volume'; factor: number }
+  | { op: 'mute' }
+  | { op: 'filter'; name: string }
+  | {
+      op: 'colorGrade'
+      brightness?: number
+      contrast?: number
+      saturation?: number
+      gamma?: number
+      temperature?: number
+      tint?: number
+    }
+  | {
+      op: 'text'
+      text: string
+      start?: number
+      end?: number
+      x?: number | string
+      y?: number | string
+      fontSize?: number
+      color?: string
+      box?: boolean
+    }
+  | { op: 'transition'; name: string; durationSec: number }
+
+/** A video edit plan the renderer sends to `bakeVideo` (re-validated main-side). */
+export interface StudioVideoPlan {
+  input: string
+  output?: string
+  operations: StudioVideoOp[]
+}
+
+/** Progress tick for a Studio bake (main → renderer), keyed by the renderer-supplied jobId. */
+export interface StudioBakeProgress {
+  jobId: string
+  pct: number
+  label: string
+}
+
+/** The authoritative result of a Studio bake (or a failure message). */
+export type StudioBakeResult =
+  | { ok: true; outputPath: string; resultPreview: string; url?: string }
+  | { ok: false; error: string }
+
+/**
+ * A vision critique request: given the baked result still + the user's goal and the edit
+ * applied so far, ask the configured (vision-capable) model whether it matches and, if not,
+ * for a corrected adjust/plan. The engine of "fix a mistake instantly".
+ */
+export interface StudioCritiqueRequest {
+  goal: string
+  kind: 'photo' | 'video'
+  /** data: URL of the current baked result (photo still / video poster frame). */
+  resultPreview: string
+  /** The adjust (photo) or plan (video) applied so far, for the model's context. */
+  current: PhotoAdjust | StudioVideoPlan
+  /** 1-based pass number, so the critique can be stricter/looser as it iterates. */
+  pass: number
+}
+
+/** The critique verdict. `ok:false` means no vision model was available (see `reason`). */
+export interface StudioCritiqueResult {
+  ok: boolean
+  /** Myto's short, user-facing note on what it changed / still needs fixing (or ''). */
+  note: string
+  /** True when the result already satisfies the goal — stop iterating. */
+  done: boolean
+  /** A corrected adjust (photo kind) to re-bake, when `ok && !done`. */
+  adjust?: PhotoAdjust
+  /** A corrected plan (video kind) to re-bake, when `ok && !done`. */
+  plan?: StudioVideoPlan
+  /** Why vision was unavailable, when `ok:false`. */
+  reason?: string
+}
+
+/**
+ * The manual-Studio surface on `window.myto.editor`. Open a source, bake with the shared
+ * ffmpeg cores, and optionally critique the result. `bakePhoto`/`bakeVideo` stream progress
+ * on {@link onBakeProgress} keyed by the caller's `jobId`.
+ */
+export interface EditorApi {
+  /** List workspace image + video files the Studio can open (capped, sorted). */
+  listMedia: () => Promise<StudioMediaItem[]>
+  /** Open a photo: downscaled still + dimensions, or null if it can't be read. */
+  openPhoto: (path: string) => Promise<StudioOpenResult | null>
+  /** Bake a photo with the authoritative ffmpeg chain; resolves the result or an error. */
+  bakePhoto: (path: string, adjust: PhotoAdjust, jobId: string, output?: string) => Promise<StudioBakeResult>
+  /** Open a video: poster frame + dimensions + duration, or null if it can't be read. */
+  openVideo: (path: string) => Promise<StudioOpenResult | null>
+  /** Grab a single poster frame of a video at `atSec` as a data: URL (for timeline scrubbing). */
+  frameAt: (path: string, atSec: number) => Promise<string | null>
+  /** Bake a video edit plan; resolves the result (with a file:// url to play) or an error. */
+  bakeVideo: (plan: StudioVideoPlan, jobId: string) => Promise<StudioBakeResult>
+  /** Ask a vision-capable model to critique a baked result against the goal (self-correction). */
+  critique: (req: StudioCritiqueRequest) => Promise<StudioCritiqueResult>
+  /** Subscribe to bake-progress ticks (filter by your jobId). Returns an unsubscribe fn. */
+  onBakeProgress: (cb: (p: StudioBakeProgress) => void) => () => void
+}
+
 /**
  * A completed NATIVE (provider) tool call assembled from a streaming response (#15).
  * The gateway's per-stream parser accumulates the provider's tool-call fragments —
@@ -1696,6 +1833,8 @@ export interface MytoApi {
   terminal: TerminalApi
   /** Credential vault: list/save/delete per-site secrets Myto injects into matching terminal commands. */
   credentials: CredentialsApi
+  /** Myto Studio: open/bake/critique photos + videos the USER edits by hand (and self-correction). */
+  editor: EditorApi
 }
 
 // ---------------------------------------------------------------------------

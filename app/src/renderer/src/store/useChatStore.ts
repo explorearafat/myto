@@ -662,7 +662,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       run.settled = true
       run.pendingApproval = undefined
       run.pendingQuestion = undefined
-      run.disposer() // detach the listener (a post-completion cancel is a no-op)
+      run.disposer()
       if (ownerSessionId) liveRuns.delete(ownerSessionId)
       syncLiveSessions()
       if (ownerSessionId) {
@@ -1157,6 +1157,10 @@ export const useChatStore = create<ChatState>((set, get) => {
     },
 
     applyLoaded: (loaded) => {
+      const prevSession = get().sessionId
+      if (prevSession && prevSession !== loaded.session.id) {
+        usePreviewStore.getState().close()
+      }
       // Do NOT tear down in-flight runs when switching conversations — they keep
       // running in the background and route their reply to their own session. If the
       // session being opened has a live run, re-attach to it (overlay the live
@@ -1178,6 +1182,9 @@ export const useChatStore = create<ChatState>((set, get) => {
     },
 
     resetTo: (sessionId, projectId = null) => {
+      if (get().sessionId && sessionId !== get().sessionId) {
+        usePreviewStore.getState().close()
+      }
       // A fresh session starts empty; it has no live run to re-attach to, but we
       // still route through projectLiveRun for a single, consistent projection.
       //

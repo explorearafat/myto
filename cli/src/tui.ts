@@ -221,12 +221,13 @@ export function runHeader(s: RunState): string {
   const w = width()
   const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   const task = s.task.length > w - 4 ? s.task.slice(0, w - 5) + '…' : s.task
+  // The working folder is shown once on the welcome screen; don't reprint it on
+  // every run — that only adds a repeated path line between tasks.
   return [
     '',
     gradient('─'.repeat(w)),
     `${c.gray('[' + time + ']')}  ${c.gray(s.model)} ${s.byok ? badge('BYOK', [167, 139, 250]) : ''}${s.fallback ? c.dim('  ↳ ' + s.fallback) : ''}`,
     `${c.green('▌')} ${c.bold(task)}`,
-    c.dim(s.workspace),
     ''
   ].join('\n')
 }

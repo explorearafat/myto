@@ -4,8 +4,9 @@ import { useAppStore } from '@renderer/store/useAppStore'
 import { useSessionStore } from '@renderer/store/useSessionStore'
 import { useProjectStore } from '@renderer/store/useProjectStore'
 import { useChatStore } from '@renderer/store/useChatStore'
-import { ProjectDialog } from '@renderer/components/ProjectDialog'
+import gearUrl from '../assets/gear.png'
 import { useAuthUser } from '@renderer/lib/useAuthUser'
+import { ProjectDialog } from '@renderer/components/ProjectDialog'
 
 /** A labelled bucket of recents (Today / Yesterday / …). */
 interface SessionGroup {
@@ -376,9 +377,22 @@ export function ConversationRail() {
 
   return (
     <div className="flex h-full flex-col border-r border-border bg-bg">
-      {/* Brand wordmark — the sidebar header. */}
-      <div className="flex items-center px-3 pb-1 pt-2">
+      {/* Brand wordmark + split toggle — top-left as requested. */}
+      <div className="flex items-center justify-between px-3 pb-1 pt-2">
         <span className="font-serif text-[19px] leading-none text-text">Myto</span>
+        <button
+          type="button"
+          aria-label="Collapse sidebar"
+          title="Collapse sidebar"
+          onClick={toggleRail}
+          className="grid h-6 w-6 place-items-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-text"
+        >
+          <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <rect x="2.5" y="3.5" width="15" height="13" rx="2" stroke="currentColor" strokeWidth="1.4" />
+            <path d="M7.5 3.5v13" stroke="currentColor" strokeWidth="1.4" />
+            <path d="M10 7l2 3-2 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
       </div>
 
       {/* Fixed top cluster: New · Projects · Artifacts · Code · Customize. */}
@@ -410,13 +424,7 @@ export function ConversationRail() {
             }
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path
-                d="M8 1.7l1.5 3.9 3.9 1.5-3.9 1.5L8 12.5 6.5 8.6 2.6 7.1l3.9-1.5L8 1.7Z"
-                stroke="currentColor"
-                strokeWidth="1.3"
-                strokeLinejoin="round"
-              />
-              <circle cx="12.6" cy="12.6" r="1.4" stroke="currentColor" strokeWidth="1.2" />
+              <path d="M4 4.5l2.5 2.5L4 9.5M7.5 4.5l2.5 2.5L7.5 9.5M11 4.5l2.5 2.5L11 9.5" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
             Cowork
           </button>
@@ -438,13 +446,8 @@ export function ConversationRail() {
             }
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path
-                d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3L8 4.5h4.5A1.5 1.5 0 0 1 14 6v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12V4.5Z"
-                stroke="currentColor"
-                strokeWidth="1.3"
-                strokeLinejoin="round"
-              />
-              <path d="M8 8.2v2.6M6.7 9.5h2.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+              <path d="M2.5 4.5h5l1.5 1.5H14v6H2.5V4.5Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+              <path d="M7.2 8.2l1.6 1.6 2.4-2.4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
             Build
           </button>
@@ -706,35 +709,20 @@ export function ConversationRail() {
             aria-label="Settings"
             title="Settings"
             onClick={() => openSettings('tools')}
-            className="grid h-6 w-6 place-items-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-text"
+            className="grid h-7 w-7 place-items-center rounded-md border border-border bg-surface-2/60 transition-colors hover:bg-surface-2"
           >
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <circle cx="8" cy="8" r="2.1" stroke="currentColor" strokeWidth="1.3" />
-              <path d="M8 1.6v1.8M8 12.6v1.8M14.4 8h-1.8M3.4 8H1.6M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3M12.5 12.5l-1.3-1.3M4.8 4.8 3.5 3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-            </svg>
+            <img src={gearUrl} alt="" width={16} height={16} className="h-[16px] w-[16px] object-contain opacity-80" />
           </button>
           <button
             type="button"
             aria-label="Search chats"
             title="Search chats"
             onClick={toggleSearch}
-            className="grid h-6 w-6 place-items-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-text"
+            className="grid h-7 w-7 place-items-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-text"
           >
             <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.4" />
               <path d="M11 11l3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            aria-label="Collapse sidebar"
-            title="Collapse sidebar"
-            onClick={toggleRail}
-            className="grid h-6 w-6 place-items-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-text"
-          >
-            <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-              <rect x="2.5" y="3.5" width="15" height="13" rx="2" stroke="currentColor" strokeWidth="1.4" />
-              <path d="M7.5 3.5v13" stroke="currentColor" strokeWidth="1.4" />
             </svg>
           </button>
         </div>
