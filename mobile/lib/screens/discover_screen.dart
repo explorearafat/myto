@@ -549,7 +549,7 @@ class _ToolbarPill extends StatelessWidget {
         decoration: BoxDecoration(
           color: selected ? context.palette.accent : context.palette.surface,
           borderRadius: BorderRadius.circular(TeamlyRadius.pill),
-          border: selected ? Border.none : Border.all(color: context.palette.border),
+          border: selected ? null : Border.all(color: context.palette.border),
         ),
         child: Text(
           label,
