@@ -9,7 +9,7 @@ import { Footer } from './Footer';
 import { Header } from './Header';
 
 /* Per-platform brand glyph. Windows/Android have their own marks; the planned
-   platforms (iOS, Linux, macOS) fall back to the Myto mark. */
+   platform (iOS) falls back to the Myto mark. */
 function Mark({ name, className }: { name: string; className?: string }) {
   if (name === 'Windows') return <WindowsMark className={className} />;
   if (name === 'Android') return <AndroidMark className={className} />;
@@ -238,7 +238,7 @@ export function DownloadPage() {
           </div>
         </section>
 
-        {/* Alternating platform blocks — Android, Windows, iOS, Linux, macOS. */}
+        {/* Alternating platform blocks — Android, Windows, iOS. */}
         <section className="mx-auto max-w-5xl px-6">
           <div className="divide-y divide-[#eceae2]">
             {PLATFORMS.map((p, i) => (

@@ -71,7 +71,7 @@ export interface Platform {
 /*
  * The /download page renders these as alternating left/right blocks, so the ORDER
  * here is load-bearing: index parity (`i % 2`) decides which side the media sits on.
- * Android (left), Windows (right), iOS (left), Linux (right), macOS (left).
+ * Android (left), Windows (right), iOS (left).
  */
 export const PLATFORMS: Platform[] = [
   {
@@ -101,19 +101,5 @@ export const PLATFORMS: Platform[] = [
     ready: false,
     requires: 'iPhone and iPad',
     body: 'Not built yet. The Flutter chat app that powers Android is the same codebase iOS will use, so this is App Store packaging and signing rather than a rewrite.',
-  },
-  {
-    name: 'Linux',
-    status: 'Planned',
-    ready: false,
-    requires: 'x86-64',
-    body: 'The workspace itself already runs cross-platform; the packaging is what is missing. The releases page is where a Linux build will show up first.',
-  },
-  {
-    name: 'macOS',
-    status: 'Planned',
-    ready: false,
-    requires: 'Apple silicon and Intel',
-    body: 'Not built yet. Myto runs on Electron, so this is packaging and signing work rather than a rewrite — the releases page is the place to watch.',
   },
 ];

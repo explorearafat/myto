@@ -145,8 +145,8 @@ function Installation() {
   return (
     <Prose title="Installation">
       <p className="max-w-[62ch]">
-        Grab a build from the <DocLink href="/download">download page</DocLink>. Windows and Android
-        are ready today; macOS and Linux are planned.
+        Grab a build from the <DocLink href="/download">download page</DocLink>. Windows 10/11 and
+        Android are ready today.
       </p>
       <p className="max-w-[62ch]">
         The installers are self-signed, so the first launch shows a caution. On Windows, SmartScreen
@@ -225,7 +225,7 @@ function Faq() {
     <Prose title="FAQ">
       <p className="max-w-[62ch]">
         <span className="font-medium text-[#141413]">Which platforms are ready?</span> Windows and
-        Android today; macOS, Linux, and iOS are planned.
+        Android today; iOS is planned. On macOS and Linux you can use the browser and CLI builds.
       </p>
       <p className="max-w-[62ch]">
         <span className="font-medium text-[#141413]">What does it cost?</span> Myto is free — you
