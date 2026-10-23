@@ -311,7 +311,7 @@ class TeamChatStore extends ChangeNotifier {
     final short = t.length > 140 ? '${t.substring(0, 140)}...' : t;
     return '**${agent.name}** — taking the “$short” brief from my side. '
         'Connecting a model lets me research it properly; meanwhile here\'s my '
-        'first read: ${agent.specialty}';
+        'first read: ${agent.category}';
   }
 
   String _reportFallback(String text) {

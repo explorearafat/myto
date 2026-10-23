@@ -24,11 +24,11 @@ import '../widgets/teamly/kit.dart';
 /// avatar and a sender label; the composer is borderless (no green focus ring).
 /// ---------------------------------------------------------------------------
 class TeamChatScreen extends StatefulWidget {
-  TeamChatScreen.direct({super.key, required this.agent, this.resumeTitle})
+  TeamChatScreen.direct({super.key, required Agent this.agent, this.resumeTitle})
       : room = null,
         channelKey = TeamChatStore.directKey(agent.id);
 
-  TeamChatScreen.room({super.key, required this.room, this.resumeTitle})
+  TeamChatScreen.room({super.key, required AgentTeam this.room, this.resumeTitle})
       : agent = null,
         channelKey = TeamChatStore.roomKey(room.id);
 
