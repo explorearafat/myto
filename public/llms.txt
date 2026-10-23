@@ -11,8 +11,8 @@
 
 ## Product facts
 
-- Platform: Windows 10 and 11 (64-bit), Android, Linux and macOS are all supported today. A browser build is available at https://mytocode.vercel.app.
-- Current release: v0.8.0 — a Windows installer (Myto-Setup.exe), a native Android APK (myto.apk), Linux packages (Myto.deb, Myto.rpm, Myto.AppImage) and macOS builds (Myto-arm64.dmg, Myto-arm64.zip) ship together from GitHub Releases.
+- Platform: Windows 10 and 11 (64-bit) and Android are supported today. A browser build is available at https://mytocode.vercel.app.
+- Current release: v0.9.0 — a Windows installer (Myto-Setup.exe) and a native Android APK (myto.apk) ship together from GitHub Releases.
 - Price: the app is free; the only cost is whatever model provider you choose to use.
 - Privacy: Myto is local-first — it works from your project on your machine, with the integrations you configure.
 - Models: a local Ollama endpoint (http://localhost:11434 by default) or any OpenAI-compatible endpoint configured in Settings. Reasoning effort is a per-turn setting from low to max.
@@ -35,8 +35,6 @@ The product page is a single main landmark with labelled sections. Read the head
 The download page (/download) is a separate document with its own heading, "Download Myto", then one block per platform under #platforms:
 
 - Windows — Available now. Windows 10 or 11, 64-bit. Direct link to the Myto-Setup.exe installer. Self-signed, so SmartScreen warns on first run (More info → Run anyway).
-- macOS — Planned. Not built yet; packaging and signing work, not a rewrite. No download link.
-- Linux — Planned. x86-64. Same position as macOS. No download link.
 - Android — Available now. Recent Android phones and tablets. Direct link to the myto.apk build. Self-signed, so Android asks you to allow the install the first time.
 
 The chat (/chat) is a separate document styled like a full chat app — a left sidebar (Myto, then New chat, Code, Projects, Artifacts, Customize) beside a main column that opens on a time-of-day greeting over one input, then becomes a transcript once a message is sent. It is a live, streaming chat, and it is bring-your-own-key: after signing in, the user adds their own OpenAI-compatible base URL, API key, and models on the Authentication page (stored to their account), and those models power the chat here and in the desktop and mobile apps. A visitor's messages are sent to a same-origin server gateway (/api/chat) that proxies to the user's own endpoint and streams the reply back token by token; replies render as Markdown. If the endpoint is unreachable it falls back to a built-in knowledge base so the page still answers. It answers questions about Myto itself; everything it states is also on the product page and in this file.
