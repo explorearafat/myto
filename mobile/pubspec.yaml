@@ -1,7 +1,7 @@
 name: sylor
 description: "Myto — a local-first AI coding workspace. The mobile chat companion."
 publish_to: "none"
-version: 0.9.0+12
+version: 0.9.1+13
 
 environment:
   sdk: ">=3.6.0 <4.0.0"
@@ -20,6 +20,11 @@ dependencies:
 
   # Assistant messages are Markdown (code blocks, lists, …), like Claude.
   flutter_markdown: ^0.7.4
+
+  # Agent profile pictures. The hand-drawn avatar library ships as inline SVG
+  # strings (widgets/agent_art_data.dart), so it renders crisp at any size with
+  # no raster assets to bundle.
+  flutter_svg: ^2.0.10+1
 
   # Sign-in against the same Firebase project as the website. Google blocks OAuth inside app
   # webviews, so we don't sign in on-device: flutter_web_auth_2 opens a real browser (Custom

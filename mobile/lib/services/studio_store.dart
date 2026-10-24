@@ -105,7 +105,10 @@ class StudioStore extends ChangeNotifier {
         description: description.trim(),
         category: category,
         source: AgentSource.custom,
-        pastelIndex: _agents.length,
+        // A user-built agent has no face of its own, so it wears the library's
+        // neutral tile. AgentAvatar falls back to the vector emblem if the id
+        // ever goes missing.
+        artId: 'prompt-engineer',
       ),
     );
     notifyListeners();

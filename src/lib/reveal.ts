@@ -33,8 +33,27 @@ export function useReveals(): void {
 
     const show = (el: HTMLElement) => el.classList.add('is-visible');
 
+    // Anything already inside the viewport reveals immediately, so the hero is
+    // painted on the first frame instead of one observer tick later.
+    const fold = window.innerHeight || document.documentElement.clientHeight;
+    for (const el of targets) {
+      if (el.getBoundingClientRect().top < fold) show(el);
+    }
+
+    // Safety net. If the observer never delivers a single entry — a hidden or
+    // zero-size pane, a headless screenshot, an embedded webview — nothing
+    // would ever un-hide and the page would render empty. That contradicts the
+    // contract at the top of this file: the failure mode must be a plain
+    // visible page. Dropping the root class reveals every section at once.
+    let fired = false;
+    const bail = window.setTimeout(() => {
+      if (!fired) document.documentElement.classList.remove(ROOT_CLASS);
+    }, 1000);
+
     const observer = new IntersectionObserver(
       (entries) => {
+        fired = true;
+        window.clearTimeout(bail);
         for (const entry of entries) {
           if (!entry.isIntersecting) continue;
           show(entry.target as HTMLElement);
@@ -50,6 +69,9 @@ export function useReveals(): void {
     );
 
     for (const el of targets) observer.observe(el);
-    return () => observer.disconnect();
+    return () => {
+      window.clearTimeout(bail);
+      observer.disconnect();
+    };
   }, []);
 }

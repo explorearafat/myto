@@ -156,7 +156,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 // ── Myto 1-to-1 assistant ──────────────────────────────────
                 _row(
                   context,
-                  avatar: const AgentAvatar(emblem: 10, pastelIndex: 0, size: 44),
+                  avatar: const AgentAvatar(artId: 'myto', size: 44),
                   title: 'Myto',
                   subtitle: 'The assistant — coding, research, writing',
                   onTap: _newMytoChat,
@@ -167,11 +167,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   for (final a in agents)
                     _row(
                       context,
-                      avatar: AgentAvatar(
-                        emblem: emblemForGlyph(a.glyph),
-                        pastelIndex: a.pastelIndex,
-                        size: 44,
-                      ),
+                      avatar: AgentAvatar(artId: a.artId, size: 44),
                       title: a.name,
                       subtitle: a.description,
                       onTap: () => _openAgent(a),
@@ -281,11 +277,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   for (var i = 0; i < members.take(3).length; i++)
                     Positioned(
                       left: i * 16.0,
-                      child: AgentAvatar(
-                        emblem: emblemForGlyph(members[i].glyph),
-                        pastelIndex: members[i].pastelIndex,
-                        size: 40,
-                      ),
+                      child: AgentAvatar(artId: members[i].artId, size: 40),
                     ),
                 ],
               ),
@@ -324,15 +316,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _conversationRow(BuildContext context, Conversation c) {
     final channelAvatar = c.channel == null
-        ? const AgentAvatar(emblem: 10, pastelIndex: 1, size: 40)
+        ? const AgentAvatar(artId: 'myto', size: 40)
         : c.channel!.startsWith('room:')
-            ? const AgentAvatar(emblem: 7, pastelIndex: 2, size: 40)
+            ? const AgentAvatar(artId: 'project-manager', size: 40)
             : AgentAvatar(
-                emblem: emblemForGlyph(
-                  agentById(TeamChatStore.idFromKey(c.channel!))?.glyph ?? 'spark',
-                ),
-                pastelIndex:
-                    agentById(TeamChatStore.idFromKey(c.channel!))?.pastelIndex ?? 0,
+                artId: agentById(TeamChatStore.idFromKey(c.channel!))?.artId ??
+                    'prompt-engineer',
                 size: 40,
               );
     return Padding(

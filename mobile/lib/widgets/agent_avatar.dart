@@ -11,8 +11,10 @@ library;
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../theme.dart';
+import 'agent_art_data.dart';
 
 /// Map an agent's `glyph` name to its vector emblem index. Every roster glyph
 /// has a distinct emblem; unknown glyphs fall back to the sparkle.
@@ -223,31 +225,31 @@ class AgentEmblemPainter extends CustomPainter {
       old.emblem != emblem || old.color != color || old.size != size;
 }
 
-/// The vector avatar: a pastel disc, the agent's emblem, and an optional
-/// presence dot. Pure drawing — nothing is loaded from disk or network.
+/// The agent's profile picture — one of the hand-drawn faces from
+/// [kAgentArtLibrary], rendered from inline SVG and clipped to a circle.
+///
+/// The artwork ships as strings (see `agent_art_data.dart`), so nothing is
+/// loaded from disk or network and every face stays crisp at any size. An
+/// unknown [artId] falls back to the neutral vector emblem rather than an
+/// empty hole, so a user-built agent always has a face.
 class AgentAvatar extends StatelessWidget {
   const AgentAvatar({
     super.key,
-    required this.emblem,
-    this.pastelIndex = 0,
+    required this.artId,
     this.size = 44,
     this.dot = false,
   });
 
-  final int emblem;
-  final int pastelIndex;
+  /// Key into [kAgentArtIndex] — which face this agent wears.
+  final String artId;
   final double size;
+
+  /// The small presence dot in the bottom-right corner.
   final bool dot;
 
   @override
   Widget build(BuildContext context) {
-    final MytoPalette palette = Theme.of(context).palette;
-    final Color disc = palette.pastel(pastelIndex);
-    // Emblem ink: a deep neutral that reads on every pastel (and its dark
-    // theme counterpart), not the accent — keeps all ten avatars uniform.
-    final Color ink = Theme.of(context).brightness == Brightness.dark
-        ? const Color(0xFFE8ECF3)
-        : const Color(0xFF3A4149);
+    final AgentArt? art = kAgentArtIndex[artId];
 
     return SizedBox(
       width: size,
@@ -255,20 +257,15 @@ class AgentAvatar extends StatelessWidget {
       child: Stack(
         clipBehavior: Clip.none,
         children: <Widget>[
-          Container(
-            width: size,
-            height: size,
-            decoration: BoxDecoration(
-              color: disc,
-              shape: BoxShape.circle,
-            ),
-            child: CustomPaint(
-              painter: AgentEmblemPainter(
-                emblem,
-                ink,
-                size: size * 0.72,
-              ),
-            ),
+          ClipOval(
+            child: art == null
+                ? _AvatarFallback(size: size)
+                : SvgPicture.string(
+                    art.svg,
+                    width: size,
+                    height: size,
+                    fit: BoxFit.cover,
+                  ),
           ),
           if (dot)
             Positioned(
@@ -288,6 +285,30 @@ class AgentAvatar extends StatelessWidget {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// Neutral stand-in for an agent whose [AgentAvatar.artId] is not in the
+/// library — a user-built agent, or art added in a newer build.
+class _AvatarFallback extends StatelessWidget {
+  const _AvatarFallback({required this.size});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color ink = Theme.of(context).brightness == Brightness.dark
+        ? const Color(0xFFE8ECF3)
+        : const Color(0xFF3A4149);
+
+    return Container(
+      width: size,
+      height: size,
+      color: context.palette.pastel(0),
+      child: CustomPaint(
+        painter: AgentEmblemPainter(10, ink, size: size * 0.72),
       ),
     );
   }

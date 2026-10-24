@@ -43,8 +43,11 @@ class _MytoChatScreenState extends State<MytoChatScreen> {
   bool _streaming = false;
   ChatMessage? _pending;
   String _effort = 'auto';
-  Timer? _flushTimer;
-  bool _dirty = false;
+
+  /// Tokens land here while the model is working and are committed as one
+  /// piece when the stream ends, so an answer appears whole instead of typing
+  /// itself out character by character.
+  final StringBuffer _buffer = StringBuffer();
 
   @override
   void initState() {
@@ -60,7 +63,6 @@ class _MytoChatScreenState extends State<MytoChatScreen> {
 
   @override
   void dispose() {
-    _flushTimer?.cancel();
     _sub?.cancel();
     _client.abort();
     _scroll.dispose();
@@ -82,6 +84,7 @@ class _MytoChatScreenState extends State<MytoChatScreen> {
 
     final assistant = ChatMessage(role: Role.assistant, content: '');
     store.addMessage(assistant);
+    _buffer.clear();
     setState(() {
       _streaming = true;
       _pending = assistant;
@@ -110,8 +113,9 @@ class _MytoChatScreenState extends State<MytoChatScreen> {
       (event) {
         switch (event) {
           case ChatToken(:final text):
-            assistant.content += text;
-            _scheduleFlush();
+            // Buffer only — the answer lands whole when the stream finishes,
+            // so there is no character-by-character typewriter animation.
+            _buffer.write(text);
           case ChatDone():
             _finish();
           case ChatFailure(:final code, :final resetSeconds):
@@ -123,18 +127,6 @@ class _MytoChatScreenState extends State<MytoChatScreen> {
     );
   }
 
-  void _scheduleFlush() {
-    _dirty = true;
-    if (_flushTimer != null) return;
-    _flushTimer = Timer(const Duration(milliseconds: 66), () {
-      _flushTimer = null;
-      if (!mounted || !_dirty) return;
-      _dirty = false;
-      setState(() {});
-      _scrollToBottomIfNear();
-    });
-  }
-
   Future<void> _pickEffort() async {
     final chosen = await showEffortPicker(context, selected: _effort);
     if (chosen != null && chosen != _effort) setState(() => _effort = chosen);
@@ -142,20 +134,30 @@ class _MytoChatScreenState extends State<MytoChatScreen> {
 
   void _finish() {
     if (!_streaming) return;
-    _flushTimer?.cancel();
-    _flushTimer = null;
-    _dirty = false;
     _sub?.cancel();
     _sub = null;
+
+    // The whole answer lands here, in one frame.
+    final String answer = _buffer.toString().trim();
+    _buffer.clear();
+    final ChatMessage? pending = _pending;
+    if (pending != null && answer.isNotEmpty) pending.content = answer;
+
     if (!mounted) return;
     _store.touch();
     setState(() {
       _streaming = false;
       _pending = null;
     });
+    _scrollToBottomIfNear();
   }
 
   void _fail(ChatMessage assistant, String code, int? resetSeconds) {
+    // Keep whatever arrived before the failure, then explain the failure only
+    // if nothing did.
+    final String partial = _buffer.toString().trim();
+    _buffer.clear();
+    if (partial.isNotEmpty) assistant.content = partial;
     if (assistant.content.trim().isEmpty) {
       assistant.content = _failureText(code, resetSeconds);
     }

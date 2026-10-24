@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../models/agent.dart';
 import '../../models/memory.dart';
 import '../../theme.dart';
+import '../agent_avatar.dart';
 import 'kit.dart';
 
 /// ---------------------------------------------------------------------------
@@ -255,7 +256,7 @@ class TeamlyAgentCard extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: <Widget>[
-          TeamlyAvatar(pastelIndex: agent.pastelIndex, size: 64, dot: agent.friends),
+          AgentAvatar(artId: agent.artId, size: 64, dot: agent.friends),
           const SizedBox(width: TeamlySpace.s4),
           Expanded(
             child: Column(

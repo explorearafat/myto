@@ -82,8 +82,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
                           title: Row(
                             children: <Widget>[
                               AgentAvatar(
-                                emblem: emblemForGlyph(agent.glyph),
-                                pastelIndex: agent.pastelIndex,
+                                artId: agent.artId,
                                 size: 30,
                               ),
                               const SizedBox(width: 10),
@@ -341,8 +340,7 @@ class _RoomCard extends StatelessWidget {
                         ),
                       ),
                       child: AgentAvatar(
-                        emblem: emblemForGlyph(shown[i].glyph),
-                        pastelIndex: shown[i].pastelIndex,
+                        artId: shown[i].artId,
                         size: 40,
                       ),
                     ),

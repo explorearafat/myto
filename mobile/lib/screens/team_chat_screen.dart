@@ -103,9 +103,9 @@ class _TeamChatScreenState extends State<TeamChatScreen> {
     final palette = Theme.of(context).palette;
     final store = context.watch<TeamChatStore>();
     final messages = store.messagesFor(widget.channelKey);
-    final streaming = store.isStreaming(widget.channelKey);
+    final String? typingLabel = store.typingLabelFor(widget.channelKey);
 
-    if (streaming) _scrollToBottom();
+    if (typingLabel != null) _scrollToBottom();
 
     return Scaffold(
       appBar: AppBar(
@@ -121,8 +121,7 @@ class _TeamChatScreenState extends State<TeamChatScreen> {
               _RoomAvatarStack(room: widget.room)
             else
               AgentAvatar(
-                emblem: emblemForGlyph(widget.agent?.glyph ?? 'spark'),
-                pastelIndex: widget.agent?.pastelIndex ?? 0,
+                artId: widget.agent?.artId ?? 'prompt-engineer',
                 size: 36,
               ),
             const SizedBox(width: 10),
@@ -141,9 +140,7 @@ class _TeamChatScreenState extends State<TeamChatScreen> {
                     ),
                   ),
                   Text(
-                    store.roomSpeaker != null
-                        ? '${agentById(store.roomSpeaker!)?.name ?? 'Agent'} is typing...'
-                        : _subtitle,
+                    typingLabel ?? _subtitle,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(color: palette.muted, fontSize: 12.5),
@@ -170,9 +167,14 @@ class _TeamChatScreenState extends State<TeamChatScreen> {
                     : ListView.builder(
                         controller: _scroll,
                         padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                        itemCount: messages.length,
-                        itemBuilder: (context, i) =>
-                            _bubble(context, messages[i], store),
+                        // +1 for the live typing row pinned under the transcript.
+                        itemCount: messages.length + (typingLabel == null ? 0 : 1),
+                        itemBuilder: (context, i) => i < messages.length
+                            ? _bubble(context, messages[i], store)
+                            : _TypingRow(
+                                label: typingLabel!,
+                                isRoom: widget.isRoom,
+                              ),
                       ),
               ),
               TeamComposer(
@@ -180,7 +182,7 @@ class _TeamChatScreenState extends State<TeamChatScreen> {
                 hint: widget.isRoom
                     ? 'Ask the room...'
                     : 'Message ${widget.agent?.name ?? 'agent'}...',
-                disabled: streaming,
+                disabled: typingLabel != null,
               ),
             ],
           ),
@@ -238,8 +240,7 @@ class _TeamChatScreenState extends State<TeamChatScreen> {
           Padding(
             padding: const EdgeInsets.only(top: 2, right: 10),
             child: AgentAvatar(
-              emblem: emblemForGlyph(agent?.glyph ?? 'spark'),
-              pastelIndex: agent?.pastelIndex ?? 0,
+              artId: agent?.artId ?? 'prompt-engineer',
               size: 32,
             ),
           ),
@@ -357,6 +358,46 @@ class _TeamChatScreenState extends State<TeamChatScreen> {
   }
 }
 
+/// The live "QA Tester, Bug analyzer and 2 others is typing..." row that sits
+/// under the transcript while the room's specialists are still answering.
+/// Replies themselves are never painted character by character — each one
+/// appears whole the moment its model finishes.
+class _TypingRow extends StatelessWidget {
+  const _TypingRow({required this.label, required this.isRoom});
+
+  final String label;
+  final bool isRoom;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).palette;
+    return Padding(
+      padding: const EdgeInsets.only(top: 6, bottom: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: <Widget>[
+          // Rooms line the dots up with the agent avatars above them.
+          SizedBox(width: isRoom ? 4 : 0),
+          const _TypingDots(),
+          const SizedBox(width: 10),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: palette.muted,
+                fontSize: 13,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// Three small pulsing dots while an agent's reply is being generated.
 class _TypingDots extends StatefulWidget {
   const _TypingDots();
@@ -424,7 +465,7 @@ class _RoomAvatarStack extends StatelessWidget {
     ];
     final shown = members.take(3).toList();
     if (shown.isEmpty) {
-      return const AgentAvatar(emblem: 10, pastelIndex: 0, size: 36);
+      return const AgentAvatar(artId: 'prompt-engineer', size: 36);
     }
     return SizedBox(
       width: 64,
@@ -444,8 +485,7 @@ class _RoomAvatarStack extends StatelessWidget {
                   ),
                 ),
                 child: AgentAvatar(
-                  emblem: emblemForGlyph(shown[i].glyph),
-                  pastelIndex: shown[i].pastelIndex,
+                  artId: shown[i].artId,
                   size: 32,
                 ),
               ),
@@ -481,8 +521,7 @@ class _EmptyThread extends StatelessWidget {
               _RoomAvatarStack(room: room)
             else
               AgentAvatar(
-                emblem: emblemForGlyph(agent?.glyph ?? 'spark'),
-                pastelIndex: agent?.pastelIndex ?? 0,
+                artId: agent?.artId ?? 'prompt-engineer',
                 size: 64,
               ),
             const SizedBox(height: 16),
