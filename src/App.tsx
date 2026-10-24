@@ -7,6 +7,7 @@ import { ExploreStrip } from './components/ExploreStrip';
 import { Pricing } from './components/Pricing';
 import { Docs } from './components/Docs';
 import { Footer } from './components/Footer';
+import { CtaBand } from './components/CtaBand';
 import { ScrollCanvas } from './components/ScrollCanvas';
 import { useReveals } from './lib/reveal';
 
@@ -33,6 +34,7 @@ export default function App() {
         <Docs />
       </main>
       <div className="relative z-10">
+        <CtaBand />
         <Footer />
       </div>
     </div>

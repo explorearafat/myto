@@ -371,3 +371,135 @@
     animation-duration: 0.01ms !important;
   }
 }
+
+/*
+ * Marketing CTA system — the one button vocabulary across every page. Solid ink
+ * pills for primary actions, quiet bordered pills for secondary; a gentle lift
+ * on hover and a physical press on click. Used with no-underline + text colour
+ * utilities so each instance stays readable in context.
+ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  border-radius: 9999px;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.25s ease,
+    transform 0.15s ease;
+}
+.btn:active {
+  transform: scale(0.97);
+}
+.btn-dark {
+  background: #141413;
+  color: #faf9f5;
+  box-shadow: 0 12px 32px -14px rgba(20, 20, 19, 0.5);
+}
+.btn-dark:hover {
+  background: #2b2721;
+  box-shadow: 0 16px 40px -14px rgba(20, 20, 19, 0.55);
+}
+.btn-ghost {
+  background: #ffffff;
+  color: #141413;
+  border: 1px solid #e3e1d8;
+}
+.btn-ghost:hover {
+  border-color: #c9c4b8;
+  background: #fbfaf6;
+}
+.btn-spruce {
+  background: #1a6b52;
+  color: #ffffff;
+  box-shadow: 0 14px 36px -14px rgba(26, 107, 82, 0.6);
+}
+.btn-spruce:hover {
+  background: #155a44;
+}
+
+/*
+ * The announcement chip above the hero — OpenAI-style "what's new" link.
+ */
+.announce-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.4rem 0.4rem 0.9rem;
+  border: 1px solid #e3e1d8;
+  border-radius: 9999px;
+  background: #ffffff;
+  font-size: 0.82rem;
+  color: #544f46;
+  text-decoration: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.announce-chip:hover {
+  border-color: #c9c4b8;
+  box-shadow: 0 6px 18px -8px rgba(20, 20, 19, 0.25);
+}
+.announce-chip > span:last-child {
+  padding: 0.18rem 0.6rem;
+  border-radius: 9999px;
+  background: #141413;
+  color: #faf9f5;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+/*
+ * Dark band — the single high-contrast moment on the landing page. Everything
+ * inside inverts to charcoal; children opt back in with the utilities below.
+ */
+.dark-band {
+  background:
+    radial-gradient(60% 80% at 85% -10%, rgba(232, 229, 221, 0.07), transparent 70%),
+    radial-gradient(50% 70% at 8% 110%, rgba(232, 229, 221, 0.05), transparent 70%),
+    #141413;
+  color: #ece9e3;
+}
+.dark-band h2,
+.dark-band h3 {
+  color: #faf9f5;
+}
+.dark-band .band-muted {
+  color: #a8a096;
+}
+
+/* Soft radial glow that sits behind a hero object. */
+.object-glow {
+  position: relative;
+}
+.object-glow::before {
+  content: "";
+  position: absolute;
+  inset: -12%;
+  background: radial-gradient(50% 50% at 50% 42%, rgba(26, 107, 82, 0.14), transparent 70%);
+  filter: blur(10px);
+  pointer-events: none;
+}
+
+/* Nav link underline animation (header only). */
+.nav-link {
+  position: relative;
+}
+.nav-link::after {
+  content: "";
+  position: absolute;
+  left: 0.9rem;
+  right: 0.9rem;
+  bottom: 0.35rem;
+  height: 1.5px;
+  background: #141413;
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.25s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+.nav-link:hover::after {
+  transform: scaleX(1);
+}

@@ -71,9 +71,9 @@ export function FeaturesPage() {
         Skip to content
       </a>
       <Header subpage />
-      <main id="content" className="relative z-10 mx-auto w-full max-w-5xl flex-1 px-6 pb-20 pt-14">
+      <main id="content" className="relative z-10 mx-auto w-full max-w-5xl flex-1 px-6 pb-24 pt-20">
         <p className="eyebrow">Features</p>
-        <h1 className="mt-4 max-w-[24ch] font-display text-[40px] leading-[1.05] tracking-[-0.02em] text-[#141413] sm:text-[52px]">
+        <h1 className="mt-4 max-w-[24ch] font-display text-[44px] leading-[1.04] tracking-[-0.025em] text-[#141413] sm:text-[58px]">
           A workspace, not a chat box.
         </h1>
         <p className="mt-5 max-w-[58ch] text-[18px] leading-relaxed text-[#544f46]">
@@ -81,7 +81,7 @@ export function FeaturesPage() {
           from your project folder on your machine.
         </p>
 
-        <div className="mt-16 space-y-20">
+        <div className="mt-20 space-y-24">
           {BLOCKS.map((b, i) => (
             <section
               key={b.title}

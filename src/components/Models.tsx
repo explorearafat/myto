@@ -10,7 +10,7 @@ import { MODEL_BRANDS } from '../lib/modelBrands';
 export function Models() {
   return (
     <section className="border-b border-[#e9e6dd]">
-      <div className="mx-auto max-w-6xl px-6 py-14 text-center sm:py-16">
+      <div className="mx-auto max-w-6xl px-6 py-20 text-center sm:py-24">
         <p
           data-reveal
           className="text-[13px] font-medium uppercase tracking-[0.14em] text-[#9c988e]"
@@ -33,7 +33,7 @@ export function Models() {
               >
                 <path d={m.path} />
               </svg>
-              <span className="font-display text-[21px] tracking-[-0.01em] text-[#544f46] transition-colors duration-200 group-hover:text-[#141413] sm:text-[24px]">
+              <span className="font-display text-[22px] tracking-[-0.01em] text-[#544f46] transition-colors duration-200 group-hover:text-[#141413] sm:text-[25px]">
                 {m.name}
               </span>
             </span>

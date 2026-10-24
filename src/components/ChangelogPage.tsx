@@ -49,9 +49,9 @@ export function ChangelogPage() {
         Skip to content
       </a>
       <Header subpage />
-      <main id="content" className="relative z-10 mx-auto w-full max-w-3xl flex-1 px-6 pb-20 pt-14">
+      <main id="content" className="relative z-10 mx-auto w-full max-w-3xl flex-1 px-6 pb-24 pt-20">
         <p className="eyebrow">Changelog</p>
-        <h1 className="mt-4 font-display text-[40px] leading-[1.05] tracking-[-0.02em] text-[#141413] sm:text-[52px]">
+        <h1 className="mt-4 font-display text-[44px] leading-[1.04] tracking-[-0.025em] text-[#141413] sm:text-[58px]">
           What shipped, when.
         </h1>
         <p className="mt-5 max-w-[56ch] text-[18px] leading-relaxed text-[#544f46]">

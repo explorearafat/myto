@@ -13,7 +13,7 @@ const INCLUDED = [
 export function Pricing() {
   return (
     <section id="pricing" className="border-b border-[#e9e6dd]">
-      <div className="mx-auto max-w-6xl px-6 py-20 sm:py-24">
+      <div className="mx-auto max-w-6xl px-6 py-24 sm:py-28">
         <div
           data-reveal
           className="mx-auto max-w-3xl overflow-hidden rounded-3xl border border-[#e4e1d8] bg-white shadow-[0_24px_60px_-40px_rgba(20,20,19,0.35)]"

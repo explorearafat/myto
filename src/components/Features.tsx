@@ -34,7 +34,7 @@ const FEATURES: Feature[] = [
 export function Features() {
   return (
     <section id="features" className="border-b border-[#e9e6dd]">
-      <div className="mx-auto max-w-6xl px-6 py-20 sm:py-24">
+      <div className="mx-auto max-w-6xl px-6 py-24 sm:py-28">
         <div className="max-w-2xl">
           <p
             data-reveal
@@ -45,7 +45,7 @@ export function Features() {
           <h2
             data-reveal
             style={{ transitionDelay: '60ms' }}
-            className="mt-3 font-display font-normal text-[32px] tracking-[-0.02em] text-[#141413] sm:text-[40px]"
+            className="mt-3 font-display text-[36px] font-normal tracking-[-0.02em] text-[#141413] sm:text-[46px]"
           >
             A full coding workspace
           </h2>
@@ -60,10 +60,10 @@ export function Features() {
         </div>
 
         {/* Plain editorial list: a Georgia heading, then its description below — no cards. */}
-        <div className="mt-14 max-w-3xl space-y-11">
+        <div className="mt-16 max-w-3xl space-y-14">
           {FEATURES.map((f, i) => (
             <div key={f.title} data-reveal style={{ transitionDelay: `${(i % 3) * 60}ms` }}>
-              <h3 className="font-display font-normal text-[24px] tracking-[-0.01em] text-[#141413]">
+              <h3 className="font-display text-[25px] font-normal tracking-[-0.01em] text-[#141413]">
                 {f.title}
               </h3>
               <p className="mt-2.5 max-w-[64ch] text-[16.5px] leading-8 text-[#544f46]">{f.body}</p>
