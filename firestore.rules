@@ -3,26 +3,166 @@ rules_version = '2';
 // Firestore security rules for Myto. Deploy these in the Firebase console
 // (Firestore Database → Rules → paste → Publish) or with `firebase deploy --only firestore:rules`.
 //
-// Each signed-in user can read and write ONLY their own data under users/{uid} — their profile
-// document and their devices/{deviceId} sign-in history. Nobody can read anyone else's, and nothing
-// else in the database is accessible from the client. Rules v2 does NOT cascade to subcollections,
-// so the devices match is spelled out explicitly.
+// Two areas live in this database:
+//
+//   1. PRIVATE per-user data (unchanged): each signed-in user can read and write ONLY their own
+//      data under users/{uid} — their profile document, their devices/{deviceId} sign-in history,
+//      and their config/{docId} bring-your-own-key chat settings (which hold secrets, so they stay
+//      strictly owner-only). Rules v2 does NOT cascade to subcollections, so these matches are
+//      spelled out explicitly.
+//
+//   2. PUBLIC social feed (the Discover community): text-only posts (AI / Myto / crypto / …) that
+//      anyone — signed in or not — can read; only signed-in users can write, and every write is
+//      field-validated below. The threat model the rules enforce:
+//        • a post's author (uid/name/photo) is pinned to the caller — nobody can post as someone else
+//        • a post's BODY is immutable after creation (delete + repost instead) — only the three
+//          counters (likeCount / commentCount / shareCount) may drift, at most +1 per write and
+//          never negative, so a hostile client can't rewrite someone's post, invent fields, or
+//          zero out (or inflate) the engagement counts
+//        • likes and shares are one-per-user (the doc id IS the user's uid — a second like
+//          overwrites itself, it can't double-count)
+//        • comments are attributed to their author; authors can edit/delete only their own
+//        • saved posts and the follow graph are writable only by the user whose edge it is
+
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // ── Shared helpers ────────────────────────────────────────────────────────
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isString(v, minLen, maxLen) {
+      return v is string && v.size() >= minLen && v.size() <= maxLen;
+    }
+
+    // A link is either absent ('') or an https URL of bounded length.
+    function isLink(v) {
+      return v is string && v.size() <= 500 && (v == '' || v.matches('https://.*'));
+    }
+
+    // Topic tags: at most 4, each a short lowercase slug (ai, myto, crypto, …).
+    function validTopics() {
+      return request.resource.data.topics is list
+        && request.resource.data.topics.size() <= 4
+        && request.resource.data.topics.size() == request.resource.data.topics
+             .filter(t, t is string && t.matches('[a-z0-9]{1,20}')).size();
+    }
+
+    // ── 1. Private per-user data (unchanged) ──────────────────────────────────
+
     match /users/{uid} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read, write: if signedIn() && request.auth.uid == uid;
 
       // Device sign-in history written by the /authentication page (see src/lib/devices.ts).
       match /devices/{deviceId} {
-        allow read, write: if request.auth != null && request.auth.uid == uid;
+        allow read, write: if signedIn() && request.auth.uid == uid;
       }
 
       // Bring-your-own-key chat config (base URL, API key, models) written by the /authentication
       // page and read by all three clients (see src/shared/byok.ts). Contains the user's own secret
       // API key, so it stays strictly owner-only, like everything else under users/{uid}.
       match /config/{docId} {
-        allow read, write: if request.auth != null && request.auth.uid == uid;
+        allow read, write: if signedIn() && request.auth.uid == uid;
       }
+
+      // Posts the user saved to their profile (Discover). Each doc holds {savedAt, post: <postId>} —
+      // ids only, no content, so the saved list is private and the cards hydrate from the
+      // (public) posts themselves.
+      match /saved/{postId} {
+        allow read, write: if signedIn() && request.auth.uid == uid;
+      }
+    }
+
+    // ── 2. Public social feed (Discover) ──────────────────────────────────────
+
+    match /posts/{postId} {
+      // Anyone can read the feed — browsing Discover signed-out is allowed.
+      allow read: if true;
+
+      // Creating a post: the author is the caller, every field is validated, and the
+      // counters all start at zero (they only ever move through the update rule below).
+      allow create: if signedIn()
+        && request.resource.data.uid == request.auth.uid
+        && isString(request.resource.data.text, 1, 500)
+        && isString(request.resource.data.name, 1, 80)
+        && request.resource.data.photo is string
+        && request.resource.data.photo.size() <= 500
+        && isLink(request.resource.data.link)
+        && isLink(request.resource.data.linkImage)
+        && isString(request.resource.data.linkTitle, 0, 200)
+        && isString(request.resource.data.linkSite, 0, 100)
+        && validTopics()
+        && request.resource.data.likeCount == 0
+        && request.resource.data.commentCount == 0
+        && request.resource.data.shareCount == 0
+        && request.resource.data.createdAt == request.time;
+
+      // Only the three counters may change, only to non-negative integers and at most
+      // +1 per write — the text, author, link and topics are frozen at creation. Any
+      // signed-in user may bump a counter (that is what like/comment/share do); the
+      // one-doc-per-user like/share records are what keep the counts honest.
+      allow update: if signedIn()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['likeCount', 'commentCount', 'shareCount'])
+        && request.resource.data.likeCount is int
+        && request.resource.data.likeCount >= 0
+        && request.resource.data.likeCount <= resource.data.likeCount + 1
+        && request.resource.data.commentCount is int
+        && request.resource.data.commentCount >= 0
+        && request.resource.data.commentCount <= resource.data.commentCount + 1
+        && request.resource.data.shareCount is int
+        && request.resource.data.shareCount >= 0
+        && request.resource.data.shareCount <= resource.data.shareCount + 1;
+
+      // Only the author can delete their post.
+      allow delete: if signedIn() && resource.data.uid == request.auth.uid;
+
+      // One like per user — the like doc's id IS the liker's uid.
+      match /likes/{likerUid} {
+        allow read: if true;
+        allow create: if signedIn() && likerUid == request.auth.uid
+          && request.resource.data.createdAt == request.time;
+        allow delete: if signedIn() && likerUid == request.auth.uid;
+      }
+
+      // Comments: attributed to their author; authors edit/delete only their own.
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if signedIn()
+          && request.resource.data.uid == request.auth.uid
+          && isString(request.resource.data.text, 1, 300)
+          && isString(request.resource.data.name, 1, 80)
+          && request.resource.data.photo is string
+          && request.resource.data.photo.size() <= 500
+          && request.resource.data.createdAt == request.time;
+        allow update, delete: if signedIn() && resource.data.uid == request.auth.uid;
+      }
+
+      // One repost-per-user ("add to my profile" share) — the doc id IS the sharer's uid.
+      match /shares/{sharerUid} {
+        allow read: if true;
+        allow create: if signedIn() && sharerUid == request.auth.uid
+          && request.resource.data.createdAt == request.time;
+        allow delete: if signedIn() && sharerUid == request.auth.uid;
+      }
+    }
+
+    // ── Follow graph ────────────────────────────────────────────────────────────
+
+    // Who I follow. Owner-readable (the Following tab needs it); the target can also
+    // see the edge. Only the follower creates or removes their own edges.
+    match /follows/{uid}/following/{targetUid} {
+      allow read: if signedIn() && (request.auth.uid == uid || request.auth.uid == targetUid);
+      allow create, delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    // Who follows someone. Public read (follower counts on a profile); the doc is
+    // written by the FOLLOWER (uid == followerUid) as the second half of a follow.
+    match /follows/{uid}/followers/{followerUid} {
+      allow read: if true;
+      allow create, delete: if signedIn() && request.auth.uid == followerUid;
     }
   }
 }

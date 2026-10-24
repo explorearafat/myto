@@ -126,6 +126,7 @@ export default defineConfig(({ mode }) => {
         input: {
           main: path.resolve(__dirname, 'index.html'),
           download: path.resolve(__dirname, 'download/index.html'),
+          discover: path.resolve(__dirname, 'discover/index.html'),
           chat: path.resolve(__dirname, 'chat/index.html'),
           authentication: path.resolve(__dirname, 'authentication/index.html'),
           policy: path.resolve(__dirname, 'policy/index.html'),

@@ -6,6 +6,7 @@ import { LINKS } from '../data';
    in-page hash that has to jump back to the product page from a subpage. */
 const NAV: Array<{ label: string; href?: string; hash?: string }> = [
   { label: 'Chat', href: LINKS.chatPage },
+  { label: 'Discover', href: LINKS.discoverPage },
   { label: 'Docs', hash: '#docs' },
 ];
 

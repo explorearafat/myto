@@ -14,6 +14,8 @@ export const LINKS = {
   downloadPage: '/download',
   /** The Myto chat — a full chat interface, client-side, that answers questions about Myto. */
   chatPage: '/chat',
+  /** The Discover community feed. */
+  discoverPage: '/discover',
   /** All published installers (latest GitHub release). */
   releases: 'https://github.com/explorearafat/myto/releases/latest',
   /** Live web build — try it with zero install. */
