@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useChatStore, type ChatMessageUI, type OutgoingAttachment, type ThinkingPhase } from '../store/useChatStore'
 import { usePreviewStore } from '../store/usePreviewStore'
 import { useTerminalStore } from '../store/useTerminalStore'
@@ -1104,7 +1104,34 @@ function AssistantMessage({
 }
 
 /** Dispatches to the user/assistant layout. */
-function Message({
+/**
+ * Stable empty list handed to memoized Messages that have no attachments — a fresh
+ * `?? []` literal per render would defeat the memo by changing identity every time.
+ */
+const NO_ATTACHMENTS: Attachment[] = []
+
+/**
+ * Transcript window sizing: how many messages render initially (the most recent
+ * ones) and how many more stream in each time the user scrolls to the top.
+ */
+const MESSAGE_WINDOW_INITIAL = 60
+const MESSAGE_WINDOW_STEP = 60
+
+/**
+ * Per-message caches for the file-card diff ledger, keyed by message object
+ * identity (see prevFileLinesByMessage). Message objects are immutable once
+ * finished, so these entries live for the message's lifetime and never go stale.
+ */
+const fileSegmentsCache = new WeakMap<object, { path: string; lines: number }[]>()
+const fileLinesCache = new WeakMap<object, (number | null)[]>()
+
+/**
+ * Memoized transcript row: the store keeps every message object's identity stable
+ * and clones ONLY the streaming one on each chunk, so with this memo a live stream
+ * re-renders just the active message instead of the whole transcript. This single
+ * memo is the biggest fix for the "long session gets choppy" lag.
+ */
+const Message = memo(function Message({
   message,
   attachments,
   prevFileLines
@@ -1114,7 +1141,7 @@ function Message({
   ) : (
     <AssistantMessage message={message} prevFileLines={prevFileLines} />
   )
-}
+})
 
 /* The side-pane tool glyphs, reused by the ToolsLauncher both in its collapsed
  * launcher (showing whichever pane is active) and in the expanded vertical menu. */
@@ -1761,10 +1788,63 @@ export function ChatPanel() {
     return map
   }, [attachments])
 
+  // ── Transcript windowing ────────────────────────────────────────────────────
+  // Render only the most recent window of messages. A long session (hundreds of
+  // turns, each Markdown + tool/file cards) makes the DOM itself the lag even
+  // with memoized rows; this keeps the rendered tree bounded no matter how long
+  // the conversation grows. Nothing is deleted — the store and DB keep every
+  // message, and scrolling to the top streams the next older window back in
+  // with the scroll position preserved. This is the view-level "auto-compact".
+  const [windowSize, setWindowSize] = useState(MESSAGE_WINDOW_INITIAL)
+  useEffect(() => {
+    // A different (or fresh) session reopens with the default window.
+    setWindowSize(MESSAGE_WINDOW_INITIAL)
+  }, [sessionId])
+  const hiddenCount = Math.max(0, messages.length - windowSize)
+  const windowedMessages = hiddenCount > 0 ? messages.slice(-windowSize) : messages
+  // Scroll anchor for a "load earlier" expansion: captured before the DOM grows,
+  // restored after, so the user keeps looking at the same message.
+  const windowScrollRef = useRef<{ prevHeight: number; prevTop: number } | null>(null)
+  const loadOlder = useCallback(() => {
+    const el = scrollRef.current
+    if (el) windowScrollRef.current = { prevHeight: el.scrollHeight, prevTop: el.scrollTop }
+    setWindowSize((w) => w + MESSAGE_WINDOW_STEP)
+  }, [])
+  // Restore after the expansion mounts. The store's messages array identity is
+  // unchanged by windowing, so the auto-scroll effect doesn't fire — this owns it.
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    const snap = windowScrollRef.current
+    if (!el || !snap) return
+    windowScrollRef.current = null
+    el.scrollTop = el.scrollHeight - snap.prevHeight + snap.prevTop
+  }, [windowSize])
+  // Auto-load when the user scrolls near the top (the sentinel rides the banner).
+  const windowSentinelRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const node = windowSentinelRef.current
+    if (!node || hiddenCount === 0) return
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) loadOlder()
+      },
+      { rootMargin: '480px 0px 0px 0px' }
+    )
+    io.observe(node)
+    return () => io.disconnect()
+  }, [hiddenCount, loadOlder])
+
   // For each assistant message, the previous same-path line count of every file
   // card it renders (in card order) — what the Cowork `+N −N` badge diffs against.
   // Walked once across the whole transcript so a file rewritten in a later turn
   // still diffs against the version from an earlier one; a fresh path → null (−0).
+  //
+  // Perf: parsed file segments AND the resulting per-message line lists are cached
+  // per message OBJECT (WeakMap). The store keeps old message identities stable and
+  // clones only the streaming one, so a live stream re-parses just that message;
+  // the ledger for older messages is replayed from cached counts (a few Map sets)
+  // instead of re-splitting every file body on every chunk — the old full-transcript
+  // re-parse per token was the biggest lag source on long sessions.
   const prevFileLinesByMessage = useMemo(() => {
     const lastLines = new Map<string, number>()
     const byMessage = new Map<string, (number | null)[]>()
@@ -1772,21 +1852,50 @@ export function ChatPanel() {
       // Only assistant turns carry file cards; the `` ``` `` guard skips prose-only
       // turns so a long transcript isn't re-parsed line-by-line every token.
       if (m.role !== 'assistant' || !m.content.includes('```')) continue
-      const perMsg: (number | null)[] = []
-      for (const seg of parseFileBlocks(m.content.trimEnd())) {
-        if (seg.kind !== 'file') continue
-        perMsg.push(lastLines.has(seg.path) ? (lastLines.get(seg.path) as number) : null)
-        lastLines.set(seg.path, countLines(seg.code))
+      let segs = fileSegmentsCache.get(m)
+      let perMsg = fileLinesCache.get(m)
+      if (segs === undefined || perMsg === undefined) {
+        segs = []
+        perMsg = []
+        for (const seg of parseFileBlocks(m.content.trimEnd())) {
+          if (seg.kind !== 'file') continue
+          const lines = countLines(seg.code)
+          segs.push({ path: seg.path, lines })
+          perMsg.push(lastLines.has(seg.path) ? (lastLines.get(seg.path) as number) : null)
+          lastLines.set(seg.path, lines)
+        }
+        fileSegmentsCache.set(m, segs)
+        fileLinesCache.set(m, perMsg)
+      } else {
+        // Cached message: replay its final line counts into the ledger cheaply.
+        for (const seg of segs) lastLines.set(seg.path, seg.lines)
+        byMessage.set(m.id, perMsg)
+        continue
       }
       if (perMsg.length) byMessage.set(m.id, perMsg)
     }
     return byMessage
   }, [messages])
 
-  // Auto-scroll to the newest content as it streams in.
+  // Auto-scroll to the newest content as it streams in — but only while the user
+  // is already reading near the bottom. Scrolling into older history mid-stream
+  // no longer yanks the view back down on every chunk (the classic churn that
+  // made long streaming sessions feel choppy). The very first paint of a session
+  // always lands at the bottom.
+  const initialScrollDoneRef = useRef(false)
+  useEffect(() => {
+    initialScrollDoneRef.current = false
+  }, [sessionId])
   useLayoutEffect(() => {
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (!el || messages.length === 0) return
+    if (!initialScrollDoneRef.current) {
+      initialScrollDoneRef.current = true
+      el.scrollTop = el.scrollHeight
+      return
+    }
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 240
+    if (nearBottom) el.scrollTop = el.scrollHeight
   }, [messages])
 
   // Auto-grow the textarea up to its max height. Reset to one line-height first
@@ -2591,11 +2700,22 @@ export function ChatPanel() {
           )}
           <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
             <div className="mx-auto max-w-3xl space-y-5 px-4 py-5">
-              {messages.map((message) => (
+              {hiddenCount > 0 && (
+                <div ref={windowSentinelRef} className="flex justify-center pb-2">
+                  <button
+                    type="button"
+                    onClick={loadOlder}
+                    className="rounded-full border border-border bg-surface px-4 py-1.5 text-[12px] text-muted transition-colors hover:text-text"
+                  >
+                    Load earlier messages ({hiddenCount} hidden)
+                  </button>
+                </div>
+              )}
+              {windowedMessages.map((message) => (
                 <Message
                   key={message.id}
                   message={message}
-                  attachments={attachmentsByMessage.get(message.id) ?? []}
+                  attachments={attachmentsByMessage.get(message.id) ?? NO_ATTACHMENTS}
                   prevFileLines={prevFileLinesByMessage.get(message.id)}
                 />
               ))}
