@@ -37,6 +37,12 @@ import {
   type QueryConstraint,
   type Unsubscribe,
 } from 'firebase/firestore';
+import { auth } from './firebase';
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  updateProfile,
+} from 'firebase/auth';
 import { db } from './firebase';
 
 // ── Shapes ─────────────────────────────────────────────────────────────────────
@@ -374,4 +380,130 @@ export async function fetchPostsByAuthors(authorUids: string[]): Promise<FeedPos
     query(collection(db, 'posts'), where('uid', 'in', ids), orderBy('createdAt', 'desc'), limit(50))
   );
   return snap.docs.map((d) => toPost(d.id, d.data()));
+}
+
+
+// ── Accounts: signup, profiles, handles ────────────────────────────────────────
+
+export interface DiscoverProfile {
+  uid: string;
+  name: string;
+  username: string;
+  bio: string;
+  photo: string;
+  /** Epoch ms of profile creation (0 until the server timestamp lands). */
+  createdAtMs: number;
+}
+
+export const HANDLE_RE = /^[a-z0-9_]{3,20}$/;
+
+/** Create an account with email + password, then seed its profile doc. */
+export async function signUpWithEmail(
+  email: string,
+  password: string,
+  name: string
+): Promise<{ uid: string; email: string }> {
+  const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+  const uid = cred.user.uid;
+  await setDoc(doc(db, 'users', uid), {
+    uid,
+    name: name.trim().slice(0, 80) || email.split('@')[0],
+    nickname: (name.trim() || email.split('@')[0]).split(/\s+/)[0],
+    email: email.trim(),
+    photoURL: '',
+    role: '',
+    company: '',
+    about: '',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+  await updateProfile(cred.user, { displayName: name.trim().slice(0, 80) || undefined });
+  return { uid, email: email.trim() };
+}
+
+/** Sign in with email + password. */
+export async function signInWithEmail(email: string, password: string): Promise<void> {
+  await signInWithEmailAndPassword(auth, email.trim(), password);
+}
+
+/** Read a user's public Discover profile. */
+export async function getProfile(uid: string): Promise<DiscoverProfile | null> {
+  const snap = await getDoc(doc(db, 'profiles', uid));
+  if (!snap.exists()) return null;
+  const d = snap.data();
+  return {
+    uid: snap.id,
+    name: String(d.name ?? 'Anonymous'),
+    username: String(d.username ?? ''),
+    bio: String(d.bio ?? ''),
+    photo: String(d.photo ?? ''),
+    createdAtMs: tsToMs(d.createdAt),
+  };
+}
+
+/** Is a handle free? (The rules enforce uniqueness too — this is UX.) */
+export async function isHandleFree(username: string): Promise<boolean> {
+  const snap = await getDoc(doc(db, 'usernames', username.toLowerCase()));
+  return !snap.exists();
+}
+
+/**
+ * Create (or update) the caller's Discover profile and claim their handle.
+ * The handle registry doc is create-once in the rules, so a taken handle fails
+ * here rather than silently reassigning. Returns false when the handle is taken.
+ */
+export async function saveProfile(
+  uid: string,
+  input: { name: string; username: string; bio: string; photo: string }
+): Promise<boolean> {
+  const username = input.username.trim().toLowerCase();
+  if (!HANDLE_RE.test(username)) throw new Error('Handle must be 3-20 chars: a-z, 0-9, underscore.');
+  const handleRef = doc(db, 'usernames', username);
+  const existing = await getDoc(handleRef);
+  if (existing.exists() && existing.data().uid !== uid) return false;
+  const batch = writeBatch(db);
+  batch.set(handleRef, { uid });
+  batch.set(doc(db, 'profiles', uid), {
+    uid,
+    name: input.name.trim().slice(0, 80) || username,
+    username,
+    bio: input.bio.trim().slice(0, 280),
+    photo: input.photo.slice(0, 500),
+    createdAt: serverTimestamp(),
+  }, { merge: true });
+  await batch.commit();
+  return true;
+}
+
+/** Viral feed: the most-liked posts (likes are the engagement proxy). */
+export function streamViralFeed(
+  opts: { topic?: string; pageSize?: number },
+  onData: (posts: FeedPost[]) => void,
+  onError?: (e: unknown) => void
+): Unsubscribe {
+  const clauses: QueryConstraint[] = [orderBy('likeCount', 'desc'), orderBy('createdAt', 'desc'), limit(opts.pageSize ?? 50)];
+  if (opts.topic) clauses.unshift(where('topics', 'array-contains', opts.topic));
+  const q = query(collection(db, 'posts'), ...clauses);
+  return onSnapshot(
+    q,
+    (snap) => onData(snap.docs.map((d) => toPost(d.id, d.data()))),
+    (e) => onError?.(e)
+  );
+}
+
+/** Public profile page data: the profile + that user's posts. */
+export async function loadProfileWithPosts(
+  uid: string
+): Promise<{ profile: DiscoverProfile | null; posts: FeedPost[] }> {
+  const [profile, snap] = await Promise.all([
+    getProfile(uid),
+    getDocs(query(collection(db, 'posts'), where('uid', '==', uid), orderBy('createdAt', 'desc'), limit(50))),
+  ]);
+  return { profile, posts: snap.docs.map((d) => toPost(d.id, d.data())) };
+}
+
+/** Resolve a handle to a uid (for /discover?u=<handle> profile links). */
+export async function uidForHandle(username: string): Promise<string | null> {
+  const snap = await getDoc(doc(db, 'usernames', username.toLowerCase()));
+  return snap.exists() ? String(snap.data().uid ?? '') || null : null;
 }

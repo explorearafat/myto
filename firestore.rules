@@ -42,6 +42,11 @@ service cloud.firestore {
       return v is string && v.size() <= 500 && (v == '' || v.matches('https://.*'));
     }
 
+    // A Discover handle: 3–20 chars, lowercase letters/digits/underscore.
+    function validHandle(v) {
+      return v is string && v.matches('[a-z0-9_]{3,20}');
+    }
+
     // Topic tags: at most 4, each a short lowercase slug (ai, myto, crypto, …).
     function validTopics() {
       return request.resource.data.topics is list
@@ -76,6 +81,30 @@ service cloud.firestore {
     }
 
     // ── 2. Public social feed (Discover) ──────────────────────────────────────
+
+    // Public Discover profile: display name, handle, bio, avatar. Anyone can read;
+    // only the owner writes, and every field is validated and size-capped.
+    match /profiles/{uid} {
+      allow read: if true;
+      allow create, update: if signedIn()
+        && request.auth.uid == uid
+        && isString(request.resource.data.name, 1, 80)
+        && validHandle(request.resource.data.username)
+        && isString(request.resource.data.bio, 0, 280)
+        && request.resource.data.photo is string
+        && request.resource.data.photo.size() <= 500;
+      allow delete: false;
+    }
+
+    // Handle registry: the doc id IS the lowercase username, the body pins the owner.
+    // Create-once (no update, no delete) so handles can never be stolen or renamed.
+    match /usernames/{username} {
+      allow read: if true;
+      allow create: if signedIn()
+        && request.auth.uid == request.resource.data.uid
+        && validHandle(username);
+      allow update, delete: if false;
+    }
 
     match /posts/{postId} {
       // Anyone can read the feed — browsing Discover signed-out is allowed.

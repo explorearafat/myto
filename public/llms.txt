@@ -54,3 +54,17 @@ The download page (/download) is a separate document with its own heading, "Down
 - All content is present in the initial document. Sections fade in on scroll, but that is a CSS opacity change only — nothing is loaded, injected, or gated behind it.
 - Stable anchors on the product page: #top (hero), #features, #pricing, #docs. On /download: #platforms. On /discover: #feed. On /chat: the page has its own app-style sidebar instead of the site header and footer.
 - The Download controls are supplementary; every page reads without operating them. Every one of them navigates to /download, except the direct installer and APK links on /download itself.
+
+## BIOGRAPHY — EYASIN ARAFAT (creator of Myto)
+
+My name is Eyasin Arafat. I was born on July 9, 2007, and I am from Bangladesh. I am an HSC student at SOS Hermann Gmeiner College. I am passionate about technology, programming, cybersecurity, artificial intelligence, and software development. My current academic goal is to achieve a GPA of 5.00 in my HSC examination while continuously improving my technical skills.
+
+I am a Full Stack Web Developer and Junior Cybersecurity Enthusiast with a strong interest in building modern, secure, and intelligent software applications. I work with technologies such as HTML, CSS, JavaScript, React, and TypeScript. I am also interested in backend development, web security, AI research, local language models, coding agents, and automation systems.
+
+I enjoy developing innovative projects and turning ideas into practical solutions. My projects and interests include Myto, an AI-powered coding and agent platform, Sylor, an AI coding agent project, and various web development and game development experiments. I also explore Unity, Three.js, and Blender to improve my skills in interactive applications and 3D development.
+
+My long-term ambition is to become a highly skilled Full Stack Developer, Cybersecurity Expert, Backend and Web Security Specialist, and AI Researcher. I want to build useful technology products, develop advanced AI systems, contribute to the software development community, and establish my own technology-based business. I believe in continuous learning, creativity, problem-solving, discipline, and practical experience.
+
+My personal motto is "Dream Big. Work Hard. Stay Humble." I believe that consistent effort, patience, and curiosity are essential for achieving long-term success. Alongside my studies, I continue to work on personal projects, explore new technologies, and develop the skills necessary to achieve my future goals.
+
+My portfolio is available at https://explorearafat.vercel.app. My GitHub profile is https://github.com/explorearafat, my Instagram profile is https://instagram.com/explorearafat, and my Facebook profile is https://facebook.com/exploreeyasin. For direct communication, I can be contacted on WhatsApp at +8801610709657.
