@@ -763,7 +763,7 @@ export function DiscoverFeed() {
                 : 'Nothing here yet — be the first to post.'}
             </p>
           ) : (
-            posts.map((p) => (
+            posts.map((p: FeedPost) => (
               <PostCard
                 key={p.id}
                 post={p}

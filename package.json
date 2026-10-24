@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "npm run build:electron && node scripts/copy-electron-build.js && vite build",
-    "build:web": "vite build",
+    "build:web": "tsc --noEmit -p tsconfig.json && vite build",
     "build:electron": "npm --prefix app run dist:win",
     "install:app": "npm --prefix app install",
     "preview": "vite preview",
@@ -28,6 +28,8 @@
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",
     "@types/node": "^22.14.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@vitest/ui": "^5.0.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",

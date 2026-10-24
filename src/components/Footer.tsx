@@ -1,5 +1,6 @@
 import { ArrowRight } from 'lucide-react';
 import { MytoMark } from './MytoMark';
+import { LINKS } from '../data';
 
 interface FooterProps {
   subpage?: boolean;

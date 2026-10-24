@@ -1,9 +1,9 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Header } from './Header';
 import { Footer } from './Footer';
 import { LINKS } from '../data';
 
-const SECTIONS: Array<{ id: string; title: string; body: React.ReactNode }> = [
+const SECTIONS: Array<{ id: string; title: string; body: ReactNode }> = [
   {
     id: 'quick-start',
     title: 'Quick start',

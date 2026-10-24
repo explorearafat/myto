@@ -17,6 +17,7 @@
 // and forbid negatives, so even a hostile client can't skew a post's numbers.
 
 import {
+  addDoc,
   collection,
   deleteDoc,
   doc,
@@ -32,6 +33,8 @@ import {
   setDoc,
   where,
   writeBatch,
+  runTransaction,
+  type QueryConstraint,
   type Unsubscribe,
 } from 'firebase/firestore';
 import { db } from './firebase';
@@ -204,7 +207,7 @@ export function streamFeed(
   onData: (posts: FeedPost[]) => void,
   onError?: (e: FirestoreError) => void
 ): Unsubscribe {
-  const clauses = [orderBy('createdAt', 'desc'), limit(opts.pageSize ?? 50)];
+  const clauses: QueryConstraint[] = [orderBy('createdAt', 'desc'), limit(opts.pageSize ?? 50)];
   if (opts.topic) clauses.unshift(where('topics', 'array-contains', opts.topic));
   if (opts.authorUid) clauses.unshift(where('uid', '==', opts.authorUid));
   const q = query(collection(db, 'posts'), ...clauses);
