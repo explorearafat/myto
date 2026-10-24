@@ -77,6 +77,28 @@ class AuthService extends ChangeNotifier {
         await FirebaseAuth.instance.signInWithCredential(credential);
       });
 
+  /// Create an account with email + password. The Firebase project needs the
+  /// Email/Password provider enabled (Firebase console → Authentication).
+  Future<void> signUpWithEmail({
+    required String email,
+    required String password,
+    required String name,
+  }) =>
+      _run(() async {
+        final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
+          email: email.trim(),
+          password: password,
+        );
+        if (name.trim().isNotEmpty) {
+          await cred.user?.updateDisplayName(name.trim());
+        }
+      });
+
+  /// Sign in with email + password.
+  Future<void> signInWithEmail({required String email, required String password}) =>
+      _run(() => FirebaseAuth.instance
+          .signInWithEmailAndPassword(email: email.trim(), password: password));
+
   /// Opens the Myto website in a Custom Tab to run Google sign-in in a real browser, then
   /// reads back the relayed OIDC ID token from the `myto://auth-callback` deep link. A random
   /// `state` is round-tripped and re-checked so we reject any callback we didn't initiate. See
@@ -153,10 +175,18 @@ class AuthService extends ChangeNotifier {
         return 'Google sign-in isn\'t enabled yet — turn it on in the Firebase console.';
       case 'account-exists-with-different-credential':
         return 'This email is already linked to a different sign-in method. Use that one.';
-      case 'invalid-credential':
-        return 'That sign-in didn\'t go through. Please try again.';
       case 'network-request-failed':
         return 'Network error during sign-in. Check your connection and try again.';
+      case 'email-already-in-use':
+        return 'That email already has an account — sign in instead.';
+      case 'weak-password':
+        return 'Password needs at least 6 characters.';
+      case 'invalid-email':
+        return "That email address doesn't look right.";
+      case 'invalid-credential':
+      case 'wrong-password':
+      case 'user-not-found':
+        return 'Email or password is incorrect.';
       default:
         return 'Sign-in failed. Please try again.';
     }

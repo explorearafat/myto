@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import '../services/auth_service.dart';
 import '../services/social_service.dart';
+import 'discover_profile.dart' show DiscoverProfileSetup, DiscoverProfileView;
 import '../theme.dart';
 import '../widgets/teamly/kit.dart';
 
@@ -27,14 +28,16 @@ class DiscoverScreen extends StatefulWidget {
 }
 
 class _DiscoverScreenState extends State<DiscoverScreen> {
-  String _tab = 'feeds'; // 'feeds' | 'following'
+  // The four destinations, mirroring the website's /discover.
+  String _dest = 'feed'; // 'feed' | 'viral' | 'following' | 'profile'
   String _topic = '';
   final Set<String> _likedIds = <String>{};
   final Set<String> _savedIds = <String>{};
   final Set<String> _followingIds = <String>{};
   bool _setsLoaded = false;
   List<FeedPost>? _followingPosts;
-  bool _profileOpen = false;
+  DiscoverProfile? _profile;
+  bool _profileLoaded = false;
 
   User? get _user => FirebaseAuth.instance.currentUser;
   String get _uid => _user?.uid ?? '';
@@ -49,6 +52,17 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
   void initState() {
     super.initState();
     _loadSets();
+    _loadProfile();
+  }
+
+  Future<void> _loadProfile() async {
+    if (_uid.isEmpty) return;
+    final p = await SocialService().getProfile(_uid);
+    if (!mounted) return;
+    setState(() {
+      _profile = p;
+      _profileLoaded = true;
+    });
   }
 
   Future<void> _loadSets() async {
@@ -93,12 +107,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
               padding: const EdgeInsets.only(right: TeamlySpace.s4),
               child: Center(
                 child: GestureDetector(
-                  onTap: () {
-                    if (!_profileOpen) {
-                      _profileOpen = true;
-                      _openProfile();
-                    }
-                  },
+                  onTap: () => setState(() => _dest = 'profile'),
                   child: _Avatar(photo: _photo, name: _name, size: 32),
                 ),
               ),
@@ -108,20 +117,68 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
       body: Column(
         children: <Widget>[
           const SizedBox(height: TeamlySpace.s2),
-          TeamlyTabs(
-            labels: const <String>['Feeds', 'Following'],
-            index: _tab == 'feeds' ? 0 : 1,
-            onChanged: (i) => setState(() => _tab = i == 0 ? 'feeds' : 'following'),
+          // The four destinations — Feed / Viral / Following / Profile.
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
+            padding: const EdgeInsets.all(3),
+            decoration: BoxDecoration(
+              color: palette.chip,
+              borderRadius: BorderRadius.circular(TeamlyRadius.pill),
+            ),
+            child: Row(
+              children: <Widget>[
+                for (final d in const <String, String>{
+                  'feed': 'Feed',
+                  'viral': 'Viral',
+                  'following': 'Following',
+                  'profile': 'Profile',
+                }.entries)
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () => setState(() => _dest = d.key),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: _dest == d.key ? palette.surface : Colors.transparent,
+                          borderRadius: BorderRadius.circular(TeamlyRadius.pill),
+                        ),
+                        child: Text(
+                          d.value,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: _dest == d.key ? FontWeight.w600 : FontWeight.w500,
+                            color: _dest == d.key ? palette.text : palette.muted,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
           const SizedBox(height: TeamlySpace.s3),
-          _TopicChips(selected: _topic, onSelected: (t) => setState(() => _topic = t)),
-          const SizedBox(height: TeamlySpace.s2),
+          if (_dest == 'feed' || _dest == 'viral')
+            _TopicChips(selected: _topic, onSelected: (t) => setState(() => _topic = t)),
+          if (_dest == 'feed' || _dest == 'viral') const SizedBox(height: TeamlySpace.s2),
           if (_uid.isEmpty)
             const _SignInCard()
-          else
+          else if (_dest != 'profile' && _profileLoaded && _profile == null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
+              child: TeamlyCard(
+                padding: const EdgeInsets.all(TeamlySpace.s4),
+                child: const Text(
+                  'Set up your profile (Profile tab) to start posting.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 13.5, color: TeamlyColors.ink500),
+                ),
+              ),
+            )
+          else if (_dest != 'profile')
             _Composer(
-              name: _name,
-              photo: _photo,
+              name: _profile?.name ?? _name,
+              photo: _profile?.photo ?? _photo,
               onPosted: () => _toast('Posted to Discover.'),
             ),
           const SizedBox(height: TeamlySpace.s3),
@@ -132,7 +189,52 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
   }
 
   Widget _feedArea(MytoPalette palette) {
-    if (_tab == 'following') {
+    if (_dest == 'profile') {
+      if (_uid.isEmpty) {
+        return const _SignInCard();
+      }
+      if (!_profileLoaded) {
+        return _Empty(text: 'Loading…', palette: palette);
+      }
+      if (_profile == null) {
+        return DiscoverProfileSetup(
+          uid: _uid,
+          defaultName: _profile?.name ?? _name,
+          defaultPhoto: _profile?.photo ?? _photo,
+          onDone: (p) => setState(() => _profile = p),
+        );
+      }
+      return DiscoverProfileView(
+        uid: _uid,
+        profile: _profile,
+        savedIds: _savedIds,
+        onUnsave: (id) => _guard(
+          () async {
+            await SocialService.unsaveFromProfile(id, _uid);
+            setState(() => _savedIds.remove(id));
+          },
+          '',
+        ),
+        onDelete: (id) => _guard(
+          () async {
+            await SocialService.deletePost(id);
+            setState(() => _followingPosts = null);
+          },
+          'Post deleted.',
+        ),
+        onComment: (post, text) => _guard(
+          () => SocialService.addComment(
+            post.id,
+            uid: _uid,
+            name: _name,
+            photo: _photo,
+            text: text,
+          ),
+          'Comment added.',
+        ),
+      );
+    }
+    if (_dest == 'following') {
       if (_uid.isEmpty) {
         return _Empty(text: 'Sign in to follow authors and see their posts here.', palette: palette);
       }
@@ -163,15 +265,22 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     }
 
     return StreamBuilder<List<FeedPost>>(
-      key: ValueKey<String>('feed:$_topic'),
-      stream: SocialService.streamFeed(topic: _topic.isEmpty ? null : _topic),
+      key: ValueKey<String>('feed:$_dest:$_topic'),
+      stream: _dest == 'viral'
+          ? SocialService().streamViralFeed(topic: _topic.isEmpty ? null : _topic)
+          : SocialService.streamFeed(topic: _topic.isEmpty ? null : _topic),
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting && !snap.hasData) {
           return _Empty(text: 'Loading the feed…', palette: palette);
         }
         final posts = snap.data ?? const <FeedPost>[];
         if (posts.isEmpty) {
-          return _Empty(text: 'Nothing here yet — be the first to post.', palette: palette);
+          return _Empty(
+            text: _dest == 'viral'
+                ? 'No popular posts yet — likes decide what rises.'
+                : 'Nothing here yet — be the first to post.',
+            palette: palette,
+          );
         }
         return RefreshIndicator(
           onRefresh: () async {},
@@ -304,7 +413,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
           'Comment added.',
         ),
       ),
-    ).whenComplete(() => _profileOpen = false);
+    );
   }
 }
 

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
@@ -45,6 +46,11 @@ class TeamChatStore extends ChangeNotifier {
   /// channelKey -> agent ids whose answers are still being generated, in the
   /// order they started. Drives the combined "…is typing" line.
   final Map<String, List<String>> _typing = <String, List<String>>{};
+
+  /// channelKey -> what the working agent is doing right now (parsed from the
+  /// gateway's tool blocks) — "Searching the web", "Reading a page", … shown in
+  /// the typing line Claude-mobile style instead of a bare "is typing".
+  final Map<String, String> _activity = <String, String>{};
 
   final Map<String, AgentTeam> _roomCache = <String, AgentTeam>{};
 
@@ -142,6 +148,10 @@ class TeamChatStore extends ChangeNotifier {
       final others = names.length - 2;
       who = '${names[0]}, ${names[1]} and $others '
           '${others == 1 ? 'other' : 'others'}';
+    }
+    final activity = _activity[channelKey];
+    if (activity != null && activity.isNotEmpty) {
+      return activity;
     }
     return '$who ${names.length == 1 ? 'is' : 'are'} typing...';
   }
@@ -335,19 +345,45 @@ class TeamChatStore extends ChangeNotifier {
       done.content = _short(answer.isEmpty ? fallback : answer);
     }
 
+    _activity.remove('$key:$agentId');
     _unmarkTyping(key, agentId);
     notifyListeners();
   }
 
-  /// Drive one model call, forwarding every token to [onDelta]. Each call gets
-  /// its own [ChatClient] because the client is single-flight — that is what
-  /// lets a whole room of agents generate simultaneously.
+  /// Friendly labels for the gateway's server-side tools, shown Claude-style
+  /// while the agent works ("Myto is searching the web…").
+  static String _toolLabel(String tool) {
+    switch (tool) {
+      case 'web_search':
+        return 'Searching the web';
+      case 'web_fetch':
+        return 'Reading a page';
+      case 'wiki_search':
+        return 'Checking Wikipedia';
+      default:
+        return 'Working';
+    }
+  }
+
+  static final RegExp _toolBlockRe = RegExp(
+    '```myto:tool\s*\n(\{[^`]*?\})\s*\n?```',
+    multiLine: true,
+  );
+  static final RegExp _urlRe = RegExp(r'https://[^\s`"<>]+');
+
+  /// Drive one model call, forwarding visible tokens to [onDelta] and tool
+  /// activity to [onActivity]. Tool blocks ride the text protocol from the
+  /// gateway (web_search / web_fetch / wiki_search); we hold their raw fences
+  /// OUT of the reply so the bubble stays clean, and collect the result URLs as
+  /// sources for the citation chips.
   Future<void> _collect({
     required ByokConfig config,
     required String system,
     required List<Map<String, String>> history,
     String? context,
     required void Function(String delta) onDelta,
+    void Function(String label)? onActivity,
+    void Function(List<String> sources)? onSources,
   }) async {
     final client = ChatClient();
 
@@ -359,6 +395,61 @@ class TeamChatStore extends ChangeNotifier {
     ];
 
     final modelId = config.models.isNotEmpty ? config.models.first.id : '';
+
+    // The gateway runs the server-side tool loop (web_search / web_fetch /
+    // wiki_search) and streams the blocks as fenced text. We hide the fences
+    // from the visible bubble, announce each tool as a Claude-style activity,
+    // and harvest the result URLs as citation sources.
+    final raw = StringBuffer();
+    final seenTools = <String>{};
+    final sources = <String>[];
+    var carry = '';
+    var inBlock = false;
+
+    void pushVisible(String piece) {
+      carry += piece;
+      for (;;) {
+        if (inBlock) {
+          final close = carry.indexOf('```');
+          if (close >= 0) {
+            // Harvest result URLs before dropping the block.
+            for (final m in _urlRe.allMatches(carry)) {
+              final g = m.group(0);
+              final host = (g == null ? '' : Uri.tryParse(g)?.host) ?? '';
+              if (host.isNotEmpty && !sources.contains(host) && sources.length < 3) {
+                sources.add(host);
+              }
+            }
+            carry = carry.substring(close + 3);
+            inBlock = false;
+            continue;
+          }
+          // Hold the tail that could be a partial closing fence.
+          final keep = carry.length < 3 ? carry.length : 3;
+          final emitLen = carry.length - keep;
+          if (emitLen > 0) {
+            onDelta(carry.substring(0, emitLen));
+            carry = carry.substring(emitLen);
+          }
+          return;
+        }
+        final open = carry.indexOf('```myto:');
+        if (open >= 0) {
+          if (open > 0) onDelta(carry.substring(0, open));
+          carry = carry.substring(open);
+          inBlock = true;
+          continue;
+        }
+        // No fence: emit everything except a possible partial fence prefix.
+        const maxHold = 9;
+        if (carry.length > maxHold) {
+          final emitLen = carry.length - maxHold;
+          onDelta(carry.substring(0, emitLen));
+          carry = carry.substring(emitLen);
+        }
+        return;
+      }
+    }
 
     try {
       outer:
@@ -373,7 +464,23 @@ class TeamChatStore extends ChangeNotifier {
       )) {
         switch (event) {
           case ChatToken(:final String text):
-            onDelta(text);
+            raw.write(text);
+            // Announce tools as soon as their name streams in.
+            if (inBlock) {
+              final m = RegExp('"tool"\s*:\s*"([a-z_]+)"').firstMatch(carry + text.length.toString());
+            }
+            pushVisible(text);
+            for (final match in _toolBlockRe.allMatches(raw.toString())) {
+              final body = match.group(1);
+              if (body == null) continue;
+              try {
+                final parsed = jsonDecode(body) as Map<String, dynamic>;
+                final tool = (parsed['tool'] ?? '') as String;
+                if (tool.isNotEmpty && seenTools.add(tool)) {
+                  onActivity?.call(_toolLabel(tool));
+                }
+              } catch (_) {}
+            }
           case ChatDone():
             break outer;
           case ChatFailure():
@@ -384,6 +491,14 @@ class TeamChatStore extends ChangeNotifier {
       // Network hiccup mid-stream: keep whatever already arrived.
     } finally {
       client.abort();
+    }
+
+    // Flush the hold-back buffer (a partial fence at the very end is dropped).
+    if (carry.isNotEmpty && !inBlock) {
+      onDelta(carry);
+    }
+    if (sources.isNotEmpty) {
+      onSources?.call(sources);
     }
   }
 

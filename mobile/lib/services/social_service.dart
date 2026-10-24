@@ -386,3 +386,101 @@ class SocialService {
     return snap.docs.map((d) => FeedPost.fromDoc(d.id, d.data())).toList();
   }
 }
+
+
+// ── Profiles, handles, viral feed ──────────────────────────────────────────────
+
+/// A Discover profile: how the community sees a builder.
+class DiscoverProfile {
+  const DiscoverProfile({
+    required this.uid,
+    required this.name,
+    required this.username,
+    required this.bio,
+    required this.photo,
+    required this.createdAtMs,
+  });
+
+  final String uid;
+  final String name;
+  final String username;
+  final String bio;
+  final String photo;
+  final int createdAtMs;
+
+  static DiscoverProfile fromDoc(String id, Map<String, dynamic> d) {
+    return DiscoverProfile(
+      uid: id,
+      name: (d['name'] ?? 'Anonymous') as String,
+      username: (d['username'] ?? '') as String,
+      bio: (d['bio'] ?? '') as String,
+      photo: (d['photo'] ?? '') as String,
+      createdAtMs: _ms(d['createdAt']),
+    );
+  }
+}
+
+/// A handle: 3–20 chars, lowercase letters/digits/underscore.
+final RegExp kHandleRe = RegExp(r'^[a-z0-9_]{3,20}$');
+extension DiscoverProfiles on SocialService {
+  /// Read a user's public Discover profile, or null when they haven't set one up.
+  Future<DiscoverProfile?> getProfile(String uid) async {
+    final snap = await SocialService._db.collection('profiles').doc(uid).get();
+    if (!snap.exists) return null;
+    return DiscoverProfile.fromDoc(snap.id, snap.data() ?? <String, dynamic>{});
+  }
+
+  /// Is a handle still free? (UX check — the rules enforce uniqueness.)
+  Future<bool> isHandleFree(String username) async {
+    final snap =
+        await SocialService._db.collection('usernames').doc(username.toLowerCase()).get();
+    return !snap.exists;
+  }
+
+  /// Create/update the caller's profile and claim their handle. The handle doc
+  /// is create-once in the rules, so a taken handle returns false.
+  Future<bool> saveProfile(
+    String uid, {
+    required String name,
+    required String username,
+    required String bio,
+    required String photo,
+  }) async {
+    final handle = username.trim().toLowerCase();
+    if (!kHandleRe.hasMatch(handle)) return false;
+    final handleRef = SocialService._db.collection('usernames').doc(handle);
+    final existing = await handleRef.get();
+    if (existing.exists && (existing.data()?['uid'] ?? '') != uid) return false;
+    final batch = SocialService._db.batch();
+    batch.set(handleRef, <String, dynamic>{'uid': uid});
+    batch.set(
+      SocialService._db.collection('profiles').doc(uid),
+      <String, dynamic>{
+        'uid': uid,
+        'name': name.substring(0, name.length.clamp(0, 80)),
+        'username': handle,
+        'bio': bio.substring(0, bio.length.clamp(0, 280)),
+        'photo': photo,
+        'createdAt': FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
+    await batch.commit();
+    return true;
+  }
+
+  /// Viral feed: the most-liked posts, newest first among ties.
+  Stream<List<FeedPost>> streamViralFeed({String? topic, int limitCount = 50}) {
+    Query<Map<String, dynamic>> q = SocialService._db
+        .collection('posts')
+        .orderBy('likeCount', descending: true)
+        .orderBy('createdAt', descending: true)
+        .limit(limitCount);
+    if (topic != null && topic.isNotEmpty) {
+      q = q.where('topics', arrayContains: topic);
+    }
+    return q.snapshots().map(
+          (s) => s.docs.map((d) => FeedPost.fromDoc(d.id, d.data())).toList(),
+        );
+  }
+}

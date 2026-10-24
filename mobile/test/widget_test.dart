@@ -31,8 +31,11 @@ void main() {
     await tester.pumpWidget(MytoApp(auth: s.auth, byok: s.byok, store: s.store, studio: s.studio));
     await tester.pump();
 
-    expect(find.text('Myto'), findsWidgets);
+    // The redesigned gate: heading + email form + the Google one-tap.
+    expect(find.text('Create an account'), findsOneWidget);
+    expect(find.text('Discover Myto'), findsOneWidget);
     expect(find.text('Continue with Google'), findsOneWidget);
+    expect(find.widgetWithText(TextField, 'Email address'), findsOneWidget);
   });
 
   testWidgets('the blank-chat hero greets by first name', (tester) async {

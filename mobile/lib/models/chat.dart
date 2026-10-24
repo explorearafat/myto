@@ -1,8 +1,14 @@
 enum Role { user, assistant }
 
 class ChatMessage {
-  ChatMessage({required this.role, required this.content, DateTime? at, this.senderName})
-      : at = at ?? DateTime.now();
+  ChatMessage({
+    required this.role,
+    required this.content,
+    DateTime? at,
+    this.senderName,
+    List<String>? sources,
+  })  : at = at ?? DateTime.now(),
+        sources = sources ?? <String>[];
 
   final Role role;
   String content;
@@ -11,6 +17,10 @@ class ChatMessage {
   /// Who produced this message. Null for plain Myto chats; set to an agent's
   /// name inside a room discussion so the bubble can label each speaker.
   final String? senderName;
+
+  /// Domains the reply drew on (web_search / web_fetch results), shown as
+  /// favicon chips at the end of the bubble — Claude-style citations.
+  List<String> sources;
 
   bool get isUser => role == Role.user;
 
