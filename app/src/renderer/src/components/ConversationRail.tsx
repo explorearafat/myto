@@ -4,7 +4,6 @@ import { useAppStore } from '@renderer/store/useAppStore'
 import { useSessionStore } from '@renderer/store/useSessionStore'
 import { useProjectStore } from '@renderer/store/useProjectStore'
 import { useChatStore } from '@renderer/store/useChatStore'
-import gearUrl from '../assets/gear.png'
 import { useAuthUser } from '@renderer/lib/useAuthUser'
 import { ProjectDialog } from '@renderer/components/ProjectDialog'
 
@@ -709,9 +708,22 @@ export function ConversationRail() {
             aria-label="Settings"
             title="Settings"
             onClick={() => openSettings('tools')}
-            className="grid h-7 w-7 place-items-center rounded-md border border-border bg-surface-2/60 transition-colors hover:bg-surface-2"
+            className="grid h-7 w-7 place-items-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-text"
           >
-            <img src={gearUrl} alt="" width={16} height={16} className="h-[16px] w-[16px] object-contain opacity-80" />
+            {/* Inline SVG gear — strokes follow `currentColor`, so the icon adapts to
+                the active theme (light/dark) instead of being a fixed-colour PNG that
+                could wash out against the wrong background. Weight (1.8 at a 24 viewBox
+                scaled to 16px ≈ 1.2px) matches the rail's other stroke icons. */}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle cx="12" cy="12" r="3.2" stroke="currentColor" strokeWidth="1.8" />
+              <path
+                d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
           </button>
           <button
             type="button"
