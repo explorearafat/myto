@@ -59,6 +59,8 @@ export interface AppState {
    * its own last/opening default.
    */
   settingsTab: SettingsTab | null
+  /** Whether the Discover community overlay is open. */
+  discoverOpen: boolean
 
   /** Environment badge derived from the active provider (local/remote). */
   envStatus: EnvStatus
@@ -79,6 +81,8 @@ export interface AppState {
   setProjectName: (name: string) => void
   setMaximized: (isMaximized: boolean) => void
   setSettingsOpen: (open: boolean) => void
+  openDiscover: () => void
+  closeDiscover: () => void
   /**
    * Open the Settings overlay directly to a specific tab (the sidebar's
    * quick-access rows use this). Passing no tab just opens it.
@@ -201,6 +205,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   modelsLoading: false,
   settingsOpen: false,
   settingsTab: null,
+  discoverOpen: false,
 
   envStatus: envForProvider(DEFAULT_PROVIDER_SETTINGS.activeProvider),
   model: DEFAULT_PROVIDER_SETTINGS.modelName,
@@ -212,6 +217,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setProjectName: (projectName) => set({ projectName }),
   setMaximized: (isMaximized) => set({ isMaximized }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  openDiscover: () => set({ discoverOpen: true }),
+  closeDiscover: () => set({ discoverOpen: false }),
   openSettings: (tab) => set({ settingsOpen: true, settingsTab: tab ?? null }),
   setRailOpen: (railOpen) => set({ railOpen }),
   toggleRail: () => set((state) => ({ railOpen: !state.railOpen })),

@@ -14,10 +14,10 @@ function installContentSecurityPolicy(isDev: boolean): void {
   const policy = isDev
     ? "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
       "style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: https://*.googleusercontent.com; " +
-      "worker-src 'self' blob:; connect-src 'self' ws: http://localhost:* https://*.googleapis.com"
+      "worker-src 'self' blob:; connect-src 'self' ws: http://localhost:* https://*.googleapis.com https://mytocode.vercel.app"
     : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
       "font-src 'self' data:; img-src 'self' data: https://*.googleusercontent.com; worker-src 'self' blob:; " +
-      "connect-src 'self' https://*.googleapis.com"
+      "connect-src 'self' https://*.googleapis.com https://mytocode.vercel.app"
 
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({

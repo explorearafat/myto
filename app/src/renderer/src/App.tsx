@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { TitleBar } from '@renderer/components/TitleBar'
 import { SplashScreen } from '@renderer/components/SplashScreen'
 import { SettingsPanel } from '@renderer/components/SettingsPanel'
+import { DiscoverOverlay } from '@renderer/components/DiscoverOverlay'
 import { StudioLauncher } from '@renderer/components/StudioLauncher'
 import { AppLayout } from '@renderer/components/layout/AppLayout'
 import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
@@ -13,6 +14,8 @@ import { useByokConfig } from '@renderer/lib/useByokConfig'
 
 export default function App() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
+  const discoverOpen = useAppStore((s) => s.discoverOpen)
+  const closeDiscover = useAppStore((s) => s.closeDiscover)
   const loadSettings = useAppStore((s) => s.loadSettings)
   const applyByokConfig = useAppStore((s) => s.applyByokConfig)
   const refreshConnectorStatus = useAppStore((s) => s.refreshConnectorStatus)
@@ -73,6 +76,7 @@ export default function App() {
           <AppLayout />
         </ErrorBoundary>
         {settingsOpen && <SettingsPanel />}
+        {discoverOpen && <DiscoverOverlay onClose={() => closeDiscover()} />}
       </div>
       <StudioLauncher />
       <SplashScreen />

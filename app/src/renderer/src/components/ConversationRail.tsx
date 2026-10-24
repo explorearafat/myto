@@ -134,6 +134,7 @@ export function ConversationRail() {
   const projects = useProjectStore((s) => s.projects)
   const removeProject = useProjectStore((s) => s.remove)
   const openSettings = useAppStore((s) => s.openSettings)
+  const openDiscover = useAppStore((s) => s.openDiscover)
   const toggleRail = useAppStore((s) => s.toggleRail)
   // Chats with a run still in flight — including ones started here and left behind
   // by a New Chat. Badging them is what makes background work visible; without it
@@ -463,6 +464,18 @@ export function ConversationRail() {
           </span>
           <span className="min-w-0 flex-1 truncate">New</span>
         </button>
+
+        <NavRow
+          icon={
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <circle cx="8" cy="8" r="5.5" stroke="currentColor" strokeWidth="1.3" />
+              <path d="M2.5 8h11M8 2.5c1.8 1.4 2.8 3.3 2.8 5.5S9.8 12.1 8 13.5C6.2 12.1 5.2 10.2 5.2 8S6.2 3.9 8 2.5z" stroke="currentColor" strokeWidth="1.2" />
+            </svg>
+          }
+          label="Discover"
+          onClick={openDiscover}
+          title="The Myto community feed"
+        />
 
         <NavRow
           icon={
