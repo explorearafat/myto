@@ -114,7 +114,6 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final palette = Theme.of(context).palette;
     final studio = context.watch<StudioStore>();
     final conversations = context.watch<ConversationStore>().conversations;
 
@@ -130,15 +129,7 @@ class _ChatScreenState extends State<ChatScreen> {
         .toList(growable: false);
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Chats'),
-        actions: <Widget>[
-          Padding(
-            padding: const EdgeInsets.only(right: TeamlySpace.s4),
-            child: Center(child: TeamlyFab(icon: Icons.add_rounded, onPressed: _newMytoChat)),
-          ),
-        ],
-      ),
+      appBar: AppBar(title: const Text('Chats')),
       body: Column(
         children: <Widget>[
           Padding(
@@ -196,7 +187,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     padding: const EdgeInsets.all(TeamlySpace.s8),
                     child: Text(
                       _query.trim().isEmpty
-                          ? 'No chats yet. Pick an agent or a room, or tap + for the assistant.'
+                          ? 'No chats yet. Pick an agent or a room, or tap Myto for the assistant.'
                           : 'Nothing matches “$_query”.',
                       textAlign: TextAlign.center,
                       style: const TextStyle(color: TeamlyColors.ink300, fontSize: 14, height: 1.5),

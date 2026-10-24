@@ -9,7 +9,6 @@ import '../services/team_chat_store.dart';
 import '../theme.dart';
 import '../widgets/agent_avatar.dart';
 import '../widgets/team_composer.dart';
-import '../widgets/teamly/kit.dart';
 
 /// ---------------------------------------------------------------------------
 /// TeamChatScreen — one full-screen chat, used for BOTH chat surfaces:
@@ -360,8 +359,8 @@ class _TeamChatScreenState extends State<TeamChatScreen> {
 
 /// The live "QA Tester, Bug analyzer and 2 others is typing..." row that sits
 /// under the transcript while the room's specialists are still answering.
-/// Replies themselves are never painted character by character — each one
-/// appears whole the moment its model finishes.
+/// Replies stream into their bubbles live as tokens arrive, so the row only
+/// covers the gap before an agent's first words land.
 class _TypingRow extends StatelessWidget {
   const _TypingRow({required this.label, required this.isRoom});
 

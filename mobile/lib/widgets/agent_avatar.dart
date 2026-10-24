@@ -72,7 +72,6 @@ class AgentEmblemPainter extends CustomPainter {
       ..style = PaintingStyle.fill;
 
     final Offset c = Offset(size / 2, size / 2);
-    final double r = size * 0.30;
 
     switch (emblem) {
       case 0: // QA Tester — clipboard with a check.
@@ -337,7 +336,6 @@ class DoodleBackground extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final MytoPalette palette = Theme.of(context).palette;
     return Positioned.fill(
       child: IgnorePointer(
         child: CustomPaint(
@@ -359,7 +357,10 @@ class _DoodlePainter extends CustomPainter {
   final Color color;
   final double opacity;
 
-  static const int _kCount = 46;
+  /// Spacing of the jittered lattice, in logical pixels. Small enough that
+  /// neighbouring doodles nearly touch — the wall reads as a dense hand-drawn
+  /// texture rather than a sparse scatter.
+  static const double _kCell = 20.0;
 
   @override
   void paint(Canvas canvas, Size s) {
@@ -371,27 +372,37 @@ class _DoodlePainter extends CustomPainter {
       ..strokeWidth = 1.6
       ..strokeCap = StrokeCap.round;
 
-    for (int i = 0; i < _kCount; i++) {
-      final double x = rng.nextDouble() * s.width;
-      final double y = rng.nextDouble() * s.height;
-      final double scale = 0.6 + rng.nextDouble() * 1.4;
-      final int kind = i % 5;
-      canvas.save();
-      canvas.translate(x, y);
-      canvas.scale(scale, scale);
-      switch (kind) {
-        case 0: // star
-          _star(canvas, p, 6);
-        case 1: // heart
-          _heart(canvas, p);
-        case 2: // spiral
-          _spiral(canvas, p);
-        case 3: // squiggle
-          _squiggle(canvas, p);
-        default: // flower
-          _flower(canvas, p);
+    // A jittered lattice instead of pure-random scatter: every cell of the
+    // canvas claims one doodle, so coverage stays uniformly packed with only
+    // a sliver of gap between neighbours at any screen size (a phone display
+    // draws ~800 of them vs. the handful a plain random pass would give).
+    final int cols = (s.width / _kCell).ceil();
+    final int rows = (s.height / _kCell).ceil();
+    int i = 0;
+    for (int r = 0; r < rows; r++) {
+      for (int c = 0; c < cols; c++) {
+        final double x = (c + 0.5 + (rng.nextDouble() - 0.5) * 0.7) * _kCell;
+        final double y = (r + 0.5 + (rng.nextDouble() - 0.5) * 0.7) * _kCell;
+        final double scale = 0.7 + rng.nextDouble() * 0.6;
+        final int kind = i % 5;
+        i++;
+        canvas.save();
+        canvas.translate(x, y);
+        canvas.scale(scale, scale);
+        switch (kind) {
+          case 0: // star
+            _star(canvas, p, 6);
+          case 1: // heart
+            _heart(canvas, p);
+          case 2: // spiral
+            _spiral(canvas, p);
+          case 3: // squiggle
+            _squiggle(canvas, p);
+          default: // flower
+            _flower(canvas, p);
+        }
+        canvas.restore();
       }
-      canvas.restore();
     }
   }
 

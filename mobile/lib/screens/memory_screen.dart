@@ -30,7 +30,6 @@ class _MemoryScreenState extends State<MemoryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.palette;
     final store = context.watch<StudioStore>();
     final system = store.systemDocs;
 

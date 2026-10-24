@@ -42,20 +42,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     }
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Discover'),
-        actions: <Widget>[
-          Padding(
-            padding: const EdgeInsets.only(right: TeamlySpace.s4),
-            child: Center(
-              child: TeamlyFab(
-                icon: Icons.auto_awesome_rounded,
-                onPressed: () => _snack('Generating a brief from your chats...'),
-              ),
-            ),
-          ),
-        ],
-      ),
+      appBar: AppBar(title: const Text('Discover')),
       body: Column(
         children: <Widget>[
           const SizedBox(height: TeamlySpace.s2),
@@ -106,10 +93,6 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     );
   }
 
-  void _snack(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
-  }
 }
 
 /// A thin green rule under the tabs, matching the reference's active-tab bar.

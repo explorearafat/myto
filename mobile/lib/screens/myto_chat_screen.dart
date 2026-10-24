@@ -44,10 +44,10 @@ class _MytoChatScreenState extends State<MytoChatScreen> {
   ChatMessage? _pending;
   String _effort = 'auto';
 
-  /// Tokens land here while the model is working and are committed as one
-  /// piece when the stream ends, so an answer appears whole instead of typing
-  /// itself out character by character.
-  final StringBuffer _buffer = StringBuffer();
+  /// Live tokens write straight into the pending bubble; repaints are throttled
+  /// to this interval so Markdown re-parsing stays cheap on mid-range phones.
+  static const int _paintIntervalMs = 40;
+  DateTime _lastPaint = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   void initState() {
@@ -84,7 +84,6 @@ class _MytoChatScreenState extends State<MytoChatScreen> {
 
     final assistant = ChatMessage(role: Role.assistant, content: '');
     store.addMessage(assistant);
-    _buffer.clear();
     setState(() {
       _streaming = true;
       _pending = assistant;
@@ -113,9 +112,10 @@ class _MytoChatScreenState extends State<MytoChatScreen> {
       (event) {
         switch (event) {
           case ChatToken(:final text):
-            // Buffer only — the answer lands whole when the stream finishes,
-            // so there is no character-by-character typewriter animation.
-            _buffer.write(text);
+            // Paint tokens the moment they land — first words appear as soon as
+            // the provider starts answering, not when the whole reply is done.
+            assistant.content += text;
+            _throttledRepaint();
           case ChatDone():
             _finish();
           case ChatFailure(:final code, :final resetSeconds):
@@ -125,6 +125,17 @@ class _MytoChatScreenState extends State<MytoChatScreen> {
       onError: (_) => _fail(assistant, 'network', null),
       onDone: _finish,
     );
+  }
+
+  /// Repaint at most every [_paintIntervalMs]; the trailing token still lands
+  /// via [_finish]'s setState, so nothing is ever left unpainted.
+  void _throttledRepaint() {
+    final now = DateTime.now();
+    if (now.difference(_lastPaint).inMilliseconds < _paintIntervalMs) return;
+    _lastPaint = now;
+    if (!mounted) return;
+    _scrollToBottomIfNear();
+    setState(() {});
   }
 
   Future<void> _pickEffort() async {
@@ -137,11 +148,10 @@ class _MytoChatScreenState extends State<MytoChatScreen> {
     _sub?.cancel();
     _sub = null;
 
-    // The whole answer lands here, in one frame.
-    final String answer = _buffer.toString().trim();
-    _buffer.clear();
     final ChatMessage? pending = _pending;
-    if (pending != null && answer.isNotEmpty) pending.content = answer;
+    if (pending != null && pending.content.isNotEmpty) {
+      pending.content = pending.content.trim();
+    }
 
     if (!mounted) return;
     _store.touch();
@@ -153,12 +163,10 @@ class _MytoChatScreenState extends State<MytoChatScreen> {
   }
 
   void _fail(ChatMessage assistant, String code, int? resetSeconds) {
-    // Keep whatever arrived before the failure, then explain the failure only
-    // if nothing did.
-    final String partial = _buffer.toString().trim();
-    _buffer.clear();
-    if (partial.isNotEmpty) assistant.content = partial;
-    if (assistant.content.trim().isEmpty) {
+    // Keep whatever streamed in before the failure, then explain the failure
+    // only if nothing did.
+    assistant.content = assistant.content.trim();
+    if (assistant.content.isEmpty) {
       assistant.content = _failureText(code, resetSeconds);
     }
     if (code == 'quota') {

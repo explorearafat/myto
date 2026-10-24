@@ -21,11 +21,13 @@ import 'studio_store.dart';
 ///     wearing that agent's persona, followed by a short consolidation.
 ///
 /// Presentation contract (important):
-///   Nothing is ever painted character by character. While a model works, its
-///   name sits in the live typing line ("QA Tester, Bug analyzer and 2 others
-///   are typing..."). The moment its answer is complete the whole bubble is
-///   appended in one piece — so replies land in the order they finish, not in
-///   roster order. Answers are deliberately kept to a couple of short lines.
+///   Each reply streams into its bubble LIVE — the first words paint the moment
+///   the provider starts answering (repaints throttled, see [_paintInterval]),
+///   so a slow provider never looks like dead air. While an agent is working
+///   its name also sits in the live typing line ("QA Tester, Bug analyzer and
+///   2 others are typing..."). Replies therefore appear in the order their
+///   models START, not roster order. Answers are deliberately kept to a couple
+///   of short lines.
 ///
 /// Threads are kept in memory for the session and mirrored into
 /// [ConversationStore] (with a `channel` marker) so they persist and appear in
@@ -56,6 +58,19 @@ class TeamChatStore extends ChangeNotifier {
   /// Hard ceiling on a reply: three short lines, so a room stays readable.
   static const int _maxReplyLines = 3;
   static const int _maxReplyChars = 300;
+
+  /// Coalesce token bursts into at most one UI rebuild per interval — a room
+  /// of agents streaming at once must not rebuild the transcript per token.
+  static const Duration _paintInterval = Duration(milliseconds: 50);
+  Timer? _paintTimer;
+
+  void _throttledNotify() {
+    if (_paintTimer != null) return;
+    _paintTimer = Timer(_paintInterval, () {
+      _paintTimer = null;
+      notifyListeners();
+    });
+  }
 
   /// Synthetic speaker id for the closing consolidation (not a roster agent).
   static const String _reportId = 'research-report';
@@ -173,7 +188,7 @@ class TeamChatStore extends ChangeNotifier {
   // -- rooms -----------------------------------------------------------------
 
   /// Kick off a room discussion. Every member starts generating at once; each
-  /// bubble appears whole as soon as that member's model finishes, then a short
+  /// bubble streams in live as its member's tokens arrive, then a short
   /// "Research Report" note closes the round.
   Future<void> sendToRoom({
     required AgentTeam room,
@@ -257,8 +272,9 @@ class TeamChatStore extends ChangeNotifier {
 
   // -- one agent, one answer -------------------------------------------------
 
-  /// Generate a single reply and, the instant it is complete, append it to the
-  /// thread as one whole message. Nothing is streamed into the UI.
+  /// Generate a single reply, painting tokens into a live bubble as they
+  /// arrive. The bubble grows in place and is complete the moment the model
+  /// finishes — no waiting for the whole answer before anything shows.
   Future<void> _runOne({
     required String key,
     required String agentId,
@@ -270,48 +286,70 @@ class TeamChatStore extends ChangeNotifier {
     String? senderName,
   }) async {
     final int gen = _generation;
+    final thread = _threads[key];
+    final sender = senderName ?? _displayName(agentId);
 
-    String answer = fallback;
+    final streamed = StringBuffer();
+    ChatMessage? live;
+
     if (config != null && config.isConfigured && config.models.isNotEmpty) {
-      answer = await _collect(
+      await _collect(
         config: config,
         system: system,
         history: history,
         context: context,
-        fallback: fallback,
+        onDelta: (String delta) {
+          if (gen != _generation || thread == null) return;
+          // First token: swap the typing line for a live, growing bubble.
+          live ??= () {
+            final m = ChatMessage(
+              role: Role.assistant,
+              content: '',
+              senderName: sender,
+            );
+            thread.add(m);
+            return m;
+          }();
+          streamed.write(delta);
+          live!.content = _short(streamed.toString());
+          _throttledNotify();
+        },
       );
     }
 
-    // Aborted or superseded while the model was working: drop the result and
-    // leave the typing line to whoever owns it now.
+    // Aborted or superseded while the model was working: leave whatever already
+    // painted and let whoever owns the newer generation run the typing line.
     if (gen != _generation) return;
 
-    final thread = _threads[key];
-    if (thread != null) {
-      final sender = senderName ?? _displayName(agentId);
-      thread.add(ChatMessage(
+    final answer = streamed.toString().trim();
+    final done = live;
+    if (done == null) {
+      // No tokens arrived (offline, unconfigured, or an empty upstream reply):
+      // append the fallback as one whole message.
+      thread?.add(ChatMessage(
         role: Role.assistant,
-        content: _short(answer),
+        content: _short(answer.isEmpty ? fallback : answer),
         senderName: sender,
       ));
+    } else {
+      done.content = _short(answer.isEmpty ? fallback : answer);
     }
 
     _unmarkTyping(key, agentId);
     notifyListeners();
   }
 
-  /// Drain one model call into a string. Each call gets its own [ChatClient]
-  /// because the client is single-flight — that is what lets a whole room of
-  /// agents generate simultaneously.
-  Future<String> _collect({
+  /// Drive one model call, forwarding every token to [onDelta]. Each call gets
+  /// its own [ChatClient] because the client is single-flight — that is what
+  /// lets a whole room of agents generate simultaneously.
+  Future<void> _collect({
     required ByokConfig config,
     required String system,
     required List<Map<String, String>> history,
     String? context,
-    required String fallback,
+    required void Function(String delta) onDelta,
   }) async {
     final client = ChatClient();
-    final buffer = StringBuffer();
 
     final messages = <Map<String, String>>[
       <String, String>{'role': 'system', 'content': system},
@@ -334,7 +372,7 @@ class TeamChatStore extends ChangeNotifier {
       )) {
         switch (event) {
           case ChatToken(:final String text):
-            buffer.write(text);
+            onDelta(text);
           case ChatDone():
             break outer;
           case ChatFailure():
@@ -346,9 +384,6 @@ class TeamChatStore extends ChangeNotifier {
     } finally {
       client.abort();
     }
-
-    final text = buffer.toString().trim();
-    return text.isEmpty ? fallback : text;
   }
 
   /// Trim a reply to the room's brevity budget: at most three non-empty lines
@@ -489,6 +524,7 @@ class TeamChatStore extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _generation++;
+    _paintTimer?.cancel();
     _typing.clear();
     super.dispose();
   }

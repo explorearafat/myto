@@ -5,6 +5,7 @@ import 'package:sylor/app.dart';
 import 'package:sylor/services/auth_service.dart';
 import 'package:sylor/services/byok_service.dart';
 import 'package:sylor/services/conversation_store.dart';
+import 'package:sylor/services/studio_store.dart';
 import 'package:sylor/theme.dart';
 import 'package:sylor/widgets/chat_empty_state.dart';
 
@@ -12,19 +13,22 @@ import 'package:sylor/widgets/chat_empty_state.dart';
 /// mode), so with `firebaseReady: false` the gate resolves straight to the sign-in screen — the
 /// one screen reachable without a real Firebase user. The blank-chat hero is exercised directly.
 void main() {
-  Future<({AuthService auth, ByokService byok, ConversationStore store})> buildServices() async {
+  Future<({AuthService auth, ByokService byok, ConversationStore store, StudioStore studio})>
+      buildServices() async {
     SharedPreferences.setMockInitialValues({});
     final store = ConversationStore();
     await store.load();
     final auth = AuthService(firebaseReady: false);
     auth.start(); // no Firebase → resolves immediately, so the gate shows the sign-in screen
     final byok = ByokService(firebaseReady: false);
-    return (auth: auth, byok: byok, store: store);
+    final studio = StudioStore();
+    await studio.load();
+    return (auth: auth, byok: byok, store: store, studio: studio);
   }
 
   testWidgets('signed-out users see the Google sign-in gate', (tester) async {
     final s = await buildServices();
-    await tester.pumpWidget(MytoApp(auth: s.auth, byok: s.byok, store: s.store));
+    await tester.pumpWidget(MytoApp(auth: s.auth, byok: s.byok, store: s.store, studio: s.studio));
     await tester.pump();
 
     expect(find.text('Myto'), findsWidgets);

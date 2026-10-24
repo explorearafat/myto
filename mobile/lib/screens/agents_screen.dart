@@ -3,7 +3,6 @@ import 'package:provider/provider.dart';
 
 import '../models/agent.dart';
 import '../services/studio_store.dart';
-import '../services/team_chat_store.dart';
 import '../theme.dart';
 import '../widgets/agent_avatar.dart';
 import '../widgets/teamly/kit.dart';
@@ -29,7 +28,6 @@ class _AgentsScreenState extends State<AgentsScreen> {
   String _query = '';
 
   Future<void> _createRoom() async {
-    final store = context.read<StudioStore>();
     final selected = <String>{};
 
     final nameCtrl = TextEditingController();
@@ -194,20 +192,14 @@ class _AgentsScreenState extends State<AgentsScreen> {
         .toList(growable: false);
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Rooms'),
-        actions: <Widget>[
-          Padding(
-            padding: const EdgeInsets.only(right: TeamlySpace.s4),
-            child: Center(
-              child: TeamlyFab(
-                icon: Icons.add_rounded,
-                onPressed: _createRoom,
-              ),
-            ),
-          ),
-        ],
-      ),
+      // With rooms on screen the creation affordance is just the green "+"
+      // floating in the lower-left corner; an empty roster instead puts the
+      // labelled button in the middle of the display (see the empty state).
+      floatingActionButton: rooms.isEmpty
+          ? null
+          : TeamlyFab(icon: Icons.add_rounded, onPressed: _createRoom),
+      floatingActionButtonLocation: FloatingActionButtonLocation.startFloat,
+      appBar: AppBar(title: const Text('Rooms')),
       body: Column(
         children: <Widget>[
           Padding(
@@ -218,27 +210,11 @@ class _AgentsScreenState extends State<AgentsScreen> {
             ),
           ),
           const SizedBox(height: TeamlySpace.s3),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
-            child: Row(
-              children: <Widget>[
-                const Text(
-                  'Group chats — pick a room to research a problem together',
-                  style: TextStyle(color: TeamlyColors.ink500, fontSize: 13),
-                ),
-                const Spacer(),
-                GestureDetector(
-                  onTap: _createRoom,
-                  child: const Text(
-                    '+ New room',
-                    style: TextStyle(
-                      color: TeamlyColors.greenText,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ],
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
+            child: Text(
+              'Group chats — pick a room to research a problem together',
+              style: TextStyle(color: TeamlyColors.ink500, fontSize: 13),
             ),
           ),
           const SizedBox(height: TeamlySpace.s2),
@@ -256,24 +232,36 @@ class _AgentsScreenState extends State<AgentsScreen> {
                             color: context.palette.muted,
                           ),
                           const SizedBox(height: 14),
-                          const Text(
-                            'No rooms yet',
-                            style: TextStyle(
+                          Text(
+                            _query.trim().isEmpty
+                                ? 'No rooms yet'
+                                : 'Nothing matches “$_query”',
+                            style: const TextStyle(
                               color: TeamlyColors.ink900,
                               fontSize: 18,
                               fontWeight: FontWeight.w700,
                             ),
                           ),
-                          const SizedBox(height: 8),
-                          const Text(
-                            'Tap "+ New room" to gather specialists — they will research your question together and hand you a report.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: TeamlyColors.ink500,
-                              fontSize: 14,
-                              height: 1.5,
+                          if (_query.trim().isEmpty) ...<Widget>[
+                            const SizedBox(height: 8),
+                            const Text(
+                              'Gather specialists — they will research your question together and hand you a report.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: TeamlyColors.ink500,
+                                fontSize: 14,
+                                height: 1.5,
+                              ),
                             ),
-                          ),
+                            // Empty roster: the labelled "+ New Group" action
+                            // sits front and centre of the display.
+                            const SizedBox(height: 22),
+                            TeamlyPillButton(
+                              label: 'New Group',
+                              icon: Icons.add_rounded,
+                              onPressed: _createRoom,
+                            ),
+                          ],
                         ],
                       ),
                     ),
