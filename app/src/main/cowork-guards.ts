@@ -471,3 +471,46 @@ export function isVerifyStep(title?: string): boolean {
   if (planFileTarget(title)) return false
   return VERIFY_VERB.test(title)
 }
+
+/**
+ * Reconcile the agent's plan against what actually happened, so the Progress panel
+ * tracks reality rapidly instead of freezing at the model's last `update_plan` call
+ * (weak models forget to call it for long stretches — the panel then reads all-pending
+ * while files are being written). Two display-level repairs, pure and model-free:
+ *
+ *  1. DISK TRUTH — a file-target step (one whose title names a relative path, same
+ *     matcher as {@link planFileTarget}) is marked done the moment its file actually
+ *     exists non-empty on disk. `existsFile` is the caller's sandboxed stat check, or
+ *     null when there is no working folder (Research) — then only rule 2 applies.
+ *  2. CURRENT STEP — when nothing is "in_progress" (the model forgot to move its own
+ *     marker), the first not-done step is promoted to in_progress, so the panel always
+ *     shows what the run is working on.
+ *
+ * Returns a NEW array when anything changed (statuses are copied, not mutated), or
+ * null when the plan already reflects reality — so the caller can skip the update.
+ */
+export function reconcilePlanProgress<T extends PlanItemLike>(
+  plan: readonly T[],
+  existsFile: ((rel: string) => boolean) | null
+): T[] | null {
+  if (plan.length === 0) return null
+  let changed = false
+  const out: T[] = plan.map((t) => ({ ...t }))
+  if (existsFile) {
+    for (const t of out) {
+      if (t.status === 'done') continue
+      const target = planFileTarget(t.title)
+      if (!target || !existsFile(target)) continue
+      changed = true
+      t.status = 'done' as T['status']
+    }
+  }
+  if (!out.some((t) => t.status === 'in_progress')) {
+    const current = out.find((t) => t.status !== 'done')
+    if (current) {
+      current.status = 'in_progress' as T['status']
+      changed = true
+    }
+  }
+  return changed ? out : null
+}

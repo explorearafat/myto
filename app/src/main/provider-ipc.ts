@@ -70,7 +70,8 @@ import {
   planHasPending,
   pendingPlanTitles,
   planFileTarget,
-  isVerifyStep
+  isVerifyStep,
+  reconcilePlanProgress
 } from './cowork-guards'
 import { detectRuntimesCached, summarizeRuntimes } from './cowork-runtimes'
 import { browserToolsEnabled } from './cowork-browser'
@@ -2427,6 +2428,41 @@ export function registerProviderIpc(): void {
           // turn knows they happened and doesn't repeat them (Cowork memory).
           if (mode === 'cowork' && workspaceDir) recordToolAction(workspaceDir, call, result)
 
+          // Live plan reconciliation (display-level, EVERY tool round): mark file-target
+          // steps done the moment their file actually exists on disk, and keep exactly
+          // one step "in_progress" even when the model forgets update_plan for long
+          // stretches. This is what makes the user's Progress panel track reality in
+          // real time instead of freezing at the model's last call — zero model calls,
+          // just local state plus a few sandboxed stat checks.
+          if (agentic && latestPlan.length > 0) {
+            const exists = workspaceDir
+              ? (rel: string): boolean => {
+                  const abs = resolveInWorkspace(workspaceDir, rel)
+                  if (!abs) return false
+                  try {
+                    return (statSync(abs, { throwIfNoEntry: false })?.size ?? 0) > 0
+                  } catch {
+                    return false
+                  }
+                }
+              : null
+            const reconciled = reconcilePlanProgress(latestPlan, exists)
+            if (reconciled) onPlan(reconciled)
+          }
+          // Keep the MODEL aware of the plan too — one compact line on every tool
+          // result (skipped for update_plan itself, whose result already reports it),
+          // so its next update_plan reflects what actually finished instead of a stale
+          // full-list rewrite.
+          let planDirective = ''
+          if (agentic && latestPlan.length > 0 && call.name !== 'update_plan') {
+            const doneCount = latestPlan.filter((t) => t.status === 'done').length
+            const current = latestPlan.find((t) => t.status === 'in_progress')
+            planDirective =
+              `\n\nPlan progress: ${doneCount}/${latestPlan.length} done` +
+              (current ? ` — "${current.title}" in progress.` : '.') +
+              ` Keep the plan current: call update_plan whenever a step's status changes.`
+          }
+
           // Progress guard: count real building (writes/edits/code/commands) vs. read-only
           // exploration. If the model keeps looking without ever building, escalate from
           // the gentle nudge to a hard directive that forbids more exploration.
@@ -2473,7 +2509,7 @@ export function registerProviderIpc(): void {
           history.push({ role: 'assistant', content: assistantTurn })
           history.push({
             role: 'user',
-            content: `Tool result for ${toolName}:\n${result}\n\n${goalReminder}Keep going until the request is fully done: call another tool if you still need to, or give your final answer once it is complete. Do not repeat an identical call. An empty or sparse result (e.g. a near-empty folder) is a starting point, not a reason to stop — build what was asked for.${progressDirective}${researchDirective}`
+            content: `Tool result for ${toolName}:\n${result}\n\n${goalReminder}Keep going until the request is fully done: call another tool if you still need to, or give your final answer once it is complete. Do not repeat an identical call. An empty or sparse result (e.g. a near-empty folder) is a starting point, not a reason to stop — build what was asked for.${planDirective}${progressDirective}${researchDirective}`
           })
           // A2b: if the tool rendered page images this round (render_document on a scanned
           // PDF), ride them on the tool-result user turn just pushed — the same turn, so

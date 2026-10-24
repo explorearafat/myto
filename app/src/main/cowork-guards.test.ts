@@ -14,6 +14,7 @@ import {
   pendingPlanTitles,
   planFileTarget,
   isVerifyStep,
+  reconcilePlanProgress,
   OSCILLATION_WINDOW,
   OSCILLATION_MAX
 } from './cowork-guards'
@@ -520,5 +521,54 @@ describe('isVerifyStep', () => {
     expect(isVerifyStep('Set up the project')).toBe(false)
     expect(isVerifyStep('')).toBe(false)
     expect(isVerifyStep(undefined)).toBe(false)
+  })
+})
+
+describe('reconcilePlanProgress — live plan repair', () => {
+  it('marks a file-target step done once its file exists', () => {
+    const plan = [
+      { title: 'Scaffold the project', status: 'done' },
+      { title: 'Write index.html', status: 'in_progress' },
+      { title: 'Create styles.css', status: 'pending' }
+    ]
+    const out = reconcilePlanProgress(plan, (rel) => rel === 'styles.css')
+    expect(out).not.toBeNull()
+    expect(out?.[2].status).toBe('done')
+    // The current step was promoted automatically (no in_progress left after the mark).
+    expect(out?.[1].status).toBe('in_progress')
+  })
+
+  it('promotes the first not-done step to in_progress when the model never did', () => {
+    const plan = [
+      { title: 'Scaffold the project', status: 'done' },
+      { title: 'Plan the API routes', status: 'pending' },
+      { title: 'Verify the build', status: 'pending' }
+    ]
+    const out = reconcilePlanProgress(plan, null)
+    expect(out?.[1].status).toBe('in_progress')
+    expect(out?.[2].status).toBe('pending')
+  })
+
+  it('returns null when the plan already reflects reality', () => {
+    // The file step is in_progress and its file does not exist yet, one step is
+    // already in_progress — nothing to repair.
+    const plan = [
+      { title: 'Scaffold the project', status: 'done' },
+      { title: 'Write index.html', status: 'in_progress' }
+    ]
+    expect(reconcilePlanProgress(plan, () => false)).toBeNull()
+    expect(reconcilePlanProgress([], () => true)).toBeNull()
+  })
+
+  it('never marks a step done for a file that does not exist', () => {
+    const plan = [{ title: 'Create app.js', status: 'pending' }]
+    const out = reconcilePlanProgress(plan, () => false)
+    expect(out?.[0].status).toBe('in_progress') // promotion only
+  })
+
+  it('does not mutate the input plan', () => {
+    const plan = [{ title: 'Create app.js', status: 'pending' }]
+    reconcilePlanProgress(plan, () => true)
+    expect(plan[0].status).toBe('pending')
   })
 })
