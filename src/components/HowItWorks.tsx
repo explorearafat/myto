@@ -77,22 +77,7 @@ export function HowItWorks() {
           </div>
         </div>
 
-        <div data-reveal className="mt-16 flex flex-wrap justify-center gap-3">
-          <a
-            href={LINKS.downloadPage}
-            className="btn px-7 py-3.5 text-[15.5px] font-medium"
-            style={{ background: '#faf9f5', color: '#141413' }}
-          >
-            Download for Windows
-          </a>
-          <a
-            href={LINKS.useCasesPage}
-            className="btn px-7 py-3.5 text-[15.5px] text-[#c9c4b8] hover:text-[#faf9f5]"
-            style={{ border: '1px solid #3a362e' }}
-          >
-            See who it&rsquo;s for
-          </a>
-        </div>
+
       </div>
     </section>
   );

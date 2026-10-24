@@ -178,6 +178,25 @@ service cloud.firestore {
       }
     }
 
+    // ── Artifacts (generated media + files, synced across clients) ─────────────
+    //
+    // Everything a model produced for the user — images, video clips, SVG/PNG,
+    // documents — lands here so the desktop, Android, and browser clients all
+    // see the same vault. Owner-only: generated media is the user's property.
+
+    match /artifacts/{artifactId} {
+      allow read, delete: if signedIn() && resource.data.uid == request.auth.uid;
+      allow create: if signedIn()
+        && request.resource.data.uid == request.auth.uid
+        && isString(request.resource.data.title, 1, 200)
+        && request.resource.data.kind in ['image', 'video', 'svg', 'document', 'file']
+        && isString(request.resource.data.mime, 3, 120)
+        && request.resource.data.dataBase64 is string
+        && request.resource.data.dataBase64.size() <= 900_000
+        && isLink(request.resource.data.url)
+        && request.resource.data.createdAt == request.time;
+    }
+
     // ── Follow graph ────────────────────────────────────────────────────────────
 
     // Who I follow. Owner-readable (the Following tab needs it); the target can also

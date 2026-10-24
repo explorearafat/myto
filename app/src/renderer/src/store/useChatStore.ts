@@ -18,6 +18,8 @@ import type {
 import type { PromptBlock } from '@shared/types/prompt-builder'
 import { takeReveal } from '../lib/reveal'
 import { usePreviewStore } from './usePreviewStore'
+import { auth } from '../lib/firebase'
+import { saveMediaArtifact } from '../lib/artifacts'
 import { useTerminalStore } from './useTerminalStore'
 import { useFilesStore } from './useFilesStore'
 import { useEditorStore } from './useEditorStore'
@@ -892,6 +894,16 @@ export const useChatStore = create<ChatState>((set, get) => {
       // media store / rehydration needed). Goes through the same buffer as text deltas.
       if (chunk.media && chunk.media.length > 0) {
         run.buffer += mediaToMarkdown(chunk.media)
+        // Artifacts vault: every generated image/clip is written to Firestore
+        // under the signed-in uid, so the website /artifacts page and the
+        // Android app show the same vault. Fire-and-forget — a vault write
+        // must never break the live reply.
+        const vaultUid = auth.currentUser?.uid
+        if (vaultUid) {
+          for (const m of chunk.media) {
+            void saveMediaArtifact(vaultUid, m).catch(() => {})
+          }
+        }
         scheduleFlush()
       }
       if (chunk.delta) {

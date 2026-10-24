@@ -484,3 +484,65 @@ extension DiscoverProfiles on SocialService {
         );
   }
 }
+
+
+// ── Artifacts vault (generated media, synced across clients) ───────────────────
+
+/// One artifact the models produced for the user: an image, video clip,
+/// SVG/PNG, or document. Small media rides inline as base64; larger or
+/// provider-linked media rides as a URL.
+class CloudArtifact {
+  const CloudArtifact({
+    required this.id,
+    required this.kind,
+    required this.title,
+    required this.mime,
+    required this.dataBase64,
+    required this.url,
+    required this.createdAtMs,
+  });
+
+  final String id;
+  final String kind; // image | video | svg | document | file
+  final String title;
+  final String mime;
+  final String dataBase64;
+  final String url;
+  final int createdAtMs;
+
+  bool get isImage => kind == 'image' || mime.startsWith('image/');
+  bool get isVideo => kind == 'video' || mime.startsWith('video/');
+  bool get hasInline => dataBase64.isNotEmpty;
+
+  String get inlineSrc => hasInline ? 'data:$mime;base64,$dataBase64' : url;
+
+  static CloudArtifact fromDoc(String id, Map<String, dynamic> d) {
+    return CloudArtifact(
+      id: id,
+      kind: (d['kind'] ?? 'file') as String,
+      title: (d['title'] ?? 'Artifact') as String,
+      mime: (d['mime'] ?? 'application/octet-stream') as String,
+      dataBase64: (d['dataBase64'] ?? '') as String,
+      url: (d['url'] ?? '') as String,
+      createdAtMs: _ms(d['createdAt']),
+    );
+  }
+}
+
+extension ArtifactVault on SocialService {
+  /// Live subscription to the user's artifact vault, newest first.
+  Stream<List<CloudArtifact>> streamArtifacts(String uid) {
+    return SocialService._db
+        .collection('artifacts')
+        .where('uid', isEqualTo: uid)
+        .orderBy('createdAt', descending: true)
+        .limit(100)
+        .snapshots()
+        .map((s) => s.docs.map((d) => CloudArtifact.fromDoc(d.id, d.data())).toList());
+  }
+
+  /// Remove one artifact from the vault.
+  Future<void> deleteArtifact(String id) async {
+    await SocialService._db.collection('artifacts').doc(id).delete();
+  }
+}

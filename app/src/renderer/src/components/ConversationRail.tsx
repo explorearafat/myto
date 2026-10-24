@@ -134,6 +134,7 @@ export function ConversationRail() {
   const projects = useProjectStore((s) => s.projects)
   const removeProject = useProjectStore((s) => s.remove)
   const openSettings = useAppStore((s) => s.openSettings)
+  const openArtifacts = useAppStore((s) => s.openArtifacts)
   const openDiscover = useAppStore((s) => s.openDiscover)
   const toggleRail = useAppStore((s) => s.toggleRail)
   // Chats with a run still in flight — including ones started here and left behind
@@ -590,7 +591,7 @@ export function ConversationRail() {
             </svg>
           }
           label="Artifacts"
-          inert
+          onClick={openArtifacts}
         />
         <NavRow
           icon={

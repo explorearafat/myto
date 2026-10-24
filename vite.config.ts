@@ -127,6 +127,7 @@ export default defineConfig(({ mode }) => {
           main: path.resolve(__dirname, 'index.html'),
           download: path.resolve(__dirname, 'download/index.html'),
           discover: path.resolve(__dirname, 'discover/index.html'),
+          artifacts: path.resolve(__dirname, 'artifacts/index.html'),
           features: path.resolve(__dirname, 'features/index.html'),
           use_cases: path.resolve(__dirname, 'use-cases/index.html'),
           compare: path.resolve(__dirname, 'compare/index.html'),

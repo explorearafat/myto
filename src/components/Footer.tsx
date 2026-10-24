@@ -56,6 +56,7 @@ export function Footer({ subpage = false }: FooterProps) {
                 { label: 'Community', href: LINKS.communityPage },
                 { label: 'Chat in browser', href: LINKS.chatPage },
                 { label: 'Guide', href: LINKS.guidePage },
+                { label: 'Artifacts', href: LINKS.artifactsPage },
                 { label: 'Use cases', href: LINKS.useCasesPage },
               ].map((l) => (
                 <li key={l.label}>

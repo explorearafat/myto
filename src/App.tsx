@@ -4,6 +4,7 @@ import { Models } from './components/Models';
 import { HowItWorks } from './components/HowItWorks';
 import { Features } from './components/Features';
 import { ExploreStrip } from './components/ExploreStrip';
+import { DemoSection } from './components/DemoSection';
 import { Pricing } from './components/Pricing';
 import { Docs } from './components/Docs';
 import { Footer } from './components/Footer';
@@ -27,6 +28,7 @@ export default function App() {
       <main id="content" className="relative z-10 flex-1">
         <Hero />
         <Models />
+        <DemoSection />
         <HowItWorks />
         <Features />
         <ExploreStrip />

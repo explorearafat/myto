@@ -507,3 +507,90 @@ export async function uidForHandle(username: string): Promise<string | null> {
   const snap = await getDoc(doc(db, 'usernames', username.toLowerCase()));
   return snap.exists() ? String(snap.data().uid ?? '') || null : null;
 }
+
+
+// ── Artifacts: generated media + files, synced across clients ──────────────────
+//
+// Everything a model produced (image-gen, video-gen, documents, agent files)
+// lands in Firestore under artifacts/{id} with the owner's uid, so the desktop,
+// Android app, and this site all show the same vault. Firestore caps documents
+// at ~1MB, so small media rides inline as base64 and anything larger (or a
+// provider-returned URL) rides as a link.
+
+export interface CloudArtifact {
+  id: string;
+  kind: 'image' | 'video' | 'svg' | 'document' | 'file';
+  title: string;
+  mime: string;
+  /** Inline base64 (no data: prefix) for small media; '' when url is set. */
+  dataBase64: string;
+  /** Provider-returned or endpoint link, when the media rides as a URL. */
+  url: string;
+  /** Domain-safe display source, e.g. 'image generation'. */
+  source: string;
+  createdAtMs: number;
+}
+
+export function saveArtifact(
+  uid: string,
+  input: {
+    kind: CloudArtifact['kind'];
+    title: string;
+    mime: string;
+    dataBase64?: string;
+    url?: string;
+    source?: string;
+  }
+): Promise<void> {
+  const data = input.dataBase64 ?? '';
+  const url = input.url ?? '';
+  if (data.length > 900_000) return Promise.resolve(); // too large for Firestore — skip silently
+  if (data === '' && url === '') return Promise.resolve(); // nothing to store
+  return addDoc(collection(db, 'artifacts'), {
+    uid,
+    kind: input.kind,
+    title: input.title.slice(0, 200),
+    mime: input.mime.slice(0, 120),
+    dataBase64: data,
+    url,
+    source: (input.source ?? '').slice(0, 100),
+    createdAt: serverTimestamp(),
+  }).then(() => undefined);
+}
+
+export function streamArtifacts(
+  uid: string,
+  onData: (artifacts: CloudArtifact[]) => void,
+  onError?: (e: unknown) => void
+): Unsubscribe {
+  const q = query(
+    collection(db, 'artifacts'),
+    where('uid', '==', uid),
+    orderBy('createdAt', 'desc'),
+    limit(100)
+  );
+  return onSnapshot(
+    q,
+    (snap) =>
+      onData(
+        snap.docs.map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            kind: (data.kind ?? 'file') as CloudArtifact['kind'],
+            title: String(data.title ?? 'Artifact'),
+            mime: String(data.mime ?? 'application/octet-stream'),
+            dataBase64: String(data.dataBase64 ?? ''),
+            url: String(data.url ?? ''),
+            source: String(data.source ?? ''),
+            createdAtMs: tsToMs(data.createdAt),
+          };
+        })
+      ),
+    (e) => onError?.(e)
+  );
+}
+
+export function deleteArtifact(id: string): Promise<void> {
+  return deleteDoc(doc(db, 'artifacts', id));
+}

@@ -30,6 +30,8 @@ export const LINKS = {
   communityPage: '/community',
   /** Full documentation. */
   guidePage: '/guide',
+  /** The generated-media vault. */
+  artifactsPage: '/artifacts',
   /** All published installers (latest GitHub release). */
   releases: 'https://github.com/explorearafat/myto/releases/latest',
   /** Live web build — try it with zero install. */
