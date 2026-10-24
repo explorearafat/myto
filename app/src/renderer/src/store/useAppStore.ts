@@ -61,6 +61,8 @@ export interface AppState {
   settingsTab: SettingsTab | null
   /** Whether the Discover community overlay is open. */
   discoverOpen: boolean
+  /** Measured streaming speed per model id (the connection doctor). */
+  speedResults: Record<string, import('@renderer/lib/speedTest').SpeedResult>
 
   /** Environment badge derived from the active provider (local/remote). */
   envStatus: EnvStatus
@@ -83,6 +85,7 @@ export interface AppState {
   setSettingsOpen: (open: boolean) => void
   openDiscover: () => void
   closeDiscover: () => void
+  setSpeedResult: (result: import('@renderer/lib/speedTest').SpeedResult) => void
   /**
    * Open the Settings overlay directly to a specific tab (the sidebar's
    * quick-access rows use this). Passing no tab just opens it.
@@ -206,6 +209,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   settingsOpen: false,
   settingsTab: null,
   discoverOpen: false,
+  speedResults: {},
 
   envStatus: envForProvider(DEFAULT_PROVIDER_SETTINGS.activeProvider),
   model: DEFAULT_PROVIDER_SETTINGS.modelName,
@@ -219,6 +223,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   openDiscover: () => set({ discoverOpen: true }),
   closeDiscover: () => set({ discoverOpen: false }),
+  setSpeedResult: (result) => set((state) => ({ speedResults: { ...state.speedResults, [result.modelId]: result } })),
   openSettings: (tab) => set({ settingsOpen: true, settingsTab: tab ?? null }),
   setRailOpen: (railOpen) => set({ railOpen }),
   toggleRail: () => set((state) => ({ railOpen: !state.railOpen })),

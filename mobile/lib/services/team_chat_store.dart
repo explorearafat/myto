@@ -369,6 +369,7 @@ class TeamChatStore extends ChangeNotifier {
         apiKey: config.apiKey,
         authSchema: config.authSchema,
         authHeaderName: config.authHeaderName,
+        reasoningEffort: 'low',
       )) {
         switch (event) {
           case ChatToken(:final String text):

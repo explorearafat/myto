@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from 'react'
+import { runSpeedTest, speedVerdict } from '@renderer/lib/speedTest'
 import type { BrowserTarget, OutputStyle, Theme } from '@shared/types'
 import { useAppStore } from '@renderer/store/useAppStore'
 import { ConnectorsPane } from '@renderer/components/ConnectorsPane'
@@ -426,24 +427,18 @@ function ModelPane() {
         </span>
         {models.length > 0 ? (
           <ul className="divide-y divide-border rounded-lg border border-border bg-bg">
-            {models.map((m) => {
-              const active = m.id === modelId
-              return (
-                <li
-                  key={m.id}
-                  className="flex items-center justify-between gap-4 px-3.5 py-2.5 text-[13px]"
-                >
-                  <span className={'min-w-0 truncate ' + (active ? 'text-primary' : 'text-text')}>
-                    {m.name}
-                  </span>
-                  <span className="shrink-0 font-mono text-[11px] text-muted">{m.id}</span>
-                </li>
-              )
-            })}
+            {models.map((m) => (
+              <ModelSpeedRow key={m.id} modelId={m.id} name={m.name} active={m.id === modelId} />
+            ))}
           </ul>
         ) : (
           <p className="text-[12px] text-muted">No models yet.</p>
         )}
+        <p className="text-[11.5px] leading-relaxed text-muted">
+          Speed = measured streaming rate of a tiny probe reply. Below ~5 tok/s every
+          response crawls no matter how fast the app is — pick a faster model or a
+          quicker provider endpoint.
+        </p>
       </section>
 
       <p className="text-[12px] leading-relaxed text-muted">
@@ -542,5 +537,60 @@ export function SettingsPanel() {
         </div>
       </div>
     </div>
+  )
+}
+
+
+/**
+ * One model row with its measured streaming speed and a test button. The speed
+ * comes from the connection doctor (lib/speedTest.ts) — a tiny probe completion
+ * timed end to end. This is the honest "why are replies slow" answer: the app is
+ * as fast as the pipe, and the badge shows the pipe.
+ */
+function ModelSpeedRow({ modelId, name, active }: { modelId: string; name: string; active: boolean }) {
+  const result = useAppStore((s) => s.speedResults[modelId])
+  const [running, setRunning] = useState(false)
+
+  const verdict = result ? speedVerdict(result.tokensPerSec) : null
+  const verdictColor =
+    verdict === 'fast'
+      ? 'text-green-500'
+      : verdict === 'ok'
+        ? 'text-amber-500'
+        : 'text-red-500'
+  const verdictLabel =
+    verdict === 'fast' ? 'Fast' : verdict === 'ok' ? 'Okay' : 'Slow'
+
+  return (
+    <li className="flex items-center justify-between gap-4 px-3.5 py-2.5 text-[13px]">
+      <span className={'min-w-0 truncate ' + (active ? 'text-primary' : 'text-text')}>
+        {name}
+        <span className="ml-2 shrink-0 font-mono text-[10.5px] text-muted">{modelId}</span>
+      </span>
+      <span className="flex shrink-0 items-center gap-2">
+        {running ? (
+          <span className="font-mono text-[11px] text-muted">testing…</span>
+        ) : result ? (
+          <span className={'text-right font-mono text-[11px] ' + verdictColor} title={`first token: ${result.ttftMs}ms`}>
+            {verdictLabel} · {result.tokensPerSec} tok/s
+          </span>
+        ) : null}
+        <button
+          type="button"
+          disabled={running}
+          onClick={async () => {
+            setRunning(true)
+            try {
+              await runSpeedTest(modelId)
+            } finally {
+              setRunning(false)
+            }
+          }}
+          className="rounded-full border border-border px-2.5 py-1 text-[11px] font-medium text-muted transition-colors hover:border-primary/40 hover:text-text disabled:opacity-50"
+        >
+          {running ? '…' : 'Test'}
+        </button>
+      </span>
+    </li>
   )
 }

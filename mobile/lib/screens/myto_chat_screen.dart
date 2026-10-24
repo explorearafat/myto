@@ -42,7 +42,10 @@ class _MytoChatScreenState extends State<MytoChatScreen> {
   StreamSubscription<ChatEvent>? _sub;
   bool _streaming = false;
   ChatMessage? _pending;
-  String _effort = 'auto';
+  // Speed-first default: reasoning models burn hidden thinking before the first
+  // visible word, and 'auto' left the provider's own (often heavy) default in
+  // charge. 'low' goes out on every request unless the user picks otherwise.
+  String _effort = 'low';
 
   /// Live tokens write straight into the pending bubble; repaints are throttled
   /// to this interval so Markdown re-parsing stays cheap on mid-range phones.

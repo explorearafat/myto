@@ -70,8 +70,10 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
   skills: [],
   // No plugins until the user installs one (Settings › Plugins).
   plugins: [],
-  // Balanced default; the composer's effort control changes it.
-  reasoningEffort: 'medium',
+  // Speed-first default: on reasoning models every step of effort is hidden
+  // thinking that delays the first visible word. Low keeps answers snappy; the
+  // composer's effort control raises it when a task genuinely needs depth.
+  reasoningEffort: 'low',
   // Myto's normal writing voice; the output-style picker (#13) changes it.
   outputStyle: 'default',
   // Native function-calling by default (#15): structured tool calls spare the model
