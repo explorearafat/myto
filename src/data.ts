@@ -16,6 +16,20 @@ export const LINKS = {
   chatPage: '/chat',
   /** The Discover community feed. */
   discoverPage: '/discover',
+  /** Deep-dive capability pages. */
+  featuresPage: '/features',
+  /** Who Myto is for, with real scenarios. */
+  useCasesPage: '/use-cases',
+  /** Myto vs typical cloud coding agents. */
+  comparePage: '/compare',
+  /** "Bring any model" — providers, Ollama, BYOK. */
+  modelsPage: '/models',
+  /** Release history. */
+  changelogPage: '/changelog',
+  /** The community landing that hands off to /discover. */
+  communityPage: '/community',
+  /** Full documentation. */
+  guidePage: '/guide',
   /** All published installers (latest GitHub release). */
   releases: 'https://github.com/explorearafat/myto/releases/latest',
   /** Live web build — try it with zero install. */

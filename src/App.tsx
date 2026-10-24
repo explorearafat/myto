@@ -3,6 +3,7 @@ import { Hero } from './components/Hero';
 import { Models } from './components/Models';
 import { HowItWorks } from './components/HowItWorks';
 import { Features } from './components/Features';
+import { ExploreStrip } from './components/ExploreStrip';
 import { Pricing } from './components/Pricing';
 import { Docs } from './components/Docs';
 import { Footer } from './components/Footer';
@@ -27,6 +28,7 @@ export default function App() {
         <Models />
         <HowItWorks />
         <Features />
+        <ExploreStrip />
         <Pricing />
         <Docs />
       </main>

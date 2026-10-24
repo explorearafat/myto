@@ -9,7 +9,7 @@ export function Footer({ subpage = false }: FooterProps) {
   return (
     <footer className="border-t border-[#e4e1d8]">
       <div className="mx-auto max-w-6xl px-6 py-12">
-        <div className="flex flex-col gap-10 sm:flex-row sm:items-start sm:justify-between">
+        <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-4 lg:items-start">
           <div>
             <a
               href={subpage ? '/' : '#top'}
@@ -27,6 +27,44 @@ export function Footer({ subpage = false }: FooterProps) {
               The AI coding agent for modern developers.
             </p>
           </div>
+
+          <nav aria-label="Product" className="text-[13.5px]">
+            <h2 className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#9c988e]">Product</h2>
+            <ul className="mt-3.5 space-y-2">
+              {[
+                { label: 'Download', href: LINKS.downloadPage },
+                { label: 'Features', href: LINKS.featuresPage },
+                { label: 'Compare', href: LINKS.comparePage },
+                { label: 'Changelog', href: LINKS.changelogPage },
+                { label: 'Models', href: LINKS.modelsPage },
+              ].map((l) => (
+                <li key={l.label}>
+                  <a href={l.href} className="text-[#544f46] no-underline transition-colors hover:text-[#141413]">
+                    {l.label}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+
+          <nav aria-label="Community and support" className="text-[13.5px]">
+            <h2 className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#9c988e]">Community</h2>
+            <ul className="mt-3.5 space-y-2">
+              {[
+                { label: 'Discover feed', href: LINKS.discoverPage },
+                { label: 'Community', href: LINKS.communityPage },
+                { label: 'Chat in browser', href: LINKS.chatPage },
+                { label: 'Guide', href: LINKS.guidePage },
+                { label: 'Use cases', href: LINKS.useCasesPage },
+              ].map((l) => (
+                <li key={l.label}>
+                  <a href={l.href} className="text-[#544f46] no-underline transition-colors hover:text-[#141413]">
+                    {l.label}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
 
           {/* Privacy & policy — a short legal/business note with the full documents on /policy. */}
           <div className="max-w-[42ch]">

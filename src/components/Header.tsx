@@ -5,6 +5,7 @@ import { LINKS } from '../data';
    Chat is a real path (renders the same on landing and subpages); Docs is an
    in-page hash that has to jump back to the product page from a subpage. */
 const NAV: Array<{ label: string; href?: string; hash?: string }> = [
+  { label: 'Features', href: LINKS.featuresPage },
   { label: 'Chat', href: LINKS.chatPage },
   { label: 'Discover', href: LINKS.discoverPage },
   { label: 'Docs', hash: '#docs' },

@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /authentication
+
+Sitemap: https://mytocode.vercel.app/sitemap.xml
