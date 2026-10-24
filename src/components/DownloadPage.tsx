@@ -52,7 +52,7 @@ function PlatformBlock({ platform, flip }: { platform: Platform; flip: boolean }
         {platform.ready ? (
           <a
             href={platform.href}
-            className="mt-6 inline-flex items-center gap-2.5 rounded-lg border border-[#e4e1d8] bg-white px-5 py-3 text-[15px] font-medium text-[#141413] no-underline transition-colors duration-150 hover:border-[#d8d3c8] hover:bg-[#faf9f5] active:translate-y-px"
+            className="mt-6 inline-flex w-full items-center justify-center gap-2.5 rounded-full border border-[#e4e1d8] bg-white px-6 py-3 text-[15px] font-medium text-[#141413] no-underline transition-all duration-200 hover:border-[#d8d3c8] hover:bg-[#faf9f5] active:scale-[0.98] sm:w-auto"
           >
             <Download className="h-[17px] w-[17px]" aria-hidden="true" />
             {platform.cta ?? 'Download'}
@@ -60,7 +60,7 @@ function PlatformBlock({ platform, flip }: { platform: Platform; flip: boolean }
         ) : (
           <span
             aria-disabled="true"
-            className="mt-6 inline-flex cursor-not-allowed items-center gap-2.5 rounded-lg border border-dashed border-[#ded9cc] bg-[#faf9f5] px-5 py-3 text-[15px] font-medium text-[#9c988e]"
+            className="mt-6 inline-flex w-full cursor-not-allowed items-center justify-center gap-2.5 rounded-full border border-dashed border-[#ded9cc] bg-[#faf9f5] px-6 py-3 text-[15px] font-medium text-[#9c988e] sm:w-auto"
           >
             Coming soon
           </span>

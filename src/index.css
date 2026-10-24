@@ -21,6 +21,10 @@
     scroll-behavior: smooth;
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
+    /* Block horizontal panning site-wide: a safety net so one wide element can never
+       introduce sideways scrolling on a phone. `clip` (not `hidden`) so position:
+       sticky keeps working. */
+    overflow-x: clip;
   }
 
   body {
@@ -30,6 +34,9 @@
     color: #141413;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    overflow-x: clip;
+    /* No grey flash on mobile taps — hover states carry the feedback instead. */
+    -webkit-tap-highlight-color: transparent;
   }
 
   h1,
@@ -41,6 +48,19 @@
 
   a {
     text-underline-offset: 0.18em;
+  }
+
+  /* Tailwind v4's preflight sets buttons to cursor: default — restore the pointer
+     so every control reads as clickable. */
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+
+  /* Sticky-header offset: in-page anchors (#docs, #features, #pricing, …) land
+     below the fixed bar instead of underneath it. */
+  [id] {
+    scroll-margin-top: 88px;
   }
 }
 

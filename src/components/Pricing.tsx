@@ -40,7 +40,7 @@ export function Pricing() {
               </p>
               <a
                 href={LINKS.downloadPage}
-                className="mt-8 inline-flex items-center rounded-lg bg-[#141413] px-6 py-3 text-[15px] font-medium text-[#faf9f5] no-underline transition-colors duration-150 hover:bg-[#2b2721] active:translate-y-px"
+                className="mt-8 inline-flex w-full items-center justify-center rounded-full bg-[#141413] px-7 py-3 text-[15px] font-medium text-[#faf9f5] no-underline transition-all duration-200 hover:bg-[#2b2721] active:scale-[0.98] sm:w-auto"
               >
                 Get Myto free
               </a>

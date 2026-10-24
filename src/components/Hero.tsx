@@ -9,7 +9,7 @@ export function Hero() {
         <div className="max-w-2xl">
           <h1
             data-reveal
-            className="font-display font-normal text-[44px] leading-[1.04] tracking-[-0.02em] text-[#141413] sm:text-[58px]"
+            className="font-display font-normal text-[44px] leading-[1.04] tracking-[-0.02em] text-[#141413] sm:text-[58px] lg:text-[68px]"
           >
             Your coding agent, on any model.
           </h1>
@@ -31,17 +31,17 @@ export function Hero() {
         >
           {/* Logo only — no wordmark. */}
           <MytoMark size={64} />
-          {/* Borderless — just text and a glyph, quiet hover. The header keeps the solid pill. */}
+          {/* The hero CTA — one solid pill, full-width on a phone, Apple-quiet hover. */}
           <a
             href={LINKS.downloadPage}
-            className="group inline-flex items-center gap-2.5 text-[17px] font-medium text-[#141413] no-underline transition-opacity duration-150 hover:opacity-70"
+            className="group inline-flex w-full items-center justify-center gap-2.5 rounded-full bg-[#141413] px-8 py-3.5 text-[16px] font-medium text-[#faf9f5] no-underline shadow-[0_10px_30px_-12px_rgba(20,20,19,0.45)] transition-all duration-200 hover:bg-[#2b2721] hover:shadow-[0_14px_36px_-12px_rgba(20,20,19,0.5)] active:scale-[0.98] sm:w-auto"
           >
             <Download
-              className="h-[19px] w-[19px] transition-transform duration-150 group-hover:translate-y-0.5"
+              className="h-[19px] w-[19px] transition-transform duration-200 group-hover:translate-y-0.5"
               strokeWidth={1.9}
               aria-hidden="true"
             />
-            Download
+            Download Myto
           </a>
         </div>
       </div>

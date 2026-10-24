@@ -44,7 +44,7 @@ export function Footer({ subpage = false }: FooterProps) {
               href="/policy"
               className="group mt-4 inline-flex items-center gap-1.5 text-[14px] font-medium text-[#141413] no-underline underline decoration-[#cbc6ba] underline-offset-2 transition-colors duration-150 hover:decoration-[#141413]"
             >
-              see more
+              See more
               <ArrowRight
                 className="h-3.5 w-3.5 transition-transform duration-150 group-hover:translate-x-0.5"
                 aria-hidden="true"
