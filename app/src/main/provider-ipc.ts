@@ -197,34 +197,50 @@ const MAX_TOOL_TURNS = 6
 /**
  * The tool-round ceiling in Cowork mode. Real agentic work — scaffold a project,
  * read and write many files, install deps, run and fix a build — routinely needs
- * dozens of round-trips, and the user's explicit ask was to remove any per-run cap and
- * "give infinite steps to build a project". So there is NO fixed ceiling: the loop runs
- * until the model decides it is done (a no-tool-call turn that clears the stall guards)
- * or a stall guard ends it. Three things keep an unbounded loop safe: in-loop context
- * compaction (below) stops the message history growing without limit as turns pile up;
- * the stall guards ({@link MAX_REPEAT_CALLS} / {@link MAX_EXPLORE_WITHOUT_BUILD} /
- * {@link detectOscillation} / {@link researchStallVerdict}) end a loop that stops making
- * progress; and the user can Stop the run at any time. If a guard does break the loop,
- * the final turn still withholds tools so the reply never ends mid-loop.
+ * dozens of round-trips, so this is generous; but it is NO longer unbounded. An
+ * unbounded loop was the "task runs for 10 hours" failure: a weak model on a slow
+ * endpoint could grind through hundreds of single-call generations, and every
+ * stall-guard nudge each added another. Three bounds now work together: this turn
+ * cap, the wall-clock budget ({@link COWORK_TIME_BUDGET_MS}), and the stall guards
+ * ({@link MAX_REPEAT_CALLS} / {@link MAX_EXPLORE_WITHOUT_BUILD} /
+ * {@link detectOscillation} / {@link researchStallVerdict}). When either budget
+ * ends the loop, the closing turn still withholds tools so the reply never ends
+ * mid-loop, and the user can always Stop sooner.
  */
-const MAX_TOOL_TURNS_COWORK = Number.POSITIVE_INFINITY
+const MAX_TOOL_TURNS_COWORK = 120
+
+/**
+ * Wall-clock budget for one agentic reply, independent of the turn cap. A slow
+ * endpoint makes per-turn time the real cost driver (a generation can legally
+ * run ten minutes), so time — not turn count — is what bounds a marathon run.
+ * When the budget is spent the loop exits through the same closing turn as the
+ * turn cap: tools withheld, answer-with-what-you-have.
+ */
+const COWORK_TIME_BUDGET_MS = 45 * 60_000
 
 /**
  * When the running message history (system prompts + the growing tool round-trips)
  * exceeds roughly this many characters, the older middle of it is compacted into a
- * short summary before the next turn — see {@link compactHistory}. ~4 chars/token,
- * so ~90k chars ≈ ~22k tokens: comfortably inside even a modest context window while
- * leaving ample room for the next generation. A long Cowork task would otherwise
- * blow past the window after enough file reads and tool results.
+ * short summary before the next turn — see {@link compactHistory}. Two ceilings,
+ * chosen per provider: a large one for remote BYOK endpoints (~90k tokens, inside a
+ * modern 128k+ window with room to generate) and the old small one for local Ollama
+ * models, whose context windows are often just 8–32k. Compacting too early was the
+ * single biggest "the agent searches the same files over and over" cause: the model's
+ * gathered findings (file contents, learned paths, failed attempts) were folded away
+ * every few turns, forcing it to re-explore from scratch — each re-exploration another
+ * slow generation. The remote ceiling makes the working memory last a whole task.
  */
-const COMPACT_OVER_CHARS = 90_000
+const COMPACT_OVER_CHARS_LOCAL = 90_000
+const COMPACT_OVER_CHARS_REMOTE = 360_000
 
 /**
  * How many of the most recent messages to keep verbatim when compacting. The last
- * few round-trips are what the model is actively reasoning over, so they must stay
- * intact; everything older is what gets folded into the summary.
+ * round-trips are what the model is actively reasoning over, so they must stay
+ * intact; everything older is what gets folded into the summary. Twelve messages ≈
+ * six full round-trips — enough working set that the model rarely needs to re-read
+ * what it just saw.
  */
-const COMPACT_KEEP_RECENT = 6
+const COMPACT_KEEP_RECENT = 12
 
 /**
  * Stall guard: if the model issues this many IDENTICAL consecutive tool calls (same
@@ -273,8 +289,12 @@ const MAX_BATCH_CALLS = 16
 /** Read-only "look at the project" tools — churning on these without building is the
  *  classic weak-model stall (see the progress guard in the Cowork loop). */
 const EXPLORE_TOOLS = new Set(['list_dir', 'read_file', 'search_code', 'find_files'])
-/** After this many explorations with nothing built yet, force a "stop looking, build now". */
-const MAX_EXPLORE_WITHOUT_BUILD = 2
+/** After this many explorations with nothing built yet, force a "stop looking, build
+ *  now". Generous (it was 2, which punished the legitimate orientation pass a real
+ *  codebase needs — 8 read/list calls is normal investigation, and the hard directive
+ *  fired mid-research, pressuring half-informed builds) while still catching a
+ *  read-only spin that never produces anything. */
+const MAX_EXPLORE_WITHOUT_BUILD = 8
 
 /**
  * How many times in a row the model may call the `think` tool (pure deliberation, no
@@ -304,6 +324,9 @@ function thinkText(input: unknown): string {
  * while leaving generous room for the reply.
  */
 const SESSION_COMPACT_OVER_TOKENS = 200_000
+
+/** The session-compaction ceiling for local Ollama models, whose windows are often 8–32k. */
+const SESSION_COMPACT_OVER_TOKENS_LOCAL = 24_000
 
 /** Most recent conversation turns kept verbatim when a long session is compacted. */
 const SESSION_KEEP_RECENT = 10
@@ -545,9 +568,13 @@ export function registerProviderIpc(): void {
       let browserController: BrowserController | null = null
 
       try {
-        const { provider, modelId, messages } = resolveRequest(request)
+        const { provider, modelId, messages, kind } = resolveRequest(request)
         const settings = getSettings()
         const mode: ChatMode = request.mode ?? 'chat'
+        // Local Ollama models run with much smaller context windows (often 8–32k) than
+        // remote BYOK endpoints (128k+), so every size budget below picks its ceiling
+        // by provider kind — the remote ceilings would silently overflow a local model.
+        const isLocalOllama = kind === 'ollama'
 
         // Feature B — media generation. When the active model is an image/video model
         // (auto-detected from its id; an explicit settings.modelKind overrides), this turn
@@ -612,7 +639,7 @@ export function registerProviderIpc(): void {
         // transcript; only what the model sees this turn is compacted. A brief status
         // caption surfaces it while the summarizer call runs.
         let convo = messages
-        if (estimateTokens(convo) > SESSION_COMPACT_OVER_TOKENS) {
+        if (estimateTokens(convo) > (isLocalOllama ? SESSION_COMPACT_OVER_TOKENS_LOCAL : SESSION_COMPACT_OVER_TOKENS)) {
           send({ delta: '', done: false, status: 'Compacting earlier conversation to fit context…' })
           convo = await compactConversation(convo, provider, modelId, controller.signal)
           if (controller.signal.aborted) return
@@ -1592,12 +1619,35 @@ export function registerProviderIpc(): void {
         // write a and threw the other three away, so the plan never left its initial state.
         const carriedCalls: ToolCall[] = []
 
+        // Wall-clock anchor for the agentic budget ({@link COWORK_TIME_BUDGET_MS}):
+        // a slow endpoint makes per-turn time the real cost, so the loop also ends
+        // on elapsed time, not just on the turn cap.
+        const runStartedAt = Date.now()
+        // Which budget ended the loop, for the finish trace below ('turn-budget' is
+        // also what the think/repeat/oscillation/research-stall breaks fall through to).
+        let budgetReason: 'turn-budget' | 'time-budget' = 'turn-budget'
+
         for (let turn = 0; turn < maxToolTurns; turn++) {
+          // Time budget (agentic): when the reply has been running longer than the
+          // wall-clock budget, stop making NEW tool calls and fall through to the
+          // closing turn below, which answers with what the run already has. This is
+          // the hard bound that turns the old "runs for 10 hours" failure into a
+          // bounded, predictable reply.
+          if (agentic && Date.now() - runStartedAt > COWORK_TIME_BUDGET_MS) {
+            budgetReason = 'time-budget'
+            break
+          }
           // Keep the running history inside the context window on long tasks: once it
           // grows past the threshold, fold the older middle into a short summary so the
           // loop can continue instead of eventually overflowing the model. Agentic modes
-          // only (Cowork/Research) — a plain-chat tool loop is short and never reaches this.
-          if (agentic && historyChars(history) > COMPACT_OVER_CHARS) {
+          // only (Cowork/Research) — a plain-chat tool loop is short and never reaches
+          // this. The ceiling is per provider: large for remote BYOK endpoints (whose
+          // windows are 128k+), small for local Ollama models (often 8–32k).
+          if (
+            agentic &&
+            historyChars(history) >
+              (isLocalOllama ? COMPACT_OVER_CHARS_LOCAL : COMPACT_OVER_CHARS_REMOTE)
+          ) {
             await compactMiddle(history, baseLen, provider, modelId, controller.signal)
             if (controller.signal.aborted) return
           }
@@ -1934,7 +1984,7 @@ export function registerProviderIpc(): void {
               history.push({ role: 'assistant', content: visible })
               history.push({
                 role: 'user',
-                content: `${goalReminder}There is NO per-reply tool limit and no cap that forces you to stop — you can keep calling tools until the work is genuinely finished. Do not defer the work to a "next turn" and do not claim a limit or quota was reached; that is not true here. Take the next concrete action NOW: emit the tool call (write_file / edit_file / run_command …) that moves the project forward, with the full file contents. If the project is genuinely, fully complete, say so explicitly and stop.`
+                content: `${goalReminder}You have a generous tool budget (a hundred+ calls) — there is no limit forcing you to stop now, and a real budget notice would come from the system, never from you. Do not defer the work to a "next turn" and do not claim a limit or quota was reached; that is not true here. Take the next concrete action NOW: emit the tool call (write_file / edit_file / run_command …) that moves the project forward, with the full file contents. If the project is genuinely, fully complete, say so explicitly and stop.`
               })
               continue
             }
@@ -2182,7 +2232,13 @@ export function registerProviderIpc(): void {
           // exactly how the e2e run gamed its way to a false "complete" while narrating
           // styles.css / app.js as prose and never saving them.
 
-          send({ delta: `\n${call.block}\n`, done: false, status: `Running ${toolName}` })
+          // Live progress: an agentic run can legally run for dozens of steps, so the
+          // status line carries the step number and elapsed minutes — the user always
+          // sees how far along (and how long) the run is, instead of an endless
+          // unlabeled spinner.
+          const elapsedMin = Math.round((Date.now() - runStartedAt) / 60_000)
+          const stepLabel = agentic ? ` — step ${turn + 1} · ${elapsedMin} min` : ''
+          send({ delta: `\n${call.block}\n`, done: false, status: `Running ${toolName}${stepLabel}` })
 
           // Stall guard: if the model keeps issuing the same call, it is spinning, not
           // progressing. Track the streak; once it hits the limit, stop the loop early
@@ -2448,7 +2504,7 @@ export function registerProviderIpc(): void {
         // Budget spent: force a closing turn with tools withheld so the reply never
         // ends mid-loop.
         agentTrace('finish', {
-          reason: 'turn-budget',
+          reason: budgetReason,
           maxToolTurns,
           planDone: latestPlan.filter((t) => t.status === 'done').length,
           planTotal: latestPlan.length
@@ -2616,9 +2672,11 @@ async function compactMiddle(
   if (middleCount < 3) return
 
   // Build the transcript to summarize, capped so the summarizer call itself stays
-  // small even though the history it is folding is large: take the tail of the joined
-  // text (the most recent, most relevant middle) if it runs long.
-  const TRANSCRIPT_CAP = 40_000
+  // manageable even though the history it is folding is large: take the tail of the
+  // joined text (the most recent, most relevant middle) if it runs long. 120k chars
+  // ≈ 30k tokens — inside every model the loop targets, and large enough that a
+  // compaction pass keeps real continuity instead of remembering only the tail.
+  const TRANSCRIPT_CAP = 120_000
   let transcript = history
     .slice(baseLen, end)
     .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
@@ -2750,6 +2808,7 @@ function resolveRequest(request: CompletionRequest): {
   provider: ReturnType<typeof providerFromSettings>
   modelId: string
   messages: ChatMessage[]
+  kind: 'gateway' | 'ollama'
 } {
   const settings = getSettings()
   const kind = request.provider ?? settings.activeProvider
@@ -2758,7 +2817,7 @@ function resolveRequest(request: CompletionRequest): {
     kind === settings.activeProvider
       ? providerFromSettings(settings)
       : createProvider(kind, kind === 'ollama' ? settings.ollama : settings.gateway)
-  return { provider, modelId, messages: request.messages }
+  return { provider, modelId, messages: request.messages, kind }
 }
 
 /** Aborts every in-flight stream. Called on app shutdown. */

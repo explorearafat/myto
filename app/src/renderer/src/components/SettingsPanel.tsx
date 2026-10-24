@@ -306,7 +306,7 @@ function ToolsPane() {
       </SettingRow>
       <SettingRow
         title="Native function-calling"
-        description="Use the provider's own tool-calling API instead of Myto's text protocol, when the endpoint supports it (OpenAI- or Anthropic-shaped gateways). Off by default; falls back to the text protocol automatically when unsupported."
+        description="Use the provider's own tool-calling API instead of Myto's text protocol, when the endpoint supports it (OpenAI- or Anthropic-shaped gateways). On by default — faster, and far less truncation-prone on agentic runs; falls back to the text protocol automatically when unsupported."
       >
         <Segmented
           ariaLabel="Native function-calling"

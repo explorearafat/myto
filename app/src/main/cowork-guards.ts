@@ -176,10 +176,13 @@ export const RESEARCH_TOOLS: ReadonlySet<string> = new Set([
   'verify_file'
 ])
 
-/** After this many back-to-back research calls with nothing built, nudge once… */
-export const RESEARCH_STALL_NUDGE = 8
+/** After this many back-to-back research calls with nothing built, nudge once…
+ *  (raised from 8/12: a legitimate investigation of a real codebase or a research
+ *  task routinely needs a dozen-plus distinct lookups, and the old caps interrupted
+ *  productive research — each nudge also cost a full extra generation.) */
+export const RESEARCH_STALL_NUDGE = 16
 /** …and after this many, stop the loop rather than research to the turn ceiling. */
-export const RESEARCH_STALL_STOP = 12
+export const RESEARCH_STALL_STOP = 24
 
 /**
  * Classify a run of consecutive research-only tool calls (see {@link RESEARCH_TOOLS}).

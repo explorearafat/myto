@@ -74,9 +74,12 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
   reasoningEffort: 'medium',
   // Myto's normal writing voice; the output-style picker (#13) changes it.
   outputStyle: 'default',
-  // Text-protocol tool calling by default (#15); native function-calling is an
-  // opt-in for capable backends and never changes behaviour while off.
-  nativeTools: false,
+  // Native function-calling by default (#15): structured tool calls spare the model
+  // re-emitting verbose ```myto:tool fences every turn — a real latency and
+  // truncation win on agentic runs — and both adapter shapes support them, with
+  // automatic fallback to the text protocol when a backend can't. settings.ts
+  // upgrades settings saved before this flip exactly once (nativeToolsMigrated).
+  nativeTools: true,
   // The Research surface opens on the default generalist; the composer's agent
   // picker swaps in any of the 300+ professional specialists (shared/agent-catalog).
   researchAgentId: DEFAULT_RESEARCH_AGENT_ID,

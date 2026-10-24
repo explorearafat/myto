@@ -230,9 +230,15 @@ describe('normalise — output style + native tools', () => {
     expect(normalise({ outputStyle: 'concise' }).outputStyle).toBe('concise')
   })
 
-  it('defaults nativeTools to off and keeps a boolean', () => {
-    expect(normalise({}).nativeTools).toBe(false)
-    expect(normalise({ nativeTools: true }).nativeTools).toBe(true)
+  it('defaults nativeTools to on; a pre-flip stored false is upgraded exactly once', () => {
+    expect(normalise({}).nativeTools).toBe(true)
+    // Pre-flip settings carry the old default as an explicit false — upgraded on
+    // first load (the migration flag is unset), then respected from then on.
+    expect(normalise({ nativeTools: false }).nativeTools).toBe(true)
+    expect(normalise({ nativeTools: false }).nativeToolsMigrated).toBe(true)
+    // Post-flip, a stored false is a real user opt-out and is honoured.
+    expect(normalise({ nativeTools: false, nativeToolsMigrated: true }).nativeTools).toBe(false)
+    expect(normalise({ nativeTools: true, nativeToolsMigrated: true }).nativeTools).toBe(true)
     expect(normalise({ nativeTools: 'yes' }).nativeTools).toBe(BASE.nativeTools)
   })
 })

@@ -514,12 +514,19 @@ export interface ProviderSettings {
   /**
    * Use native provider function-calling (#15) instead of the ```myto:tool text
    * protocol, when the active provider/model supports it (an OpenAI- or
-   * Anthropic-shaped gateway). Opt-in and OFF by default: with it off, Myto uses
-   * the text protocol exactly as before, so existing chats and persistence are
-   * untouched. When on and unsupported by the backend, the loop falls back to the
-   * text protocol automatically.
+   * Anthropic-shaped gateway). ON by default — structured calls are materially
+   * faster and less truncation-prone on agentic runs. When on and unsupported by
+   * the backend, the loop falls back to the text protocol automatically.
    */
   nativeTools: boolean
+  /**
+   * One-time marker for the nativeTools default flip (false → true): settings
+   * saved before the flip carry the old default as an explicit `false`, which is
+   * indistinguishable from a deliberate opt-out. On the first load after the
+   * flip, settings.ts upgrades such a stored `false` to the new default and sets
+   * this flag; from then on a stored `false` is respected as a real user choice.
+   */
+  nativeToolsMigrated?: boolean
   /**
    * The professional agent driving the Research surface (see shared/agent-catalog):
    * an id from that catalog (e.g. `research-assistant`, `frontend-engineer`,

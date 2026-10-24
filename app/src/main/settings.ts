@@ -310,7 +310,18 @@ export function normalise(raw: unknown): ProviderSettings {
     outputStyle: VALID_OUTPUT_STYLES.includes(o.outputStyle as OutputStyle)
       ? (o.outputStyle as OutputStyle)
       : d.outputStyle,
-    nativeTools: typeof o.nativeTools === 'boolean' ? o.nativeTools : d.nativeTools,
+    // One-time default flip (nativeTools false → true). Settings saved before the
+    // flip carry the OLD default as an explicit `false`, indistinguishable from a
+    // deliberate opt-out; on the first load after the flip such a stored `false` is
+    // upgraded to the new default and nativeToolsMigrated is set, so from then on a
+    // stored `false` is respected as a real user choice (the Settings toggle).
+    nativeTools:
+      o.nativeToolsMigrated === true
+        ? typeof o.nativeTools === 'boolean'
+          ? o.nativeTools
+          : d.nativeTools
+        : true,
+    nativeToolsMigrated: true,
     // Research surface: keep any non-empty persisted agent id verbatim (validity is
     // checked at run time by resolveResearchAgent, which falls back to the default),
     // so a catalog that gains/renames agents never strands a saved choice here.
