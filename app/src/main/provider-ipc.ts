@@ -576,6 +576,15 @@ export function registerProviderIpc(): void {
         // remote BYOK endpoints (128k+), so every size budget below picks its ceiling
         // by provider kind — the remote ceilings would silently overflow a local model.
         const isLocalOllama = kind === 'ollama'
+        // Adaptive reasoning effort: the user's setting, capped at 'low' for trivial
+        // prompts (a greeting must not wait through a reasoning model's full
+        // chain-of-thought — see isTrivialPrompt).
+        const latestUserMessage = [...messages].reverse().find((m) => m.role === 'user')
+        const effortForRun: ProviderSettings['reasoningEffort'] = isTrivialPrompt(
+          latestUserMessage?.content ?? ''
+        )
+          ? 'low'
+          : settings.reasoningEffort
 
         // Feature B — media generation. When the active model is an image/video model
         // (auto-detected from its id; an explicit settings.modelKind overrides), this turn
@@ -1234,7 +1243,7 @@ export function registerProviderIpc(): void {
           for (let attempt = 0; ; attempt++) {
             try {
               await provider.streamCompletion(activeModelId, turnHistory, onProviderChunk, iter.signal, {
-                reasoningEffort: settings.reasoningEffort,
+                reasoningEffort: effortForRun,
                 // Advertise the tool schemas only on a tool-enabled native turn; the closing
                 // turn (parseTools=false) and the text protocol never send them.
                 ...(parseTools && useNativeTools ? { tools: nativeSchemas } : {})
@@ -2860,4 +2869,20 @@ function resolveRequest(request: CompletionRequest): {
 export function cancelAllStreams(): void {
   for (const controller of activeStreams.values()) controller.abort()
   activeStreams.clear()
+}
+
+/**
+ * Is this user prompt too small to deserve reasoning depth? A greeting, a "thanks",
+ * a one-word ack — under ~4 short words with no code, URL, or newline. Measured
+ * failure this fixes: "hii" on a slow reasoning endpoint burned 167 thinking tokens
+ * and a minute of dead air BEFORE the first visible word, because the configured
+ * reasoning effort was forwarded verbatim. A trivial prompt caps the effort at
+ * 'low' — the one case where Myto overrides the user's effort choice, since the
+ * choice was never about greetings. Anything longer or structured keeps the setting.
+ */
+function isTrivialPrompt(text: string): boolean {
+  const t = text.trim()
+  if (!t || t.length > 48) return false
+  if (t.split(/\s+/).filter(Boolean).length > 4) return false
+  return !/[\n`]|https?:|\.(com|org|net|dev|io)\b/i.test(t)
 }
