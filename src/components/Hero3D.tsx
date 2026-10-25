@@ -20,16 +20,16 @@ export function Hero3D() {
 
   // Tilt/size per ring — nested tighter and flatter toward the back.
   const RINGS = [
-    { size: 440, tiltX: 74, tiltY: 0, dur: 38, border: 'rgba(20,20,19,0.11)' },
-    { size: 372, tiltX: 74, tiltY: 60, dur: 52, border: 'rgba(20,20,19,0.085)' },
-    { size: 304, tiltX: 74, tiltY: 120, dur: 68, border: 'rgba(26,107,82,0.14)' },
+    { size: 520, tiltX: 74, tiltY: 0, dur: 38, border: 'rgba(20,20,19,0.16)' },
+    { size: 438, tiltX: 74, tiltY: 60, dur: 52, border: 'rgba(26,107,82,0.16)' },
+    { size: 356, tiltX: 74, tiltY: 120, dur: 68, border: 'rgba(20,20,19,0.13)' },
   ];
 
   return (
     <div
       aria-hidden="true"
       ref={ref}
-      className="pointer-events-none absolute -right-16 top-1/2 hidden -translate-y-1/2 lg:block"
+      className="pointer-events-none absolute right-[8%] top-1/2 hidden -translate-y-1/2 lg:block"
       style={{ perspective: '900px' }}
     >
       <div className="h3d-scene relative h-[440px] w-[440px]">
