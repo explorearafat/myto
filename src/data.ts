@@ -43,8 +43,8 @@ export const LINKS = {
  * new tag ships, or the download page will quietly understate the version.
  */
 export const RELEASE = {
-  version: 'v0.9.2',
-  date: '24 October 2026',
+  version: 'v0.10.0',
+  date: '25 October 2026',
   size: '265 MB',
 };
 
