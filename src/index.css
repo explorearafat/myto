@@ -503,3 +503,43 @@
 .nav-link:hover::after {
   transform: scaleX(1);
 }
+
+/*
+ * Hero gyroscope — three tilted rings spinning on their own axes (pure CSS 3D,
+ * composite-only). The outer divs hold a static tilt; the inner .h3d-ring spins
+ * around Z, and the node dot rides the ring's edge as it orbits.
+ */
+.h3d-scene {
+  perspective: 900px;
+}
+.h3d-tilt {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+}
+.h3d-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  transform-style: preserve-3d;
+  animation: h3d-spin 40s linear infinite;
+}
+.h3d-node {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 7px;
+  height: 7px;
+  margin-left: -3.5px;
+  margin-top: -3.5px;
+  border-radius: 9999px;
+  background: rgba(26, 107, 82, 0.55);
+}
+@keyframes h3d-spin {
+  from {
+    transform: rotateZ(0deg);
+  }
+  to {
+    transform: rotateZ(360deg);
+  }
+}

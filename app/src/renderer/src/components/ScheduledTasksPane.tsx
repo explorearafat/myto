@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useAppStore } from '@renderer/store/useAppStore'
 import type { ChatMode, ScheduledTask } from '@shared/types'
 
 /*
@@ -317,13 +318,49 @@ export function ScheduledTasksPane() {
 
   const showForm = adding || editing !== null
 
+  const mcpStatuses = useAppStore((st) => st.mcpStatuses)
+  const connected = mcpStatuses.filter((st) => st.state === 'connected')
+
   return (
     <div className="space-y-5">
       <p className="text-[12px] leading-relaxed text-muted">
-        Scheduled tasks run a prompt on their own cron, even when you're not watching. Each run
-        opens a fresh session in the task's mode — it can't see your other chats. Tasks fire only
-        while Myto is running.
+        Automations run a prompt on their own cron — even when you're not watching. Each run
+        opens a fresh session with the tools from your connected apps, so a schedule can pull
+        from GitHub, query a connector, or read a page before it answers. Runs happen while
+        Myto is running.
       </p>
+
+      {/* Connected apps strip — the "connect" half of connect + automate. */}
+      <div className="rounded-xl border border-border bg-bg p-3.5">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-medium uppercase tracking-wider text-muted">
+            Connected apps ({connected.length})
+          </span>
+          <span className="text-[11px] text-muted">add more in Connectors</span>
+        </div>
+        {connected.length > 0 ? (
+          <div className="mt-2.5 flex flex-wrap gap-1.5">
+            {connected.map((c) => {
+              const meta = useAppStore.getState().settings.mcpServers.find((sv) => sv.id === c.id)
+              return (
+                <span
+                  key={c.id}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-surface-2 px-2.5 py-1 text-[11.5px] font-medium text-text"
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                  {meta?.name ?? c.id}
+                  <span className="text-muted">· {c.toolCount} tools</span>
+                </span>
+              )
+            })}
+          </div>
+        ) : (
+          <p className="mt-2 text-[11.5px] leading-relaxed text-muted">
+            No apps connected yet — connectors let automations reach external services. Add one
+            in the Connectors tab and its tools become available to every run.
+          </p>
+        )}
+      </div>
 
       {tasks.length > 0 && (
         <div className="space-y-2.5">

@@ -2,6 +2,7 @@ import { Download } from 'lucide-react';
 import { MytoMark } from './MytoMark';
 import { LINKS } from '../data';
 import { AppWindowMockup, StatStrip } from './objects';
+import { Hero3D } from './Hero3D';
 
 export function Hero() {
   return (
@@ -16,6 +17,8 @@ export function Hero() {
         }}
       />
       <div className="relative mx-auto max-w-6xl px-6 pb-20 pt-10 sm:pb-24 sm:pt-14">
+        {/* The 3D gyroscope floats behind everything at low opacity. */}
+        <Hero3D />
         {/* Announcement chip — what's new, one tap from the hero. */}
         <div className="flex justify-center">
           <a href={LINKS.communityPage} className="announce-chip">

@@ -445,6 +445,23 @@ function ModelPane() {
         Manage your models on the Myto website → Authentication page. Changes sync here
         automatically the next time this account's config updates.
       </p>
+
+      <div className="rounded-xl border border-border bg-bg p-3.5">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-medium uppercase tracking-wider text-muted">
+            Media routing
+          </span>
+          <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[10.5px] font-medium text-muted">
+            automatic
+          </span>
+        </div>
+        <p className="mt-2 text-[12px] leading-relaxed text-muted">
+          Requests route by the model&rsquo;s kind, detected from its id: an image or video
+          model (flux, dall-e, veo, sora…) generates media in the chat; everything else
+          answers as text. Renaming the active model to an image/video id flips the routing
+          instantly — no endpoint reconfiguration needed.
+        </p>
+      </div>
     </div>
   )
 }
