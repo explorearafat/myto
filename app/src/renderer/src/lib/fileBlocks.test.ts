@@ -40,7 +40,6 @@ describe('parseFileBlocks', () => {
       code: 'print("hi")',
       complete: true
     })
-    // The prose on either side survives so Markdown still renders it.
     expect((segments[0] as { text: string }).text).toContain('Here is the file:')
     expect((segments[2] as { text: string }).text).toContain('Done.')
   })
