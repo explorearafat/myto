@@ -13,62 +13,72 @@ myto "add dark mode to the settings page"
 > Published on npm as **`mytocode`** — the bare name `myto` is blocked as too
 > similar to existing packages. The installed command is still `myto`.
 
-## The interface (v1.4)
+## The interface (v1.5)
 
-`myto` boots with a short animation — the agent face assembles line by line,
-blinks once, and settles into the dashboard:
+On an interactive terminal `myto` runs inside a **docked shell**: the alternate
+screen buffer with a fixed layout — nothing ever reprints, every update happens
+in place. The agent face pins to the top and assembles line by line (one blink)
+on first draw:
 
 ```
-         ·  ·  ·  ·  ·  ·  ·  ·  ·
- ╭────────────────────────────────────────╮
- │                                        │
- │         ######          ######         │
- │         ######          ######         │
- │                                        │
- │               M  Y  T  O               │
- │           \────────────────/           │
- │                                        │
- ╰────────────────────────────────────────╯
-  ● ~/projects/myto  ◆ gpt-4o-mini  ☁ gateway
+    ·  ·  ·  ·  ·  ·  ·  ·  ·  ·  ·  ·  ·  ·
+ \                                       /
+  \         ──              ──          /
+   ##       (*)            (*)        ##
+   ##                                 ##
+   |           M  Y  T  O             |
+   |                                  |
+    \       \______________/         /
+     \                              /
+ ╭───────────────────────────────────────────╮
+ │   Working Folder  ~/projects/new-app      │
+ │   Model           claude-3.5-sonnet       │
+ │   Effort          Advanced                │
+ │   API Status      Connected · gateway     │
+ ╰───────────────────────────────────────────╯
 ```
 
-The dashboard is the only text above the input: working folder, model,
-provider. Nothing else.
+- **The dashboard rows are live controls.** With an empty input, **↑/↓** move
+  the `▸` selection and **←/→** (or Enter) change it in place: Effort cycles
+  Low → Balanced → Advanced, Working Folder opens the folder browser, Model
+  opens the live model picker. Only the dashboard repaints — the rest of the
+  screen never moves.
+- **Messages scroll in their own region** between the face and the input, so
+  tool output never pushes the frame around. Tool lines land as colour-coded
+  `⏺ Write(src/app.ts)` with `⎿` results (green writes, amber shell, red
+  failures).
+- **The input box docks at the bottom** with a block caret and an `Ask Myto…`
+  placeholder; the slash-command dropdown appears above it while you type
+  `/`. Under it a live strip:
 
-**First run** — before the dashboard appears, a wizard signs you in, all driven
-by keyboard or mouse:
+```
+ ↑↓ tune · ⇧⇥ ask before acting · ⌃E effort Balanced
+```
+
+  **Shift+Tab** cycles the permission policy (ask ⇄ auto-approve), **Ctrl+E**
+  cycles effort (Low 15 · Balanced 40 · Advanced 200 tool turns) — same as the
+  dashboard rows and `/permissions`, `/effort`.
+
+- **Submissions** lift into a blue panel — `User (12:30 PM): build a dashboard`
+  — while the model's chain-of-thought prints dim/ash at low opacity, and the
+  final answer settles into its own gray panel labelled `Myto (12:30 PM)`,
+  rendered as terminal markdown.
+
+On terminals too small for the shell (or pipes/CI) everything degrades to
+sequential printing; piped runs list instead of hang and a closed stdin exits
+cleanly. Works on Windows PowerShell / Windows Terminal, macOS and Linux.
+
+**First run** — before the shell appears, a wizard signs you in, all driven by
+keyboard or mouse:
 
 1. **Provider** — an OpenAI-compatible gateway (OpenAI, OpenRouter, vLLM, any
    `/v1` endpoint) or local Ollama.
 2. **Credentials** — the API key is masked as you type (`****`), stored in
    `~/.myto/config.json`, never echoed or logged.
-3. **Model** — fetched live from the endpoint and picked from a menu (mouse
-   clickable); if the endpoint lists nothing you type the id.
+3. **Model** — fetched live from the endpoint and picked from a menu; if the
+   endpoint lists nothing you type the id.
 4. **Folder** — a mouse-usable directory browser: descend, go up, or commit to
    the folder Myto should work in.
-
-**The input box** sits at the bottom of the terminal. Under it a live mode
-strip:
-
-```
- ⇧⇥ ask before acting   ·   ⌃E effort medium
-```
-
-- **Shift+Tab** cycles the permission policy: *ask before acting* ⇄
-  *auto-approve* (`/permissions` does the same).
-- **Ctrl+E** cycles effort — `low` (15 tool turns, quick questions), `medium`
-  (40), `high` (200 — room for long heavy builds) (`/effort` does the same).
-
-**When you submit a prompt** it lifts above the stream as a cyan-barred echo
-(`▌ your prompt`) with a dim model chip. The model's chain-of-thought prints
-below it in dim ash at low opacity while it thinks, tool calls land as
-colour-coded `⏺ Write(src/app.ts)` lines with `⎿` results (green = writes,
-amber = shell, cyan = reads, red = failures), and the final answer settles into
-its own bordered panel rendered as terminal markdown.
-
-Pipes and CI never hang: without a TTY the menus print listings instead of
-waiting, `myto "<task>"` runs one-shot, and a closed stdin exits cleanly.
-Works on Windows PowerShell / Windows Terminal, macOS and Linux terminals.
 
 ## The numbered menu
 

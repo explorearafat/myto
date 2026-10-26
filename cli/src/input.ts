@@ -8,6 +8,7 @@
 import { createInterface } from 'node:readline'
 import { paint as c, colorOn, isTty } from './ui'
 import { width, padEnd } from './tui'
+import * as screen from './screen'
 
 export interface SlashCmd {
   name: string
@@ -25,6 +26,12 @@ export interface ReadOpts {
   strip?: () => string
   /** Extra raw-key handlers, checked before editing keys (e.g. Shift+Tab, Ctrl-E). */
   hotkeys?: { seq: string; run: () => void }[]
+  /**
+   * Dashboard focus: on an empty buffer, ↑/↓ move the dashboard selection and
+   * ←/→ change the selected value — in place, nothing reprints. 'blur' fires
+   * when typing takes focus back. Return true when the key was consumed.
+   */
+  onDashboard?: (dir: 'up' | 'down' | 'left' | 'right' | 'blur') => boolean
 }
 
 /** Commands whose name starts with what was typed after '/'. Pure, for tests. */
@@ -83,13 +90,38 @@ export async function readTask(commands: SlashCmd[], opts: ReadOpts = {}): Promi
   if (!isTty || !stdin.isTTY || typeof stdin.setRawMode !== 'function') return simpleReadline()
 
   const history = opts.history ?? []
-  const placeholder = opts.placeholder ?? 'Type a task, / for commands, ! for shell'
+  const placeholder = opts.placeholder ?? 'Ask Myto…'
   let buf = ''
   let sel = 0
   let histIdx = -1
   let prevRows = 0
 
+  /** The docked painter: absolute-positioned rows inside the shell. */
+  const renderDocked = (): void => {
+    const frame = screen.inputOrigin()
+    if (!frame) return
+    const w = Math.min(frame.cols, 104)
+    const menu = filterSlash(buf, commands).slice(0, 8)
+    const body = buf ? buf + c.cyan('█') : c.dim(placeholder)
+    const rows: string[] = menu.map((m, i) => {
+      const on = i === Math.min(sel, menu.length - 1)
+      const name = on ? c.cyan(padEnd(m.name, 13)) : padEnd(m.name, 13)
+      return ` ${on ? c.cyan('❯') : ' '} ${name} ${c.dim(m.desc)}`
+    })
+    rows.push(
+      c.gray('╭' + '─'.repeat(w - 2) + '╮'),
+      `${c.gray('│')} ${padEnd(body, w - 4)} ${c.gray('│')}`,
+      c.gray('╰' + '─'.repeat(w - 2) + '╯')
+    )
+    if (opts.strip) rows.push(` ${c.gray(opts.strip())}`)
+    screen.drawInputRows(rows, 3 + buf.length)
+  }
+
   const render = (): void => {
+    if (screen.active()) {
+      renderDocked()
+      return
+    }
     const w = width()
     const inner = w - 4
     if (prevRows > 0) out.write(`\x1b[${prevRows - 1}A`)
@@ -128,7 +160,7 @@ export async function readTask(commands: SlashCmd[], opts: ReadOpts = {}): Promi
   return new Promise<string | null>((resolve) => {
     let onData: (b: Buffer) => void = () => {}
     const finish = (v: string | null): void => {
-      out.write('\x1b[?25h\n')
+      out.write(screen.active() ? '\x1b[?25h' : '\x1b[?25h\n') // hide/show handled; no newline inside the docked shell
       try {
         stdin.setRawMode(false)
       } catch {
@@ -167,25 +199,32 @@ export async function readTask(commands: SlashCmd[], opts: ReadOpts = {}): Promi
         buf = ''
         sel = 0
         histIdx = -1
+        if (screen.active()) opts.onDashboard?.('blur')
         return render()
       }
-      if (s === '\x1b[A' || s === '\x1b[B') {
-        const dir = s === '\x1b[A' ? 'up' : 'down'
-        if (menu.length) {
-          sel = (sel + (dir === 'up' ? -1 : 1) + menu.length) % menu.length
-          return render()
-        }
-        const rec = recallHistory(buf, history, histIdx, dir)
-        if (rec) {
-          buf = rec.buf
-          histIdx = rec.index
-          render()
+      if (s === '\x1b[A' || s === '\x1b[B' || s === '\x1b[D' || s === '\x1b[C') {
+        const dir = s === '\x1b[A' ? 'up' : s === '\x1b[B' ? 'down' : s === '\x1b[D' ? 'left' : 'right'
+        // With an empty buffer on the docked shell, the arrows tune the
+        // dashboard in place; typing takes focus back first.
+        if (!buf && screen.active() && opts.onDashboard?.(dir)) return
+        if (dir === 'up' || dir === 'down') {
+          if (menu.length) {
+            sel = (sel + (dir === 'up' ? -1 : 1) + menu.length) % menu.length
+            return render()
+          }
+          const rec = recallHistory(buf, history, histIdx, dir)
+          if (rec) {
+            buf = rec.buf
+            histIdx = rec.index
+            render()
+          }
         }
         return
       }
       if (s.startsWith('\x1b')) return // ignore other escape sequences
       const clean = s.replace(/[\x00-\x1f\x7f]/g, '')
       if (clean) {
+        if (screen.active()) opts.onDashboard?.('blur') // typing takes focus back
         buf += clean
         sel = 0
         histIdx = -1

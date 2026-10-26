@@ -622,15 +622,10 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
   const changed = new Set<string>()
   let linesAdded = 0
 
+  const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   process.stdout.write(
     '\n' +
-      tui.runHeader({
-        version: CLI_VERSION,
-        task: opts.task,
-        model: opts.modelId,
-        workspace: workspaceDir,
-        byok: true
-      }) +
+      tui.userBox(opts.task, now) +
       '\n'
   )
 
@@ -864,13 +859,15 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
   if (turns >= maxTurns && !finalText) {
     finalText = 'Stopped: reached the tool-turn ceiling before finishing.'
   }
-  // Render the final answer inside its own bordered panel — the reply is the
-  // one thing on screen that gets a box. Narration shown inside the guard
-  // cascade printed plain; only errors skip this pass (printed red above).
+  // Render the final answer inside its own bordered panel with a Myto label —
+  // the reply is the one thing on screen that gets a box. Narration shown
+  // inside the guard cascade printed plain; errors skip this (printed red).
   if (finalText && !/^Error:/.test(finalText) && !/^Stopped: reached the tool-turn ceiling/.test(finalText)) {
     const w = Math.min(tui.width(), 104)
+    const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     const inner = renderMarkdown(finalText, { width: w - 6 }).split('\n')
-    process.stdout.write('\n' + tui.box({ lines: inner, width: w, accent: c.gray }).join('\n') + '\n')
+    const lines = [c.gray(`Myto (${time})`), ...inner]
+    process.stdout.write('\n' + tui.box({ lines, width: w, accent: c.gray }).join('\n') + '\n')
   }
   // Give the session memory of the answer (multi-turn follow-ups need it).
   if (finalText && !/^Error:/.test(finalText) && history[history.length - 1]?.content !== finalText) {

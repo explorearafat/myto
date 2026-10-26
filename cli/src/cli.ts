@@ -12,8 +12,9 @@ import { renderMarkdown } from './md'
 import { startSpinner } from './spinner'
 import { watchInterrupt } from './interrupt'
 import { MAIN_MENU, numberMenu } from './menu'
-import { bootFace, dashboardLine } from './face'
-import { canRunSetup, runSetup } from './setup'
+import { bootFace, effortLabel, faceLines, type DashRow } from './face'
+import { canRunSetup, pickFolder, runSetup } from './setup'
+import * as screen from './screen'
 import { chatSession } from './chat'
 import { QUICK_ACTIONS, type QuickAction } from './actions'
 import { listSkills, saveSkill, skillTemplate, type Skill } from './skills'
@@ -466,9 +467,10 @@ async function pluginsMenu(workspace: string): Promise<void> {
 }
 
 /**
- * The interactive app. First run: the animated face, then the setup wizard
- * (provider · key · model · folder — mouse-friendly). Then straight into the
- * chat interface. The numbered menu stays reachable via /menu as a hub.
+ * The interactive app. First run: the setup wizard (provider · key · model ·
+ * folder — mouse-friendly). Then the docked shell: the agent face pinned on
+ * top, messages scrolling in their region, the input box docked below with the
+ * ⇧⇥/⌃E strip. The numbered menu stays reachable via /menu as a hub.
  */
 async function app(dir?: string): Promise<number> {
   const startWs = resolveWorkspace(dir)
@@ -487,35 +489,66 @@ async function app(dir?: string): Promise<number> {
     }
     workspace = r.workspace ?? startWs
   }
-  for (;;) {
-    // Cowork is the home screen; it returns 2 when the user asks for the menu.
-    const code = await repl(dir, workspace)
-    if (code !== 2) return code
-    const pick = await numberMenu(MAIN_MENU, 'What would you like to do?')
-    if (pick === null) {
-      process.stdout.write(ui.paint.dim('  bye ') + ui.paint.magenta(ui.sym.spark) + '\n')
-      return 0
-    }
-    const cfg = loadConfig()
-    if (pick === 0) {
-      if (!isConfigured(cfg)) {
-        process.stderr.write(notConfiguredMessage(cfg))
-        continue
+
+  // Docked shell: pin the face + dashboard, dock the input, route every write.
+  const p = ui.paint
+  const initialDash = (): DashRow[] => [
+    { label: 'Working Folder', value: workspace },
+    { label: 'Model', value: firstCfg.modelId || '(not set)' },
+    { label: 'Effort', value: effortLabel('medium') },
+    { label: 'API Status', value: 'Connected · ' + firstCfg.activeProvider }
+  ]
+  const drawIdleInput = (): void => {
+    const w = Math.min(process.stdout.columns || 96, 104)
+    screen.drawInputRows(
+      [
+        p.gray('╭' + '─'.repeat(w - 2) + '╮'),
+        `${p.gray('│')} ${tui.padEnd(p.dim('Ask Myto…'), w - 4)} ${p.gray('│')}`,
+        p.gray('╰' + '─'.repeat(w - 2) + '╯'),
+        ` ${p.gray('↑↓ tune · ⇧⇥ ask before acting · ⌃E effort Balanced')}`
+      ],
+      3
+    )
+  }
+  const frame = faceLines({ rows: initialDash(), selected: -1 })
+  if (screen.supported(frame.length + 1)) {
+    await screen.enter(frame, drawIdleInput, 35)
+    process.stdout.on('resize', () => screen.relayout())
+  }
+
+  try {
+    for (;;) {
+      // Cowork is the home screen; it returns 2 when the user asks for the menu.
+      const code = await repl(dir, workspace)
+      if (code !== 2) return code
+      const pick = await numberMenu(MAIN_MENU, 'What would you like to do?')
+      if (pick === null) {
+        process.stdout.write(p.dim('  bye ') + p.magenta(ui.sym.spark) + '\n')
+        return 0
       }
-      await chatSession({ provider: providerFromSettingsLike(cfg), modelId: cfg.modelId, isTty: ui.isTty })
-    } else if (pick === 1) {
-      // Cowork — loops back to the top of this for.
-    } else if (pick === 2) {
-      await connectorMenu()
-    } else if (pick === 3) {
-      await skillsMenu(workspace)
-    } else if (pick === 4) {
-      await actionsMenu(workspace)
-    } else if (pick === 5) {
-      await pluginsMenu(workspace)
-    } else if (pick === 6) {
-      await pickModelGlobal()
+      const cfg = loadConfig()
+      if (pick === 0) {
+        if (!isConfigured(cfg)) {
+          process.stderr.write(notConfiguredMessage(cfg))
+          continue
+        }
+        await chatSession({ provider: providerFromSettingsLike(cfg), modelId: cfg.modelId, isTty: ui.isTty })
+      } else if (pick === 1) {
+        // Cowork — loops back to the top of this for.
+      } else if (pick === 2) {
+        await connectorMenu()
+      } else if (pick === 3) {
+        await skillsMenu(workspace)
+      } else if (pick === 4) {
+        await actionsMenu(workspace)
+      } else if (pick === 5) {
+        await pluginsMenu(workspace)
+      } else if (pick === 6) {
+        await pickModelGlobal()
+      }
     }
+  } finally {
+    screen.leave()
   }
 }
 
@@ -571,33 +604,84 @@ async function repl(dir?: string, workspaceOverride?: string): Promise<number> {
   let sessionSummary = ''
   let permMode: 'ask' | 'auto' = 'ask'
   let effort: 'low' | 'medium' | 'high' = 'medium'
+  let dashSel = -1 // dashboard row under focus: 0 folder · 1 model · 2 effort · -1 none
   let exitToMenu = false
   const promptHistory: string[] = []
   const p = ui.paint
 
-  /** The face + one dashboard line: folder · model · provider. Nothing else. */
-  const showDashboard = async (animated: boolean): Promise<void> => {
-    await bootFace(animated ? 40 : 0)
-    process.stdout.write(
-      '  ' +
-        dashboardLine({
-          workspace,
-          model: cfg.modelId,
-          provider: cfg.activeProvider === 'ollama' ? 'ollama · local' : 'gateway'
-        }) +
-        '\n\n'
-    )
+  /** Collapse the home directory so the dashboard value stays short. */
+  const shortWs = (): string => {
+    const home = process.env.USERPROFILE || process.env.HOME || ''
+    return home && workspace.startsWith(home) ? '~' + workspace.slice(home.length) : workspace
   }
-  await showDashboard(true)
 
-  /** The strip under the input box — the ⇧⇥ / ⌃E affordances, always live. */
-  const strip = (): string => `⇧⇥ ${permMode === 'ask' ? 'ask before acting' : 'auto-approve'}   ·   ⌃E effort ${effort}`
+  /** The four dashboard rows inside the face box. */
+  const dashRows = (): DashRow[] => [
+    { label: 'Working Folder', value: shortWs() },
+    { label: 'Model', value: cfg.modelId || '(not set)' },
+    { label: 'Effort', value: effortLabel(effort) },
+    { label: 'API Status', value: isConfigured(cfg) ? `Connected · ${cfg.activeProvider}` : 'Not configured' }
+  ]
+
+  /** Repaint just the face block — in place on the shell, printed otherwise. */
+  const redrawFace = (): void => {
+    const lines = faceLines({ rows: dashRows(), selected: dashSel })
+    if (screen.active()) screen.setFace(lines)
+    else process.stdout.write('\n' + lines.join('\n') + '\n')
+  }
+
+  /** The strip under the input box — the arrows + ⇧⇥ + ⌃E affordances. */
+  const strip = (): string =>
+    `↑↓ tune · ⇧⇥ ${permMode === 'ask' ? 'ask before acting' : 'auto-approve'} · ⌃E effort ${effortLabel(effort)}`
   const cyclePermission = (): void => {
     permMode = permMode === 'ask' ? 'auto' : 'ask'
   }
   const cycleEffort = (): void => {
     effort = effort === 'low' ? 'medium' : effort === 'medium' ? 'high' : 'low'
   }
+
+  /**
+   * Dashboard arrows: ↑/↓ move the selection over the changeable rows (folder,
+   * model, effort), ←/→ change the selected value in place, typing blurs.
+   * Returns true when the key was consumed.
+   */
+  const onDashboard = (dir: 'up' | 'down' | 'left' | 'right' | 'blur'): boolean => {
+    if (dir === 'blur') {
+      if (dashSel >= 0) {
+        dashSel = -1
+        redrawFace()
+      }
+      return false
+    }
+    if (dir === 'up' || dir === 'down') {
+      dashSel = dashSel < 0 ? (dir === 'down' ? 0 : 2) : Math.min(2, Math.max(0, dashSel + (dir === 'down' ? 1 : -1)))
+      redrawFace()
+      return true
+    }
+    if (dashSel < 0) return false
+    if (dashSel === 2) {
+      cycleEffort()
+      redrawFace()
+      return true
+    }
+    return false // folder/model rows commit via Enter (handled by the REPL loop)
+  }
+
+  /** A dashboard row committed with Enter: folder and model open real pickers. */
+  const openDashRow = async (row: number): Promise<void> => {
+    if (row === 0) {
+      const ws = await pickFolder(workspace)
+      if (ws) workspace = ws
+    } else if (row === 1) {
+      await pickModelGlobal()
+      cfg = loadConfig()
+    }
+    dashSel = -1
+    redrawFace()
+  }
+
+  // Outside the docked shell the face prints (animated) as usual.
+  if (!screen.active()) await bootFace(35, { rows: dashRows(), selected: -1 })
 
   /** One agent run with interrupt watching + the session permission policy. */
   const runTask = async (t: string, opts?: { fresh?: boolean; quietHeader?: boolean }): Promise<void> => {
@@ -717,7 +801,8 @@ async function repl(dir?: string, workspaceOverride?: string): Promise<number> {
         process.stdout.write('\x1b[2J\x1b[3J\x1b[H')
         session = []
         sessionSummary = ''
-        await showDashboard(false)
+        dashSel = -1
+        redrawFace()
         return false
       case 'status':
         showStatus()
@@ -823,6 +908,7 @@ async function repl(dir?: string, workspaceOverride?: string): Promise<number> {
     const raw = await input.readTask(SLASH, {
       history: promptHistory,
       strip,
+      onDashboard,
       hotkeys: [
         { seq: '\x1b[Z', run: cyclePermission }, // Shift+Tab
         { seq: '\x05', run: cycleEffort } // Ctrl-E
@@ -833,7 +919,13 @@ async function repl(dir?: string, workspaceOverride?: string): Promise<number> {
       break
     }
     const line = raw.trim()
-    if (!line) continue
+    if (!line) {
+      // An empty submit with a focused dashboard row commits that row.
+      if (dashSel >= 0) await openDashRow(dashSel)
+      continue
+    }
+    dashSel = -1
+    if (screen.active()) redrawFace() // in-place only; never reprint the frame
     promptHistory.push(line)
     if (line.startsWith('!')) {
       // Shell escape: run the command directly, print its output.
@@ -872,7 +964,10 @@ async function main(): Promise<number> {
   let interrupted = 0
   process.on('SIGINT', () => {
     interrupted++
-    if (interrupted >= 2) process.exit(130)
+    if (interrupted >= 2) {
+      screen.hardExitRestore()
+      process.exit(130)
+    }
     process.stderr.write(ui.paint.dim('\n(again to force quit)\n'))
   })
 

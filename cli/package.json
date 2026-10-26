@@ -1,6 +1,6 @@
 {
   "name": "mytocode",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "The Myto coding agent in your terminal — reads your project, edits with approval, runs your build, and verifies its work.",
   "keywords": [
     "ai",

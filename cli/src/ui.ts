@@ -5,6 +5,7 @@
  * so piped output stays clean and scriptable.
  */
 import { spawn } from 'node:child_process'
+import * as screen from './screen'
 
 const isTtyOut = process.stdout.isTTY === true
 const noColor = process.env.NO_COLOR != null && process.env.NO_COLOR !== ''
@@ -192,6 +193,18 @@ export async function select<T>(title: string, options: SelectOption<T>[]): Prom
   if (!isTty || !stdin.isTTY || typeof stdin.setRawMode !== 'function' || options.length === 0) {
     return options.length ? options[0].value : null
   }
+  // The menu owns the cursor: inside the docked shell it takes the message
+  // region and redraws in place; arrows change only the highlighted row.
+  screen.focus()
+  try {
+    return await selectInner(title, options)
+  } finally {
+    screen.unfocus()
+  }
+}
+
+async function selectInner<T>(title: string, options: SelectOption<T>[]): Promise<T | null> {
+  const stdin = process.stdin
   const out = process.stdout
   const header = `${paint.magenta(sym.spark)} ${paint.bold(title)}`
   const hintBar = paint.dim('  ↑/↓ or click · Enter to select · Esc to cancel')

@@ -7,6 +7,7 @@
  */
 import { createInterface } from 'node:readline'
 import { paint as c, isTty, menuIndexAfter, parseMouse, sym, colorOn } from './ui'
+import * as screen from './screen'
 
 export interface MenuItem {
   /** The number shown and the digit that selects it. */
@@ -100,69 +101,76 @@ export async function numberMenu(items: MenuItem[], title = 'What would you like
   const hintBar = c.dim('  press 1-7 · ↑/↓ · Enter · Esc back')
   let index = 0
 
+  // Inside the docked shell the menu owns the message region and redraws in
+  // place — arrows change only the highlighted row, nothing reprints.
+  screen.focus()
   try {
-    stdin.setRawMode(true)
-  } catch {
-    /* some shells can't */
-  }
-  stdin.resume()
-  const rows = items.length + 2
-  out.write('\n'.repeat(rows) + `\x1b[${rows}A`) // reserve space, back to the top
-  out.write('\x1b[?25l')
-
-  const render = (): void => {
-    out.write('\r\x1b[0J' + header + '\n' + renderMenu(items, index) + '\n' + hintBar)
-  }
-
-  return new Promise<number | null>((resolve) => {
-    let onData: (buf: Buffer) => void = () => {}
-    const finish = (v: number | null): void => {
-      out.write('\x1b[?25h\n')
-      try {
-        stdin.setRawMode(false)
-      } catch {
-        /* ignore */
-      }
-      stdin.pause()
-      stdin.removeListener('data', onData)
-      resolve(v)
+    try {
+      stdin.setRawMode(true)
+    } catch {
+      /* some shells can't */
     }
-    onData = (buf: Buffer): void => {
-      const s = buf.toString('utf8')
-      const mouse = parseMouse(s)
-      if (mouse) {
-        if (mouse.btn === 64) index = menuIndexAfter('up', index, items.length)
-        else if (mouse.btn === 65) index = menuIndexAfter('down', index, items.length)
-        else if (mouse.press && mouse.btn === 0) {
-          const row = mouse.y - 2 // header row + the blank row above the options
-          if (row >= 0 && row < items.length) {
-            index = row
-            return finish(index)
+    stdin.resume()
+    const rows = items.length + 2
+    out.write('\n'.repeat(rows) + `\x1b[${rows}A`) // reserve space, back to the top
+    out.write('\x1b[?25l')
+
+    const render = (): void => {
+      out.write('\r\x1b[0J' + header + '\n' + renderMenu(items, index) + '\n' + hintBar)
+    }
+
+    return await new Promise<number | null>((resolve) => {
+      let onData: (buf: Buffer) => void = () => {}
+      const finish = (v: number | null): void => {
+        out.write('\x1b[?25h\n')
+        try {
+          stdin.setRawMode(false)
+        } catch {
+          /* ignore */
+        }
+        stdin.pause()
+        stdin.removeListener('data', onData)
+        resolve(v)
+      }
+      onData = (buf: Buffer): void => {
+        const s = buf.toString('utf8')
+        const mouse = parseMouse(s)
+        if (mouse) {
+          if (mouse.btn === 64) index = menuIndexAfter('up', index, items.length)
+          else if (mouse.btn === 65) index = menuIndexAfter('down', index, items.length)
+          else if (mouse.press && mouse.btn === 0) {
+            const row = mouse.y - 2 // header row + the blank row above the options
+            if (row >= 0 && row < items.length) {
+              index = row
+              return finish(index)
+            }
+            return
+          } else return
+          return render()
+        }
+        const key = menuKey(s)
+        if (key === 'ignore') return
+        if (key === 'cancel') return finish(null)
+        if (key === 'enter') return finish(index)
+        const digit = Number(key)
+        if (Number.isInteger(digit) && digit >= 1 && digit <= items.length) {
+          index = digit - 1
+          return finish(index)
+        }
+        if (key === 'up' || key === 'down') {
+          const next = menuIndexAfter(key, index, items.length)
+          if (next !== index) {
+            index = next
+            render()
           }
-          return
-        } else return
-        return render()
-      }
-      const key = menuKey(s)
-      if (key === 'ignore') return
-      if (key === 'cancel') return finish(null)
-      if (key === 'enter') return finish(index)
-      const digit = Number(key)
-      if (Number.isInteger(digit) && digit >= 1 && digit <= items.length) {
-        index = digit - 1
-        return finish(index)
-      }
-      if (key === 'up' || key === 'down') {
-        const next = menuIndexAfter(key, index, items.length)
-        if (next !== index) {
-          index = next
-          render()
         }
       }
-    }
-    stdin.on('data', onData)
-    render()
-  })
+      stdin.on('data', onData)
+      render()
+    })
+  } finally {
+    screen.unfocus()
+  }
 }
 
 /** One line summarising auth + workspace for the header above the menu. */

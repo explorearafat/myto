@@ -245,9 +245,35 @@ export interface RunState {
   fallback?: string
   workspace: string
   byok?: boolean
+  /** Wall-clock time of submission, shown as `User (12:30 PM)`. */
+  time?: string
 }
 
-/** The prompt echo — the user's task lifts above the stream: bar + bold text. */
+/** A blue user-message panel: `User (12:30 PM): task` — the submission style. */
+export function userBox(task: string, time: string, w = width()): string {
+  const inner = w - 6
+  const words = task.split(/\s+/)
+  const lines: string[] = []
+  let cur = ''
+  for (const word of words) {
+    if (!cur.length) cur = word
+    else if (cur.length + 1 + word.length <= inner) cur += ' ' + word
+    else {
+      lines.push(cur)
+      cur = word
+    }
+  }
+  if (cur.length) lines.push(cur)
+  const head = `${c.blue('User')}${time ? c.gray(` (${time})`) : ''}${c.blue(':')} `
+  const body = lines.map((l, i) => (i === 0 ? head + l : ' '.repeat(vlen(head)) + l))
+  return [
+    c.blue('╭' + '─'.repeat(w - 2) + '╮'),
+    ...body.map((l) => `${c.blue('│')} ${padEnd(l, w - 4)} ${c.blue('│')}`),
+    c.blue('╰' + '─'.repeat(w - 2) + '╯')
+  ].join('\n')
+}
+
+/** The prompt echo — kept for one-shot runs; the REPL uses userBox. */
 export function runHeader(s: RunState): string {
   const w = width()
   const task = s.task.length > w - 4 ? s.task.slice(0, w - 5) + '…' : s.task
