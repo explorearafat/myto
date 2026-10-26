@@ -239,5 +239,166 @@ describe('cli tool result feedback', () => {
   })
 })
 
+describe('cli permission gate', () => {
+  it('a deny keeps the file unwritten and lets the run continue another way', async () => {
+    const ws = tmpWorkspace()
+    try {
+      const provider = fakeProvider([
+        [toolCallChunk('write_file', { path: 'blocked.txt', content: 'nope' }), DONE],
+        [text('Understood, trying a different approach.'), DONE]
+      ])
+      const asked: string[] = []
+      const result = await runAgentLoop({
+        provider,
+        modelId: 'test-model',
+        workspaceDir: ws,
+        task: 'write blocked.txt',
+        onPermission: async (req) => {
+          asked.push(req.displayName)
+          return 'deny'
+        }
+      })
+      expect(asked).toEqual(['Write'])
+      expect(existsSync(join(ws, 'blocked.txt'))).toBe(false)
+      expect(result.finalText).toContain('different approach')
+    } finally {
+      rmSync(ws, { recursive: true, force: true })
+    }
+  })
+
+  it('allow-session is remembered for the rest of the run', async () => {
+    const ws = tmpWorkspace()
+    try {
+      const provider = fakeProvider([
+        [toolCallChunk('write_file', { path: 'a.txt', content: 'A' }), toolCallChunk('write_file', { path: 'b.txt', content: 'B' }), DONE],
+        [text('Both written.'), DONE]
+      ])
+      let asks = 0
+      const result = await runAgentLoop({
+        provider,
+        modelId: 'test-model',
+        workspaceDir: ws,
+        task: 'write a and b',
+        onPermission: async () => {
+          asks++
+          return 'allow-session'
+        }
+      })
+      expect(asks).toBe(1) // asked once, remembered for the second write
+      expect(existsSync(join(ws, 'a.txt'))).toBe(true)
+      expect(existsSync(join(ws, 'b.txt'))).toBe(true)
+      expect(result.toolCalls).toBe(2)
+    } finally {
+      rmSync(ws, { recursive: true, force: true })
+    }
+  })
+
+  it('read-only tools never hit the gate', async () => {
+    const ws = tmpWorkspace()
+    try {
+      writeFileSync(join(ws, 'note.txt'), 'hello')
+      const provider = fakeProvider([[text('It says hello.'), DONE]])
+      let asks = 0
+      await runAgentLoop({
+        provider,
+        modelId: 'test-model',
+        workspaceDir: ws,
+        task: 'read note.txt',
+        onPermission: async () => {
+          asks++
+          return 'deny'
+        }
+      })
+      expect(asks).toBe(0)
+    } finally {
+      rmSync(ws, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('cli session memory', () => {
+  it('reuses the passed history and returns it grown', async () => {
+    const ws = tmpWorkspace()
+    try {
+      const seen: ChatMessage[][] = []
+      let i = 0
+      const provider: Provider = {
+        async listModels() {
+          return { ok: true, models: [] }
+        },
+        async testConnection() {
+          return { ok: true, message: 'ok' }
+        },
+        async getCompletion() {
+          return ''
+        },
+        async streamCompletion(_m, messages, onChunk) {
+          seen.push(messages)
+          const script = i++ === 0 ? [text('First answer.'), DONE] : [text('Second answer.'), DONE]
+          for (const chunk of script) onChunk(chunk)
+        }
+      }
+      const session: ChatMessage[] = []
+      await runAgentLoop({ provider, modelId: 'm', workspaceDir: ws, task: 'first task', history: session })
+      await runAgentLoop({ provider, modelId: 'm', workspaceDir: ws, task: 'second task', history: session })
+      // The second call must see the whole first exchange, not just the new task.
+      const second = seen[1]
+      expect(second.some((m) => m.role === 'user' && m.content === 'first task')).toBe(true)
+      expect(second.some((m) => m.role === 'assistant' && m.content === 'First answer.')).toBe(true)
+      expect(second.some((m) => m.role === 'user' && m.content === 'second task')).toBe(true)
+      expect(session.length).toBeGreaterThan(3)
+    } finally {
+      rmSync(ws, { recursive: true, force: true })
+    }
+  })
+
+  it('estimates session tokens from the conversation', async () => {
+    const ws = tmpWorkspace()
+    try {
+      const provider = fakeProvider([[text('A reasonably sized answer for the token gauge.'), DONE]])
+      const result = await runAgentLoop({ provider, modelId: 'm', workspaceDir: ws, task: 'hello', history: [] })
+      expect(result.tokens).toBeGreaterThan(10)
+    } finally {
+      rmSync(ws, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('cli interrupts', () => {
+  it('an aborted stream ends the run gracefully with any partial text', async () => {
+    const ws = tmpWorkspace()
+    try {
+      const controller = new AbortController()
+      const provider: Provider = {
+        async listModels() {
+          return { ok: true, models: [] }
+        },
+        async testConnection() {
+          return { ok: true, message: 'ok' }
+        },
+        async getCompletion() {
+          return ''
+        },
+        async streamCompletion(_m, _messages, onChunk, signal) {
+          onChunk({ delta: 'partial thought before the cut', done: false })
+          signal?.addEventListener('abort', () => {}, { once: true })
+          controller.abort()
+          throw new Error('The operation was aborted')
+        }
+      }
+      const result = await runAgentLoop({
+        provider,
+        modelId: 'm',
+        workspaceDir: ws,
+        task: 'long task',
+        signal: controller.signal
+      })
+      expect(result.finalText).toContain('partial thought')
+    } finally {
+      rmSync(ws, { recursive: true, force: true })
+    }
+  })
+})
+
 // Re-exported for a direct writeFileSync usage check in the narration test above.
 void writeFileSync

@@ -78,8 +78,30 @@ settings** — if you already configured the app, the CLI just works.
 | `myto "<task>"` | One-shot task in the current folder |
 | `myto --dir <path> "<task>"` | One-shot task in a specific folder |
 | `myto config --base-url … --api-key … --model …` | Save config |
+| `myto --auto "<task>"` | One-shot without permission prompts |
 | `myto models` | List models the endpoint serves |
 | `myto help` | Help |
+
+## Session features (v1.2)
+
+The REPL now works like a real agentic CLI (the Claude Code / Freebuff school):
+
+- **Session memory** — your conversation carries across prompts, so follow-ups
+  like "now add tests for what you just wrote" work. `/clear` starts fresh,
+  `/compact` folds the session into a summary to free context.
+- **Permission prompts** — before every side effect (write / edit / delete /
+  shell / code) Myto asks: allow once, allow for the session, or decline and
+  redirect. `/permissions` toggles auto-approve; `myto --auto "task"` skips
+  prompting in one-shot runs.
+- **Markdown answers** — the final answer renders as terminal markdown
+  (headings, lists, fenced code), not raw model text.
+- **Interrupts** — `Esc` or `Ctrl-C` stops the running agent mid-turn; `↑`
+  recalls earlier prompts; `!` runs a shell command directly.
+- **Project memory** — `/init` surveys the project and writes a `MYTO.md` that
+  future runs read; `/memory` shows it; `/status` prints the current setup.
+- **Animated status** — a spinner with elapsed seconds (`✻ Thinking… (3s · esc
+  to interrupt)`) covers generation; tool calls print as `⏺ Write(src/app.ts)`
+  with `⎿` results.
 
 ## How it works
 
@@ -96,4 +118,5 @@ settings** — if you already configured the app, the CLI just works.
   research-stall stops, batched-call draining.
 - **Safety.** File tools are confined to the working folder (lexical + realpath
   containment). `run_command`/`run_code` execute with your user's privileges —
-  review the `▸ $ command` lines as they print. Ctrl-C twice force-quits.
+  with the default permission policy each one asks before it acts; `/permissions`
+  or `--auto` lifts the prompt. Ctrl-C twice force-quits.

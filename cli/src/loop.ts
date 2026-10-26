@@ -34,6 +34,8 @@ import {
 import type { Provider } from '@app/main/providers/provider'
 import type { MytoCliConfig } from './config'
 import * as tui from './tui'
+import { renderMarkdown } from './md'
+import { startSpinner } from './spinner'
 
 declare const MYTO_CLI_VERSION: string
 const CLI_VERSION = typeof MYTO_CLI_VERSION === 'string' ? MYTO_CLI_VERSION : '0.0.0'
@@ -75,7 +77,8 @@ const c = {
   cyan: (s: string): string => (isTty ? `\x1b[36m${s}\x1b[0m` : s),
   yellow: (s: string): string => (isTty ? `\x1b[33m${s}\x1b[0m` : s),
   red: (s: string): string => (isTty ? `\x1b[31m${s}\x1b[0m` : s),
-  green: (s: string): string => (isTty ? `\x1b[32m${s}\x1b[0m` : s)
+  green: (s: string): string => (isTty ? `\x1b[32m${s}\x1b[0m` : s),
+  amber: (s: string): string => (isTty ? `\x1b[38;2;251;191;36m${s}\x1b[0m` : s)
 }
 
 /** "0.4s" / "1.2s" / "320ms" — compact duration for a step's right-hand meta. */
@@ -83,24 +86,64 @@ function fmtMs(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)}s` : `${ms}ms`
 }
 
+/** Claude-style display names for the tool catalogue. */
+const TOOL_DISPLAY: Record<string, string> = {
+  write_file: 'Write',
+  edit_file: 'Edit',
+  delete_file: 'Delete',
+  read_file: 'Read',
+  list_dir: 'List',
+  find_files: 'Glob',
+  search_code: 'Grep',
+  run_command: 'Bash',
+  run_code: 'Run',
+  web_search: 'WebSearch',
+  web_fetch: 'Fetch',
+  wiki_search: 'Wiki',
+  update_plan: 'Plan',
+  think: 'Think'
+}
+
+const TOOL_VERB: Record<string, string> = {
+  write_file: 'Writing',
+  edit_file: 'Editing',
+  delete_file: 'Deleting',
+  read_file: 'Reading',
+  list_dir: 'Listing',
+  find_files: 'Finding',
+  search_code: 'Searching',
+  run_command: 'Running',
+  run_code: 'Running code',
+  web_search: 'Searching the web',
+  web_fetch: 'Fetching',
+  wiki_search: 'Searching wiki',
+  update_plan: 'Planning',
+  think: 'Thinking'
+}
+
+/** The human target of a tool call — the path, pattern, query or command. */
+export function targetOf(call: ToolCall): string {
+  const rec = (call.input && typeof call.input === 'object' ? call.input : {}) as Record<string, unknown>
+  const s = (k: string): string => (typeof rec[k] === 'string' ? (rec[k] as string) : '')
+  return s('path') || s('command') || s('pattern') || s('query') || s('url') || ''
+}
+
 /** A human verb + target for a tool call, shown as the step's label. */
 function stepLabel(call: ToolCall): string {
-  const rec = (call.input && typeof call.input === 'object' ? call.input : {}) as Record<string, unknown>
-  const path = typeof rec.path === 'string' ? rec.path : ''
-  const s = (k: string): string => (typeof rec[k] === 'string' ? (rec[k] as string) : '')
+  const path = targetOf(call)
   switch (call.name) {
     case 'write_file': return `Writing ${c.bold(path)}`
     case 'edit_file': return `Editing ${c.bold(path)}`
     case 'delete_file': return `Deleting ${c.bold(path)}`
     case 'read_file': return `Reading ${path}`
     case 'list_dir': return `Inspecting ${path || 'folder'}`
-    case 'find_files': return `Finding ${s('pattern') || s('query')}`
-    case 'search_code': return `Searching ${s('pattern') || s('query')}`
-    case 'run_command': return `Running ${c.bold(s('command'))}`
+    case 'find_files': return `Finding ${path}`
+    case 'search_code': return `Searching ${path}`
+    case 'run_command': return `Running ${c.bold(path)}`
     case 'run_code': return 'Running code'
-    case 'web_search': return `Searching web · ${s('query')}`
-    case 'web_fetch': return `Fetching ${s('url')}`
-    case 'wiki_search': return `Wiki · ${s('query')}`
+    case 'web_search': return `Searching web · ${path}`
+    case 'web_fetch': return `Fetching ${path}`
+    case 'wiki_search': return `Wiki · ${path}`
     case 'update_plan': return 'Planning'
     case 'think': return 'Thinking'
     default: return call.name ?? 'tool'
@@ -120,7 +163,30 @@ function stepFailed(result: string): boolean {
   )
 }
 
-/** Render one executed step as a Claude-style bullet (plan → TODOs, writes → diff card). */
+/** The colour kind a finished step renders with. */
+function kindFor(call: ToolCall, failed: boolean): 'write' | 'exec' | 'read' | 'web' | 'plan' | 'fail' {
+  if (failed) return 'fail'
+  switch (call.name) {
+    case 'write_file':
+    case 'edit_file':
+    case 'delete_file':
+      return 'write'
+    case 'run_command':
+    case 'run_code':
+      return 'exec'
+    case 'web_search':
+    case 'web_fetch':
+    case 'wiki_search':
+      return 'web'
+    case 'update_plan':
+    case 'think':
+      return 'plan'
+    default:
+      return 'read'
+  }
+}
+
+/** Render one executed step as a Claude-style ⏺ call with a ⎿ result (plan → TODOs, writes → diff card). */
 function renderStep(call: ToolCall, result: string, ms: number): void {
   const failed = stepFailed(result)
   const name = call.name
@@ -134,20 +200,24 @@ function renderStep(call: ToolCall, result: string, ms: number): void {
     process.stdout.write('\n' + tui.bullet('Thinking', thought.slice(0, 400), 'think') + '\n')
     return
   }
-  const label = `${stepLabel(call)}${ms ? '  ' + fmtMs(ms) : ''}`
+  const display = TOOL_DISPLAY[name ?? ''] ?? name ?? 'tool'
+  const target = targetOf(call)
   const lines = contentLines(call)
   if ((name === 'write_file' || name === 'edit_file') && lines && !failed) {
-    const rec = call.input as Record<string, unknown>
-    const path = typeof rec.path === 'string' ? rec.path : 'file'
-    process.stdout.write('\n' + tui.bullet(label, '', 'act') + '\n')
+    const meta = `+${lines.length} lines${ms ? ' · ' + fmtMs(ms) : ''}`
+    process.stdout.write('\n' + tui.toolCall(display, target, 'write', meta) + '\n')
     const shown: tui.DiffLine[] = lines.slice(0, 14).map((t, i) => ({ n: i + 1, type: 'add', text: t }))
     if (lines.length > 14) shown.push({ type: 'ctx', text: `… +${lines.length - 14} more lines` })
-    for (const l of tui.diffBlock(path, shown)) process.stdout.write(l + '\n')
+    for (const l of tui.diffBlock(target || 'file', shown)) process.stdout.write(l + '\n')
     return
   }
-  const cap = 240
-  const body = result.length > cap ? `${result.slice(0, cap)} …` : result
-  process.stdout.write('\n' + tui.bullet(label, body.split('\n').slice(0, 4).join('\n'), failed ? 'fail' : 'act') + '\n')
+  const meta = ms ? fmtMs(ms) : ''
+  process.stdout.write('\n' + tui.toolCall(display, target, kindFor(call, failed), meta) + '\n')
+  const body = result.trim()
+  if (body) {
+    const cap = 240
+    process.stdout.write(tui.toolResult(body.length > cap ? `${body.slice(0, cap)} …` : body, !failed) + '\n')
+  }
 }
 
 /** Coax a plan/update_plan payload into a {done,text} checklist, defensively. */
@@ -172,14 +242,40 @@ function parsePlanItems(input: unknown): { done: boolean; text: string }[] {
     .map((l) => ({ done: /^[-*]\s*\[x\]/i.test(l), text: l.replace(/^[-*]\s*(\[.\]\s*)?/, '').replace(/^\d+[.)]\s*/, '') }))
 }
 
+/** The permission decisions a gate may return; `undefined`/void auto-allows. */
+export type PermissionDecision = 'allow' | 'allow-session' | 'deny'
+
+/** What the gate learns about a pending side-effecting call. */
+export interface PermissionRequest {
+  call: ToolCall
+  /** Claude-style display name, e.g. `Write`. */
+  displayName: string
+  /** The path / command / pattern the call targets. */
+  target: string
+  kind: 'write' | 'exec'
+}
+
+/** Decides whether a side-effecting tool may run; omit or resolve void to allow. */
+export type PermissionGate = (req: PermissionRequest) => Promise<PermissionDecision | undefined | void>
+
 export interface LoopOptions {
   provider: Provider
   modelId: string
   workspaceDir: string
   /** The user's task/prompt for this run. */
   task: string
+  /**
+   * A conversation to continue (multi-turn REPL session). When empty/absent the
+   * loop seeds a fresh history with the system prompt; when provided it is
+   * appended to and the grown array comes back on the result.
+   */
+  history?: ChatMessage[]
   /** Extra system-prompt lines (e.g. a persona) — appended to the tool prompt. */
   systemExtra?: string
+  /** Gate for side-effecting tools; the REPL wires its ask/auto policy here. */
+  onPermission?: PermissionGate
+  /** Spinner hint text, e.g. "esc to interrupt". Empty/non-TTY disables it. */
+  spinnerHint?: string
   /** Called with the final assistant text when the run finishes. */
   onDone?: (text: string) => void
   /** Signals a hard stop (user Ctrl-C during a turn). */
@@ -190,9 +286,13 @@ export interface LoopResult {
   finalText: string
   turns: number
   toolCalls: number
+  /** The full conversation (seed + every turn of this run), safe to reuse. */
+  history: ChatMessage[]
+  /** Rough token estimate over the whole session (chars/4) — a /status gauge. */
+  tokens: number
 }
 
-/** The CLI's tool gate: agentic (cowork) over the resolved workspace. */
+/** The CLI agent loop: agentic (cowork) over the resolved workspace. */
 function cliGate(settings: ProviderSettings, workspaceDir: string): ToolGate {
   return { settings, mode: 'cowork', workspaceDir }
 }
@@ -269,6 +369,28 @@ export async function runCliTool(call: ToolCall, ctx: ToolContext, tools: readon
   }
 }
 
+/** Run one shell command in the workspace (the REPL's `!` escape). Never throws. */
+export async function runCliCommand(command: string, workspaceDir: string): Promise<string> {
+  const settings = cliSettings(
+    {
+      activeProvider: 'gateway',
+      ollama: { baseUrl: 'http://localhost:11434' },
+      gateway: { baseUrl: '', apiKey: '', authSchema: 'bearer', authHeaderName: 'Authorization' },
+      modelId: ''
+    },
+    workspaceDir
+  )
+  const ctx: ToolContext = {
+    settings,
+    mode: 'cowork',
+    workspaceDir,
+    signal: new AbortController().signal,
+    onPlan: () => {},
+    onCommand: () => {}
+  }
+  return runCommandTool.run({ command }, ctx)
+}
+
 /**
  * Build the system prompt: the same teaching prompt the registry emits (rebuilt
  * here against the CLI's catalogue) plus a CLI-specific preamble.
@@ -311,31 +433,29 @@ function cliToolContext(settings: ProviderSettings, workspaceDir: string, signal
     workspaceDir,
     signal,
     onPlan: () => {}, // plan updates render via the tool's return string; nothing extra to do
-    onCommand: (run) => {
-      // Mirror shell runs so the user sees what executed, like the app's Terminal pane.
-      process.stdout.write(c.yellow(`  ▸ $ ${run.command}\n`))
-    }
+    onCommand: () => {} // the ⏺ Bash call line already shows the command
   }
 }
 
 /**
- * Stream one generation with bounded retries (429 / transient 5xx), printing text
- * as it arrives. Returns the visible text plus any parsed tool calls.
+ * Stream one generation with bounded retries (429 / transient 5xx). The visible
+ * text is BUFFERED (the caller renders it — plain for narration, markdown for
+ * the final answer), the thinking stream stays live under a dim bullet, and a
+ * spinner covers the silent generation window.
  */
 async function streamTurn(
   opts: LoopOptions,
   history: ChatMessage[],
   signal: AbortSignal
-): Promise<{ visible: string; calls: ToolCall[]; truncated: boolean; error?: string }> {
-  const parser = createToolCallParser()
+): Promise<{ visible: string; calls: ToolCall[]; truncated: boolean; interrupted?: boolean; error?: string }> {
   let visible = ''
   let truncated = false
   let lastError: string | undefined
 
   for (let attempt = 0; attempt < 4; attempt++) {
     visible = ''
-    parser // one parser per attempt: a retried turn re-parses from scratch
-    const p = createToolCallParser()
+    const spin = startSpinner(attempt === 0 ? 'Thinking' : 'Retrying', opts.spinnerHint ?? '')
+    const p = createToolCallParser() // one parser per attempt: a retried turn re-parses from scratch
     const calls: ToolCall[] = []
     let thinking = false // mid-reasoning stream, so we can close the block cleanly
     try {
@@ -348,6 +468,7 @@ async function streamTurn(
             // it arrives — the terminal twin of the app's thinking view.
             if (SHOW_THINKING) {
               if (!thinking) {
+                spin.stop()
                 process.stdout.write('\n' + tui.bullet('Thinking', '', 'think') + '\n  ')
                 thinking = true
               }
@@ -356,20 +477,19 @@ async function streamTurn(
             return
           }
           if (chunk.delta) {
+            spin.stop()
             if (thinking) {
               process.stdout.write('\n')
               thinking = false
             }
             const r = p.push(chunk.delta)
-            if (r.text) {
-              visible += r.text
-              process.stdout.write(r.text)
-            }
+            if (r.text) visible += r.text
             if (r.call) calls.push(r.call)
           }
           if (chunk.toolCall) {
             // Native structured call (should not occur with nativeTools off, but
             // fold it in defensively so a drift never drops the work).
+            spin.stop()
             calls.push({ block: toolCallBlock(chunk.toolCall.name, safeParse(chunk.toolCall.argsJson)), name: chunk.toolCall.name, input: safeParse(chunk.toolCall.argsJson), error: null })
           }
           if (chunk.done && chunk.truncated) truncated = true
@@ -377,13 +497,13 @@ async function streamTurn(
         },
         signal
       )
+      spin.stop()
       if (thinking) process.stdout.write('\n')
       // Drain anything still buffered (a call whose close fence landed in the
       // final delta, or a truncated open block → keep as text, not lost).
       const tail = p.flush()
       if (tail && !p.holdingBlock) {
         visible += tail
-        process.stdout.write(tail)
       } else if (tail && p.holdingBlock) {
         // A truncated tool block: try to parse the partial as a call anyway —
         // the model may have finished the JSON before the fence closed.
@@ -404,10 +524,12 @@ async function streamTurn(
       if (lastError) return { visible, calls, truncated, error: lastError }
       return { visible, calls, truncated }
     } catch (err) {
+      spin.stop()
+      if (signal.aborted) return { visible, calls: [], truncated: false, interrupted: true }
       lastError = toErrorMessage(err)
       const wait = rateLimitRetryDelay(err, attempt)
       if (wait === null) return { visible, calls, truncated, error: lastError }
-      process.stdout.write(c.yellow(`\n  (${lastError} — retrying in ${Math.round(wait / 1000)}s)\n`))
+      process.stdout.write(c.amber(`\n  (${lastError} — retrying in ${Math.round(wait / 1000)}s)\n`))
       await new Promise((r) => setTimeout(r, wait))
     }
   }
@@ -437,8 +559,14 @@ interface GuardState {
   narrated: Map<string, string>
 }
 
+/** Rough token estimate over a conversation — chars/4, good enough for a gauge. */
+export function estimateTokens(history: ChatMessage[]): number {
+  return Math.round(history.reduce((n, m) => n + m.content.length, 0) / 4)
+}
+
 /**
- * Run the agent to completion. Returns the final assistant text.
+ * Run the agent to completion. Returns the final assistant text plus the grown
+ * conversation, so the REPL can carry one session across many tasks.
  */
 export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
   const workspaceDir = opts.workspaceDir
@@ -455,10 +583,11 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
   const signal = opts.signal ?? new AbortController().signal
   const ctx = cliToolContext(settings, workspaceDir, signal)
 
-  const history: ChatMessage[] = [
-    { role: 'system', content: cliSystemPrompt(gate, workspaceDir, opts.systemExtra) },
-    { role: 'user', content: opts.task }
-  ]
+  const history: ChatMessage[] = opts.history ?? []
+  if (history.length === 0) {
+    history.push({ role: 'system', content: cliSystemPrompt(gate, workspaceDir, opts.systemExtra) })
+  }
+  history.push({ role: 'user', content: opts.task })
 
   const guards: GuardState = {
     plan: [],
@@ -472,6 +601,7 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
     recentSigs: [],
     narrated: new Map()
   }
+  const sessionAllowed = new Set<string>() // "don't ask again" picks land here
   let toolCalls = 0
   let turns = 0
   const carried: ToolCall[] = []
@@ -504,6 +634,11 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
       const r = await streamTurn(opts, history, signal)
       turnText = r.visible
       truncated = r.truncated
+      if (r.interrupted) {
+        process.stdout.write(c.amber('\n⏹  Interrupted by user\n'))
+        finalText = turnText || finalText
+        break
+      }
       if (r.error) {
         process.stdout.write(c.red(`\n${r.error}\n`))
         finalText = finalText || `Error: ${r.error}`
@@ -518,9 +653,42 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
     }
 
     if (call) {
-      // Execute. The dispatcher never throws; errors come back as strings.
+      // Narration that streamed before the call is printed once, dim-plain.
+      if (turnText.trim()) process.stdout.write('\n' + turnText.trimEnd() + '\n')
+
+      // Permission gate: side-effecting tools ask before they act (when wired).
+      const tool = TOOLS.find((t) => t.name === call?.name)
+      if (tool?.sideEffect && opts.onPermission && !sessionAllowed.has(call.name ?? '')) {
+        const decision = await opts.onPermission({
+          call,
+          displayName: TOOL_DISPLAY[call.name ?? ''] ?? call.name ?? 'tool',
+          target: targetOf(call),
+          kind: tool.sideEffect === 'exec' ? 'exec' : 'write'
+        })
+        if (decision === 'deny') {
+          process.stdout.write(
+            '\n' +
+              tui.toolCall(TOOL_DISPLAY[call.name ?? ''] ?? call.name ?? 'tool', targetOf(call), 'deny') +
+              '\n' +
+              tui.toolResult('declined by the user — asking Myto to try another way', false) +
+              '\n'
+          )
+          history.push({ role: 'assistant', content: call.block })
+          history.push({
+            role: 'user',
+            content:
+              'The user DECLINED this action. Do not repeat the same call. Ask what they would like you to do differently, or propose and take another approach.'
+          })
+          continue
+        }
+        if (decision === 'allow-session') sessionAllowed.add(call.name ?? '')
+      }
+
+      // Execute under the spinner. The dispatcher never throws; errors come back as strings.
+      const spin = startSpinner(TOOL_VERB[call.name ?? ''] ?? 'Working', opts.spinnerHint ?? '')
       const t0 = Date.now()
       const result = await runCliTool(call, ctx, TOOLS)
+      spin.stop()
       toolCalls++
       renderStep(call, result, Date.now() - t0)
       if ((call.name === 'write_file' || call.name === 'edit_file') && !stepFailed(result)) {
@@ -533,7 +701,6 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
       guards.recentSigs.push(`${call.name}:${JSON.stringify(call.input ?? {}).slice(0, 200)}`)
       if (guards.recentSigs.length > OSCILLATION_WINDOW * 2) guards.recentSigs.shift()
       // Building actions reset the research streak; read-only ones extend it.
-      const tool = cliTools().find((t) => t.name === call?.name)
       const sideEffect = tool?.sideEffect
       if (sideEffect) {
         guards.researchStreak = 0
@@ -551,6 +718,7 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
     finalText = turnText || finalText
 
     if (truncated) {
+      if (turnText.trim()) process.stdout.write('\n' + turnText.trimEnd() + '\n')
       history.push({ role: 'assistant', content: turnText })
       history.push({
         role: 'user',
@@ -579,6 +747,7 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
     // Plan-completion gate (RC-1): a no-call turn with pending plan items is not a finish.
     if (planHasPending(guards.plan) && guards.planNudges < MAX_PLAN_INCOMPLETE) {
       guards.planNudges++
+      if (turnText.trim()) process.stdout.write('\n' + turnText.trimEnd() + '\n')
       history.push({ role: 'assistant', content: turnText })
       history.push({
         role: 'user',
@@ -610,6 +779,7 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
           continue
         }
       }
+      if (turnText.trim()) process.stdout.write('\n' + turnText.trimEnd() + '\n')
       history.push({ role: 'assistant', content: turnText })
       history.push({
         role: 'user',
@@ -621,6 +791,7 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
     // Announced action ("Now I'm building…") with no call (RC-4).
     if (looksLikeAnnouncedAction(turnText) && guards.announcedActions < MAX_ANNOUNCED_ACTION) {
       guards.announcedActions++
+      if (turnText.trim()) process.stdout.write('\n' + turnText.trimEnd() + '\n')
       history.push({ role: 'assistant', content: turnText })
       history.push({ role: 'user', content: 'You announced a next step but made no tool call. Do it now with the appropriate tool.' })
       continue
@@ -629,6 +800,7 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
     // Continuation request ("Shall I continue?").
     if (looksLikeContinuationRequest(turnText) && guards.autoContinues < MAX_AUTO_CONTINUE) {
       guards.autoContinues++
+      if (turnText.trim()) process.stdout.write('\n' + turnText.trimEnd() + '\n')
       history.push({ role: 'assistant', content: turnText })
       history.push({ role: 'user', content: 'Yes — continue now. Do not ask again; keep working until the task is done.' })
       continue
@@ -637,6 +809,7 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
     // False limit / deferral ("I'll do it in the next turn…").
     if (looksLikeFalseLimitDeferral(turnText) && guards.falseLimits < MAX_FALSE_LIMIT_DEFERRAL) {
       guards.falseLimits++
+      if (turnText.trim()) process.stdout.write('\n' + turnText.trimEnd() + '\n')
       history.push({ role: 'assistant', content: turnText })
       history.push({ role: 'user', content: 'There is no such limit. Act now with the available tools — do not defer to a later turn.' })
       continue
@@ -649,6 +822,7 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
       break
     }
     if (verdict === 'nudge') {
+      if (turnText.trim()) process.stdout.write('\n' + turnText.trimEnd() + '\n')
       history.push({ role: 'assistant', content: turnText })
       history.push({ role: 'user', content: 'Stop researching and act on what you have: write the file, run the command, or deliver the answer now.' })
       continue
@@ -669,7 +843,8 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
       break
     }
 
-    // Otherwise this is the genuine final answer.
+    // Otherwise this is the genuine final answer — leave it unshown; the
+    // markdown pass below renders it properly.
     finalText = turnText
     break
   }
@@ -677,10 +852,19 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
   if (turns >= MAX_TOOL_TURNS && !finalText) {
     finalText = 'Stopped: reached the tool-turn ceiling before finishing.'
   }
+  // Render the final answer as terminal markdown. Narration shown inside the
+  // guard cascade printed plain; only errors skip this pass (printed red above).
+  if (finalText && !/^Error:/.test(finalText) && !/^Stopped: reached the tool-turn ceiling/.test(finalText)) {
+    process.stdout.write('\n' + renderMarkdown(finalText) + '\n')
+  }
+  // Give the session memory of the answer (multi-turn follow-ups need it).
+  if (finalText && !/^Error:/.test(finalText) && history[history.length - 1]?.content !== finalText) {
+    history.push({ role: 'assistant', content: finalText })
+  }
   if (toolCalls > 0) {
     const tests = /(\d+\s*\/\s*\d+|all)\s+tests?\s+pass|tests?\s+pass(?:ed)?(?:\s*·?\s*\d+\/\d+)?/i.exec(finalText)?.[0]
     process.stdout.write(tui.summary({ files: changed.size, add: linesAdded, del: 0, turns, tests }) + '\n')
   }
   opts.onDone?.(finalText)
-  return { finalText, turns, toolCalls }
+  return { finalText, turns, toolCalls, history, tokens: estimateTokens(history) }
 }

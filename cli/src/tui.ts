@@ -3,7 +3,9 @@
  * run view (plan · steps · diffs · results) and the status sidebar. Pure string
  * composition: every function returns text, so rendering stays testable (strip
  * the colour, assert structure) and degrades to clean plain text when stdout is
- * not a TTY. The layout is adapted from the desktop app's Build pane.
+ * not a TTY. The layout follows the Claude Code / Freebuff school: a big block
+ * wordmark, a short welcome, `⏺` tool calls with `⎿` results, and a tight
+ * summary line when the run lands.
  */
 import { paint as c, gradient, stripAnsi, sym, colorOn } from './ui'
 
@@ -131,17 +133,6 @@ export function panel(sections: PanelSection[]): string[] {
   return out
 }
 
-/** A featherweight syntax tint for context lines (keywords + numbers). */
-function tint(s: string): string {
-  if (!colorOn) return s
-  return s
-    .replace(
-      /\b(const|let|var|function|return|import|from|export|async|await|if|else|for|while|class|new|type|interface|def|public|private)\b/g,
-      (m) => c.magenta(m)
-    )
-    .replace(/\b(\d+(?:\.\d+)?)\b/g, (m) => c.amber(m))
-}
-
 export interface DiffLine {
   n?: number
   type: 'ctx' | 'add' | 'del'
@@ -159,7 +150,7 @@ export function diffBlock(file: string, lines: DiffLine[], w = width()): string[
     const shown = plain.length > avail ? plain.slice(0, Math.max(0, avail - 1)) + '…' : plain
     const num = c.gray(String(l.n ?? '').padStart(3))
     const sign = l.type === 'add' ? c.green('+') : l.type === 'del' ? c.red('-') : ' '
-    const body = l.type === 'add' ? c.green(shown) : l.type === 'del' ? c.red(shown) : tint(shown)
+    const body = l.type === 'add' ? c.green(shown) : l.type === 'del' ? c.red(shown) : plain
     return `${num} ${sign} ${body}`
   })
   return box({ title: file, titleRight: counts, lines: rows, width: w, accent: c.gray })
@@ -188,21 +179,61 @@ export interface SidebarState {
   workspace?: string
 }
 
-/** The welcome screen — Freebuff × Claude hybrid: block wordmark, tips, status bar, input. */
+/** The chunky ANSI-shadow wordmark, tinted violet→magenta→cyan top-to-bottom. */
+const MYTO_ROWS = [
+  '███╗   ███╗██╗   ██╗████████╗ ██████╗  ██████╗ ',
+  '████╗ ████║╚██╗ ██╔╝╚══██╔══╝██╔═══██╗██╔═══██╗',
+  '██╔████╔██║ ╚████╔╝    ██║   ██║   ██║██║   ██║',
+  '██║╚██╔╝██║  ╚██╔╝     ██║   ██║   ██║██║   ██║',
+  '██║ ╚═╝ ██║   ██║      ██║   ╚██████╔╝╚██████╔╝',
+  '╚═╝     ╚═╝   ╚═╝      ╚═╝    ╚═════╝  ╚═════╝ '
+]
+export function blockWordmark(): string[] {
+  if (!colorOn) return MYTO_ROWS.map((r) => r.trimEnd())
+  const stops: Array<[number, number, number]> = [
+    [167, 139, 250], // violet
+    [232, 121, 249], // magenta
+    [34, 211, 238] // cyan
+  ]
+  const n = MYTO_ROWS.length - 1
+  return MYTO_ROWS.map((row, i) => {
+    const seg = (i / n) * (stops.length - 1)
+    const k = Math.min(Math.floor(seg), stops.length - 2)
+    const f = seg - k
+    const [r1, g1, b1] = stops[k]
+    const [r2, g2, b2] = stops[k + 1]
+    const r = Math.round(r1 + (r2 - r1) * f)
+    const g = Math.round(g1 + (g2 - g1) * f)
+    const b = Math.round(b1 + (b2 - b1) * f)
+    return `\x1b[1m\x1b[38;2;${r};${g};${b}m${row}\x1b[0m`
+  })
+}
+
+/** "Tips for getting started:" — Claude-style numbered suggestions. */
+export function suggestions(items: string[]): string {
+  return [
+    c.gray('Tips for getting started:'),
+    ...items.map((s, i) => `${c.gray(`${i + 1}.`)} ${s}`)
+  ].join('\n')
+}
+
+/** The welcome screen — Claude Code style: big wordmark, short hello, setup, tips. */
 export function welcome(state: SidebarState, suggest: string[]): string {
-  const provider = state.provider + (state.providerUrl ? c.dim('  ' + state.providerUrl) : '')
   return [
     '',
     ...blockWordmark(),
     '',
-    `${c.bold('Myto')} ${c.gray('will run commands on your behalf to help you build.')}`,
+    `  ${c.violet('✻')} ${c.bold('Welcome to Myto!')}  ${c.dim('your agentic coding companion')}`,
     '',
-    `${c.gray('Directory')}  ${c.dim(state.workspace ?? process.cwd())}`,
-    `${c.gray('Model')}  ${state.model ? c.cyan(state.model) : c.red('(none)')}   ${c.gray('Provider')}  ${provider}`,
+    `  ${c.gray('/help for help, /status for your current setup')}`,
     '',
-    suggestions(suggest),
+    `  ${c.gray('cwd')}   ${c.dim(state.workspace ?? process.cwd())}`,
+    `  ${c.gray('model')} ${state.model ? c.cyan(state.model) : c.red('(none set)')}   ${c.gray(state.provider)}${state.providerUrl ? c.dim('  ' + state.providerUrl) : ''}`,
     '',
-    statusBar(`● myto · ${state.model || 'no model set'}`, 'type a task  ·  / for commands  ·  Ctrl-C to exit'),
+    suggestions(suggest)
+      .split('\n')
+      .map((l) => '  ' + l)
+      .join('\n'),
     ''
   ].join('\n')
 }
@@ -216,18 +247,17 @@ export interface RunState {
   byok?: boolean
 }
 
-/** The run header — Freebuff style: a rule, then the task echoed with a time + green bar. */
+/** The run header — a rule, the echoed prompt and a dim model chip. */
 export function runHeader(s: RunState): string {
   const w = width()
-  const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   const task = s.task.length > w - 4 ? s.task.slice(0, w - 5) + '…' : s.task
   // The working folder is shown once on the welcome screen; don't reprint it on
   // every run — that only adds a repeated path line between tasks.
   return [
     '',
-    gradient('─'.repeat(w)),
-    `${c.gray('[' + time + ']')}  ${c.gray(s.model)} ${s.byok ? badge('BYOK', [167, 139, 250]) : ''}${s.fallback ? c.dim('  ↳ ' + s.fallback) : ''}`,
-    `${c.green('▌')} ${c.bold(task)}`,
+    c.gray('─'.repeat(Math.min(w, 64))),
+    `${c.gray('❯')} ${c.bold(task)}`,
+    `${c.dim(s.model)}${s.byok ? ' ' + badge('BYOK', [167, 139, 250]) : ''}${s.fallback ? c.dim('  ↳ ' + s.fallback) : ''}`,
     ''
   ].join('\n')
 }
@@ -240,36 +270,41 @@ export interface SummaryState {
   tests?: string
 }
 
-/** The run footer — a rule, then a done bullet with the changes tally. */
+/** The run footer — a single Claude-style ⏺ Done line with the changes tally. */
 export function summary(s: SummaryState): string {
-  const w = width()
-  const lines = ['', gradient('─'.repeat(w))]
-  if (s.tests) lines.push(`${c.green(sym.check)} ${c.bold('Tests passed')} ${c.dim('· ' + s.tests)}`)
-  lines.push(
-    `${c.green(sym.spark)} ${c.bold('Done')}   ${c.bold(String(s.files))} ${c.gray('files')}  ${c.green('+' + s.add)} ${c.red('-' + s.del)}  ${c.gray(s.turns + ' turns')}`,
-    ''
-  )
-  return lines.join('\n')
+  const bits = [`${c.bold(String(s.files))} ${c.gray('files')}`, `${c.green('+' + s.add)} ${c.red('-' + s.del)}`, c.gray(`${s.turns} turns`)]
+  if (s.tests) bits.push(`${c.green(sym.check)} ${c.bold(s.tests)}`)
+  return `\n${c.green('⏺')} ${c.bold('Done')} — ${bits.join(c.gray('  ·  '))}\n`
 }
 
-/** The chunky 5-row block wordmark, tinted green→white top-to-bottom (the glow). */
-const MYTO_ROWS = [
-  '█   █ █   █ █████ █████',
-  '██ ██  █ █    █   █   █',
-  '█ █ █   █     █   █   █',
-  '█   █   █     █   █   █',
-  '█   █   █     █   █████'
-]
-export function blockWordmark(): string[] {
-  if (!colorOn) return MYTO_ROWS
-  const n = MYTO_ROWS.length - 1
-  return MYTO_ROWS.map((row, i) => {
-    const t = i / n
-    const r = Math.round(74 + (240 - 74) * t)
-    const g = Math.round(222 + (246 - 222) * t)
-    const b = Math.round(128 + (252 - 128) * t)
-    return `\x1b[1m\x1b[38;2;${r};${g};${b}m${row}\x1b[0m`
-  })
+/** The tool-call line: `⏺ Write(src/app.ts)` coloured by the kind of action. */
+export function toolCall(
+  name: string,
+  target: string,
+  kind: 'write' | 'exec' | 'read' | 'web' | 'plan' | 'fail' | 'deny',
+  meta = ''
+): string {
+  const dot =
+    kind === 'write' ? c.green('⏺') : kind === 'exec' ? c.amber('⏺') : kind === 'fail' ? c.red('⏺') : kind === 'deny' ? c.amber('⏺') : c.cyan('⏺')
+  const label =
+    kind === 'write' ? c.green(name) : kind === 'exec' ? c.amber(name) : kind === 'fail' ? c.red(name) : kind === 'deny' ? c.amber(name) : c.cyan(name)
+  const targetStr = target ? `${c.bold(target)}` : ''
+  const metaStr = meta ? ` ${c.dim(meta)}` : ''
+  return `${dot} ${label}${targetStr ? '(' + targetStr + ')' : ''}${metaStr}`
+}
+
+/** The result line under a call: `  ⎿ …`, dim, wrapped to the terminal width. */
+export function toolResult(text: string, ok = true): string {
+  const mark = ok ? c.gray('⎿') : c.amber('⎿')
+  const w = width()
+  const lines = text
+    .split('\n')
+    .slice(0, 3)
+    .map((l, i) => {
+      const body = l.length > w - 8 ? l.slice(0, w - 9) + '…' : l
+      return i === 0 ? `  ${mark} ${body}` : `    ${c.gray(body)}`
+    })
+  return lines.join('\n')
 }
 
 /** A full-width inverse status strip: left label, right actions. */
@@ -282,21 +317,16 @@ export function statusBar(left: string, right: string): string {
   return colorOn ? `\x1b[48;2;30;31;38m\x1b[38;2;205;205;212m${text}\x1b[0m` : text
 }
 
-/** A rounded input box with a green cursor and a dim placeholder. */
+/** A rounded input box with a cyan caret and a dim placeholder. */
 export function inputBox(placeholder: string): string {
   const w = width()
   const inner = w - 4
-  const line = `${c.green('▌')} ${c.dim(placeholder)}`
+  const line = `${c.cyan('❯')} ${c.dim(placeholder)}`
   return [
     c.gray('╭' + '─'.repeat(w - 2) + '╮'),
     `${c.gray('│')} ${padEnd(line, inner)} ${c.gray('│')}`,
     c.gray('╰' + '─'.repeat(w - 2) + '╯')
   ].join('\n')
-}
-
-/** "Try one of these:" with green arrow suggestions. */
-export function suggestions(items: string[]): string {
-  return [c.gray('Try one of these:'), ...items.map((s) => `${c.green('→')} ${s}`)].join('\n')
 }
 
 /** A Claude-style activity bullet: • Title, with optional dim/italic body. */
@@ -316,4 +346,3 @@ export function todos(items: { done: boolean; text: string }[]): string {
 }
 
 // __TUI_APPEND__
-
