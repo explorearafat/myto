@@ -13,35 +13,71 @@ myto "add dark mode to the settings page"
 > Published on npm as **`mytocode`** — the bare name `myto` is blocked as too
 > similar to existing packages. The installed command is still `myto`.
 
-## The main menu (v1.3)
+## The interface (v1.4)
 
-`myto` opens on a numbered menu — pick with the number keys, ↑/↓ + Enter, or a
-mouse click; `Esc`/`q` exits:
+`myto` boots with a short animation — the agent face assembles line by line,
+blinks once, and settles into the dashboard:
 
 ```
-✦ M Y T O
-AI coding agent, right in your terminal
-v1.3.0  ·  /help for commands
-  ✓ ready gateway https://api.openai.com/v1 · key ····ab12 · model gpt-4o-mini · C:\your-project
-
-What would you like to do?
- ❯ 1. Chat       General-purpose AI assistant
-   2. Cowork     Collaborative AI workspace — Myto reads, edits and runs
-   3. Connector  Provider endpoints — base URL, API key, connection test
-   4. Skills     Skills and custom agents
-   5. Command    Quick actions and automation
-   6. Plugin     Extend functionality with local plugins
-   7. Model      Provider and model management
+         ·  ·  ·  ·  ·  ·  ·  ·  ·
+ ╭────────────────────────────────────────╮
+ │                                        │
+ │         ######          ######         │
+ │         ######          ######         │
+ │                                        │
+ │               M  Y  T  O               │
+ │           \────────────────/           │
+ │                                        │
+ ╰────────────────────────────────────────╯
+  ● ~/projects/myto  ◆ gpt-4o-mini  ☁ gateway
 ```
 
-- **Chat** — a plain streaming conversation with no tools and no file access;
-  `Esc` interrupts a reply, `/back` returns to the menu.
-- **Cowork** — the full agent REPL: sessions, permission prompts, markdown
-  answers, `!` shell escape, and everything listed under *Session features*.
-  `/menu` brings the main menu back.
-- **Connector** — switch between an OpenAI-compatible gateway and local Ollama,
-  set the base URL / API key (stored in `~/.myto/config.json`, never printed in
-  full), and run a real connection test with latency.
+The dashboard is the only text above the input: working folder, model,
+provider. Nothing else.
+
+**First run** — before the dashboard appears, a wizard signs you in, all driven
+by keyboard or mouse:
+
+1. **Provider** — an OpenAI-compatible gateway (OpenAI, OpenRouter, vLLM, any
+   `/v1` endpoint) or local Ollama.
+2. **Credentials** — the API key is masked as you type (`****`), stored in
+   `~/.myto/config.json`, never echoed or logged.
+3. **Model** — fetched live from the endpoint and picked from a menu (mouse
+   clickable); if the endpoint lists nothing you type the id.
+4. **Folder** — a mouse-usable directory browser: descend, go up, or commit to
+   the folder Myto should work in.
+
+**The input box** sits at the bottom of the terminal. Under it a live mode
+strip:
+
+```
+ ⇧⇥ ask before acting   ·   ⌃E effort medium
+```
+
+- **Shift+Tab** cycles the permission policy: *ask before acting* ⇄
+  *auto-approve* (`/permissions` does the same).
+- **Ctrl+E** cycles effort — `low` (15 tool turns, quick questions), `medium`
+  (40), `high` (200 — room for long heavy builds) (`/effort` does the same).
+
+**When you submit a prompt** it lifts above the stream as a cyan-barred echo
+(`▌ your prompt`) with a dim model chip. The model's chain-of-thought prints
+below it in dim ash at low opacity while it thinks, tool calls land as
+colour-coded `⏺ Write(src/app.ts)` lines with `⎿` results (green = writes,
+amber = shell, cyan = reads, red = failures), and the final answer settles into
+its own bordered panel rendered as terminal markdown.
+
+Pipes and CI never hang: without a TTY the menus print listings instead of
+waiting, `myto "<task>"` runs one-shot, and a closed stdin exits cleanly.
+Works on Windows PowerShell / Windows Terminal, macOS and Linux terminals.
+
+## The numbered menu
+
+`/menu` opens a hub with seven
+destinations — Chat (a plain streaming assistant with no tools), Cowork (the
+agent interface), Connector (switch provider, set the base URL / key, run a
+real connection test with latency), Skills, Command, Plugin, Model — pick with
+number keys, ↑/↓ + Enter, or a mouse click; Esc/q exits.
+
 - **Skills** — instruction packs that shape how the agent works. A skill is a
   markdown file whose first `# heading` is its name; the body rides the system
   prompt. Discover in `<workspace>/.myto/skills/` then `~/.myto/skills/`
@@ -61,12 +97,6 @@ What would you like to do?
     "command": "npm run build"   // for kind: "command"
   }
   ```
-
-- **Model** — pick a model from the live endpoint list; the choice persists.
-
-Pipes and CI never hang: without a TTY the menus print their listings instead of
-waiting, `myto "<task>"` runs one-shot, and a closed stdin exits cleanly.
-Works on Windows PowerShell / Windows Terminal, macOS and Linux terminals.
 
 ## Build (from this repo)
 

@@ -21,6 +21,10 @@ export interface ReadOpts {
   placeholder?: string
   /** Dim status line rendered under the box (cwd · model · hints). */
   hint?: string
+  /** Dim strip rendered under the box — mode affordances (⇧⇥ permissions · ⌃E effort). */
+  strip?: () => string
+  /** Extra raw-key handlers, checked before editing keys (e.g. Shift+Tab, Ctrl-E). */
+  hotkeys?: { seq: string; run: () => void }[]
 }
 
 /** Commands whose name starts with what was typed after '/'. Pure, for tests. */
@@ -107,6 +111,10 @@ export async function readTask(commands: SlashCmd[], opts: ReadOpts = {}): Promi
       out.write(`\n ${c.gray(opts.hint)}`)
       rows++
     }
+    if (opts.strip) {
+      out.write(`\n ${c.gray(opts.strip())}`)
+      rows++
+    }
     prevRows = rows
   }
 
@@ -132,6 +140,11 @@ export async function readTask(commands: SlashCmd[], opts: ReadOpts = {}): Promi
     }
     onData = (b: Buffer): void => {
       const s = b.toString('utf8')
+      const hot = opts.hotkeys?.find((h) => h.seq === s)
+      if (hot) {
+        hot.run()
+        return render()
+      }
       const menu = filterSlash(buf, commands)
       const pick = (): SlashCmd => menu[Math.min(sel, menu.length - 1)]
       if (s === '\r' || s === '\n') return finish(menu.length ? pick().name : buf)

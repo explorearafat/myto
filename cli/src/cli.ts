@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { configHint, isConfigured, loadConfig, resolveWorkspace, saveUserConfig, userConfigPath, type MytoCliConfig } from './config'
-import { runAgentLoop, runCliCommand, setThinking, thinkingOn, cliTools, estimateTokens, type PermissionDecision } from './loop'
+import { runAgentLoop, runCliCommand, setThinking, thinkingOn, cliTools, estimateTokens, maxTurnsFor, type PermissionDecision } from './loop'
 import { createProvider, type Provider } from '@app/main/providers'
 import type { ChatMessage } from '@app/shared/types'
 import * as ui from './ui'
@@ -11,7 +11,9 @@ import * as input from './input'
 import { renderMarkdown } from './md'
 import { startSpinner } from './spinner'
 import { watchInterrupt } from './interrupt'
-import { MAIN_MENU, authLine, numberMenu } from './menu'
+import { MAIN_MENU, numberMenu } from './menu'
+import { bootFace, dashboardLine } from './face'
+import { canRunSetup, runSetup } from './setup'
 import { chatSession } from './chat'
 import { QUICK_ACTIONS, type QuickAction } from './actions'
 import { listSkills, saveSkill, skillTemplate, type Skill } from './skills'
@@ -33,6 +35,7 @@ const SLASH: { name: string; desc: string }[] = [
   { name: '/connector', desc: 'Provider endpoints, keys and connection test' },
   { name: '/dir', desc: 'Switch the working folder: /dir <path>' },
   { name: '/permissions', desc: 'Toggle ask-before-acting / auto-approve' },
+  { name: '/effort', desc: 'Cycle agent effort: low / medium / high' },
   { name: '/tools', desc: "List the agent's tools" },
   { name: '/skills', desc: 'Browse and run skills' },
   { name: '/command', desc: 'Quick actions and automation' },
@@ -194,19 +197,6 @@ function notConfiguredMessage(cfg: MytoCliConfig): string {
     '\n\n' +
     ui.paint.dim('Or set env vars: MYTO_BASE_URL, MYTO_API_KEY, MYTO_MODEL.\n')
   )
-}
-
-/** The auth + workspace header shown under the banner, above the main menu. */
-function authHeader(cfg: MytoCliConfig, workspace: string): string {
-  const isOllama = cfg.activeProvider === 'ollama'
-  return authLine({
-    provider: isOllama ? 'ollama (local)' : 'gateway',
-    url: isOllama ? cfg.ollama.baseUrl : cfg.gateway.baseUrl || '(no base URL)',
-    keyMasked: !isOllama && cfg.gateway.apiKey ? '····' + cfg.gateway.apiKey.slice(-4) : undefined,
-    model: cfg.modelId,
-    workspace,
-    ready: isConfigured(cfg)
-  })
 }
 
 /** One menu-driven one-shot agent run in the workspace (skills, quick actions). */
@@ -476,15 +466,31 @@ async function pluginsMenu(workspace: string): Promise<void> {
 }
 
 /**
- * The interactive app: banner + auth header, then the numbered main menu. Each
- * destination runs as its own sub-session and returns here; Esc/q on the menu
- * exits. Cowork is the classic REPL and comes back to the menu via /menu.
+ * The interactive app. First run: the animated face, then the setup wizard
+ * (provider · key · model · folder — mouse-friendly). Then straight into the
+ * chat interface. The numbered menu stays reachable via /menu as a hub.
  */
 async function app(dir?: string): Promise<number> {
-  const workspace = resolveWorkspace(dir)
-  process.stdout.write(ui.banner(VERSION))
-  process.stdout.write(authHeader(loadConfig(), workspace) + '\n')
+  const startWs = resolveWorkspace(dir)
+  let workspace = startWs
+  const firstCfg = loadConfig()
+  if (!isConfigured(firstCfg)) {
+    if (!canRunSetup()) {
+      process.stderr.write(notConfiguredMessage(firstCfg))
+      return 1
+    }
+    const r = await runSetup(startWs)
+    const cfg = loadConfig()
+    if (!r.ok || !isConfigured(cfg)) {
+      process.stderr.write(notConfiguredMessage(cfg))
+      return 1
+    }
+    workspace = r.workspace ?? startWs
+  }
   for (;;) {
+    // Cowork is the home screen; it returns 2 when the user asks for the menu.
+    const code = await repl(dir, workspace)
+    if (code !== 2) return code
     const pick = await numberMenu(MAIN_MENU, 'What would you like to do?')
     if (pick === null) {
       process.stdout.write(ui.paint.dim('  bye ') + ui.paint.magenta(ui.sym.spark) + '\n')
@@ -492,16 +498,13 @@ async function app(dir?: string): Promise<number> {
     }
     const cfg = loadConfig()
     if (pick === 0) {
-      // Chat
       if (!isConfigured(cfg)) {
         process.stderr.write(notConfiguredMessage(cfg))
         continue
       }
       await chatSession({ provider: providerFromSettingsLike(cfg), modelId: cfg.modelId, isTty: ui.isTty })
     } else if (pick === 1) {
-      // Cowork — the classic agent REPL; returns 2 to come back to the menu.
-      const code = await repl(dir)
-      if (code !== 2) return code
+      // Cowork — loops back to the top of this for.
     } else if (pick === 2) {
       await connectorMenu()
     } else if (pick === 3) {
@@ -555,48 +558,46 @@ function permissionGate(): (req: { displayName: string; target: string; kind: 'w
   }
 }
 
-async function repl(dir?: string): Promise<number> {
+async function repl(dir?: string, workspaceOverride?: string): Promise<number> {
   let cfg = loadConfig()
   if (!isConfigured(cfg)) {
     process.stderr.write(notConfiguredMessage(cfg))
     return 1
   }
-  let workspace = resolveWorkspace(dir)
+  let workspace = workspaceOverride ?? resolveWorkspace(dir)
   let lastAnswer = ''
   let lastTask = ''
   let session: ChatMessage[] = []
   let sessionSummary = ''
   let permMode: 'ask' | 'auto' = 'ask'
+  let effort: 'low' | 'medium' | 'high' = 'medium'
   let exitToMenu = false
   const promptHistory: string[] = []
   const p = ui.paint
 
-  const SUGGESTIONS = [
-    'Explain this codebase',
-    'Build a dashboard from a spec file',
-    'Add tests and run them',
-    '/init to write a project memory (MYTO.md)'
-  ]
-
-  const hintLine = (): string =>
-    `${workspace}  ·  ${cfg.modelId || 'no model'}  ·  ${permMode === 'ask' ? 'asks before acting' : 'auto-approve'}  ·  /help for commands`
-
-  const showWelcome = (): void => {
+  /** The face + one dashboard line: folder · model · provider. Nothing else. */
+  const showDashboard = async (animated: boolean): Promise<void> => {
+    await bootFace(animated ? 40 : 0)
     process.stdout.write(
-      tui.welcome(
-        {
-          version: VERSION,
-          provider: cfg.activeProvider === 'ollama' ? 'Ollama (local)' : 'OpenAI-compatible',
-          providerUrl: cfg.activeProvider === 'ollama' ? cfg.ollama.baseUrl : cfg.gateway.baseUrl,
+      '  ' +
+        dashboardLine({
+          workspace,
           model: cfg.modelId,
-          ready: isConfigured(cfg),
-          workspace
-        },
-        SUGGESTIONS
-      )
+          provider: cfg.activeProvider === 'ollama' ? 'ollama · local' : 'gateway'
+        }) +
+        '\n\n'
     )
   }
-  showWelcome()
+  await showDashboard(true)
+
+  /** The strip under the input box — the ⇧⇥ / ⌃E affordances, always live. */
+  const strip = (): string => `⇧⇥ ${permMode === 'ask' ? 'ask before acting' : 'auto-approve'}   ·   ⌃E effort ${effort}`
+  const cyclePermission = (): void => {
+    permMode = permMode === 'ask' ? 'auto' : 'ask'
+  }
+  const cycleEffort = (): void => {
+    effort = effort === 'low' ? 'medium' : effort === 'medium' ? 'high' : 'low'
+  }
 
   /** One agent run with interrupt watching + the session permission policy. */
   const runTask = async (t: string, opts?: { fresh?: boolean; quietHeader?: boolean }): Promise<void> => {
@@ -614,6 +615,7 @@ async function repl(dir?: string): Promise<number> {
         history,
         systemExtra: sessionSummary ? `Earlier session summary (from /compact):\n${sessionSummary}` : undefined,
         spinnerHint: 'esc to interrupt',
+        effort,
         onPermission:
           permMode === 'auto' || !process.stdin.isTTY
             ? undefined
@@ -715,7 +717,7 @@ async function repl(dir?: string): Promise<number> {
         process.stdout.write('\x1b[2J\x1b[3J\x1b[H')
         session = []
         sessionSummary = ''
-        showWelcome()
+        await showDashboard(false)
         return false
       case 'status':
         showStatus()
@@ -806,6 +808,10 @@ async function repl(dir?: string): Promise<number> {
           thinkingOn() ? p.green(`${ui.sym.check} thinking stream on\n`) : p.dim('  thinking stream off\n')
         )
         return false
+      case 'effort':
+        cycleEffort()
+        process.stdout.write(p.green(`${ui.sym.check} effort → `) + p.cyan(effort) + p.dim(` (turn budget ${maxTurnsFor(effort)})\n`))
+        return false
       default:
         process.stdout.write(p.red(`  unknown command /${cmd}`) + p.dim(' — type / for the menu\n'))
         return false
@@ -814,7 +820,14 @@ async function repl(dir?: string): Promise<number> {
 
   for (;;) {
     cfg = loadConfig() // provider/model switches (Connector, Model) apply live
-    const raw = await input.readTask(SLASH, { history: promptHistory, hint: hintLine() })
+    const raw = await input.readTask(SLASH, {
+      history: promptHistory,
+      strip,
+      hotkeys: [
+        { seq: '\x1b[Z', run: cyclePermission }, // Shift+Tab
+        { seq: '\x05', run: cycleEffort } // Ctrl-E
+      ]
+    })
     if (raw === null) {
       await handleSlash('quit', '')
       break

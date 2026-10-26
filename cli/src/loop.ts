@@ -67,7 +67,15 @@ export function thinkingOn(): boolean {
  */
 
 /** Turn budget — Cowork is effectively unbounded; keep a hard runaway ceiling. */
-const MAX_TOOL_TURNS = 80
+/**
+ * Tool-turn budget by effort level — the Shift+Tab/Ctrl-E dial. Low is for
+ * quick questions, high gives heavy builds real room to work.
+ */
+export function maxTurnsFor(effort?: 'low' | 'medium' | 'high'): number {
+  if (effort === 'low') return 15
+  if (effort === 'high') return 200
+  return 40
+}
 
 /** ANSI helpers. Disabled automatically when stdout is not a TTY (piped output). */
 const isTty = process.stdout.isTTY === true
@@ -78,7 +86,8 @@ const c = {
   yellow: (s: string): string => (isTty ? `\x1b[33m${s}\x1b[0m` : s),
   red: (s: string): string => (isTty ? `\x1b[31m${s}\x1b[0m` : s),
   green: (s: string): string => (isTty ? `\x1b[32m${s}\x1b[0m` : s),
-  amber: (s: string): string => (isTty ? `\x1b[38;2;251;191;36m${s}\x1b[0m` : s)
+  amber: (s: string): string => (isTty ? `\x1b[38;2;251;191;36m${s}\x1b[0m` : s),
+  gray: (s: string): string => (isTty ? `\x1b[38;2;150;150;150m${s}\x1b[0m` : s)
 }
 
 /** "0.4s" / "1.2s" / "320ms" — compact duration for a step's right-hand meta. */
@@ -276,6 +285,8 @@ export interface LoopOptions {
   onPermission?: PermissionGate
   /** Spinner hint text, e.g. "esc to interrupt". Empty/non-TTY disables it. */
   spinnerHint?: string
+  /** How hard the agent may work: the tool-turn budget dial (default medium). */
+  effort?: 'low' | 'medium' | 'high'
   /** Called with the final assistant text when the run finishes. */
   onDone?: (text: string) => void
   /** Signals a hard stop (user Ctrl-C during a turn). */
@@ -623,7 +634,8 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
       '\n'
   )
 
-  while (turns < MAX_TOOL_TURNS) {
+  const maxTurns = maxTurnsFor(opts.effort)
+  while (turns < maxTurns) {
     turns++
 
     // Drain a previously batched call without re-generating (the app's RC-7).
@@ -849,13 +861,16 @@ export async function runAgentLoop(opts: LoopOptions): Promise<LoopResult> {
     break
   }
 
-  if (turns >= MAX_TOOL_TURNS && !finalText) {
+  if (turns >= maxTurns && !finalText) {
     finalText = 'Stopped: reached the tool-turn ceiling before finishing.'
   }
-  // Render the final answer as terminal markdown. Narration shown inside the
-  // guard cascade printed plain; only errors skip this pass (printed red above).
+  // Render the final answer inside its own bordered panel — the reply is the
+  // one thing on screen that gets a box. Narration shown inside the guard
+  // cascade printed plain; only errors skip this pass (printed red above).
   if (finalText && !/^Error:/.test(finalText) && !/^Stopped: reached the tool-turn ceiling/.test(finalText)) {
-    process.stdout.write('\n' + renderMarkdown(finalText) + '\n')
+    const w = Math.min(tui.width(), 104)
+    const inner = renderMarkdown(finalText, { width: w - 6 }).split('\n')
+    process.stdout.write('\n' + tui.box({ lines: inner, width: w, accent: c.gray }).join('\n') + '\n')
   }
   // Give the session memory of the answer (multi-turn follow-ups need it).
   if (finalText && !/^Error:/.test(finalText) && history[history.length - 1]?.content !== finalText) {

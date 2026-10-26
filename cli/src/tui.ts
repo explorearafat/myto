@@ -247,19 +247,18 @@ export interface RunState {
   byok?: boolean
 }
 
-/** The run header — a rule, the echoed prompt and a dim model chip. */
+/** The prompt echo — the user's task lifts above the stream: bar + bold text. */
 export function runHeader(s: RunState): string {
   const w = width()
   const task = s.task.length > w - 4 ? s.task.slice(0, w - 5) + '…' : s.task
-  // The working folder is shown once on the welcome screen; don't reprint it on
-  // every run — that only adds a repeated path line between tasks.
+  const meta = [s.model, s.fallback].filter(Boolean).join('  ·  ')
   return [
     '',
-    c.gray('─'.repeat(Math.min(w, 64))),
-    `${c.gray('❯')} ${c.bold(task)}`,
-    `${c.dim(s.model)}${s.byok ? ' ' + badge('BYOK', [167, 139, 250]) : ''}${s.fallback ? c.dim('  ↳ ' + s.fallback) : ''}`,
-    ''
-  ].join('\n')
+    `${c.cyan('▌')} ${c.bold(task)}`,
+    meta ? `  ${c.dim(meta)}` : ''
+  ]
+    .filter((l) => l !== '')
+    .join('\n')
 }
 
 export interface SummaryState {
