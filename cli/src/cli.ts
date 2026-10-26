@@ -3,13 +3,19 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { configHint, isConfigured, loadConfig, resolveWorkspace, saveUserConfig, userConfigPath, type MytoCliConfig } from './config'
 import { runAgentLoop, runCliCommand, setThinking, thinkingOn, cliTools, estimateTokens, type PermissionDecision } from './loop'
-import { createProvider } from '@app/main/providers'
+import { createProvider, type Provider } from '@app/main/providers'
 import type { ChatMessage } from '@app/shared/types'
 import * as ui from './ui'
 import * as tui from './tui'
 import * as input from './input'
 import { renderMarkdown } from './md'
 import { startSpinner } from './spinner'
+import { watchInterrupt } from './interrupt'
+import { MAIN_MENU, authLine, numberMenu } from './menu'
+import { chatSession } from './chat'
+import { QUICK_ACTIONS, type QuickAction } from './actions'
+import { listSkills, saveSkill, skillTemplate, type Skill } from './skills'
+import { listPlugins, pluginTemplate, savePlugin, type PluginManifest } from './plugins'
 
 declare const MYTO_CLI_VERSION: string
 const VERSION = typeof MYTO_CLI_VERSION === 'string' ? MYTO_CLI_VERSION : '0.0.0'
@@ -18,13 +24,18 @@ const msg = (err: unknown): string => (err instanceof Error ? err.message : Stri
 
 /** Slash commands available inside an interactive session (also the `/` palette). */
 const SLASH: { name: string; desc: string }[] = [
+  { name: '/menu', desc: 'Back to the main menu (Chat · Cowork · Skills…)' },
+  { name: '/chat', desc: 'Switch to Chat mode — plain conversation, no tools' },
   { name: '/model', desc: 'Pick the model — interactive menu' },
   { name: '/models', desc: 'List the models the endpoint serves' },
   { name: '/status', desc: 'Current setup: provider, model, session, tokens' },
   { name: '/config', desc: 'Show the current provider config' },
+  { name: '/connector', desc: 'Provider endpoints, keys and connection test' },
   { name: '/dir', desc: 'Switch the working folder: /dir <path>' },
   { name: '/permissions', desc: 'Toggle ask-before-acting / auto-approve' },
   { name: '/tools', desc: "List the agent's tools" },
+  { name: '/skills', desc: 'Browse and run skills' },
+  { name: '/command', desc: 'Quick actions and automation' },
   { name: '/init', desc: 'Survey the project and write a MYTO.md memory' },
   { name: '/memory', desc: 'Show the project memory (MYTO.md)' },
   { name: '/compact', desc: 'Summarize the session to free context' },
@@ -44,7 +55,7 @@ function helpText(): string {
   return [
     ui.banner(VERSION),
     p.bold('USAGE'),
-    row('myto', 'Interactive session in the current folder'),
+    row('myto', 'Interactive session — main menu: Chat · Cowork · Skills…'),
     row('myto "<task>"', 'One-shot task in the current folder'),
     row('myto --dir <path> "<task>"', 'One-shot task in a specific folder'),
     row('myto --auto "<task>"', 'One-shot without permission prompts'),
@@ -185,6 +196,326 @@ function notConfiguredMessage(cfg: MytoCliConfig): string {
   )
 }
 
+/** The auth + workspace header shown under the banner, above the main menu. */
+function authHeader(cfg: MytoCliConfig, workspace: string): string {
+  const isOllama = cfg.activeProvider === 'ollama'
+  return authLine({
+    provider: isOllama ? 'ollama (local)' : 'gateway',
+    url: isOllama ? cfg.ollama.baseUrl : cfg.gateway.baseUrl || '(no base URL)',
+    keyMasked: !isOllama && cfg.gateway.apiKey ? '····' + cfg.gateway.apiKey.slice(-4) : undefined,
+    model: cfg.modelId,
+    workspace,
+    ready: isConfigured(cfg)
+  })
+}
+
+/** One menu-driven one-shot agent run in the workspace (skills, quick actions). */
+async function runMenuTask(task: string, workspace: string, opts?: { systemExtra?: string }): Promise<void> {
+  const cfg = loadConfig()
+  if (!isConfigured(cfg)) {
+    process.stderr.write(notConfiguredMessage(cfg))
+    return
+  }
+  try {
+    await runAgentLoop({
+      provider: providerFromSettingsLike(cfg),
+      modelId: cfg.modelId,
+      workspaceDir: workspace,
+      task,
+      systemExtra: opts?.systemExtra,
+      spinnerHint: 'esc to interrupt',
+      onPermission: ui.isTty ? permissionGate() : undefined
+    })
+  } catch (err) {
+    process.stderr.write(ui.paint.red(`Run failed: ${msg(err)}\n`))
+  }
+}
+
+/** Pick a model interactively from the live endpoint list and persist it. */
+async function pickModelGlobal(): Promise<void> {
+  const p = ui.paint
+  if (!interactive()) {
+    await cmdModels() // piped runs: list, don't silently re-pick
+    return
+  }
+  const cfg = loadConfig()
+  process.stdout.write(p.dim('  fetching models…\n'))
+  const list = await providerFromSettingsLike(cfg).listModels()
+  if (!list.ok || list.models.length === 0) {
+    process.stdout.write(p.red(`  could not list models${list.ok ? '' : ': ' + (list.error ?? '')}\n`))
+    return
+  }
+  const choice = await ui.select(
+    'Select a model',
+    list.models.map((m) => ({ label: m.id, hint: m.name !== m.id ? m.name : undefined, value: m.id }))
+  )
+  if (!choice) return
+  saveUserConfig({ model: choice })
+  process.stdout.write(p.green(`${ui.sym.check} model → `) + p.cyan(choice) + '\n')
+}
+
+/** Read one line from the prompt box (for URLs, keys, names). Null = cancelled. */
+async function askLine(placeholder: string, hint?: string): Promise<string | null> {
+  const raw = await input.readTask([], { placeholder, hint })
+  if (raw === null) return null
+  const t = raw.trim()
+  return t || null
+}
+
+/** True when the terminal can drive interactive select menus (raw keys + mouse). */
+function interactive(): boolean {
+  const stdin = process.stdin
+  return ui.isTty && stdin.isTTY === true && typeof stdin.setRawMode === 'function'
+}
+
+/** Connector — provider endpoints: switch provider, set credentials, test. */
+async function connectorMenu(): Promise<void> {
+  const p = ui.paint
+  if (!interactive()) {
+    // Piped/CI runs can't drive the select menu: show the config and stop.
+    printConfig(loadConfig())
+    return
+  }
+  for (;;) {
+    const cfg = loadConfig()
+    printConfig(cfg)
+    const pick = await ui.select('Connector — provider endpoints', [
+      { label: 'Test connection', hint: `probe ${cfg.activeProvider} with ${cfg.modelId || 'no model'}`, value: 'test' },
+      { label: 'Use OpenAI-compatible gateway', hint: 'hosted or self-hosted OpenAI-style API', value: 'gateway' },
+      { label: 'Use Ollama (local)', hint: cfg.ollama.baseUrl, value: 'ollama' },
+      { label: 'Set gateway base URL', value: 'url' },
+      { label: 'Set gateway API key', hint: 'stored in ~/.myto/config.json, never printed', value: 'key' },
+      { label: 'Set Ollama URL', value: 'ourl' },
+      { label: 'Back', value: 'back' }
+    ])
+    if (!pick || pick === 'back') return
+    if (pick === 'test') {
+      if (!isConfigured(cfg)) {
+        process.stdout.write(p.amber('  finish the configuration first — a test needs a model id\n'))
+        continue
+      }
+      const spin = startSpinner('Testing connection', '')
+      try {
+        const r = await providerFromSettingsLike(cfg).testConnection(cfg.modelId)
+        spin.stop()
+        if (r.ok) process.stdout.write(p.green(`${ui.sym.check} connected `) + p.dim(`${r.message}${r.latencyMs ? ' · ' + r.latencyMs + 'ms' : ''}\n`))
+        else process.stdout.write(p.red(`${ui.sym.cross} ${r.message}\n`))
+      } catch (err) {
+        spin.stop()
+        process.stdout.write(p.red(`${ui.sym.cross} test failed: ${msg(err)}\n`))
+      }
+      continue
+    }
+    if (pick === 'gateway') {
+      saveUserConfig({ provider: 'gateway' })
+      process.stdout.write(p.green(`${ui.sym.check} provider → `) + p.cyan('gateway') + '\n')
+      continue
+    }
+    if (pick === 'ollama') {
+      saveUserConfig({ provider: 'ollama' })
+      process.stdout.write(p.green(`${ui.sym.check} provider → `) + p.cyan('ollama (local)') + '\n')
+      continue
+    }
+    if (pick === 'url') {
+      const v = await askLine('https://api.openai.com/v1', 'gateway base URL')
+      if (v) {
+        saveUserConfig({ baseUrl: v })
+        process.stdout.write(p.green(`${ui.sym.check} base URL → `) + p.cyan(v) + '\n')
+      }
+      continue
+    }
+    if (pick === 'key') {
+      const v = await askLine('sk-…', 'gateway API key (input is echoed — paste carefully)')
+      if (v) {
+        saveUserConfig({ apiKey: v })
+        process.stdout.write(p.green(`${ui.sym.check} API key saved `) + p.dim('(····' + v.slice(-4) + ')\n'))
+      }
+      continue
+    }
+    if (pick === 'ourl') {
+      const v = await askLine(cfg.ollama.baseUrl, 'ollama base URL')
+      if (v) {
+        saveUserConfig({ ollamaUrl: v })
+        process.stdout.write(p.green(`${ui.sym.check} ollama URL → `) + p.cyan(v) + '\n')
+      }
+    }
+  }
+}
+
+/** Skills — browse, create and run instruction packs. */
+async function skillsMenu(workspace: string): Promise<void> {
+  const p = ui.paint
+  if (!interactive()) {
+    const scan = listSkills(workspace)
+    if (scan.skills.length === 0) process.stdout.write(p.dim('  no skills yet — add markdown files to ~/.myto/skills\n'))
+    for (const s of scan.skills) process.stdout.write(`  ${p.cyan(s.name.padEnd(20))}${p.dim(s.source)}\n`)
+    return
+  }
+  for (;;) {
+    const scan = listSkills(workspace)
+    for (const e of scan.errors) process.stdout.write(p.amber(`  ⚠ ${e.path}: ${e.error}\n`))
+    const options: ui.SelectOption<{ kind: 'run' | 'new' | 'back'; skill?: Skill }>[] = [
+      ...scan.skills.map((s) => ({
+        label: s.name,
+        hint: `${s.source} · ${s.instructions.split('\n')[0].slice(0, 48)}${s.instructions.length > 48 ? '…' : ''}`,
+        value: { kind: 'run' as const, skill: s }
+      })),
+      { label: 'New skill…', hint: 'write a starter skill file', value: { kind: 'new' } },
+      { label: 'Back', value: { kind: 'back' } }
+    ]
+    const pick = await ui.select('Skills — instruction packs for the agent', options)
+    if (!pick || pick.kind === 'back') return
+    if (pick.kind === 'new') {
+      const name = await askLine('code-review', 'skill name (the first "# heading" of the file)')
+      if (!name) continue
+      const desc = (await askLine('one-line description', 'what it is for')) ?? ''
+      const path = saveSkill(workspace, name, skillTemplate(name, desc))
+      process.stdout.write(p.green(`${ui.sym.check} skill written → `) + p.cyan(path) + '\n')
+      continue
+    }
+    const skill = pick.skill!
+    process.stdout.write('\n' + renderMarkdown(`## ${skill.name}\n\n${skill.instructions}`) + '\n')
+    const task = await askLine(`Task for the ${skill.name} skill`, 'esc cancels')
+    if (!task) continue
+    await runMenuTask(task, workspace, {
+      systemExtra: `You are operating under the "${skill.name}" skill. Follow these instructions for this task:\n\n${skill.instructions}`
+    })
+  }
+}
+
+/** Command — curated quick actions plus prompt/command plugins. */
+async function actionsMenu(workspace: string): Promise<void> {
+  const p = ui.paint
+  if (!interactive()) {
+    for (const a of QUICK_ACTIONS) process.stdout.write(`  ${p.cyan(a.label.padEnd(34))}${p.dim(a.hint)}\n`)
+    return
+  }
+  for (;;) {
+    const scan = listPlugins(workspace)
+    for (const e of scan.errors) process.stdout.write(p.amber(`  ⚠ ${e.path}: ${e.error}\n`))
+    const options: ui.SelectOption<{ kind: 'builtin' | 'prompt' | 'command' | 'back'; action?: QuickAction; plugin?: PluginManifest }>[] = [
+      ...QUICK_ACTIONS.map((a) => ({ label: a.label, hint: a.hint, value: { kind: 'builtin' as const, action: a } })),
+      ...scan.plugins
+        .filter((pl) => pl.kind === 'prompt')
+        .map((pl) => ({ label: pl.title, hint: 'plugin · ' + (pl.description ?? pl.name), value: { kind: 'prompt' as const, plugin: pl } })),
+      ...scan.plugins
+        .filter((pl) => pl.kind === 'command')
+        .map((pl) => ({ label: pl.title, hint: 'command · $ ' + pl.command, value: { kind: 'command' as const, plugin: pl } })),
+      { label: 'Back', value: { kind: 'back' } }
+    ]
+    const pick = await ui.select('Command — quick actions and automation', options)
+    if (!pick || pick.kind === 'back') return
+    if (pick.kind === 'builtin') {
+      await runMenuTask(pick.action!.task(workspace), workspace)
+      continue
+    }
+    if (pick.kind === 'prompt') {
+      await runMenuTask(pick.plugin!.prompt!, workspace)
+      continue
+    }
+    if (pick.kind === 'command') {
+      const cmdText = pick.plugin!.command!
+      process.stdout.write(p.amber(`$ ${cmdText}\n`))
+      const out = await runCliCommand(cmdText, workspace)
+      process.stdout.write(p.dim(out.trim() || '(no output)') + '\n')
+    }
+  }
+}
+
+/** Plugin — inspect, create and manage local plugin manifests. */
+async function pluginsMenu(workspace: string): Promise<void> {
+  const p = ui.paint
+  if (!interactive()) {
+    const scan = listPlugins(workspace)
+    if (scan.plugins.length === 0) process.stdout.write(p.dim('  no plugins yet — add JSON manifests to ~/.myto/plugins\n'))
+    for (const pl of scan.plugins) process.stdout.write(`  ${p.cyan(pl.title.padEnd(20))}${p.dim(pl.kind + ' · ' + pl.name)}\n`)
+    return
+  }
+  for (;;) {
+    const scan = listPlugins(workspace)
+    for (const e of scan.errors) process.stdout.write(p.amber(`  ⚠ ${e.path}: ${e.error}\n`))
+    const options: ui.SelectOption<{ kind: 'inspect' | 'new' | 'back'; plugin?: PluginManifest }>[] = [
+      ...scan.plugins.map((pl) => ({
+        label: pl.title,
+        hint: `${pl.kind} · ${pl.description ?? pl.name}`,
+        value: { kind: 'inspect' as const, plugin: pl }
+      })),
+      { label: 'New plugin…', hint: 'write a starter manifest to ~/.myto/plugins', value: { kind: 'new' } },
+      { label: 'Back', value: { kind: 'back' } }
+    ]
+    const pick = await ui.select('Plugin — extend Myto with local manifests', options)
+    if (!pick || pick.kind === 'back') return
+    if (pick.kind === 'new') {
+      const name = await askLine('deploy-check', 'plugin name (a slug: lowercase-dashes)')
+      if (!name) continue
+      const title = (await askLine(name, 'display title')) ?? name
+      const path = savePlugin(workspace, name, pluginTemplate(name, title))
+      process.stdout.write(p.green(`${ui.sym.check} plugin written → `) + p.cyan(path) + '\n')
+      process.stdout.write(p.dim('  edit it: "kind" is "prompt" (a reusable task) or "command" (a shell shortcut)\n'))
+      continue
+    }
+    const pl = pick.plugin!
+    process.stdout.write('\n')
+    const rows: [string, string][] = [
+      ['name', pl.name],
+      ['title', pl.title],
+      ['kind', pl.kind],
+      ...(pl.description ? ([['description', pl.description]] as [string, string][]) : []),
+      ...(pl.kind === 'prompt'
+        ? ([['prompt', pl.prompt!]] as [string, string][])
+        : ([['command', '$ ' + pl.command!]] as [string, string][]))
+    ]
+    process.stdout.write(rows.map(([k, v]) => `  ${p.gray(k.padEnd(12))}${p.cyan(v)}`).join('\n') + '\n\n')
+    if (pl.kind === 'prompt' && (await ui.confirm('Run this plugin now?'))) await runMenuTask(pl.prompt!, workspace)
+    if (pl.kind === 'command' && (await ui.confirm(`Run \`${pl.command}\` in the workspace now?`))) {
+      process.stdout.write(p.amber(`$ ${pl.command}\n`))
+      const out = await runCliCommand(pl.command!, workspace)
+      process.stdout.write(p.dim(out.trim() || '(no output)') + '\n')
+    }
+  }
+}
+
+/**
+ * The interactive app: banner + auth header, then the numbered main menu. Each
+ * destination runs as its own sub-session and returns here; Esc/q on the menu
+ * exits. Cowork is the classic REPL and comes back to the menu via /menu.
+ */
+async function app(dir?: string): Promise<number> {
+  const workspace = resolveWorkspace(dir)
+  process.stdout.write(ui.banner(VERSION))
+  process.stdout.write(authHeader(loadConfig(), workspace) + '\n')
+  for (;;) {
+    const pick = await numberMenu(MAIN_MENU, 'What would you like to do?')
+    if (pick === null) {
+      process.stdout.write(ui.paint.dim('  bye ') + ui.paint.magenta(ui.sym.spark) + '\n')
+      return 0
+    }
+    const cfg = loadConfig()
+    if (pick === 0) {
+      // Chat
+      if (!isConfigured(cfg)) {
+        process.stderr.write(notConfiguredMessage(cfg))
+        continue
+      }
+      await chatSession({ provider: providerFromSettingsLike(cfg), modelId: cfg.modelId, isTty: ui.isTty })
+    } else if (pick === 1) {
+      // Cowork — the classic agent REPL; returns 2 to come back to the menu.
+      const code = await repl(dir)
+      if (code !== 2) return code
+    } else if (pick === 2) {
+      await connectorMenu()
+    } else if (pick === 3) {
+      await skillsMenu(workspace)
+    } else if (pick === 4) {
+      await actionsMenu(workspace)
+    } else if (pick === 5) {
+      await pluginsMenu(workspace)
+    } else if (pick === 6) {
+      await pickModelGlobal()
+    }
+  }
+}
+
 /** One-shot run (`myto "<task>"`). Returns the process exit code. */
 async function runOnce(task: string, dir?: string, auto?: boolean): Promise<number> {
   const cfg = loadConfig()
@@ -224,33 +555,6 @@ function permissionGate(): (req: { displayName: string; target: string; kind: 'w
   }
 }
 
-/** Watch stdin while a run is in flight: Esc (or Ctrl-C) aborts it. Returns a stop fn. */
-function watchInterrupt(controller: AbortController, paused: { value: boolean }): () => void {
-  const stdin = process.stdin
-  if (!ui.isTty || !stdin.isTTY || typeof stdin.setRawMode !== 'function') return () => {}
-  const onData = (b: Buffer): void => {
-    if (paused.value) return
-    const s = b.toString('utf8')
-    if (s === '\x1b' || s === '\x03') controller.abort(new Error('interrupted by user'))
-  }
-  stdin.resume()
-  try {
-    stdin.setRawMode(true)
-  } catch {
-    return () => {}
-  }
-  stdin.on('data', onData)
-  return () => {
-    stdin.removeListener('data', onData)
-    try {
-      stdin.setRawMode(false)
-    } catch {
-      /* ignore */
-    }
-    stdin.pause()
-  }
-}
-
 async function repl(dir?: string): Promise<number> {
   let cfg = loadConfig()
   if (!isConfigured(cfg)) {
@@ -263,6 +567,7 @@ async function repl(dir?: string): Promise<number> {
   let session: ChatMessage[] = []
   let sessionSummary = ''
   let permMode: 'ask' | 'auto' = 'ask'
+  let exitToMenu = false
   const promptHistory: string[] = []
   const p = ui.paint
 
@@ -299,7 +604,7 @@ async function repl(dir?: string): Promise<number> {
     const history = opts?.fresh ? [] : session
     const controller = new AbortController()
     const paused = { value: false }
-    const stopWatch = watchInterrupt(controller, paused)
+    const stopWatch = watchInterrupt(controller, paused, ui.isTty)
     try {
       const res = await runAgentLoop({
         provider: providerFromSettingsLike(cfg),
@@ -328,21 +633,7 @@ async function repl(dir?: string): Promise<number> {
     }
   }
 
-  const pickModel = async (): Promise<void> => {
-    process.stdout.write(p.dim('  fetching models…\n'))
-    const list = await providerFromSettingsLike(cfg).listModels()
-    if (!list.ok || list.models.length === 0) {
-      process.stdout.write(p.red(`  could not list models${list.ok ? '' : ': ' + (list.error ?? '')}\n`))
-      return
-    }
-    const choice = await ui.select(
-      'Select a model',
-      list.models.map((m) => ({ label: m.id, hint: m.name !== m.id ? m.name : undefined, value: m.id }))
-    )
-    if (!choice) return
-    cfg = saveUserConfig({ model: choice })
-    process.stdout.write(p.green(`${ui.sym.check} model → `) + p.cyan(choice) + '\n')
-  }
+  const pickModel = pickModelGlobal
 
   /** /compact — fold the session into a summary so the context starts light. */
   const compactSession = async (): Promise<void> => {
@@ -476,6 +767,23 @@ async function repl(dir?: string): Promise<number> {
           process.stdout.write(p.green(`${ui.sym.check} folder → `) + p.gray(workspace) + '\n')
         }
         return false
+      case 'menu':
+        process.stdout.write(p.dim('  back to the main menu ') + p.gray('— /help anytime\n'))
+        exitToMenu = true
+        return true
+      case 'chat':
+        await chatSession({ provider: providerFromSettingsLike(cfg), modelId: cfg.modelId, isTty: ui.isTty })
+        return false
+      case 'skills':
+        await skillsMenu(workspace)
+        return false
+      case 'command':
+        await actionsMenu(workspace)
+        return false
+      case 'connector':
+        await connectorMenu()
+        cfg = loadConfig()
+        return false
       case 'copy': {
         if (!lastAnswer.trim()) {
           process.stdout.write(p.dim('  nothing to copy yet\n'))
@@ -505,6 +813,7 @@ async function repl(dir?: string): Promise<number> {
   }
 
   for (;;) {
+    cfg = loadConfig() // provider/model switches (Connector, Model) apply live
     const raw = await input.readTask(SLASH, { history: promptHistory, hint: hintLine() })
     if (raw === null) {
       await handleSlash('quit', '')
@@ -529,7 +838,7 @@ async function repl(dir?: string): Promise<number> {
     }
     await runTask(line)
   }
-  return 0
+  return exitToMenu ? 2 : 0
 }
 
 async function main(): Promise<number> {
@@ -555,7 +864,7 @@ async function main(): Promise<number> {
   })
 
   if (args.oneShot) return runOnce(args.oneShot, args.dir, args.auto)
-  return repl(args.dir)
+  return app(args.dir)
 }
 
 main()

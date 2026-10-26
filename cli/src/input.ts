@@ -54,10 +54,20 @@ export function recallHistory(
 /** Plain one-line read for pipes / non-TTY (scriptable, never raw). */
 function simpleReadline(): Promise<string | null> {
   return new Promise((resolve) => {
+    // Settled-guard: on EOF the question callback never fires, and rl.close()
+    // emits 'close' synchronously — resolve before closing, null on EOF.
+    let settled = false
     const rl = createInterface({ input: process.stdin, output: process.stdout })
     rl.question(colorOn ? `\n${c.cyan('❯')} ` : '\n> ', (ans) => {
-      rl.close()
+      if (settled) return
+      settled = true
       resolve(ans)
+      rl.close()
+    })
+    rl.on('close', () => {
+      if (settled) return
+      settled = true
+      resolve(null)
     })
   })
 }

@@ -13,6 +13,61 @@ myto "add dark mode to the settings page"
 > Published on npm as **`mytocode`** — the bare name `myto` is blocked as too
 > similar to existing packages. The installed command is still `myto`.
 
+## The main menu (v1.3)
+
+`myto` opens on a numbered menu — pick with the number keys, ↑/↓ + Enter, or a
+mouse click; `Esc`/`q` exits:
+
+```
+✦ M Y T O
+AI coding agent, right in your terminal
+v1.3.0  ·  /help for commands
+  ✓ ready gateway https://api.openai.com/v1 · key ····ab12 · model gpt-4o-mini · C:\your-project
+
+What would you like to do?
+ ❯ 1. Chat       General-purpose AI assistant
+   2. Cowork     Collaborative AI workspace — Myto reads, edits and runs
+   3. Connector  Provider endpoints — base URL, API key, connection test
+   4. Skills     Skills and custom agents
+   5. Command    Quick actions and automation
+   6. Plugin     Extend functionality with local plugins
+   7. Model      Provider and model management
+```
+
+- **Chat** — a plain streaming conversation with no tools and no file access;
+  `Esc` interrupts a reply, `/back` returns to the menu.
+- **Cowork** — the full agent REPL: sessions, permission prompts, markdown
+  answers, `!` shell escape, and everything listed under *Session features*.
+  `/menu` brings the main menu back.
+- **Connector** — switch between an OpenAI-compatible gateway and local Ollama,
+  set the base URL / API key (stored in `~/.myto/config.json`, never printed in
+  full), and run a real connection test with latency.
+- **Skills** — instruction packs that shape how the agent works. A skill is a
+  markdown file whose first `# heading` is its name; the body rides the system
+  prompt. Discover in `<workspace>/.myto/skills/` then `~/.myto/skills/`
+  (workspace wins on a name clash). Create from the menu, run with a task.
+- **Command** — one-shot quick actions (explain the codebase, review the
+  working diff, write/fix tests, write `MYTO.md`) plus your prompt-kind plugins.
+- **Plugin** — JSON manifests in `~/.myto/plugins/` or
+  `<workspace>/.myto/plugins/` that extend the CLI:
+
+  ```json
+  {
+    "name": "deploy-check",
+    "title": "Deploy check",
+    "kind": "prompt",            // or "command"
+    "description": "Verify the deploy is healthy.",
+    "prompt": "Check the deploy scripts and report risks.",
+    "command": "npm run build"   // for kind: "command"
+  }
+  ```
+
+- **Model** — pick a model from the live endpoint list; the choice persists.
+
+Pipes and CI never hang: without a TTY the menus print their listings instead of
+waiting, `myto "<task>"` runs one-shot, and a closed stdin exits cleanly.
+Works on Windows PowerShell / Windows Terminal, macOS and Linux terminals.
+
 ## Build (from this repo)
 
 The CLI reuses the desktop app's real engine — the gateway/Ollama providers, the
@@ -74,7 +129,7 @@ settings** — if you already configured the app, the CLI just works.
 
 | Command | What it does |
 |---|---|
-| `myto` | Interactive session in the current folder |
+| `myto` | Interactive session — main menu: Chat · Cowork · Connector · Skills… |
 | `myto "<task>"` | One-shot task in the current folder |
 | `myto --dir <path> "<task>"` | One-shot task in a specific folder |
 | `myto config --base-url … --api-key … --model …` | Save config |
@@ -82,9 +137,9 @@ settings** — if you already configured the app, the CLI just works.
 | `myto models` | List models the endpoint serves |
 | `myto help` | Help |
 
-## Session features (v1.2)
+## Session features (Cowork mode)
 
-The REPL now works like a real agentic CLI (the Claude Code / Freebuff school):
+Cowork works like a real agentic CLI (the Claude Code / Freebuff school):
 
 - **Session memory** — your conversation carries across prompts, so follow-ups
   like "now add tests for what you just wrote" work. `/clear` starts fresh,
