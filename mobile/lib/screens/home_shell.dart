@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../services/studio_store.dart';
 import '../theme.dart';
+import 'assistant_screen.dart';
 import '../widgets/teamly/kit.dart';
 import 'agents_screen.dart';
 import 'artifacts_screen.dart';
@@ -44,6 +45,7 @@ class _HomeShellState extends State<HomeShell> {
         index: _tab,
         children: <Widget>[
           const ChatScreen(),
+          const AssistantScreen(),
           const AgentsScreen(),
           const DiscoverScreen(),
           const MemoryScreen(),
@@ -62,16 +64,17 @@ class _HomeShellState extends State<HomeShell> {
             child: Row(
               children: <Widget>[
                 _item(0, Icons.chat_bubble_outline_rounded, Icons.chat_bubble_rounded, 'Chat'),
-                _item(1, Icons.smart_toy_outlined, Icons.smart_toy, 'Agents'),
-                _item(2, Icons.explore_outlined, Icons.explore, 'Discover'),
+                _item(1, Icons.assistant_outlined, Icons.assistant, 'Helper'),
+                _item(2, Icons.smart_toy_outlined, Icons.smart_toy, 'Agents'),
+                _item(3, Icons.explore_outlined, Icons.explore, 'Discover'),
                 _item(
-                  3,
+                  4,
                   Icons.psychology_outlined,
                   Icons.psychology,
                   'Memory',
                   badge: studio.newCount,
                 ),
-                _item(4, Icons.layers_outlined, Icons.layers, 'Artifacts'),
+                _item(5, Icons.layers_outlined, Icons.layers, 'Artifacts'),
               ],
             ),
           ),

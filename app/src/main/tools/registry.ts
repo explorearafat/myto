@@ -56,6 +56,14 @@ export interface ToolGate {
   mode: ChatMode
   /** The Cowork working folder, or null when none is chosen / not in Cowork. */
   workspaceDir: string | null
+  /**
+   * Full-computer access (the CLI's `--full-access` / the REPL's `full`
+   * permission mode): when true the filesystem tools resolve paths ANYWHERE on
+   * the machine instead of confining them to workspaceDir — relative paths
+   * still anchor to the workspace so bare filenames keep working. The desktop
+   * app never sets it; its containment stays on.
+   */
+  fullAccess?: boolean
 }
 
 /** Ambient state a tool needs while running: the gate plus the cancel signal. */

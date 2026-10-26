@@ -14,6 +14,7 @@ import { registerPreviewIpc } from './preview-ipc'
 import { registerMcpIpc, syncConnectors, disposeConnectors } from './mcp-ipc'
 import { registerVoiceIpc } from './voice-ipc'
 import { registerScreenshotIpc } from './screenshot-ipc'
+import { registerAssistantIpc } from './assistant/assistant-ipc'
 import { registerScheduledTasksIpc } from './scheduled-tasks-ipc'
 import { registerTerminalIpc } from './terminal-ipc'
 import { registerEditorIpc } from './editor-ipc'
@@ -150,6 +151,7 @@ app.whenReady().then(() => {
   registerMcpIpc()
   registerVoiceIpc()
   registerScreenshotIpc()
+  registerAssistantIpc()
   registerScheduledTasksIpc()
   registerTerminalIpc()
   registerEditorIpc()

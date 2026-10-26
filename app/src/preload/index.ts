@@ -139,6 +139,23 @@ const api: MytoApi = {
   screenshot: {
     capture: () => ipcRenderer.invoke(IpcChannel.ScreenshotCapture)
   },
+  assistant: {
+    status: () => ipcRenderer.invoke(IpcChannel.AssistantStatus),
+    accept: () => ipcRenderer.invoke(IpcChannel.AssistantAccept),
+    disable: () => ipcRenderer.invoke(IpcChannel.AssistantDisable),
+    testAction: () => ipcRenderer.invoke(IpcChannel.AssistantTestAction),
+    compose: (req) => ipcRenderer.invoke(IpcChannel.AssistantCompose, req),
+    deliver: (req) => ipcRenderer.invoke(IpcChannel.AssistantDeliver, req),
+    learnStart: (req) => ipcRenderer.invoke(IpcChannel.AssistantLearnStart, req),
+    learnStop: (req) => ipcRenderer.invoke(IpcChannel.AssistantLearnStop, req),
+    practice: (req) => ipcRenderer.invoke(IpcChannel.AssistantPractice, req),
+    skillsList: () => ipcRenderer.invoke(IpcChannel.AssistantSkillsList),
+    skillRemove: (req) => ipcRenderer.invoke(IpcChannel.AssistantSkillRemove, req),
+    mailGetConfig: () => ipcRenderer.invoke(IpcChannel.AssistantMailGetConfig),
+    mailSend: (req) => ipcRenderer.invoke(IpcChannel.AssistantMailSend, req),
+    bridgeGet: () => ipcRenderer.invoke(IpcChannel.AssistantBridgeGet),
+    bridgeSet: (req) => ipcRenderer.invoke(IpcChannel.AssistantBridgeSet, req)
+  },
   scheduledTasks: {
     list: () => ipcRenderer.invoke(IpcChannel.ScheduledTasksList),
     create: (input) => ipcRenderer.invoke(IpcChannel.ScheduledTasksCreate, input),

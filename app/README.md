@@ -8,6 +8,33 @@ and intelligent, token-efficient project workflows.
 > layout, theming, editor, and terminal are in place. AI logic, real command execution,
 > and session persistence arrive in later phases.
 
+## Myto Assistant (v0.8)
+
+A policy-gated personal assistant that uses the computer like its owner — Windows first.
+
+**Turn it on:** Myto → Settings → **Assistant** → read the policy → agree. Nothing runs before that.
+
+What it can do once on:
+
+- **Use the computer** — open apps/URLs/files, read the active window, move/click the mouse,
+  press keys, and paste text (clipboard + Ctrl+V: instant, unicode-safe Bangla).
+  In chat, the agent gets a `computer` tool; every action still follows your permission mode.
+- **Fast by design** — a resident PowerShell host keeps actions at ~5-20 ms (measured), far
+  under the 0.5 s budget.
+- **Messages in your tone** — it reads the recent conversation on screen with a vision model,
+  distils your style (Bangla/Banglish mix, emoji rate, length, no-fullstop habit, openers)
+  into a per-contact profile, composes ONE draft, and **shows it to you before anything is sent**.
+  Approved drafts are pasted into the chat window and verified.
+- **Email** — a dependency-free SMTP client (TLS, AUTH LOGIN, base64 UTF-8 bodies, RFC 2047
+  subjects) with every server reply checked; config stays on disk with 0600 permissions.
+- **Learn by watching** — press Start, do a task on screen; screenshots go to your vision model
+  once, come back as a step list, and are saved as a skill. Practice replays it silently,
+  verifying each step with a screenshot check (one retry, then an honest failure).
+- **Phone bridge** — a token-guarded HTTP server on your Wi-Fi (off by default) lets the Myto
+  mobile app compose and approve drafts from the couch.
+
+Everything the assistant learns (tones, skills) stays on this machine.
+
 ## Tech stack
 
 - **Desktop:** Electron 43 (frameless window, custom title bar)

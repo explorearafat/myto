@@ -1,7 +1,7 @@
 import { readFile, writeFile, readdir, mkdir, rm, realpath, lstat } from 'node:fs/promises'
 import { resolve, relative, isAbsolute, dirname, basename, sep } from 'node:path'
 import { toErrorMessage } from '../providers/http'
-import type { ToolDef, ToolGate } from './registry'
+import type { ToolContext, ToolDef, ToolGate } from './registry'
 
 /**
  * The Cowork filesystem tools: {@link listDirTool}, {@link readFileTool},
@@ -126,15 +126,34 @@ function readContent(input: unknown): string | null {
   return typeof raw === 'string' ? raw : null
 }
 
-/** Resolve `input.path` against the context's workspace, or return a refusal string. */
+/**
+ * The ONE path chokepoint for every fs tool. Contained to the workspace by
+ * default; when the gate grants full access (CLI `--full-access`) the path
+ * resolves ANYWHERE the user's account can reach — relative paths still anchor
+ * to the workspace so bare filenames keep working. Absoluteness is enforced by
+ * `resolve`, not containment: there is no `..` rejection in full-access mode.
+ */
+async function resolveForTool(ctx: ToolContext, rel: string): Promise<string | null> {
+  if (typeof rel !== 'string' || !rel.trim()) return null
+  if (ctx.fullAccess === true) {
+    try {
+      return resolve(ctx.workspaceDir || process.cwd(), rel)
+    } catch {
+      return null
+    }
+  }
+  return ctx.workspaceDir ? await resolveInWorkspaceReal(ctx.workspaceDir, rel) : null
+}
+
+/** Resolve `input.path` for the calling tool, or return a refusal string. */
 async function pathInWorkspace(
   input: unknown,
-  workspaceDir: string | null,
+  ctx: ToolContext,
   toolName: string
 ): Promise<{ abs: string; rel: string } | string> {
   const rel = readPath(input)
   if (!rel) return `${toolName} needs a JSON input like {"path": "src/app.ts"} (relative to the working folder).`
-  const abs = workspaceDir ? await resolveInWorkspaceReal(workspaceDir, rel) : null
+  const abs = await resolveForTool(ctx, rel)
   if (!abs) return `${toolName}: "${rel}" is outside the working folder and was refused.`
   return { abs, rel }
 }
@@ -147,7 +166,7 @@ export const listDirTool: ToolDef = {
   async run(input, ctx) {
     // `path` is optional for list_dir; default to the folder root.
     const rel = readPath(input) ?? '.'
-    const abs = ctx.workspaceDir ? await resolveInWorkspaceReal(ctx.workspaceDir, rel) : null
+    const abs = await resolveForTool(ctx, rel)
     if (!abs) return `list_dir: "${rel}" is outside the working folder and was refused.`
     try {
       const entries = await readdir(abs, { withFileTypes: true })
@@ -169,7 +188,7 @@ export const readFileTool: ToolDef = {
   usage: '{"path": "src/app.ts"}',
   available: fsAvailable,
   async run(input, ctx) {
-    const r = await pathInWorkspace(input, ctx.workspaceDir, 'read_file')
+    const r = await pathInWorkspace(input, ctx, 'read_file')
     if (typeof r === 'string') return r
     try {
       const text = await readFile(r.abs, 'utf8')
@@ -188,7 +207,7 @@ export const writeFileTool: ToolDef = {
   sideEffect: 'write',
   available: fsAvailable,
   async run(input, ctx) {
-    const r = await pathInWorkspace(input, ctx.workspaceDir, 'write_file')
+    const r = await pathInWorkspace(input, ctx, 'write_file')
     if (typeof r === 'string') return r
     const content = readContent(input)
     if (content == null) return 'write_file needs a "content" string, e.g. {"path": "notes.md", "content": "…"}.'
@@ -218,7 +237,7 @@ export const editFileTool: ToolDef = {
   sideEffect: 'write',
   available: fsAvailable,
   async run(input, ctx) {
-    const r = await pathInWorkspace(input, ctx.workspaceDir, 'edit_file')
+    const r = await pathInWorkspace(input, ctx, 'edit_file')
     if (typeof r === 'string') return r
     const o = input && typeof input === 'object' ? (input as Record<string, unknown>) : {}
     const oldText = typeof o.old === 'string' ? o.old : null
@@ -265,7 +284,7 @@ export const deleteFileTool: ToolDef = {
   sideEffect: 'write',
   available: fsAvailable,
   async run(input, ctx) {
-    const r = await pathInWorkspace(input, ctx.workspaceDir, 'delete_file')
+    const r = await pathInWorkspace(input, ctx, 'delete_file')
     if (typeof r === 'string') return r
     // Refuse to delete the workspace root itself.
     if (r.abs === (ctx.workspaceDir ? resolve(ctx.workspaceDir) : '')) {

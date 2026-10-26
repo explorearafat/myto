@@ -1842,6 +1842,63 @@ export interface MytoApi {
   credentials: CredentialsApi
   /** Myto Studio: open/bake/critique photos + videos the USER edits by hand (and self-correction). */
   editor: EditorApi
+  /** Assistant: the policy-gated computer-use personal assistant (Windows first). Optional — absent in shims/tests. */
+  assistant?: AssistantApi
+}
+
+// ---------------------------------------------------------------------------
+// Assistant (computer-use personal assistant)
+// ---------------------------------------------------------------------------
+
+/** The policy + host state the Assistant pane renders. */
+export interface AssistantStatusResult {
+  accepted: boolean
+  policyVersion: number
+  platform: string
+  hostReady: boolean
+  policy: string
+}
+
+export interface AssistantTestResult {
+  ok: boolean
+  detail: string
+  ms: number
+}
+
+export interface AssistantComposeResult {
+  ok: boolean
+  draft?: string
+  detail: string
+}
+
+export interface AssistantSkillSummary {
+  name: string
+  goal: string
+  steps: number
+  createdAt: string
+}
+
+export interface AssistantApi {
+  status: () => Promise<AssistantStatusResult>
+  accept: () => Promise<AssistantStatusResult>
+  disable: () => Promise<AssistantStatusResult>
+  testAction: () => Promise<AssistantTestResult>
+  compose: (req: { contact: string; intent: string; history?: Array<{ from: 'me' | 'them'; text: string }> }) => Promise<AssistantComposeResult>
+  deliver: (req: { text: string; windowTitle?: string; pressEnter?: boolean }) => Promise<{ ok: boolean; detail: string }>
+  learnStart: (req: { goal: string }) => Promise<{ ok: boolean; detail: string }>
+  learnStop: (req: { name: string }) => Promise<{ ok: boolean; detail: string; steps?: unknown[] }>
+  practice: (req: { name: string }) => Promise<{ skill: string; ok: boolean; steps: Array<{ index: number; action: string; ok: boolean; detail: string }>; detail: string }>
+  skillsList: () => Promise<AssistantSkillSummary[]>
+  skillRemove: (req: { name: string }) => Promise<boolean>
+  mailGetConfig: () => Promise<{ host: string; port: number; secure: boolean; user: string; name?: string; from?: string } | null>
+  mailSend: (req: {
+    config: { host: string; port: number; secure: boolean; user: string; pass?: string; from?: string; name?: string }
+    message: { to: string; subject: string; body: string; cc?: string }
+    save?: boolean
+  }) => Promise<{ ok: boolean; transcript: string; messageId?: string }>
+  /** LAN bridge so the phone can reach this PC's assistant (token-guarded, off by default). */
+  bridgeGet: () => Promise<{ enabled: boolean; running: boolean; port: number; token: string; urls: string[] }>
+  bridgeSet: (req: { enabled: boolean; port?: number }) => Promise<{ enabled: boolean; running: boolean; port: number; token: string; urls: string[] }>
 }
 
 // ---------------------------------------------------------------------------

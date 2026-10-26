@@ -128,7 +128,7 @@ export const searchCodeTool: ToolDef = {
   async run(input, ctx) {
     const query = readField(input, 'query')
     if (!query) return 'search_code needs a "query" string, e.g. {"query": "TODO"}.'
-    const root = ctx.workspaceDir ? resolveInWorkspace(ctx.workspaceDir, '.') : null
+    const root = ctx.fullAccess === true ? ctx.workspaceDir || null : ctx.workspaceDir ? resolveInWorkspace(ctx.workspaceDir, '.') : null
     if (!root) return 'search_code: no working folder is set.'
     const glob = readField(input, 'glob')
     const matcher = glob ? globToRegExp(glob) : null
@@ -175,7 +175,7 @@ export const findFilesTool: ToolDef = {
   async run(input, ctx) {
     const pattern = readField(input, 'pattern')
     if (!pattern) return 'find_files needs a "pattern" string, e.g. {"pattern": "*.ts"}.'
-    const root = ctx.workspaceDir ? resolveInWorkspace(ctx.workspaceDir, '.') : null
+    const root = ctx.fullAccess === true ? ctx.workspaceDir || null : ctx.workspaceDir ? resolveInWorkspace(ctx.workspaceDir, '.') : null
     if (!root) return 'find_files: no working folder is set.'
     const matcher = globToRegExp(pattern)
 

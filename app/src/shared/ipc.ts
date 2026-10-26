@@ -145,6 +145,38 @@ export const IpcChannel = {
   /** Renderer → main (invoke): grab the primary screen; resolves a PNG data URL or null. */
   ScreenshotCapture: 'screenshot:capture',
 
+  // Assistant: the computer-use personal assistant (policy-gated, Windows first).
+  /** Renderer → main (invoke): policy acceptance state + the policy text. */
+  AssistantStatus: 'assistant:status',
+  /** Renderer → main (invoke): record the policy acceptance and warm the host. */
+  AssistantAccept: 'assistant:accept',
+  /** Renderer → main (invoke): revoke consent, stop the host, unregister the agent tool. */
+  AssistantDisable: 'assistant:disable',
+  /** Renderer → main (invoke): real end-to-end probe (clipboard round-trip + window read, timed). */
+  AssistantTestAction: 'assistant:test-action',
+  /** Renderer → main (invoke): gather the open chat + tone, compose ONE draft (nothing sent). */
+  AssistantCompose: 'assistant:compose',
+  /** Renderer → main (invoke): deliver an APPROVED draft (focus window → paste → Enter). */
+  AssistantDeliver: 'assistant:deliver',
+  /** Renderer → main (invoke): start screen-share learning for a goal. */
+  AssistantLearnStart: 'assistant:learn-start',
+  /** Renderer → main (invoke): stop watching and distil the steps into a skill. */
+  AssistantLearnStop: 'assistant:learn-stop',
+  /** Renderer → main (invoke): silently replay a learned skill with vision verification. */
+  AssistantPractice: 'assistant:practice',
+  /** Renderer → main (invoke): list learned skills. */
+  AssistantSkillsList: 'assistant:skills-list',
+  /** Renderer → main (invoke): delete a learned skill. */
+  AssistantSkillRemove: 'assistant:skill-remove',
+  /** Renderer → main (invoke): read the stored SMTP config (password never returned). */
+  AssistantMailGetConfig: 'assistant:mail-get-config',
+  /** Renderer → main (invoke): send one email via SMTP; optionally persist the config. */
+  AssistantMailSend: 'assistant:mail-send',
+  /** Renderer → main (invoke): the LAN bridge state (URLs + token) for the phone. */
+  AssistantBridgeGet: 'assistant:bridge-get',
+  /** Renderer → main (invoke): enable/disable the LAN bridge. */
+  AssistantBridgeSet: 'assistant:bridge-set',
+
   // Scheduled tasks (#12): durable prompts the main-process scheduler fires on a cron.
   /** Renderer → main (invoke): list every persisted scheduled task. */
   ScheduledTasksList: 'scheduled-tasks:list',

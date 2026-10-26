@@ -3,6 +3,7 @@ import { runSpeedTest, speedVerdict } from '@renderer/lib/speedTest'
 import type { BrowserTarget, OutputStyle, Theme } from '@shared/types'
 import { useAppStore } from '@renderer/store/useAppStore'
 import { ConnectorsPane } from '@renderer/components/ConnectorsPane'
+import { AssistantPane } from '@renderer/components/AssistantPane'
 import { SkillsPane } from '@renderer/components/SkillsPane'
 import { PluginsPane } from '@renderer/components/PluginsPane'
 import { ScheduledTasksPane } from '@renderer/components/ScheduledTasksPane'
@@ -10,6 +11,7 @@ import { CredentialsPane } from '@renderer/components/CredentialsPane'
 
 /** The Settings window's left-rail categories. */
 type SettingsCategory =
+  | 'assistant'
   | 'appearance'
   | 'model'
   | 'tools'
@@ -21,6 +23,10 @@ type SettingsCategory =
 
 /** Title + one-line subtitle shown in each category pane's header. */
 const CATEGORY_META: Record<SettingsCategory, { label: string; subtitle: string }> = {
+  assistant: {
+    label: 'Assistant',
+    subtitle: 'A personal assistant that can use this computer — policy-gated, Windows first.'
+  },
   appearance: { label: 'Appearance', subtitle: 'Theme and visual style.' },
   model: { label: 'Model', subtitle: 'The model Myto talks to, from your Myto account.' },
   tools: { label: 'Tools', subtitle: 'What Myto can do beyond chatting — search the web, run code.' },
@@ -49,6 +55,13 @@ const CATEGORY_META: Record<SettingsCategory, { label: string; subtitle: string 
 /** Small monochrome glyph for each category, tinted by the nav's active state. */
 function CategoryIcon({ id }: { id: SettingsCategory }): ReactNode {
   switch (id) {
+    case 'assistant':
+      return (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="6" r="3.5" stroke="currentColor" strokeWidth="1.3" />
+          <path d="M2.5 14c.8-2.6 2.9-4 5.5-4s4.7 1.4 5.5 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+        </svg>
+      )
     case 'appearance':
       return (
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -135,6 +148,7 @@ function CategoryIcon({ id }: { id: SettingsCategory }): ReactNode {
 }
 
 const CATEGORY_ORDER: SettingsCategory[] = [
+  'assistant',
   'model',
   'tools',
   'connectors',
@@ -541,6 +555,7 @@ export function SettingsPanel() {
               center it so forms don't stretch edge-to-edge on wide windows. */}
           <div className="flex-1 overflow-y-auto px-6 py-6">
             <div className="mx-auto max-w-3xl">
+              {category === 'assistant' && <AssistantPane />}
               {category === 'appearance' && <AppearancePane />}
               {category === 'tools' && <ToolsPane />}
               {category === 'model' && <ModelPane />}
