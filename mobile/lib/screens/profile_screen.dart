@@ -28,6 +28,7 @@ class ProfileScreen extends StatefulWidget {
 class _ProfileScreenState extends State<ProfileScreen> {
   DiscoverProfile? _profile;
   bool _loaded = false;
+  final Set<String> _savedIds = <String>{};
 
   User? get _user => FirebaseAuth.instance.currentUser;
   String get _uid => _user?.uid ?? '';
@@ -40,12 +41,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Future<void> _load() async {
     if (_uid.isEmpty) return;
+    final saved = await SocialService.listSavedIds(_uid);
     final p = await SocialService().getProfile(_uid);
     if (!mounted) return;
     setState(() {
+      _savedIds.addAll(saved);
       _profile = p;
       _loaded = true;
     });
+  }
+
+  Future<void> _toast(String message) async {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 2)));
   }
 
   @override
@@ -105,10 +115,27 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   DiscoverProfileView(
                     uid: _uid,
                     profile: _profile,
-                    savedIds: const <String>{},
-                    onUnsave: (_) {},
-                    onDelete: (_) {},
-                    onComment: (_, __) {},
+                    savedIds: _savedIds,
+                    onUnsave: (id) async {
+                      await SocialService.unsaveFromProfile(id, _uid);
+                      if (!mounted) return;
+                      setState(() => _savedIds.remove(id));
+                      await _toast('Removed from your profile.');
+                    },
+                    onDelete: (id) async {
+                      await SocialService.deletePost(id);
+                      await _toast('Post deleted.');
+                    },
+                    onComment: (post, text) async {
+                      await SocialService.addComment(
+                        post.id,
+                        uid: _uid,
+                        name: _profile?.name ?? name,
+                        photo: _user?.photoURL ?? '',
+                        text: text,
+                      );
+                      await _toast('Comment added.');
+                    },
                   ),
                 const SizedBox(height: TeamlySpace.s5),
                 const TeamlyGroupHeader(label: 'Myto tools'),

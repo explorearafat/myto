@@ -6,16 +6,12 @@ import '../services/dm_service.dart';
 import '../services/studio_store.dart';
 import '../theme.dart';
 import '../widgets/teamly/kit.dart';
-import 'agents_screen.dart';
-import 'artifacts_screen.dart';
-import 'assistant_screen.dart';
-import 'chat_screen.dart';
 import 'dm_list_screen.dart';
 import 'discover_screen.dart';
-import 'memory_screen.dart';
 import 'post_composer_page.dart';
 import 'profile_screen.dart';
 import 'search_screen.dart';
+import 'tools_hub_screen.dart';
 
 /// HomeShell — the app's single bottom navigation, Myto-community style:
 ///
@@ -105,76 +101,11 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
-  /// The back arrow on Discover's header opens the tools menu (AI Chat and the
-  /// four inner tools from the old shell).
+  /// The back arrow on Discover's header opens the full-screen tools hub —
+  /// the original Myto screens (AI Chat, Agents, Helper, Memory, Artifacts).
   void _openTools() {
-    final palette = context.palette;
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: palette.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            const Padding(
-              padding: EdgeInsets.all(TeamlySpace.s4),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Myto tools',
-                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: TeamlyColors.ink900),
-                ),
-              ),
-            ),
-            _tool(sheetContext, context, Icons.chat_bubble_outline_rounded, 'AI Chat',
-                'Talk with your models', const ChatScreen()),
-            _tool(sheetContext, context, Icons.assistant_outlined, 'Helper', 'Your AI assistant',
-                const AssistantScreen()),
-            _tool(sheetContext, context, Icons.smart_toy_outlined, 'Agents', 'Create and run agents',
-                const AgentsScreen()),
-            _tool(sheetContext, context, Icons.psychology_outlined, 'Memory', 'What Myto remembers',
-                const MemoryScreen()),
-            _tool(sheetContext, context, Icons.layers_outlined, 'Artifacts', 'Generated media & files',
-                const ArtifactsScreen()),
-            const SizedBox(height: TeamlySpace.s2),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _tool(
-    BuildContext sheetContext,
-    BuildContext appContext,
-    IconData icon,
-    String title,
-    String subtitle,
-    Widget screen,
-  ) {
-    final palette = appContext.palette;
-    return ListTile(
-      leading: Container(
-        width: 40,
-        height: 40,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: palette.tagBg,
-          borderRadius: BorderRadius.circular(TeamlyRadius.sm),
-        ),
-        child: Icon(icon, size: 20, color: palette.tagFg),
-      ),
-      title: Text(
-        title,
-        style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: TeamlyColors.ink900),
-      ),
-      subtitle: Text(subtitle, style: const TextStyle(fontSize: 12.5, color: TeamlyColors.ink500)),
-      onTap: () {
-        Navigator.of(sheetContext).pop();
-        Navigator.of(appContext).push(MaterialPageRoute<void>(builder: (_) => screen));
-      },
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const ToolsHubScreen()),
     );
   }
 
