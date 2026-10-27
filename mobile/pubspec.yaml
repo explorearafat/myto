@@ -53,6 +53,13 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 
+  # The cursive wordmark ("Myto" on the Discover header) — Dancing Script (OFL).
+  fonts:
+    - family: Dancing Script
+      fonts:
+        - asset: assets/fonts/DancingScript.ttf
+          weight: 700
+
 # App launcher icon — the monochrome Myto mitochondria mark (near-white #F0F0EC) on charcoal
 # #181818. Regenerate the source PNGs with `python scripts/build-launcher-icon.py`; CI then runs
 # `dart run flutter_launcher_icons` after `flutter create` to stamp them over the default Flutter

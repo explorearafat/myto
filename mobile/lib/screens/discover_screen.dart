@@ -6,38 +6,43 @@ import 'package:provider/provider.dart';
 
 import '../services/auth_service.dart';
 import '../services/social_service.dart';
-import 'discover_profile.dart' show DiscoverProfileSetup, DiscoverProfileView;
 import '../theme.dart';
 import '../widgets/teamly/kit.dart';
+import 'notifications_sheet.dart';
 
 /// ---------------------------------------------------------------------------
-/// DiscoverScreen — the Myto community, backed by Firestore (the same feed the
-/// website's /discover serves; see services/social_service.dart + firestore.rules).
+/// DiscoverScreen — Home: the Myto community feed, backed by Firestore (the
+/// same feed the website's /discover serves; see services/social_service.dart
+/// + firestore.rules).
 ///
-/// Text-only posts about AI / Myto / crypto / anything — optionally with an
-/// attached website link whose preview card renders on the post. Readers can
-/// react (like), comment, share (repost to their profile), follow authors, and
-/// save posts to their own profile. Reading is public; writing needs sign-in
-/// (the app is already gated on Google/GitHub sign-in).
+/// Header (per the design spec): back icon → tools menu, "Myto" in cursive,
+/// notification bell → activity sheet.
+///
+/// The "For you" feed flows by PRIORITY, not pure recency: engagement +
+/// recency + who-you-follow + a per-refresh jitter (see
+/// SocialService.prioritizePosts), and cards enter with a step-by-step
+/// staggered animation.
 /// ---------------------------------------------------------------------------
 class DiscoverScreen extends StatefulWidget {
-  const DiscoverScreen({super.key});
+  const DiscoverScreen({super.key, this.onOpenTools});
+
+  /// Opens the tools menu (AI Chat / Helper / Agents / Memory / Artifacts).
+  final VoidCallback? onOpenTools;
 
   @override
   State<DiscoverScreen> createState() => _DiscoverScreenState();
 }
 
 class _DiscoverScreenState extends State<DiscoverScreen> {
-  // The four destinations, mirroring the website's /discover.
-  String _dest = 'feed'; // 'feed' | 'viral' | 'following' | 'profile'
+  // Three destinations: 'foryou' | 'viral' | 'following'.
+  String _dest = 'foryou';
   String _topic = '';
+  int _seed = 0; // re-jittered on pull-to-refresh so the flow changes
   final Set<String> _likedIds = <String>{};
   final Set<String> _savedIds = <String>{};
   final Set<String> _followingIds = <String>{};
   bool _setsLoaded = false;
   List<FeedPost>? _followingPosts;
-  DiscoverProfile? _profile;
-  bool _profileLoaded = false;
 
   User? get _user => FirebaseAuth.instance.currentUser;
   String get _uid => _user?.uid ?? '';
@@ -46,23 +51,13 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     final n = (auth.displayName.isNotEmpty ? auth.displayName : (_user?.displayName ?? 'Anonymous')).trim();
     return n.isEmpty ? 'Anonymous' : n;
   }
+
   String get _photo => _user?.photoURL ?? '';
 
   @override
   void initState() {
     super.initState();
     _loadSets();
-    _loadProfile();
-  }
-
-  Future<void> _loadProfile() async {
-    if (_uid.isEmpty) return;
-    final p = await SocialService().getProfile(_uid);
-    if (!mounted) return;
-    setState(() {
-      _profile = p;
-      _profileLoaded = true;
-    });
   }
 
   Future<void> _loadSets() async {
@@ -99,25 +94,37 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
   Widget build(BuildContext context) {
     final palette = context.palette;
     return Scaffold(
+      backgroundColor: palette.bg,
       appBar: AppBar(
-        title: const Text('Discover'),
+        // The spec's header: back icon · Myto (cursive) · notification bell.
+        leading: IconButton(
+          tooltip: 'Myto tools',
+          icon: const Icon(Icons.arrow_back_rounded),
+          onPressed: widget.onOpenTools,
+        ),
+        title: const Text(
+          'Myto',
+          style: TextStyle(
+            fontFamily: 'Dancing Script',
+            fontSize: 30,
+            fontWeight: FontWeight.w700,
+            color: TeamlyColors.ink900,
+          ),
+        ),
+        centerTitle: false,
         actions: <Widget>[
-          if (_uid.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(right: TeamlySpace.s4),
-              child: Center(
-                child: GestureDetector(
-                  onTap: () => setState(() => _dest = 'profile'),
-                  child: _Avatar(photo: _photo, name: _name, size: 32),
-                ),
-              ),
-            ),
+          IconButton(
+            tooltip: 'Notifications',
+            icon: const Icon(Icons.notifications_none_rounded, size: 24),
+            onPressed: () => showNotificationsSheet(context),
+          ),
+          const SizedBox(width: TeamlySpace.s1),
         ],
       ),
       body: Column(
         children: <Widget>[
           const SizedBox(height: TeamlySpace.s2),
-          // The four destinations — Feed / Viral / Following / Profile.
+          // Three destinations — For you / Viral / Following.
           Container(
             margin: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
             padding: const EdgeInsets.all(3),
@@ -128,10 +135,9 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
             child: Row(
               children: <Widget>[
                 for (final d in const <String, String>{
-                  'feed': 'Feed',
+                  'foryou': 'For you',
                   'viral': 'Viral',
                   'following': 'Following',
-                  'profile': 'Profile',
                 }.entries)
                   Expanded(
                     child: GestureDetector(
@@ -157,31 +163,10 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
               ],
             ),
           ),
-          const SizedBox(height: TeamlySpace.s3),
-          if (_dest == 'feed' || _dest == 'viral')
-            _TopicChips(selected: _topic, onSelected: (t) => setState(() => _topic = t)),
-          if (_dest == 'feed' || _dest == 'viral') const SizedBox(height: TeamlySpace.s2),
-          if (_uid.isEmpty)
-            const _SignInCard()
-          else if (_dest != 'profile' && _profileLoaded && _profile == null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
-              child: TeamlyCard(
-                padding: const EdgeInsets.all(TeamlySpace.s4),
-                child: const Text(
-                  'Set up your profile (Profile tab) to start posting.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 13.5, color: TeamlyColors.ink500),
-                ),
-              ),
-            )
-          else if (_dest != 'profile')
-            _Composer(
-              name: _profile?.name ?? _name,
-              photo: _profile?.photo ?? _photo,
-              onPosted: () => _toast('Posted to Discover.'),
-            ),
-          const SizedBox(height: TeamlySpace.s3),
+          const SizedBox(height: TeamlySpace.s2),
+          _TopicChips(selected: _topic, onSelected: (t) => setState(() => _topic = t)),
+          const SizedBox(height: TeamlySpace.s2),
+          if (_uid.isEmpty) const _SignInCard(),
           Expanded(child: _feedArea(palette)),
         ],
       ),
@@ -189,51 +174,6 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
   }
 
   Widget _feedArea(MytoPalette palette) {
-    if (_dest == 'profile') {
-      if (_uid.isEmpty) {
-        return const _SignInCard();
-      }
-      if (!_profileLoaded) {
-        return _Empty(text: 'Loading…', palette: palette);
-      }
-      if (_profile == null) {
-        return DiscoverProfileSetup(
-          uid: _uid,
-          defaultName: _profile?.name ?? _name,
-          defaultPhoto: _profile?.photo ?? _photo,
-          onDone: (p) => setState(() => _profile = p),
-        );
-      }
-      return DiscoverProfileView(
-        uid: _uid,
-        profile: _profile,
-        savedIds: _savedIds,
-        onUnsave: (id) => _guard(
-          () async {
-            await SocialService.unsaveFromProfile(id, _uid);
-            setState(() => _savedIds.remove(id));
-          },
-          '',
-        ),
-        onDelete: (id) => _guard(
-          () async {
-            await SocialService.deletePost(id);
-            setState(() => _followingPosts = null);
-          },
-          'Post deleted.',
-        ),
-        onComment: (post, text) => _guard(
-          () => SocialService.addComment(
-            post.id,
-            uid: _uid,
-            name: _name,
-            photo: _photo,
-            text: text,
-          ),
-          'Comment added.',
-        ),
-      );
-    }
     if (_dest == 'following') {
       if (_uid.isEmpty) {
         return _Empty(text: 'Sign in to follow authors and see their posts here.', palette: palette);
@@ -257,13 +197,11 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
           final list = await SocialService.fetchPostsByAuthors(_followingIds.toList());
           if (mounted) setState(() => _followingPosts = list);
         },
-        child: ListView(
-          padding: const EdgeInsets.all(TeamlySpace.gutter),
-          children: <Widget>[for (final p in list) _buildCard(p)],
-        ),
+        child: _StaggeredFeed(posts: list, buildCard: _buildCard),
       );
     }
 
+    // For you + Viral both stream live; For you re-ranks with priority + jitter.
     return StreamBuilder<List<FeedPost>>(
       key: ValueKey<String>('feed:$_dest:$_topic'),
       stream: _dest == 'viral'
@@ -273,415 +211,186 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
         if (snap.connectionState == ConnectionState.waiting && !snap.hasData) {
           return _Empty(text: 'Loading the feed…', palette: palette);
         }
-        final posts = snap.data ?? const <FeedPost>[];
+        var posts = snap.data ?? const <FeedPost>[];
+        if (_dest == 'foryou') {
+          posts = SocialService.prioritizePosts(
+            posts,
+            following: _followingIds,
+            seed: _seed,
+          );
+        }
         if (posts.isEmpty) {
           return _Empty(
             text: _dest == 'viral'
                 ? 'No popular posts yet — likes decide what rises.'
-                : 'Nothing here yet — be the first to post.',
+                : 'Nothing here yet — tap the green + to post first.',
             palette: palette,
           );
         }
         return RefreshIndicator(
-          onRefresh: () async {},
-          child: ListView(
-            padding: const EdgeInsets.all(TeamlySpace.gutter),
-            children: <Widget>[for (final p in posts) _buildCard(p)],
-          ),
+          // A pull-to-refresh re-jitters the For you flow (new order, same posts).
+          onRefresh: () async => setState(() => _seed++),
+          child: _StaggeredFeed(posts: posts, buildCard: _buildCard),
         );
       },
     );
   }
 
   Widget _buildCard(FeedPost post) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: TeamlySpace.s3),
-      child: _PostCard(
-        post: post,
-        meUid: _uid,
-        meName: _name,
-        liked: _likedIds.contains(post.id),
-        saved: _savedIds.contains(post.id),
-        following: _followingIds.contains(post.uid),
-        onToggleLike: () => _guard(
-          () async {
-            final nowLiked = await SocialService.toggleLike(post.id, _uid);
+    return _PostCard(
+      post: post,
+      meUid: _uid,
+      meName: _name,
+      liked: _likedIds.contains(post.id),
+      saved: _savedIds.contains(post.id),
+      following: _followingIds.contains(post.uid),
+      onToggleLike: () => _guard(
+        () async {
+          final nowLiked = await SocialService.toggleLike(post.id, _uid);
+          setState(() {
+            nowLiked ? _likedIds.add(post.id) : _likedIds.remove(post.id);
+          });
+        },
+        '',
+      ),
+      onShare: () => _guard(
+        () async {
+          final created = await SocialService.sharePost(post.id, uid: _uid, name: _name);
+          await _toast(created ? 'Reposted to your profile.' : 'Already in your profile.');
+        },
+        '',
+      ),
+      onToggleSave: () => _guard(
+        () async {
+          if (_savedIds.contains(post.id)) {
+            await SocialService.unsaveFromProfile(post.id, _uid);
+            setState(() => _savedIds.remove(post.id));
+            await _toast('Removed from your profile.');
+          } else {
+            await SocialService.saveToProfile(post.id, _uid);
+            setState(() => _savedIds.add(post.id));
+            await _toast('Saved to your profile.');
+          }
+        },
+        '',
+      ),
+      onToggleFollow: () => _guard(
+        () async {
+          if (_followingIds.contains(post.uid)) {
+            await SocialService.unfollowAuthor(_uid, post.uid);
             setState(() {
-              nowLiked ? _likedIds.add(post.id) : _likedIds.remove(post.id);
+              _followingIds.remove(post.uid);
+              _followingPosts = null;
             });
-          },
-          '',
-        ),
-        onShare: () => _guard(
-          () async {
-            final created = await SocialService.sharePost(post.id, uid: _uid, name: _name);
-            await _toast(created ? 'Reposted to your profile.' : 'Already in your profile.');
-          },
-          '',
-        ),
-        onToggleSave: () => _guard(
-          () async {
-            if (_savedIds.contains(post.id)) {
-              await SocialService.unsaveFromProfile(post.id, _uid);
-              setState(() => _savedIds.remove(post.id));
-              await _toast('Removed from your profile.');
-            } else {
-              await SocialService.saveToProfile(post.id, _uid);
-              setState(() => _savedIds.add(post.id));
-              await _toast('Saved to your profile.');
-            }
-          },
-          '',
-        ),
-        onToggleFollow: () => _guard(
-          () async {
-            if (_followingIds.contains(post.uid)) {
-              await SocialService.unfollowAuthor(_uid, post.uid);
-              setState(() {
-                _followingIds.remove(post.uid);
-                _followingPosts = null;
-              });
-            } else {
-              await SocialService.followAuthor(_uid, post.uid);
-              setState(() {
-                _followingIds.add(post.uid);
-                _followingPosts = null;
-              });
-              await _toast('Following ${post.name}.');
-            }
-          },
-          '',
-        ),
-        onComment: (text) => _guard(
-          () => SocialService.addComment(
-            post.id,
-            uid: _uid,
-            name: _name,
-            photo: _photo,
-            text: text,
-          ),
-          'Comment added.',
-        ),
-        onDelete: post.uid == _uid
-            ? () => _guard(
-                () async {
-                  await SocialService.deletePost(post.id);
-                  setState(() => _followingPosts = null);
-                },
-                'Post deleted.',
-              )
-            : null,
+          } else {
+            await SocialService.followAuthor(_uid, post.uid);
+            setState(() {
+              _followingIds.add(post.uid);
+              _followingPosts = null;
+            });
+            await _toast('Following ${post.name}.');
+          }
+        },
+        '',
       ),
-    );
-  }
-
-  void _openProfile() {
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: context.palette.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      onComment: (text) => _guard(
+        () => SocialService.addComment(
+          post.id,
+          uid: _uid,
+          name: _name,
+          photo: _photo,
+          text: text,
+        ),
+        'Comment added.',
       ),
-      builder: (_) => _ProfileSheet(
-        uid: _uid,
-        name: _name,
-        photo: _photo,
-        savedIds: _savedIds.toList(growable: false),
-        onUnsave: (id) => _guard(
-          () async {
-            await SocialService.unsaveFromProfile(id, _uid);
-            setState(() => _savedIds.remove(id));
-          },
-          '',
-        ),
-        onDelete: (id) => _guard(
-          () async {
-            await SocialService.deletePost(id);
-            setState(() => _followingPosts = null);
-          },
-          'Post deleted.',
-        ),
-        onComment: (post, text) => _guard(
-          () => SocialService.addComment(
-            post.id,
-            uid: _uid,
-            name: _name,
-            photo: _photo,
-            text: text,
-          ),
-          'Comment added.',
-        ),
-      ),
+      onDelete: post.uid == _uid
+          ? () => _guard(
+              () async {
+                await SocialService.deletePost(post.id);
+                setState(() => _followingPosts = null);
+              },
+              'Post deleted.',
+            )
+          : null,
     );
   }
 }
 
-// ── Composer ───────────────────────────────────────────────────────────────────
+// ── Step-by-step staggered feed ────────────────────────────────────────────────
 
-class _Composer extends StatefulWidget {
-  const _Composer({required this.name, required this.photo, required this.onPosted});
+/// Wraps each post card in a fade+slide entrance, delayed by its index — the
+/// "step by step" reveal. The stagger caps out so long feeds don't feel slow.
+class _StaggeredFeed extends StatelessWidget {
+  const _StaggeredFeed({required this.posts, required this.buildCard});
 
-  final String name;
-  final String photo;
-  final VoidCallback onPosted;
+  final List<FeedPost> posts;
+  final Widget Function(FeedPost post) buildCard;
 
   @override
-  State<_Composer> createState() => _ComposerState();
+  Widget build(BuildContext context) {
+    return ListView.builder(
+      padding: const EdgeInsets.all(TeamlySpace.gutter),
+      itemCount: posts.length,
+      itemBuilder: (context, i) {
+        return _StaggerIn(
+          delay: Duration(milliseconds: 60 * (i < 10 ? i : 10)),
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: TeamlySpace.s3),
+            child: buildCard(posts[i]),
+          ),
+        );
+      },
+    );
+  }
 }
 
-class _ComposerState extends State<_Composer> {
-  final TextEditingController _ctrl = TextEditingController();
-  final FocusNode _focus = FocusNode();
-  bool _expanded = false;
-  bool _busy = false;
-  String _error = '';
-  final List<String> _topics = <String>[];
-  Map<String, String>? _meta;
-  Timer? _debounce;
-  String _lastUrl = '';
+class _StaggerIn extends StatefulWidget {
+  const _StaggerIn({required this.delay, required this.child});
+
+  final Duration delay;
+  final Widget child;
+
+  @override
+  State<_StaggerIn> createState() => _StaggerInState();
+}
+
+class _StaggerInState extends State<_StaggerIn> with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 320),
+  );
+  late final Animation<double> _fade = CurvedAnimation(parent: _c, curve: Curves.easeOut);
+  late final Animation<Offset> _slide = Tween<Offset>(
+    begin: const Offset(0, 0.05),
+    end: Offset.zero,
+  ).animate(_fade);
+
+  @override
+  void initState() {
+    super.initState();
+    Timer(widget.delay, () {
+      if (mounted) _c.forward();
+    });
+  }
 
   @override
   void dispose() {
-    _debounce?.cancel();
-    _ctrl.dispose();
-    _focus.dispose();
+    _c.dispose();
     super.dispose();
-  }
-
-  void _onTextChanged(String value) {
-    final url = SocialService.firstUrl(value);
-    if (url == null) {
-      _debounce?.cancel();
-      if (_meta != null) setState(() => _meta = null);
-      _lastUrl = '';
-      return;
-    }
-    if (url == _lastUrl) return;
-    _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 700), () async {
-      _lastUrl = url;
-      final meta = await SocialService.fetchLinkMeta(url);
-      if (!mounted) return;
-      setState(() => _meta = <String, String>{'url': url, ...meta});
-    });
-  }
-
-  Future<void> _post() async {
-    final text = _ctrl.text.trim();
-    if (text.isEmpty || _busy) return;
-    setState(() {
-      _busy = true;
-      _error = '';
-    });
-    try {
-      final url = _meta?['url'] ?? SocialService.firstUrl(text) ?? '';
-      await SocialService.createPost(
-        uid: FirebaseAuth.instance.currentUser!.uid,
-        name: widget.name,
-        photo: widget.photo,
-        text: text,
-        topics: _topics,
-        link: url,
-        linkMeta: _meta ?? const <String, String>{},
-      );
-      _ctrl.clear();
-      if (mounted) {
-        setState(() {
-          _expanded = false;
-          _topics.clear();
-          _meta = null;
-          _lastUrl = '';
-        });
-      }
-      widget.onPosted();
-    } catch (_) {
-      if (mounted) setState(() => _error = 'Could not post. Try again.');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final remaining = SocialService.maxPostChars - _ctrl.text.length;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
-      child: TeamlyCard(
-        padding: const EdgeInsets.all(TeamlySpace.s3),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Row(
-              children: <Widget>[
-                _Avatar(photo: widget.photo, name: widget.name, size: 32),
-                const SizedBox(width: TeamlySpace.s3),
-                Expanded(
-                  child: TextField(
-                    controller: _ctrl,
-                    focusNode: _focus,
-                    minLines: _expanded ? 3 : 1,
-                    maxLines: 5,
-                    maxLength: SocialService.maxPostChars + 50,
-                    style: const TextStyle(color: TeamlyColors.ink900, fontSize: 14.5, height: 1.4),
-                    decoration: const InputDecoration(
-                      isCollapsed: true,
-                      border: InputBorder.none,
-                      hintText: 'Share something about AI, Myto, crypto…',
-                      hintStyle: TextStyle(color: TeamlyColors.ink300, fontSize: 14),
-                    ),
-                    onChanged: (v) {
-                      setState(() {});
-                      _onTextChanged(v);
-                    },
-                    onTap: () => setState(() => _expanded = true),
-                  ),
-                ),
-              ],
-            ),
-            if (_expanded) ...<Widget>[
-              const SizedBox(height: TeamlySpace.s2),
-              Wrap(
-                spacing: 6,
-                children: <Widget>[
-                  for (final t in kDiscoverTopics)
-                    GestureDetector(
-                      onTap: () => setState(() {
-                        _topics.contains(t) ? _topics.remove(t) : _topics.add(t);
-                        if (_topics.length > 4) _topics.removeAt(0);
-                      }),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: _topics.contains(t) ? context.palette.accent : context.palette.chip,
-                          borderRadius: BorderRadius.circular(TeamlyRadius.pill),
-                        ),
-                        child: Text(
-                          '#$t',
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.w600,
-                            color: _topics.contains(t) ? context.palette.onAccent : TeamlyColors.ink700,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            if (_meta != null && (_meta!['title']!.isNotEmpty || _meta!['image']!.isNotEmpty))
-              Container(
-                margin: const EdgeInsets.only(top: TeamlySpace.s2),
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: context.palette.chip,
-                  borderRadius: BorderRadius.circular(TeamlyRadius.md),
-                ),
-                child: Row(
-                  children: <Widget>[
-                    if (_meta!['image']!.isNotEmpty)
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(TeamlyRadius.sm),
-                        child: Image.network(
-                          _meta!['image']!,
-                          width: 56,
-                          height: 40,
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) => const SizedBox(width: 56, height: 40),
-                        ),
-                      ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: <Widget>[
-                          Text(
-                            _meta!['title']!.isEmpty ? _meta!['url']! : _meta!['title']!,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: TeamlyColors.ink900),
-                          ),
-                          Text(
-                            _meta!['site']!.isEmpty ? _meta!['url']! : _meta!['site']!,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 11, color: TeamlyColors.ink500),
-                          ),
-                        ],
-                      ),
-                    ),
-                    IconButton(
-                      visualDensity: VisualDensity.compact,
-                      onPressed: () => setState(() {
-                        _meta = null;
-                        _lastUrl = '';
-                        _ctrl.text = _ctrl.text.replaceFirst(_meta?['url'] ?? '', '').trim();
-                      }),
-                      icon: const Icon(Icons.close_rounded, size: 16, color: TeamlyColors.ink500),
-                    ),
-                  ],
-                ),
-              ),
-            const SizedBox(height: TeamlySpace.s2),
-            Row(
-              children: <Widget>[
-                Text(
-                  '${remaining.clamp(0, SocialService.maxPostChars)}',
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    fontFamily: 'monospace',
-                    color: remaining < 0 ? TeamlyColors.danger : TeamlyColors.ink300,
-                  ),
-                ),
-                const Spacer(),
-                if (_expanded)
-                  TextButton(
-                    onPressed: () => setState(() {
-                      _expanded = false;
-                      _focus.unfocus();
-                    }),
-                    child: const Text('Cancel', style: TextStyle(color: TeamlyColors.ink500, fontSize: 12.5)),
-                  ),
-                const SizedBox(width: 4),
-                GestureDetector(
-                  onTap: _ctrl.text.trim().isEmpty || _busy ? null : _post,
-                  child: Container(
-                    height: 34,
-                    padding: const EdgeInsets.symmetric(horizontal: 18),
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: _ctrl.text.trim().isEmpty || _busy
-                          ? context.palette.chip
-                          : context.palette.accent,
-                      borderRadius: BorderRadius.circular(TeamlyRadius.pill),
-                    ),
-                    child: Text(
-                      _busy ? 'Posting…' : 'Post',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: _ctrl.text.trim().isEmpty || _busy ? TeamlyColors.ink300 : context.palette.onAccent,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            if (_error.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text(_error, style: const TextStyle(color: TeamlyColors.danger, fontSize: 12)),
-              ),
-          ],
-      ),
-    ),
-  );
-}
+    return FadeTransition(
+      opacity: _fade,
+      child: SlideTransition(position: _slide, child: widget.child),
+    );
+  }
 }
 
 // ── Post card ──────────────────────────────────────────────────────────────────
 
-class _PostCard extends StatefulWidget {
+class _PostCard extends StatelessWidget {
   const _PostCard({
     required this.post,
     required this.meUid,
@@ -711,17 +420,7 @@ class _PostCard extends StatefulWidget {
   final VoidCallback? onDelete;
 
   @override
-  State<_PostCard> createState() => _PostCardState();
-}
-
-class _PostCardState extends State<_PostCard> {
-  bool _commentsOpen = false;
-
-  String get _mine => widget.post.uid == widget.meUid ? 'me' : 'other';
-
-  @override
   Widget build(BuildContext context) {
-    final post = widget.post;
     return TeamlyCard(
       padding: const EdgeInsets.all(TeamlySpace.s4),
       child: Column(
@@ -748,26 +447,26 @@ class _PostCardState extends State<_PostCard> {
                   ],
                 ),
               ),
-              if (widget.meUid.isNotEmpty && _mine != 'me')
+              if (meUid.isNotEmpty && post.uid != meUid)
                 GestureDetector(
-                  onTap: widget.onToggleFollow,
+                  onTap: onToggleFollow,
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
                     decoration: BoxDecoration(
-                      color: widget.following ? context.palette.chip : context.palette.accent,
+                      color: following ? context.palette.chip : context.palette.accent,
                       borderRadius: BorderRadius.circular(TeamlyRadius.pill),
                     ),
                     child: Text(
-                      widget.following ? 'Following' : 'Follow',
+                      following ? 'Following' : 'Follow',
                       style: TextStyle(
                         fontSize: 11.5,
                         fontWeight: FontWeight.w600,
-                        color: widget.following ? TeamlyColors.ink700 : context.palette.onAccent,
+                        color: following ? TeamlyColors.ink700 : context.palette.onAccent,
                       ),
                     ),
                   ),
                 ),
-              if (widget.meUid.isNotEmpty && _mine == 'me' && widget.onDelete != null)
+              if (meUid.isNotEmpty && post.uid == meUid && onDelete != null)
                 IconButton(
                   visualDensity: VisualDensity.compact,
                   onPressed: () {
@@ -784,7 +483,7 @@ class _PostCardState extends State<_PostCard> {
                           TextButton(
                             onPressed: () {
                               Navigator.pop(ctx);
-                              widget.onDelete!();
+                              onDelete!();
                             },
                             child: const Text('Delete', style: TextStyle(color: TeamlyColors.danger)),
                           ),
@@ -828,42 +527,35 @@ class _PostCardState extends State<_PostCard> {
           Row(
             children: <Widget>[
               _Action(
-                icon: widget.liked ? Icons.favorite_rounded : Icons.favorite_border_rounded,
-                color: widget.liked ? TeamlyColors.danger : TeamlyColors.ink500,
+                icon: liked ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+                color: liked ? TeamlyColors.danger : TeamlyColors.ink500,
                 label: post.likeCount > 0 ? '${post.likeCount}' : 'Like',
-                onTap: widget.meUid.isEmpty ? null : widget.onToggleLike,
+                onTap: meUid.isEmpty ? null : onToggleLike,
               ),
               const SizedBox(width: 10),
-              _Action(
-                icon: Icons.chat_bubble_outline_rounded,
-                color: TeamlyColors.ink500,
-                label: post.commentCount > 0 ? '${post.commentCount}' : 'Comment',
-                onTap: () => setState(() => _commentsOpen = !_commentsOpen),
+              _CommentsAction(
+                post: post,
+                meUid: meUid,
+                meName: meName,
+                onComment: onComment,
               ),
               const SizedBox(width: 10),
               _Action(
                 icon: Icons.reply_rounded,
                 color: TeamlyColors.ink500,
                 label: post.shareCount > 0 ? '${post.shareCount}' : 'Share',
-                onTap: widget.meUid.isEmpty ? null : widget.onShare,
+                onTap: meUid.isEmpty ? null : onShare,
               ),
               const Spacer(),
-              if (widget.meUid.isNotEmpty)
+              if (meUid.isNotEmpty)
                 _Action(
-                  icon: widget.saved ? Icons.bookmark_rounded : Icons.bookmark_border_rounded,
-                  color: widget.saved ? TeamlyColors.greenText : TeamlyColors.ink500,
-                  label: widget.saved ? 'Saved' : 'Save',
-                  onTap: widget.onToggleSave,
+                  icon: saved ? Icons.bookmark_rounded : Icons.bookmark_border_rounded,
+                  color: saved ? TeamlyColors.greenText : TeamlyColors.ink500,
+                  label: saved ? 'Saved' : 'Save',
+                  onTap: onToggleSave,
                 ),
             ],
           ),
-          if (_commentsOpen)
-            _Comments(
-              postId: post.id,
-              meUid: widget.meUid,
-              meName: widget.meName,
-              onSend: widget.onComment,
-            ),
         ],
       ),
     );
@@ -879,6 +571,50 @@ class _PostCardState extends State<_PostCard> {
     if (s < 604800) return '${s ~/ 86400}d';
     final d = DateTime.fromMillisecondsSinceEpoch(ms);
     return '${d.day}/${d.month}';
+  }
+}
+
+/// Comment action that expands the thread inline beneath its own card.
+class _CommentsAction extends StatefulWidget {
+  const _CommentsAction({
+    required this.post,
+    required this.meUid,
+    required this.meName,
+    required this.onComment,
+  });
+
+  final FeedPost post;
+  final String meUid;
+  final String meName;
+  final void Function(String text) onComment;
+
+  @override
+  State<_CommentsAction> createState() => _CommentsActionState();
+}
+
+class _CommentsActionState extends State<_CommentsAction> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        _Action(
+          icon: Icons.chat_bubble_outline_rounded,
+          color: TeamlyColors.ink500,
+          label: widget.post.commentCount > 0 ? '${widget.post.commentCount}' : 'Comment',
+          onTap: () => setState(() => _open = !_open),
+        ),
+        if (_open)
+          _Comments(
+            postId: widget.post.id,
+            meUid: widget.meUid,
+            meName: widget.meName,
+            onSend: widget.onComment,
+          ),
+      ],
+    );
   }
 }
 
@@ -929,46 +665,43 @@ class _LinkCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () {}, // Opening external links from the feed is left to the website; keep the card informational.
-      child: Container(
-        width: double.infinity,
-        decoration: BoxDecoration(
-          color: context.palette.chip,
-          borderRadius: BorderRadius.circular(TeamlyRadius.md),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            if (image.isNotEmpty)
-              ClipRRect(
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(10)),
-                child: Image.network(
-                  image,
-                  width: double.infinity,
-                  height: 150,
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => const SizedBox(width: double.infinity, height: 0),
-                ),
-              ),
-            Padding(
-              padding: const EdgeInsets.all(10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  if (title.isNotEmpty)
-                    Text(title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: TeamlyColors.ink900)),
-                  Text(
-                    site.isEmpty ? url : site,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11.5, color: TeamlyColors.ink300),
-                  ),
-                ],
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: context.palette.chip,
+        borderRadius: BorderRadius.circular(TeamlyRadius.md),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          if (image.isNotEmpty)
+            ClipRRect(
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(10)),
+              child: Image.network(
+                image,
+                width: double.infinity,
+                height: 150,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => const SizedBox(width: double.infinity, height: 0),
               ),
             ),
-          ],
-        ),
+          Padding(
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                if (title.isNotEmpty)
+                  Text(title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: TeamlyColors.ink900)),
+                Text(
+                  site.isEmpty ? url : site,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11.5, color: TeamlyColors.ink300),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1146,130 +879,6 @@ class _TopicChips extends StatelessWidget {
   }
 }
 
-// ── Profile sheet ──────────────────────────────────────────────────────────────
-
-class _ProfileSheet extends StatefulWidget {
-  const _ProfileSheet({
-    required this.uid,
-    required this.name,
-    required this.photo,
-    required this.savedIds,
-    required this.onUnsave,
-    required this.onDelete,
-    required this.onComment,
-  });
-
-  final String uid;
-  final String name;
-  final String photo;
-  final List<String> savedIds;
-  final void Function(String postId) onUnsave;
-  final void Function(String postId) onDelete;
-  final void Function(FeedPost post, String text) onComment;
-
-  @override
-  State<_ProfileSheet> createState() => _ProfileSheetState();
-}
-
-class _ProfileSheetState extends State<_ProfileSheet> {
-  String _tab = 'posts'; // 'posts' | 'saved'
-  List<FeedPost>? _mine;
-  List<FeedPost>? _saved;
-
-  @override
-  void initState() {
-    super.initState();
-    SocialService.streamFeed(authorUid: widget.uid, limitCount: 50).listen((list) {
-      if (mounted) setState(() => _mine = list);
-    });
-    _loadSaved();
-  }
-
-  Future<void> _loadSaved() async {
-    final posts = await SocialService.hydratePosts(await SocialService.listSavedIds(widget.uid));
-    if (mounted) setState(() => _saved = posts);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final list = _tab == 'posts' ? _mine : _saved;
-    return SizedBox(
-      height: MediaQuery.of(context).size.height * 0.82,
-      child: Column(
-        children: <Widget>[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(TeamlySpace.s4, TeamlySpace.s4, TeamlySpace.s4, TeamlySpace.s2),
-            child: Row(
-              children: <Widget>[
-                _Avatar(photo: widget.photo, name: widget.name, size: 42),
-                const SizedBox(width: TeamlySpace.s3),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Text(widget.name, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: TeamlyColors.ink900)),
-                      Text(
-                        'Your public profile on Discover',
-                        style: const TextStyle(fontSize: 12, color: TeamlyColors.ink500),
-                      ),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(Icons.close_rounded, color: TeamlyColors.ink500),
-                ),
-              ],
-            ),
-          ),
-          TeamlyTabs(
-            labels: const <String>['My posts', 'Saved'],
-            index: _tab == 'posts' ? 0 : 1,
-            onChanged: (i) => setState(() => _tab = i == 0 ? 'posts' : 'saved'),
-          ),
-          Expanded(
-            child: list == null
-                ? const Center(child: Text('Loading…', style: TextStyle(color: TeamlyColors.ink300)))
-                : list.isEmpty
-                    ? Center(
-                        child: Text(
-                          _tab == 'posts' ? 'You have not posted yet.' : 'Nothing saved yet — tap Save on a post.',
-                          style: const TextStyle(color: TeamlyColors.ink300),
-                        ),
-                      )
-                    : RefreshIndicator(
-                        onRefresh: _loadSaved,
-                        child: ListView(
-                          padding: const EdgeInsets.all(TeamlySpace.gutter),
-                          children: <Widget>[
-                            for (final p in list)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: TeamlySpace.s3),
-                                child: _PostCard(
-                                  post: p,
-                                  meUid: widget.uid,
-                                  meName: widget.name,
-                                  liked: false,
-                                  saved: _tab == 'saved',
-                                  following: false,
-                                  onToggleLike: () {},
-                                  onShare: () {},
-                                  onToggleSave: _tab == 'saved' ? () => widget.onUnsave(p.id) : () {},
-                                  onToggleFollow: () {},
-                                  onComment: (text) => widget.onComment(p, text),
-                                  onDelete: _tab == 'posts' ? () => widget.onDelete(p.id) : null,
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 // ── Shared bits ────────────────────────────────────────────────────────────────
 
 class _Avatar extends StatelessWidget {
@@ -1324,7 +933,7 @@ class _SignInCard extends StatelessWidget {
       child: TeamlyCard(
         padding: const EdgeInsets.all(TeamlySpace.s4),
         child: const Text(
-          'Sign in (top right avatar) to post, react, comment and follow — browsing is open to everyone.',
+          'Sign in (Profile tab) to post, react, comment, follow and DM — browsing is open to everyone.',
           textAlign: TextAlign.center,
           style: TextStyle(fontSize: 13, color: TeamlyColors.ink500),
         ),
@@ -1356,4 +965,3 @@ class _Empty extends StatelessWidget {
     );
   }
 }
-

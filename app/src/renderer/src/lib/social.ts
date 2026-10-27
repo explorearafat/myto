@@ -341,3 +341,58 @@ export async function fetchPostsByAuthors(authorUids: string[]): Promise<FeedPos
   )
   return snap.docs.map((d) => toPost(d.id, d.data()))
 }
+
+/**
+ * "For you" ordering: engagement + recency + who-you-follow, with a jitter that
+ * is stable per (post, refresh) — the feed flows differently on each refresh but
+ * never re-shuffles while you scroll. Mirrors the mobile app's ranking.
+ */
+export function prioritizePosts(
+  posts: FeedPost[],
+  opts: { following?: Set<string>; seed?: number; nowMs?: number } = {}
+): FeedPost[] {
+  const { following = new Set<string>(), seed = 0 } = opts
+  const now = opts.nowMs ?? Date.now()
+  const score = (p: FeedPost): number => {
+    const ageH = Math.min(Math.max((now - p.createdAtMs) / 3600000, 0), 72)
+    const engagement = p.likeCount * 2 + p.commentCount * 3 + p.shareCount * 2.5
+    const recency = 40 * (1 - ageH / 72)
+    const followBoost = following.has(p.uid) ? 25 : 0
+    const jitter = jitterFor(`${seed}:${p.id}`) * 12
+    return engagement + recency + followBoost + jitter
+  }
+  return [...posts].sort((a, b) => score(b) - score(a))
+}
+
+/** Stable 0..1 hash (String.hash varies per run, so roll our own). */
+function jitterFor(s: string): number {
+  let h = 7
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) & 0x7fffffff
+  return (h % 1000) / 1000
+}
+
+/** Recent comments on my posts — the Discover bell's notification list. */
+export async function fetchMyNotifications(
+  uid: string,
+  maxPosts = 10
+): Promise<Array<{ id: string; who: string; text: string; atMs: number; postPreview: string }>> {
+  const mine = await getDocs(
+    query(collection(db, 'posts'), where('uid', '==', uid), orderBy('createdAt', 'desc'), limit(maxPosts))
+  )
+  const out: Array<{ id: string; who: string; text: string; atMs: number; postPreview: string }> = []
+  for (const post of mine.docs) {
+    const preview = String(post.data().text ?? '').slice(0, 60)
+    const comments = await getDocs(query(collection(db, 'posts', post.id, 'comments'), limit(20)))
+    for (const c of comments.docs) {
+      const d = c.data()
+      out.push({
+        id: c.id,
+        who: String(d.name ?? 'Someone'),
+        text: String(d.text ?? ''),
+        atMs: (d.createdAt as { toMillis?: () => number } | null)?.toMillis?.() ?? 0,
+        postPreview: preview,
+      })
+    }
+  }
+  return out.sort((a, b) => b.atMs - a.atMs)
+}

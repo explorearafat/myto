@@ -385,6 +385,62 @@ class SocialService {
         .get();
     return snap.docs.map((d) => FeedPost.fromDoc(d.id, d.data())).toList();
   }
+
+  /// One-shot recent posts (the Search screen filters this client-side).
+  static Future<List<FeedPost>> fetchRecentPosts({int limitCount = 100}) async {
+    final snap = await _db
+        .collection('posts')
+        .orderBy('createdAt', descending: true)
+        .limit(limitCount)
+        .get();
+    return snap.docs.map((d) => FeedPost.fromDoc(d.id, d.data())).toList();
+  }
+
+  /// One-shot profile sample (Search filters names/handles client-side).
+  static Future<List<DiscoverProfile>> fetchProfileSample({int limitCount = 200}) async {
+    final snap = await _db.collection('profiles').limit(limitCount).get();
+    return snap.docs.map((d) => DiscoverProfile.fromDoc(d.id, d.data())).toList();
+  }
+
+  /// "For you" ordering: engagement + recency + who-you-follow, with a jitter
+  /// that is stable per (post, refresh) — so the feed flows differently on each
+  /// pull-to-refresh but never re-shuffles while you scroll.
+  ///
+  ///   score = engagement + recency + follow-boost + jitter
+  ///     engagement — likes ×2, comments ×3, shares ×2.5 (conversation wins)
+  ///     recency    — linear decay over 72h, worth up to 40 points
+  ///     follow     — +25 for authors from your follow graph
+  ///     jitter     — 0..12 points, seeded by the refresh so ties separate
+  ///
+  /// Pure + deterministic given (posts, following, seed) — unit-testable.
+  static List<FeedPost> prioritizePosts(
+    List<FeedPost> posts, {
+    Set<String> following = const <String>{},
+    int seed = 0,
+    int? nowMs,
+  }) {
+    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    double score(FeedPost p) {
+      final ageH = ((now - p.createdAtMs) / 3600000).clamp(0.0, 72.0);
+      final engagement = p.likeCount * 2.0 + p.commentCount * 3.0 + p.shareCount * 2.5;
+      final recency = 40.0 * (1 - ageH / 72);
+      final followBoost = following.contains(p.uid) ? 25.0 : 0.0;
+      final jitter = _jitter('$seed:${p.id}') * 12.0;
+      return engagement + recency + followBoost + jitter;
+    }
+
+    final ranked = <FeedPost>[...posts]..sort((a, b) => score(b).compareTo(score(a)));
+    return ranked;
+  }
+
+  /// Stable 0..1 hash of a string (no Dart core hash — it varies per run).
+  static double _jitter(String s) {
+    var h = 7;
+    for (final c in s.codeUnits) {
+      h = (h * 31 + c) & 0x7fffffff;
+    }
+    return (h % 1000) / 1000.0;
+  }
 }
 
 

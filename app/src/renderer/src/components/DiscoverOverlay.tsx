@@ -11,6 +11,7 @@ import {
   createPost,
   deletePost,
   fetchLinkMeta,
+  fetchMyNotifications,
   fetchPostsByAuthors,
   firstUrl,
   followAuthor,
@@ -19,6 +20,7 @@ import {
   isLikedBy,
   listSavedIds,
   MAX_POST_CHARS,
+  prioritizePosts,
   saveToProfile,
   sharePost,
   streamComments,
@@ -470,6 +472,8 @@ export function DiscoverOverlay({ onClose }: { onClose: () => void }) {
   const [savedIds, setSavedIds] = useState<Set<string>>(new Set())
   const [followingIds, setFollowingIds] = useState<Set<string>>(new Set())
   const [toast, setToast] = useState('')
+  const [seed, setSeed] = useState(0)
+  const [notifOpen, setNotifOpen] = useState(false)
   const toastTimer = useRef<number | undefined>(undefined)
 
   const showToast = useCallback((msg: string) => {
@@ -572,27 +576,56 @@ export function DiscoverOverlay({ onClose }: { onClose: () => void }) {
     { key: 'saved', label: 'Saved' },
   ]
 
+  // The unfiltered Feeds tab flows by priority (engagement + recency + follows +
+  // per-refresh jitter); topic filters, Following, Mine and Saved stay as-is.
+  const visiblePosts = useMemo(() => {
+    if (!posts) return posts
+    if (tab !== 'feeds' || topic) return posts
+    return prioritizePosts(posts, { following: followingIds, seed })
+  }, [posts, tab, topic, followingIds, seed])
+
   return (
     <div className="absolute inset-0 z-40 flex flex-col bg-bg/95 backdrop-blur-sm">
-      {/* Header row */}
-      <div className="flex items-center justify-between border-b border-border px-5 py-3">
-        <div className="flex items-center gap-2.5">
-          <span className="grid h-6 w-6 place-items-center rounded-full bg-primary/15 text-primary">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <circle cx="8" cy="8" r="5.5" stroke="currentColor" strokeWidth="1.3" />
-              <path d="M2.5 8h11M8 2.5c1.8 1.4 2.8 3.3 2.8 5.5S9.8 12.1 8 13.5C6.2 12.1 5.2 10.2 5.2 8S6.2 3.9 8 2.5z" stroke="currentColor" strokeWidth="1.2" />
+      {/* Header row — back · cursive Myto · notifications (per the mobile design) */}
+      <div className="flex items-center justify-between border-b border-border px-5 py-2.5">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Back"
+            className="grid h-8 w-8 place-items-center rounded-full text-muted transition-colors hover:bg-surface-2 hover:text-text"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M15 5l-7 7 7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
-          </span>
-          <h1 className="text-[15px] font-semibold text-text">Discover</h1>
-          <span className="text-[12px] text-muted">the Myto community</span>
+          </button>
+          <h1 className="font-cursive text-[30px] leading-none text-text">Myto</h1>
+          <span className="hidden text-[12px] text-muted sm:inline">the community</span>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="rounded-full px-3 py-1.5 text-[12.5px] text-muted transition-colors hover:bg-surface-2 hover:text-text"
-        >
-          Close
-        </button>
+        <div className="relative flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setSeed((s) => s + 1)}
+            aria-label="Shuffle the feed"
+            title="Shuffle the flow"
+            className="grid h-8 w-8 place-items-center rounded-full text-muted transition-colors hover:bg-surface-2 hover:text-text"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M20 11A8 8 0 0 0 5.6 6.6L4 8.3M4 5v3.5h3.5M4 13a8 8 0 0 0 14.4 4.4L20 15.7M20 19v-3.5h-3.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onClick={() => setNotifOpen((o) => !o)}
+            aria-label="Notifications"
+            className="grid h-8 w-8 place-items-center rounded-full text-muted transition-colors hover:bg-surface-2 hover:text-text"
+          >
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M6 9a6 6 0 1 1 12 0c0 4 1.5 5.5 2 6.2.2.3 0 .8-.5.8h-15c-.5 0-.7-.5-.5-.8.5-.7 2-2.2 2-6.2zM10 19a2.2 2.2 0 0 0 4 0" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          {notifOpen && <NotificationsPanel uid={me.uid} onClose={() => setNotifOpen(false)} />}
+        </div>
       </div>
 
       {/* Tabs + topics */}
@@ -648,9 +681,9 @@ export function DiscoverOverlay({ onClose }: { onClose: () => void }) {
         <div className="mx-auto max-w-2xl space-y-4">
           {tab === 'feeds' && <Composer me={me} onPosted={() => showToast('Posted to Discover.')} />}
 
-          {posts == null ? (
+          {visiblePosts == null ? (
             <p className="py-10 text-center text-[13px] text-muted">Loading…</p>
-          ) : posts.length === 0 ? (
+          ) : visiblePosts.length === 0 ? (
             <p className="py-10 text-center text-[13px] text-muted">
               {tab === 'following'
                 ? 'Follow authors and their posts land here.'
@@ -661,7 +694,7 @@ export function DiscoverOverlay({ onClose }: { onClose: () => void }) {
                     : 'Nothing here yet — be the first to post.'}
             </p>
           ) : (
-            posts.map((p) => (
+            visiblePosts.map((p) => (
               <PostCard
                 key={p.id}
                 post={p}
@@ -742,5 +775,51 @@ export function DiscoverOverlay({ onClose }: { onClose: () => void }) {
         </div>
       )}
     </div>
+  )
+}
+
+// ── Notifications (the bell) ───────────────────────────────────────────────────
+
+function NotificationsPanel({ uid, onClose }: { uid: string; onClose: () => void }) {
+  const [items, setItems] = useState<Awaited<ReturnType<typeof fetchMyNotifications>> | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    void fetchMyNotifications(uid).then((list) => {
+      if (alive) setItems(list)
+    })
+    return () => {
+      alive = false
+    }
+  }, [uid])
+
+  return (
+    <>
+      <div className="fixed inset-0 z-10" onClick={onClose} aria-hidden="true" />
+      <div className="absolute right-0 top-10 z-20 w-80 rounded-xl border border-border bg-surface p-2 shadow-lg">
+        <p className="px-2 py-1.5 text-[12px] font-semibold uppercase tracking-wide text-muted">
+          Notifications
+        </p>
+        {items == null ? (
+          <p className="px-2 py-4 text-center text-[12.5px] text-muted">Loading…</p>
+        ) : items.length === 0 ? (
+          <p className="px-2 py-4 text-center text-[12.5px] text-muted">
+            No activity yet — comments on your posts show up here.
+          </p>
+        ) : (
+          <div className="max-h-72 overflow-y-auto">
+            {items.map((n) => (
+              <div key={n.id} className="rounded-lg px-2 py-2 hover:bg-surface-2/60">
+                <p className="text-[12.5px] leading-snug text-text">
+                  <span className="font-semibold">{n.who}</span>{' '}
+                  <span className="text-muted">{relativeTime(n.atMs)}</span>
+                </p>
+                <p className="truncate text-[12px] text-muted">{n.text}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
   )
 }
