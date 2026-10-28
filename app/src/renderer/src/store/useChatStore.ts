@@ -59,8 +59,16 @@ function mediaToMarkdown(media: GeneratedMedia[]): string {
  *
  * It doubles as the reveal cadence: a tick shows part of whatever is queued (see
  * `lib/reveal.ts`), so text that arrived as one big delta still types out.
+ *
+ * While the window is hidden/minimized, Chromium throttles timers to ~1/sec —
+ * at the 66ms cadence plus the 200-char-per-tick reveal cap the queue would
+ * grow without bound and the whole backlog would have to be revealed (and
+ * re-parsed) on restore. So hidden windows flush on a slow cadence and DRAIN
+ * the queue completely on every tick (no typing animation while nobody can
+ * see it) — nothing piles up, and restore is instant.
  */
 const DELTA_FLUSH_MS = 66
+const HIDDEN_FLUSH_MS = 1000
 
 /**
  * How often (ms) the still-streaming assistant reply is checkpointed to the DB.
@@ -206,6 +214,13 @@ interface LiveRun {
   thinking?: ThinkingPhase[]
   /** Cancels the main-process stream and detaches its chunk listener. */
   disposer: () => void
+  /**
+   * Runs when the window turns visible again: a hidden window mirrors NOTHING into
+   * the store (every `set` is gated off), so restore must project the run's
+   * authoritative state once — content, status, thinking, todos, prompts — or the
+   * conversation would stay frozen at whatever was on screen when it was minimized.
+   */
+  onVisibilityChange?: () => void
   /** Un-flushed delta text, drained by the flush timer. */
   buffer: string
   /** Pending flush timer id, or null when idle. */
@@ -230,6 +245,8 @@ interface LiveRun {
    * the resolved disposer is invoked immediately instead of being stored.
    */
   settled: boolean
+  /** The error message when the run ended in failure (drives the restore projection). */
+  error?: string
 }
 
 /**
@@ -569,6 +586,15 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     /** Is this run's owner session the conversation currently on screen? */
     const isVisible = (): boolean => get().sessionId === ownerSessionId
+    /**
+     * Whether the run's live state may be mirrored into the visible store right now.
+     * A HIDDEN window never mirrors: React would re-render (and re-parse Markdown)
+     * offscreen at the main process's send cadence — reasoning alone lands ~3×/s —
+     * which is the minimize lag and the slow catch-up burst on restore. The run
+     * object keeps the authoritative state instead; {@link onVisibilityChange}
+     * projects it once when the window comes back.
+     */
+    const mayMirror = (): boolean => isVisible() && !document.hidden
 
     /**
      * Drain buffered deltas into the store, if visible.
@@ -583,7 +609,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         clearTimeout(run.flushTimer)
         run.flushTimer = null
       }
-      const lead = all ? { shown: run.buffer, rest: '' } : takeReveal(run.buffer)
+      const lead =
+        all || document.hidden ? { shown: run.buffer, rest: '' } : takeReveal(run.buffer)
       const leadText = lead.shown
       run.buffer = lead.rest
       if (leadText) run.content += leadText
@@ -606,7 +633,9 @@ export const useChatStore = create<ChatState>((set, get) => {
       // come from here, since no further delta may arrive to schedule one.
       if (run.buffer !== '') scheduleFlush()
       if (!leadText) return
-      if (isVisible()) {
+      // Hidden windows never mirror (see mayMirror) — the content lives on `run`
+      // and lands in the store via the restore projection.
+      if (mayMirror()) {
         set((state) => ({
           messages: state.messages.map((m) =>
             m.id === assistantId
@@ -617,8 +646,53 @@ export const useChatStore = create<ChatState>((set, get) => {
       }
     }
     const scheduleFlush = (): void => {
-      if (run.flushTimer == null) run.flushTimer = setTimeout(flush, DELTA_FLUSH_MS)
+      if (run.flushTimer == null) {
+        run.flushTimer = setTimeout(flush, document.hidden ? HIDDEN_FLUSH_MS : DELTA_FLUSH_MS)
+      }
     }
+
+    /**
+     * Project the run's full live state onto the on-screen assistant message in ONE
+     * set — the restore path after a hidden stretch (window minimized/occluded),
+     * where per-chunk mirroring was suppressed. Fires on the window turning visible
+     * again, so the conversation catches up instantly instead of bursting. A run
+     * that SETTLED while hidden projects its final state (pending:false, error) and
+     * detaches itself; a settled run whose message is already current was detached
+     * by finishOk/finishError, so this only ever fires when needed.
+     */
+    const onVisibilityChange = (): void => {
+      if (document.hidden || !isVisible()) return
+      flush(true)
+      const settled = run.settled
+      set((state) => ({
+        messages: state.messages.map((m) =>
+          m.id === assistantId
+            ? settled
+              ? {
+                  ...m,
+                  content: run.content,
+                  pending: false,
+                  pendingApproval: undefined,
+                  pendingQuestion: undefined,
+                  error: run.error
+                }
+              : {
+                  ...m,
+                  status: run.status,
+                  pendingApproval: run.pendingApproval,
+                  pendingQuestion: run.pendingQuestion,
+                  todos: run.todos,
+                  thinking: run.thinking?.map((p) => ({ ...p })),
+                  activityAt: run.lastActivityAt
+                }
+            : m
+        ),
+        ...(settled ? { running: false, runId: null, disposer: null } : {})
+      }))
+      if (settled) detachVisibility()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    run.onVisibilityChange = onVisibilityChange
 
     /**
      * Open or grow the current thinking phase with the model's latest reasoning
@@ -632,7 +706,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       const last = phases[phases.length - 1]
       if (last && !last.done) last.text = text
       else phases.push({ at: run.content.length + run.buffer.length, text, done: false, startedAt: Date.now() })
-      if (isVisible()) {
+      if (mayMirror()) {
         const snapshot = phases.map((p) => ({ ...p }))
         set((state) => ({
           messages: state.messages.map((m) =>
@@ -649,11 +723,22 @@ export const useChatStore = create<ChatState>((set, get) => {
       const last = phases[phases.length - 1]
       if (last.done) return
       last.done = true
-      if (isVisible()) {
+      if (mayMirror()) {
         const snapshot = phases.map((p) => ({ ...p }))
         set((state) => ({
           messages: state.messages.map((m) => (m.id === assistantId ? { ...m, thinking: snapshot } : m))
         }))
+      }
+    }
+
+    /**
+     * Detach the run's restore listener. Called from every teardown path (ok, error,
+     * cancel/clear via disposeRun) — a settled run must not keep projecting.
+     */
+    const detachVisibility = (): void => {
+      if (run.onVisibilityChange) {
+        document.removeEventListener('visibilitychange', run.onVisibilityChange)
+        run.onVisibilityChange = undefined
       }
     }
 
@@ -664,6 +749,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       run.settled = true
       run.pendingApproval = undefined
       run.pendingQuestion = undefined
+      detachVisibility()
       run.disposer()
       if (ownerSessionId) liveRuns.delete(ownerSessionId)
       syncLiveSessions()
@@ -674,11 +760,19 @@ export const useChatStore = create<ChatState>((set, get) => {
           content: run.content
         })
       }
-      if (isVisible()) {
+      if (mayMirror()) {
+        // Content comes from the run, not the (possibly stale, never-mirrored-
+        // while-hidden) store copy — this is the authoritative final write.
         set((state) => ({
           messages: state.messages.map((m) =>
             m.id === assistantId
-              ? { ...m, pending: false, pendingApproval: undefined, pendingQuestion: undefined }
+              ? {
+                  ...m,
+                  content: run.content,
+                  pending: false,
+                  pendingApproval: undefined,
+                  pendingQuestion: undefined
+                }
               : m
           ),
           running: false,
@@ -695,11 +789,13 @@ export const useChatStore = create<ChatState>((set, get) => {
       run.settled = true
       run.pendingApproval = undefined
       run.pendingQuestion = undefined
+      detachVisibility()
       run.disposer()
       if (ownerSessionId) liveRuns.delete(ownerSessionId)
       syncLiveSessions()
       const content = run.content || '_Request failed._'
       run.content = content
+      run.error = message
       if (ownerSessionId) {
         window.myto.sessions.appendMessage(ownerSessionId, {
           id: assistantId,
@@ -708,17 +804,17 @@ export const useChatStore = create<ChatState>((set, get) => {
           error: message
         })
       }
-      if (isVisible()) {
+      if (mayMirror()) {
         set((state) => ({
           messages: state.messages.map((m) =>
             m.id === assistantId
               ? {
                   ...m,
+                  content,
                   pending: false,
                   pendingApproval: undefined,
                   pendingQuestion: undefined,
-                  error: message,
-                  content: m.content || '_Request failed._'
+                  error: message
                 }
               : m
           ),
@@ -736,7 +832,7 @@ export const useChatStore = create<ChatState>((set, get) => {
      */
     const setStatus = (status: string): void => {
       run.status = status
-      if (isVisible()) {
+      if (mayMirror()) {
         set((state) => ({
           messages: state.messages.map((m) =>
             m.id === assistantId ? { ...m, status, activityAt: run.lastActivityAt } : m
@@ -751,7 +847,7 @@ export const useChatStore = create<ChatState>((set, get) => {
      */
     const setApproval = (approval: ApprovalRequest | undefined): void => {
       run.pendingApproval = approval
-      if (isVisible()) {
+      if (mayMirror()) {
         set((state) => ({
           messages: state.messages.map((m) =>
             m.id === assistantId ? { ...m, pendingApproval: approval } : m
@@ -763,7 +859,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     /** Set or clear this run's pending ask_user questions (mirrors {@link setApproval}). */
     const setQuestion = (question: QuestionRequest | undefined): void => {
       run.pendingQuestion = question
-      if (isVisible()) {
+      if (mayMirror()) {
         set((state) => ({
           messages: state.messages.map((m) =>
             m.id === assistantId ? { ...m, pendingQuestion: question } : m
@@ -780,7 +876,7 @@ export const useChatStore = create<ChatState>((set, get) => {
      */
     const setTodos = (todos: TodoItem[]): void => {
       run.todos = todos
-      if (isVisible()) {
+      if (mayMirror()) {
         set((state) => ({
           messages: state.messages.map((m) =>
             m.id === assistantId ? { ...m, todos, activityAt: run.lastActivityAt } : m
@@ -946,6 +1042,12 @@ export const useChatStore = create<ChatState>((set, get) => {
     const run = sessionId ? liveRuns.get(sessionId) : undefined
     if (run) run.settled = true
     if (run?.flushTimer != null) clearTimeout(run.flushTimer)
+    // Drop the restore listener: the run is going away. (The visible-message
+    // cleanup for an on-screen cancel is done by the caller's set below.)
+    if (run?.onVisibilityChange) {
+      document.removeEventListener('visibilitychange', run.onVisibilityChange)
+      run.onVisibilityChange = undefined
+    }
     // Persist the final prose before detaching. A Stop (cancel) or a clear can land
     // between checkpoints, so without this the last (<1s) of streamed text —
     // including any delta still sitting un-flushed in the buffer — would be dropped

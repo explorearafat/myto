@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { memo, useEffect, useState, type ReactNode } from 'react'
 import { basename, countLines, type FileSegment } from '../lib/fileBlocks'
 import { fileTypeFor } from '../lib/fileTypes'
 import { FileIcon } from '../lib/FileIcon'
@@ -68,7 +68,7 @@ function CheckIcon(): ReactNode {
   )
 }
 
-export function FileCard({
+function FileCardInner({
   file,
   cowork = false,
   prevLines
@@ -242,3 +242,21 @@ export function FileCard({
     </div>
   )
 }
+
+/**
+ * Memoized export (see ToolCard): value-compare only what the card renders. The
+ * body text compares by value so a live "Writing…" card re-renders as its code
+ * streams in; completed cards compare equal and skip a full re-parse per tick.
+ */
+export const FileCard = memo(FileCardInner, (a, b) => {
+  if (a.cowork !== b.cowork || a.prevLines !== b.prevLines) return false
+  const af = a.file
+  const bf = b.file
+  if (af === bf) return true
+  return (
+    af.path === bf.path &&
+    af.lang === bf.lang &&
+    af.complete === bf.complete &&
+    af.code === bf.code
+  )
+})

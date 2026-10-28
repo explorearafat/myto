@@ -26,25 +26,98 @@ const MARKER = '```myto:tool'
 
 /*
  * Native-markup fallback. Some models ignore the fenced protocol above and instead
- * emit their *native* tool-call markup straight into the token stream:
+ * emit their *native* tool-call markup straight into the token stream, in three
+ * shapes we have seen in the wild:
  *
- *     <invoke name="run_command">
+ *     <invoke name="run_command">                      ← Anthropic-style invoke
  *       <parameter name="command">npm run build</parameter>
  *     </invoke>
  *
- * It arrives dressed up in ways the fenced parser never sees: an `antml:` / `antml`
+ *     <run_code>{"language":"python","code":"…"}</run_code>   ← tool-name-as-tag,
+ *     <run_dev_server>{"command":"…"}</run_dev_server>          args as raw JSON
+ *
+ *     <parameter name="tool">{"tool":"run","command":"…"}</parameter>  ← bare
+ *                                                              parameter wrapper
+ *
+ * They arrive dressed up in ways the fenced parser never sees: an `antml:` / `antml`
  * namespace prefix on every tag, and stray `| DSML |` token-pollution wedged in
  * around the angle brackets. Left alone this leaks into the chat as raw text and the
- * call never runs. We detect it, strip the noise, and fold it into the SAME
+ * call never runs. We detect all three, strip the noise, and fold them into the SAME
  * {@link ToolCall} shape (with a synthesised canonical `` ```myto:tool `` block) so
  * everything downstream — the reply loop, the renderer's cards — is none the wiser.
  */
-/** Matches the START of a native invoke tag (namespace-tolerant), anywhere in a line. */
-const INVOKE_OPEN = /<\s*(?:antml[:.]?)?invoke\b/i
-/** Matches a native invoke CLOSE tag (namespace-tolerant). */
-const INVOKE_CLOSE = /<\/\s*(?:antml[:.]?)?invoke\s*>/i
-/** The literal openers whose partial tails must be held back mid-stream. */
-const INVOKE_OPENERS = ['<invoke', '<invoke']
+
+/**
+ * Tools a model may emit as its OWN tag (`<run_code>{…}</run_code>`) instead of an
+ * `<invoke>` wrapper. Only these names can open a native block — matching ANY
+ * `<word>` would swallow ordinary HTML/JSX in prose. Mirrors the tool registry's
+ * catalogue plus the media sub-ops some gateways expose.
+ */
+const NATIVE_TOOL_TAGS = [
+  'write_file',
+  'create_file',
+  'read_file',
+  'edit_file',
+  'delete_file',
+  'list_dir',
+  'preview',
+  'run_code',
+  'run_command',
+  'run_dev_server',
+  'search_code',
+  'find_files',
+  'update_plan',
+  'present_plan',
+  'think',
+  'remember',
+  'spawn_agent',
+  'spawn_agents',
+  'ask_user',
+  'web_search',
+  'web_fetch',
+  'wiki_search',
+  'verify_file',
+  'detect_runtimes',
+  'scaffold_deploy',
+  'create_document',
+  'render_document',
+  'read_document',
+  'edit_notebook',
+  'run_ffmpeg',
+  'edit_photo',
+  'edit_video',
+  'transcribe_audio',
+  'git_status',
+  'git_commit',
+  'git_diff',
+  'git_log',
+  'git_publish',
+  'install_skill',
+  'install_connector',
+  'list_credentials',
+  'save_credential',
+  'delete_credential',
+  'browser_navigate',
+  'browser_snapshot',
+  'browser_read',
+  'browser_click',
+  'browser_type',
+  'search_document',
+  'read_pages',
+  'apply_edit_plan'
+] as const
+
+/**
+ * Matches a native tool tag opener: `<invoke`, `<parameter name="tool">` (the bare
+ * wrapper some models emit with the whole call as its JSON body — the lookahead
+ * keeps OTHER `<parameter>` children from ever opening a block), or ANY known tool
+ * name as the tag itself. Group 1 is the clean tag word; group 2 the rest of the
+ * opener line.
+ */
+const NATIVE_OPEN_RE = new RegExp(
+  `<\\s*(?:antml[:.]?)?(invoke|parameter(?=[^>]*\\bname\\s*=\\s*["']tool["'])|${NATIVE_TOOL_TAGS.join('|')})\\b([^>]*)>`,
+  'i'
+)
 
 /** A completed tool call detected in the stream. */
 export interface ToolCall {
@@ -250,25 +323,40 @@ function stripDsmlNoise(s: string): string {
 }
 
 /**
- * Length of the trailing suffix of `s` that is a nonempty proper prefix of a native
- * invoke opener (`<invoke` / `<invoke`) — text that could still grow into a real
- * tag next delta, so it is held rather than shown. A lone trailing `<` is held one
- * tick and released the moment the next char rules the tag out, exactly like the
- * fenced held-prefix and the status stripper's held `<`.
+ * Length of the trailing suffix of `s` that could still grow into a native tool
+ * opener — held rather than shown. Checked ONCE at the last `<` (no backward scan,
+ * so the function cannot loop): after stripping an optional `antml` namespace
+ * prefix, the remainder must either be a proper prefix of an opener name (still
+ * typing the word — `<run_`, `<par` mid-`parameter`), a complete name (attributes
+ * may still be streaming, awaiting the `>`), or that plus attr text with no `>`
+ * yet. A `>` anywhere in the tail means the tag is complete and the main scan's
+ * {@link NATIVE_OPEN_RE} decides it — never hold past one. Ordinary markup in
+ * prose (`<div …>`) matches no name and flows through.
+ *
+ * The old version scanned backwards through every `<` and re-derived `i` with
+ * `lastIndexOf('<', i - 1)`, which returns 0 forever when i is already 0 — an
+ * infinite main-process loop on any buffer like `'<pa'` (mid-word `parameter`
+ * matched NO tool-tag prefix and the word-boundary regex needed the whole word).
+ * It also leaked `<parameter`'s partials outright, which is how whole
+ * `<parameter name="tool">…</parameter>` calls ended up as raw chat text.
  */
 function heldInvokePrefix(s: string): number {
-  const lower = s.toLowerCase()
-  let best = 0
-  for (const opener of INVOKE_OPENERS) {
-    const maxK = Math.min(s.length, opener.length - 1)
-    for (let k = maxK; k > best; k--) {
-      if (lower.endsWith(opener.slice(0, k))) {
-        best = k
-        break
-      }
-    }
+  const i = s.lastIndexOf('<')
+  if (i === -1) return 0
+  const seg = s.slice(i).toLowerCase()
+  if (seg.includes('>')) return 0 // complete tag — the main scan decides it
+  const stripped = /^<\s*(?:antml[:.]?)?/.exec(seg)
+  const word = seg.slice(stripped?.[0].length ?? 1)
+  // Hold while the (namespace-stripped) word is still growing toward an opener
+  // name, is one, or is one plus streaming attributes not yet closed by '>'. The
+  // `antml` namespace prefix itself is also held while still being typed ('<a',
+  // '<antm', …) — otherwise the opener leaks piecemeal before it can be recognised.
+  const names = ['invoke', 'parameter', ...NATIVE_TOOL_TAGS]
+  const typingAntml = word.length > 0 && word.length < 'antml'.length && 'antml'.startsWith(word)
+  if (typingAntml || names.some((n) => n.startsWith(word) || word.startsWith(n))) {
+    return s.length - i
   }
-  return best
+  return 0
 }
 
 /** Coerce a native `<parameter>` value: JSON for object/array literals, else raw. */
@@ -324,33 +412,175 @@ export function toolCallBlock(name: string, input: unknown): string {
 }
 
 /**
- * From a buffer that starts at a native invoke opener, extract the whole block once
- * its `</invoke>` has arrived. Returns null while still open (hold everything);
- * `call` is null for a tag with no tool name, with `raw` carrying the verbatim text
- * to release as prose.
+ * Try `JSON.parse`; return undefined on failure. Shared by the native-tag parsers.
  */
-function extractInvokeBlock(buf: string): { consumed: number; call: ToolCall | null; raw: string } | null {
-  const close = INVOKE_CLOSE.exec(buf)
+function tryParseJson(s: string): Record<string, unknown> | undefined {
+  try {
+    const obj = JSON.parse(s.trim())
+    return obj && typeof obj === 'object' && !Array.isArray(obj) ? (obj as Record<string, unknown>) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Parse a complete NATIVE block (any of the three shapes — `<invoke name=…>`,
+ * `<tool_name>{json}</tool_name>`, or the bare `<parameter name="tool">{json}</parameter>`)
+ * into the canonical {@link ToolCall}, or null when it carries no usable tool name (a
+ * false positive we release as plain text rather than an errored call — the reply loop
+ * aborts the turn on ANY detected call, so emitting an error here would wedge on prose
+ * that merely looked like a tag). `tag` is the clean tag word NATIVE_OPEN_RE matched.
+ * Exported for tests and callers holding a whole block already.
+ */
+export function parseNativeBlock(raw: string, tag: string): ToolCall | null {
+  const cleaned = stripDsmlNoise(raw)
+  if (tag === 'invoke') return parseInvokeBlock(raw)
+
+  const openEnd = cleaned.indexOf('>')
+  if (openEnd === -1) return null
+  const closeIdx = cleaned.toLowerCase().lastIndexOf(`</${tag.toLowerCase()}`)
+  if (closeIdx <= openEnd) return null
+  const inner = cleaned.slice(openEnd + 1, closeIdx)
+
+  if (tag === 'parameter') {
+    // The bare wrapper: its body is the whole call as JSON — `{"tool":"run", …}`.
+    // `{"tool":"x","input":{…}}` honours the canonical shape; any other JSON with a
+    // string `tool` key takes the remaining keys as the input.
+    const obj = tryParseJson(inner)
+    if (!obj) return null
+    const name = typeof obj.tool === 'string' ? obj.tool.trim() : ''
+    if (!name) return null
+    const rest = { ...obj }
+    delete rest.tool
+    const input = 'input' in obj && obj.input && typeof obj.input === 'object' ? obj.input : rest
+    return { block: toolCallBlock(name, input), name, input, error: null }
+  }
+
+  // A known tool as the tag itself: the name is the tag; the input is either the
+  // `<parameter>` children (Anthropic style, without the invoke wrapper) or the
+  // JSON body — honouring an explicit {"tool","input"} shape when present.
+  let name: string = tag
+  let input: unknown
+  const params: Record<string, unknown> = {}
+  let hasParams = false
+  const paramRe =
+    /<\s*(?:antml[:.]?)?parameter\b[^>]*?\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/\s*(?:antml[:.]?)?parameter\s*>/gi
+  for (let m = paramRe.exec(cleaned); m; m = paramRe.exec(cleaned)) {
+    params[m[1].trim()] = coerceParamValue(m[2])
+    hasParams = true
+  }
+  if (hasParams) {
+    input = params
+  } else {
+    const obj = tryParseJson(inner)
+    if (obj) {
+      if (typeof obj.tool === 'string' && obj.tool.trim() && 'input' in obj) {
+        name = (obj.tool as string).trim()
+        input = obj.input
+      } else {
+        input = obj
+      }
+    } else if (inner.trim()) {
+      input = inner.trim()
+    }
+  }
+  return { block: toolCallBlock(name, input), name, input, error: null }
+}
+
+/**
+ * From a buffer that starts at a native opener for `tag`, extract the whole block
+ * once its close tag has arrived. Returns null while still open (hold everything);
+ * `call` is null for a tag with no usable tool name, with `raw` carrying the
+ * verbatim text to release as prose.
+ */
+function extractNativeBlock(
+  buf: string,
+  tag: string
+): { consumed: number; call: ToolCall | null; raw: string } | null {
+  const close = new RegExp(`</\\s*(?:antml[:.]?)?${tag}\\s*>`, 'i').exec(buf)
   if (!close) return null // not closed yet — hold everything
   const end = close.index + close[0].length
   const raw = buf.slice(0, end)
   let consumed = end
   if (buf[consumed] === '\n') consumed++
-  return { consumed, call: parseInvokeBlock(raw), raw }
+  return { consumed, call: parseNativeBlock(raw, tag), raw }
+}
+
+/**
+ * Index of the first line at/after `from` that starts with a run of at least `min`
+ * backticks, or -1. Scans only from `from` forward — the caller keeps `from` at the
+ * start of the previous push's partial line, so each byte of a held block is
+ * examined O(1) times across the whole stream instead of re-splitting the entire
+ * buffer on every delta (the O(n²) that stalled the main process on large
+ * `write_file` bodies).
+ */
+function findCloseLineFrom(buf: string, from: number, min: number): number {
+  let pos = from
+  for (;;) {
+    let n = 0
+    while (pos + n < buf.length && buf[pos + n] === '`') n++
+    if (n >= min) return pos
+    const nl = buf.indexOf('\n', pos)
+    if (nl === -1) return -1
+    pos = nl + 1
+  }
 }
 
 export function createToolCallParser(): ToolCallParser {
-  // Un-emitted tail: prose about to be released, a partial opening fence or invoke
+  // Un-emitted tail: prose about to be released, a partial opening fence or native
   // tag, or a tool block whose closing fence/tag has not arrived.
   let buffer = ''
   let inTool = false
   let inInvoke = false
+  // The clean tag word NATIVE_OPEN_RE matched for the open native block ('invoke',
+  // 'parameter', or a tool name) — drives the close-tag search and the parser.
+  let invokeTag = ''
+  // Fenced-block close scanning: the open fence's backtick width (a close must run
+  // at least as long) and the buffer index to resume the line scan from — the start
+  // of the previous push's still-partial line, which may grow into the close.
+  let fenceLen = 3
+  let lineScanFrom = 0
+  // Native-block close scanning: a sticky global regex for `</tag>` (so lastIndex
+  // can resume mid-buffer) and how far the buffer has been scanned without a hit.
+  // A block can open MID-buffer (right after a previous call's remainder), so the
+  // first search starts at 0; afterwards each push rescans only a small window back
+  // from the previous end, so a close straddling the delta boundary is never missed.
+  let closeRe: RegExp | null = null
+  let invokeScannedTo = 0
+  // How far past the last scanned position a `</tag…>` match may START (the pattern
+  // can straddle the delta boundary) — the rescan window's width.
+  const closeStraddle = (tag: string): number => tag.length + 48
 
   return {
     push(delta: string): ToolParseResult {
-      // Strip token-pollution across the whole held buffer every push, so noise
-      // wedged inside an invoke block is cleaned by the time its close tag lands.
-      buffer = stripDsmlNoise(buffer + delta)
+      // Strip token-pollution before appending, so noise wedged inside an invoke
+      // block is gone by the time its close tag lands — WITHOUT re-scanning the
+      // whole held buffer per delta (O(n²) on a large write_file). The only seam a
+      // two-piece noise token could straddle is the append boundary, so the previous
+      // push's last few chars are re-stripped with the new delta; a full re-strip
+      // runs only when that seam actually contained a '|' (vanishingly rare).
+      const added = stripDsmlNoise(delta)
+      const prevLen = buffer.length
+      // A noise token is at most a handful of chars, so re-stripping the last 48
+      // chars of the held buffer together with the new delta catches a token
+      // straddling the append boundary; when neither side contains a '|', no noise
+      // token can exist there and the delta appends as-is. Small buffers just
+      // re-strip whole (bounded, and they are the common case).
+      const seamLen = Math.min(48, prevLen)
+      const seam = buffer.slice(prevLen - seamLen)
+      if (prevLen <= 64) {
+        buffer = stripDsmlNoise(buffer + added)
+      } else if (added.includes('|') || seam.includes('|')) {
+        const stripped = stripDsmlNoise(seam + added)
+        buffer = buffer.slice(0, prevLen - seamLen) + stripped
+        // Indices into the buffer shifted by whatever the seam strip removed.
+        const removed = seamLen + added.length - stripped.length
+        if (removed > 0 && lineScanFrom > prevLen - seamLen) {
+          lineScanFrom = Math.max(0, lineScanFrom - removed)
+        }
+      } else {
+        buffer += added
+      }
       let text = ''
 
       for (;;) {
@@ -360,7 +590,7 @@ export function createToolCallParser(): ToolCallParser {
           // it is released as text below. findMarker rejects the ```myto:tool_result
           // wrapper and 4+ backtick fences that merely contain the marker.
           const fenceIdx = findMarker(buffer)
-          const invMatch = INVOKE_OPEN.exec(buffer)
+          const invMatch = NATIVE_OPEN_RE.exec(buffer)
           const invIdx = invMatch ? invMatch.index : -1
 
           if (fenceIdx === -1 && invIdx === -1) {
@@ -376,13 +606,40 @@ export function createToolCallParser(): ToolCallParser {
           const idx = useFence ? fenceIdx : invIdx
           text += buffer.slice(0, idx)
           buffer = buffer.slice(idx)
-          if (useFence) inTool = true
-          else inInvoke = true
+          if (useFence) {
+            inTool = true
+            // The open fence's width gates how long a close-line backtick run must
+            // be; the close scan starts over the opener line itself.
+            fenceLen = /^(`{3,})/.exec(buffer)?.[1].length ?? 3
+            lineScanFrom = 0
+          } else {
+            inInvoke = true
+            invokeTag = (invMatch?.[1] ?? 'invoke').toLowerCase()
+            closeRe = new RegExp(`</\\s*(?:antml[:.]?)?${invokeTag}\\s*>`, 'gi')
+            invokeScannedTo = 0
+          }
         }
 
         if (inTool) {
+          // Cheap incremental check first: has any line grown into a close fence?
+          // Rescanning only from the previous partial line keeps a multi-KB block
+          // O(n) across the whole stream. Once a candidate exists, the exact
+          // extraction (glued-open handling, consumption width) runs once, whole.
+          const closeAt = findCloseLineFrom(buffer, lineScanFrom, fenceLen)
+          if (closeAt === -1) {
+            lineScanFrom = buffer.lastIndexOf('\n') + 1
+            return { text, call: null } // still open — hold the block
+          }
           const found = extractToolBlock(buffer)
-          if (!found) return { text, call: null } // still open — hold the block
+          if (!found) {
+            // The only way the exact extractor disagrees with the cheap scan: the
+            // candidate is the opener line itself (it starts with the fence but is
+            // never a close). Skip past it so the scan can never re-latch, then
+            // keep holding.
+            const nl = buffer.indexOf('\n', closeAt)
+            lineScanFrom = nl === -1 ? buffer.length : nl + 1
+            return { text, call: null }
+          }
           buffer = buffer.slice(found.consumed)
           inTool = false
           // A single delta rarely carries two calls, but the loop aborts on the
@@ -390,11 +647,22 @@ export function createToolCallParser(): ToolCallParser {
           return { text, call: found.call }
         }
 
-        // inInvoke: native `<invoke>` markup.
-        const found = extractInvokeBlock(buffer)
+        // inInvoke: native markup — <invoke>, a tool-name tag, or the bare
+        // <parameter name="tool"> wrapper. Windowed close search: a match may
+        // straddle the delta boundary, so resume from just before where the last
+        // push ended rather than re-scanning the whole held block per delta.
+        const from = Math.max(0, Math.min(invokeScannedTo, buffer.length) - closeStraddle(invokeTag))
+        closeRe!.lastIndex = from
+        const closeHit = closeRe!.exec(buffer)
+        if (!closeHit) {
+          invokeScannedTo = buffer.length
+          return { text, call: null } // still open — hold the block
+        }
+        const found = extractNativeBlock(buffer, invokeTag)
         if (!found) return { text, call: null } // still open — hold the block
         buffer = buffer.slice(found.consumed)
         inInvoke = false
+        closeRe = null
         if (!found.call) {
           // No tool name — a false positive. Release verbatim so a stray `<invoke`
           // in prose can never wedge the reply loop, and keep scanning.
@@ -410,6 +678,10 @@ export function createToolCallParser(): ToolCallParser {
       buffer = ''
       inTool = false
       inInvoke = false
+      invokeTag = ''
+      closeRe = null
+      lineScanFrom = 0
+      fenceLen = 3
       return rest
     },
     get holdingBlock(): boolean {
@@ -417,8 +689,16 @@ export function createToolCallParser(): ToolCallParser {
     },
     get holdingToolName(): string | null {
       if (inInvoke) {
-        const m = /<\s*(?:antml[:.]?)?invoke\b[^>]*?\bname\s*=\s*["']([^"']+)["']/i.exec(buffer)
-        return m ? m[1].trim() : null
+        const attr =
+          /<\s*(?:antml[:.]?)?invoke\b[^>]*?\bname\s*=\s*["']([^"']+)["']/i.exec(buffer)
+        if (attr) return attr[1].trim()
+        // A tool-name tag IS the name: <run_code… → run_code. The bare parameter
+        // wrapper names nothing until its JSON body lands.
+        const tag = /^<\s*(?:antml[:.]?)?([a-z_][a-z0-9_]*)/i.exec(buffer)
+        if (tag && tag[1] !== 'parameter') return tag[1]
+        const json = /"tool"\s*:\s*"([^"]+)"/.exec(buffer)
+        if (json) return json[1].trim()
+        return null
       }
       if (inTool) {
         const m = /"tool"\s*:\s*"([^"]+)"/.exec(buffer)

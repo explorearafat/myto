@@ -10,7 +10,7 @@ import { useAuthUser } from '../lib/useAuthUser'
 import { Markdown } from './Markdown'
 import { FileCard } from './FileCard'
 import { ToolCard } from './ToolCard'
-import { parseFileBlocks, countLines, type ToolSegment } from '../lib/fileBlocks'
+import { parseFileBlocks, parseFileBlocksTracked, countLines, type ToolSegment, type Segment } from '../lib/fileBlocks'
 import { livenessNote, STALL_ALARM_MS } from '../lib/liveness'
 import {
   startDictation,
@@ -773,7 +773,7 @@ function thinkingWord(ms: number): string {
   return 'Thinking'
 }
 
-function ThinkingBlock({ phase, live }: { phase: ThinkingPhase; live: boolean }) {
+function ThinkingBlockInner({ phase, live }: { phase: ThinkingPhase; live: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const mountRef = useRef<number>(Date.now())
   const [, forceTick] = useState(0)
@@ -836,6 +836,22 @@ function ThinkingBlock({ phase, live }: { phase: ThinkingPhase; live: boolean })
     </div>
   )
 }
+
+/**
+ * Memoized: the transcript's flat item list is rebuilt on every stream tick with
+ * fresh phase snapshots ({@link ThinkingPhase} objects are cloned per update), so
+ * value-compare what the block renders — the reasoning text (a fast string
+ * memcmp), its sealed state, and liveness — and skip re-rendering every sealed
+ * "Thought for N tokens" block each tick.
+ */
+const ThinkingBlock = memo(
+  ThinkingBlockInner,
+  (a, b) =>
+    a.live === b.live &&
+    a.phase.done === b.phase.done &&
+    a.phase.startedAt === b.phase.startedAt &&
+    a.phase.text === b.phase.text
+)
 
 /** Format ms as `Ns`, `Nm Ns`, or `Nh Nm Ns` (no leading zeros), Claude-desktop style. */
 function fmtElapsed(ms: number): string {
@@ -982,7 +998,9 @@ function AssistantMessage({
   // Split the reply into prose and generated-file blocks so files render as
   // downloadable cards while everything else stays ordinary Markdown. A reply with
   // no file blocks yields a single prose segment — identical to rendering it whole.
-  const segments = useMemo(() => parseFileBlocks(displayContent), [displayContent])
+  // Routed through the incremental cache: while streaming, only the tail from the
+  // last segment re-parses per tick instead of the whole message.
+  const segments = useMemo(() => cachedSegments(message.id, displayContent), [message.id, displayContent])
   // A turn that touched the filesystem is a Cowork turn: its tool cards render
   // borderless (the bordered/expandable style is reserved for the normal chat).
   const coworkTurn = useMemo(
@@ -1108,6 +1126,48 @@ function AssistantMessage({
  * Stable empty list handed to memoized Messages that have no attachments — a fresh
  * `?? []` literal per render would defeat the memo by changing identity every time.
  */
+
+/**
+ * Segment cache for streaming replies, keyed by message id. A live reply re-renders
+ * up to ~15×/s and its content is append-only while streaming, so the previous
+ * parse is reused: everything before the LAST segment is final (segments split only
+ * at fence boundaries — an earlier segment can never change once a later one
+ * exists), and only the tail from the last segment's start re-parses. A message
+ * that was edited/regenerated (content no longer extends the cache) re-parses
+ * whole. Entries are bounded — one per streamed message, oldest evicted.
+ */
+interface SegmentCacheEntry {
+  md: string
+  segments: Segment[]
+  offsets: number[]
+}
+const segmentCache = new Map<string, SegmentCacheEntry>()
+function cachedSegments(id: string, md: string): Segment[] {
+  const prev = segmentCache.get(id)
+  let entry: SegmentCacheEntry
+  if (prev && prev.segments.length > 0 && md.length >= prev.md.length && md.startsWith(prev.md)) {
+    const last = prev.segments.length - 1
+    const lastStart = prev.offsets[last]
+    const tail = parseFileBlocksTracked(md.slice(lastStart))
+    entry = {
+      md,
+      segments: [...prev.segments.slice(0, last), ...tail.segments],
+      offsets: [...prev.offsets.slice(0, last), ...tail.offsets.map((o) => o + lastStart)]
+    }
+  } else {
+    entry = { md, ...parseFileBlocksTracked(md) }
+  }
+  // Re-insert to make this entry most-recently-used, then bound the map.
+  segmentCache.delete(id)
+  segmentCache.set(id, entry)
+  while (segmentCache.size > 64) {
+    const oldest = segmentCache.keys().next().value
+    if (oldest === undefined) break
+    segmentCache.delete(oldest)
+  }
+  return entry.segments
+}
+
 const NO_ATTACHMENTS: Attachment[] = []
 
 /**

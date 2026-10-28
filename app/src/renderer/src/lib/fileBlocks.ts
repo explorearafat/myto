@@ -160,20 +160,41 @@ function parseCallBody(body: string): { name: string | null; input: unknown } {
 /** Matches an opening/closing fence line: 3+ backticks, then the info string. */
 const FENCE = /^(`{3,})[ \t]*(.*)$/
 
-/**
- * Parse `md` into ordered prose + file segments. Prose segments preserve the
- * original text (including non-file code blocks) so Markdown renders them
- * identically; empty/whitespace-only prose is dropped. A reply with no file
- * blocks yields a single prose segment (i.e. today's behaviour).
- */
-export function parseFileBlocks(md: string): Segment[] {
-  const lines = md.split('\n')
-  const segments: Segment[] = []
-  let prose: string[] = []
+/** {@link parseFileBlocks} result plus each segment's source offset. */
+export interface TrackedParse {
+  segments: Segment[]
+  /** Source offset of each segment's first character (parallel to `segments`). */
+  offsets: number[]
+}
 
-  const flushProse = (): void => {
+/**
+ * Core parser (see {@link parseFileBlocks}) that also records where each segment
+ * starts in the source. Offsets let the transcript cache segments across stream
+ * ticks: a growing reply re-parses only from the last segment's start instead of
+ * the whole message (see the segment cache in ChatPanel).
+ */
+export function parseFileBlocksTracked(md: string): TrackedParse {
+  const lines = md.split('\n')
+  // Line-start offsets — one forward pass, reused for every segment boundary.
+  const lineOffset = new Array<number>(lines.length)
+  {
+    let pos = 0
+    for (let k = 0; k < lines.length; k++) {
+      lineOffset[k] = pos
+      pos += lines[k].length + 1
+    }
+  }
+  const segments: Segment[] = []
+  const offsets: number[] = []
+  let prose: string[] = []
+  let proseStart = 0
+
+  const flushProse = (startLine: number): void => {
     const text = prose.join('\n')
-    if (text.trim() !== '') segments.push({ kind: 'prose', text })
+    if (text.trim() !== '') {
+      segments.push({ kind: 'prose', text })
+      offsets.push(lineOffset[startLine])
+    }
     prose = []
   }
 
@@ -181,6 +202,7 @@ export function parseFileBlocks(md: string): Segment[] {
   while (i < lines.length) {
     const open = FENCE.exec(lines[i])
     if (!open) {
+      if (prose.length === 0) proseStart = i
       prose.push(lines[i])
       i++
       continue
@@ -204,11 +226,12 @@ export function parseFileBlocks(md: string): Segment[] {
     }
 
     if (tool) {
-      flushProse()
+      flushProse(proseStart)
       const bodyText = body.join('\n')
       if (tool.kind === 'call') {
         const { name, input } = parseCallBody(bodyText)
         segments.push({ kind: 'tool', name, input, result: null, complete: closed })
+        offsets.push(lineOffset[i])
       } else {
         // Coalesce onto the preceding call segment when it is still awaiting a
         // result; otherwise stand alone (a result with no call is degenerate but
@@ -220,11 +243,12 @@ export function parseFileBlocks(md: string): Segment[] {
           if (!last.name) last.name = tool.name
         } else {
           segments.push({ kind: 'tool', name: tool.name, input: undefined, result: bodyText, complete: closed })
+          offsets.push(lineOffset[i])
         }
       }
       i = closed ? j + 1 : j
     } else if (file) {
-      flushProse()
+      flushProse(proseStart)
       segments.push({
         kind: 'file',
         lang: file.lang,
@@ -232,9 +256,11 @@ export function parseFileBlocks(md: string): Segment[] {
         code: body.join('\n'),
         complete: closed
       })
+      offsets.push(lineOffset[i])
       i = closed ? j + 1 : j // resume after the close, or at EOF
     } else {
       // Not a file: keep the block verbatim in the prose stream.
+      if (prose.length === 0) proseStart = i
       prose.push(lines[i], ...body)
       if (closed) {
         prose.push(lines[j])
@@ -245,8 +271,18 @@ export function parseFileBlocks(md: string): Segment[] {
     }
   }
 
-  flushProse()
-  return segments
+  flushProse(proseStart)
+  return { segments, offsets }
+}
+
+/**
+ * Parse `md` into ordered prose + file segments. Prose segments preserve the
+ * original text (including non-file code blocks) so Markdown renders them
+ * identically; empty/whitespace-only prose is dropped. A reply with no file
+ * blocks yields a single prose segment (i.e. today's behaviour).
+ */
+export function parseFileBlocks(md: string): Segment[] {
+  return parseFileBlocksTracked(md).segments
 }
 
 /**

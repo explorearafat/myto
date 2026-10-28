@@ -1010,8 +1010,15 @@ export function registerProviderIpc(): void {
          */
         const runTurn = async (
           turnHistory: ChatMessage[],
-          parseTools: boolean
+          parseTools: boolean,
+          opts?: { stripOnly?: boolean }
         ): Promise<{ visible: string; call: ToolCall | null; calls?: ToolCall[]; error?: string; truncated?: boolean }> => {
+          // stripOnly: watch the text for tool calls (fenced AND native markup) but
+          // never return one for execution — the budget-spent closing turn uses it, so
+          // a model that ignored "do not call any more tools" has its call swallowed
+          // with a one-line note instead of leaking raw `<run_code>{…}</run_code>`
+          // JSON into the reply (the screenshot bug).
+          const stripOnly = opts?.stripOnly === true
           // Per-turn abort, chained to the outer user-cancel controller: aborting
           // `iter` ends just this generation (e.g. once a tool call is complete)
           // without tearing down the whole reply.
@@ -1033,7 +1040,9 @@ export function registerProviderIpc(): void {
           // safe: a native call arrives as structured args (never in the text stream) and
           // a text call arrives as prose (never as chunk.toolCall), so they never double-
           // fire, and real prose almost never contains the exact fence. See NOTES.md RC-9.
-          const toolParser = parseTools ? createToolCallParser() : null
+          // stripOnly keeps the parser armed on a turn that must not run tools (the
+          // closing turn), so drifting native markup is swallowed, not leaked.
+          const toolParser = parseTools || stripOnly ? createToolCallParser() : null
           let reasoningText = ''
           let contentStarted = false
           let captionFromReasoning = false
@@ -1057,6 +1066,9 @@ export function registerProviderIpc(): void {
           // of discarding all but the first — which is why a batched update_plan-done never
           // landed and the plan stayed at 0/N.
           const extraCalls: ToolCall[] = []
+          // stripOnly: set once the first swallowed call emits its note, so the
+          // closing turn admits it only once no matter how many calls it drops.
+          let strippedCallNote = false
           // Set when the provider reports the model stopped at its OUTPUT-token limit
           // (terminal chunk `truncated`), or when a native tool call's JSON arguments
           // arrive unparseable — both mean "the reply was cut off mid-answer." The loop
@@ -1093,6 +1105,19 @@ export function registerProviderIpc(): void {
                   send({ delta: text, done: false })
                 }
                 if (!call) break
+                if (stripOnly) {
+                  // Closing turn: the call is swallowed with a one-time note instead
+                  // of leaking raw markup; draining continues so a batched tail is
+                  // swallowed too.
+                  if (!strippedCallNote) {
+                    strippedCallNote = true
+                    const note =
+                      '\n\n_(A tool call was skipped — the tool-use limit for this reply was reached.)_'
+                    visible += note
+                    send({ delta: note, done: false })
+                  }
+                  continue
+                }
                 if (!pendingCall) pendingCall = call
                 else if (extraCalls.length < MAX_BATCH_CALLS - 1) extraCalls.push(call)
                 else {
@@ -1144,7 +1169,9 @@ export function registerProviderIpc(): void {
             // so a call already captured this generation — a native one whose abort tail is
             // still draining, or a ```myto:tool text call the parser found first now that it
             // runs in native mode too (RC-9) — is never clobbered by a later structured one.
-            if (parseTools && chunk.toolCall && !pendingCall) {
+            // stripOnly (closing turn) never executes: a structured call on that turn is
+            // simply dropped (it never enters the text stream, so nothing to strip).
+            if (parseTools && chunk.toolCall && !pendingCall && !stripOnly) {
               let input: unknown = {}
               let parseErr: string | null = null
               const argsJson = chunk.toolCall.argsJson?.trim()
@@ -2547,7 +2574,9 @@ export function registerProviderIpc(): void {
         }
 
         // Budget spent: force a closing turn with tools withheld so the reply never
-        // ends mid-loop.
+        // ends mid-loop. The turn still WATCHES the text for tool calls (stripOnly)
+        // — a model that drifts to emitting native markup anyway gets it swallowed
+        // behind a one-line note instead of leaking raw JSON into the answer.
         agentTrace('finish', {
           reason: budgetReason,
           maxToolTurns,
@@ -2560,7 +2589,7 @@ export function registerProviderIpc(): void {
           content:
             'You have reached the tool-use limit for this reply. Do not call any more tools — answer the user now using what you already have.'
         })
-        const final = await runTurn(history, false)
+        const final = await runTurn(history, false, { stripOnly: true })
         if (controller.signal.aborted) return
         send(final.error ? { delta: '', done: true, error: final.error } : { delta: '', done: true })
       } catch (err) {

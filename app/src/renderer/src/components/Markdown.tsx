@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, type ReactNode } from 'react'
+import { memo, createContext, useContext, useState, type ReactNode } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
@@ -271,23 +271,38 @@ function fenceFor(code: string): string {
  * pipeline as {@link Markdown}, but without the header chrome. `lang` is a
  * highlight.js language hint (e.g. `python`, `html`); an unknown or empty value
  * degrades to an unhighlighted block (ignoreMissing) rather than throwing.
+ *
+ * Memoized on `code`: a re-parsed transcript hands tool/file cards fresh segment
+ * objects every stream tick, and react-markdown + rehype-highlight are far too
+ * expensive to re-run for unchanged content (a live Cowork reply re-renders its
+ * whole segment list up to ~15×/s).
  */
-export function CodeBody({ code, lang }: { code: string; lang?: string }): ReactNode {
-  const fence = fenceFor(code)
-  const fenced = `${fence}${lang ?? ''}\n${code}\n${fence}`
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}
-      components={bodyComponents}
-    >
-      {fenced}
-    </ReactMarkdown>
-  )
-}
+export const CodeBody = memo(
+  function CodeBody({ code, lang }: { code: string; lang?: string }): ReactNode {
+    const fence = fenceFor(code)
+    const fenced = `${fence}${lang ?? ''}\n${code}\n${fence}`
+    return (
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}
+        components={bodyComponents}
+      >
+        {fenced}
+      </ReactMarkdown>
+    )
+  },
+  (a, b) => a.code === b.code && a.lang === b.lang
+)
 
-/** Render Markdown `content` with the shared component overrides + GFM + highlight. */
-export function Markdown({ content }: { content: string }): ReactNode {
+/**
+ * Render Markdown `content` with the shared component overrides + GFM + highlight.
+ *
+ * Memoized on `content` (value equality — the transcript re-slices stable prose
+ * into fresh strings every stream tick, and string === is a cheap memcmp): only a
+ * segment whose text actually changed re-parses, so a streaming reply's cost is
+ * bounded by its growing tail instead of its whole length.
+ */
+export const Markdown = memo(function Markdown({ content }: { content: string }): ReactNode {
   return (
     <div className="text-[13px] leading-relaxed text-text/90">
       <ReactMarkdown
@@ -299,4 +314,4 @@ export function Markdown({ content }: { content: string }): ReactNode {
       </ReactMarkdown>
     </div>
   )
-}
+})

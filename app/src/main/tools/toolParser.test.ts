@@ -345,3 +345,87 @@ describe('createToolCallParser holdingToolName', () => {
     expect(parser.holdingToolName).toBeNull()
   })
 })
+
+describe('native tool-name tags, streamed like a real token stream (RC-10)', () => {
+  /**
+   * Feed `full` through a fresh parser in `size`-char deltas with the reply loop's
+   * drain (push the piece once, then '' until no further call surfaces) — the exact
+   * cadence emitText uses, which a fixed-chunk harness without the drain does not
+   * reproduce. Collects everything so each case can assert: every call parsed, no
+   * raw markup leaked into text, and — critically — push() always terminates (the
+   * old heldInvokePrefix spun forever on a buffer ending mid-word, e.g. '<pa').
+   */
+  function stream(full: string, size: number): { text: string; names: string[] } {
+    const parser = createToolCallParser()
+    let text = ''
+    const names: string[] = []
+    let guard = 0
+    const push = (piece: string): void => {
+      for (let first = true; ; first = false) {
+        if (++guard > 10_000) throw new Error('push() did not terminate (held-prefix loop?)')
+        const { text: t, call } = parser.push(first ? piece : '')
+        text += t
+        if (call) {
+          names.push(call.name ?? `ERROR:${call.error}`)
+          continue // drain: another call may be buffered behind this one
+        }
+        break
+      }
+    }
+    for (let i = 0; i < full.length; i += size) push(full.slice(i, i + size))
+    text += parser.flush()
+    return { text, names }
+  }
+
+  // A Cowork-style build reply: fenced protocol call + prose + every native shape
+  // seen leaking in the wild (tool-name tags with a space before the JSON body,
+  // the bare <parameter name="tool"> wrapper, <run_dev_server>).
+  const python = `{"language":"python","code":"import io,os,re,sys\nsys.stdout.reconfigure(encoding='utf-8')\nfor f,s in files.items():\n print(f'{f:18s} len={len(s):6d}')"}`
+  const reply = [
+    'Everything serves 200. Let me verify the theme wiring.',
+    '```myto:tool\n{"tool":"run_command","input":{"command":"cd mykey-site && echo === sizes ==="}}\n```',
+    'Theme PNGs exist. Checking swatches now.\n',
+    `<run_code> ${python} </run_code> Let me verify the site's theme wiring.`,
+    `<run_code> ${python} </run_code>`,
+    `<parameter name="tool"> {"tool":"run","command":"cd mykey-site && echo === theme refs ==="} </parameter>`,
+    `<run_dev_server> {"command":"cd mykey-site && npx --yes serve . -l 4173","port":4173} </run_dev_server>`,
+    'Site is substantially built.'
+  ].join('\n\n')
+  const allNames = ['run_command', 'run_code', 'run_code', 'run', 'run_dev_server']
+
+  for (const size of [1, 2, 3, 5, 7, 11, 13, 17, 31, 64, 127, 200, 512, 1024, 4096]) {
+    it(`parses every call at ${size}-char deltas without leaking markup`, () => {
+      const { text, names } = stream(reply, size)
+      expect(names).toEqual(allNames)
+      expect(text).not.toContain('<run_code')
+      expect(text).not.toContain('<parameter')
+      expect(text).not.toContain('<run_dev_server')
+      expect(text).toContain('Everything serves 200')
+      expect(text).toContain('Site is substantially built.')
+    })
+  }
+
+  it('holds a mid-word <parameter tail instead of looping or leaking it', () => {
+    // '<pa' is the exact state that sent the old heldInvokePrefix into an infinite
+    // lastIndexOf('<', -1) === 0 loop, pegging the main process at 100% CPU.
+    for (const tail of ['<p', '<pa', '<par', '<param', '<parameter', '<parameter name="to']) {
+      const parser = createToolCallParser()
+      const { text } = parser.push(`prose ${tail}`)
+      expect(text, tail).toBe('prose ') // tail held, nothing leaked
+      expect(parser.flush()).toBe(tail)
+    }
+  })
+
+  it('releases ordinary markup and comparisons that merely start with <', () => {
+    const { text, names } = stream('a < b and <div class="x">hi</div> stays', 3)
+    expect(names).toEqual([])
+    expect(text.replace(/\s+/g, ' ').trim()).toBe('a < b and <div class="x">hi</div> stays')
+  })
+
+  it('parses an antml-namespaced invoke split across tiny deltas', () => {
+    const { text, names } = stream('<antml:invoke name="run_command">\n  <antml:parameter name="command">npm test</antml:parameter>\n</antml:invoke> done', 5)
+    expect(names).toEqual(['run_command'])
+    expect(text).not.toContain('<antml')
+    expect(text).toContain('done')
+  })
+})

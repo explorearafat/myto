@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { memo, useEffect, useState, type ReactNode } from 'react'
 import { basename, toolHeadline, type ToolSegment } from '../lib/fileBlocks'
 import { CodeBody } from './Markdown'
 import { DiffView } from './DiffView'
@@ -171,7 +171,7 @@ function formatInput(input: unknown): string {
   }
 }
 
-export function ToolCard({
+function ToolCardInner({
   tool,
   cowork = false,
   pending = false
@@ -393,4 +393,36 @@ export function ToolCard({
       )}
     </div>
   )
+}
+
+/**
+ * Memoized export: a streaming reply re-parses its segments every tick (~15×/s),
+ * handing each card a fresh ToolSegment object even when nothing it displays
+ * changed. The comparator compares only what the card renders — name, phase
+ * inputs, result — by value (string === is a fast memcmp) plus a key/length
+ * fingerprint of the input, so a growing write_file body still re-renders (its
+ * live +N badge advances) without ever stringifying megabytes of JSON.
+ */
+export const ToolCard = memo(ToolCardInner, (a, b) => {
+  if (a.cowork !== b.cowork || a.pending !== b.pending) return false
+  const at = a.tool
+  const bt = b.tool
+  if (at === bt) return true
+  if (at.name !== bt.name || at.complete !== bt.complete) return false
+  if (at.result !== bt.result) return false
+  return inputFingerprint(at.input) === inputFingerprint(bt.input)
+})
+
+/** Cheap shape fingerprint of a tool input: sorted keys + value kind/length. */
+function inputFingerprint(input: unknown): string {
+  if (input === null || input === undefined) return String(input)
+  if (typeof input !== 'object') return `${typeof input}:${String(input).length}`
+  const rec = input as Record<string, unknown>
+  return Object.keys(rec)
+    .sort()
+    .map((k) => {
+      const v = rec[k]
+      return typeof v === 'string' ? `${k}:${v.length}` : `${k}:${typeof v}`
+    })
+    .join('|')
 }
