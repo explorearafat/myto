@@ -3,19 +3,25 @@ import 'package:provider/provider.dart';
 
 import '../models/agent.dart';
 import '../services/studio_store.dart';
-import '../theme.dart';
 import '../widgets/agent_avatar.dart';
+import '../theme.dart';
 import '../widgets/teamly/kit.dart';
+import '../widgets/teamly/parts.dart';
 import 'team_chat_screen.dart';
 
 /// ---------------------------------------------------------------------------
-/// AgentsScreen — the Rooms hub.
+/// AgentsScreen — the Agents tab, styled on the Teamly reference:
 ///
-/// This is the group-chat section: every room is a chat where the roster
-/// specialists research the user's problem together and hand back a Research
-/// Report. The user builds a room by picking agents from the roster, names it,
-/// and taps it to open the group chat. No demo data — only the seeded room
-/// catalogue plus rooms the user creates.
+///   [Agents | Automations] segmented header
+///   Agents · Agent Teams  (text tabs)
+///   search + green "Create My Own Agent"
+///   [By Myto AI | My Custom Agents]  →  category chips (All, Quality, ...)
+///   agent cards (illustration avatar · title · description · green Chat)
+///
+/// "Agents" lists the roster (kSeedAgents — the catalogue Myto ships) and the
+/// user's custom agents; "Agent Teams" lists the research rooms. Automations
+/// is the scheduled-runs surface, which the mobile app doesn't have yet — an
+/// honest empty state.
 /// ---------------------------------------------------------------------------
 class AgentsScreen extends StatefulWidget {
   const AgentsScreen({super.key});
@@ -25,7 +31,29 @@ class AgentsScreen extends StatefulWidget {
 }
 
 class _AgentsScreenState extends State<AgentsScreen> {
+  /// Agents | Automations.
+  int _segment = 0;
+
+  /// Agents | Agent Teams.
+  int _tab = 0;
+
+  /// By Myto AI | My Custom Agents.
+  String _source = 'By Myto AI';
+
+  String _category = 'All';
   String _query = '';
+
+  bool get _showRoster => _source == 'By Myto AI';
+
+  Future<void> _create() async {
+    if (_tab == 1) {
+      await _createRoom();
+      return;
+    }
+    // On the Agents tab the green CTA routes to the team builder too —
+    // custom agents are rooms you assemble from the roster.
+    await _createRoom();
+  }
 
   Future<void> _createRoom() async {
     final selected = <String>{};
@@ -36,7 +64,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           backgroundColor: context.palette.surface,
-          title: const Text('New room'),
+          title: const Text('My own agent team'),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(TeamlyRadius.lg),
           ),
@@ -49,7 +77,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
                 TextField(
                   controller: nameCtrl,
                   autofocus: true,
-                  decoration: const InputDecoration(hintText: 'Room name (optional)'),
+                  decoration: const InputDecoration(hintText: 'Team name (optional)'),
                 ),
                 const SizedBox(height: 14),
                 const Text(
@@ -79,10 +107,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
                           controlAffinity: ListTileControlAffinity.leading,
                           title: Row(
                             children: <Widget>[
-                              AgentAvatar(
-                                artId: agent.artId,
-                                size: 30,
-                              ),
+                              AgentAvatar(artId: agent.artId),
                               const SizedBox(width: 10),
                               Expanded(
                                 child: Column(
@@ -123,11 +148,9 @@ class _AgentsScreenState extends State<AgentsScreen> {
               child: const Text('Cancel', style: TextStyle(color: TeamlyColors.ink500)),
             ),
             TextButton(
-              onPressed: selected.isEmpty
-                  ? null
-                  : () => Navigator.pop(context, true),
+              onPressed: selected.isEmpty ? null : () => Navigator.pop(context, true),
               child: const Text(
-                'Create room',
+                'Create team',
                 style: TextStyle(color: TeamlyColors.greenText),
               ),
             ),
@@ -145,14 +168,22 @@ class _AgentsScreenState extends State<AgentsScreen> {
             ],
             agentIds: selected.toList(),
           );
-      _openRoom(team);
+      _openTeam(team);
     }
   }
 
-  void _openRoom(AgentTeam room) {
+  void _openAgent(Agent agent) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => TeamChatScreen.room(room: room),
+        builder: (_) => TeamChatScreen.direct(agent: agent, resumeTitle: agent.name),
+      ),
+    );
+  }
+
+  void _openTeam(AgentTeam team) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => TeamChatScreen.room(room: team),
       ),
     );
   }
@@ -162,7 +193,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: context.palette.surface,
-        title: const Text('Delete room?'),
+        title: const Text('Delete team?'),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(TeamlyRadius.lg),
         ),
@@ -185,131 +216,255 @@ class _AgentsScreenState extends State<AgentsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     final store = context.watch<StudioStore>();
     final q = _query.trim().toLowerCase();
-    final rooms = store.teams
+
+    // Categories straight from the roster, alphabetical with All first.
+    final categories = <String>{'All', for (final a in kSeedAgents) a.category}.toList()..sort();
+
+    final agents = <Agent>[
+      if (_showRoster)
+        for (final a in kSeedAgents
+            .where((a) =>
+                (_category == 'All' || a.category == _category) &&
+                (q.isEmpty || a.name.toLowerCase().contains(q))))
+          a
+      else
+        ...store.agentsBy(AgentSource.custom)
+            .where((a) => (_category == 'All' || a.category == _category) && (q.isEmpty || a.name.toLowerCase().contains(q))),
+    ];
+    final teams = store.teams
         .where((t) => q.isEmpty || t.name.toLowerCase().contains(q))
         .toList(growable: false);
 
     return Scaffold(
-      // With rooms on screen the creation affordance is just the green "+"
-      // floating in the lower-left corner; an empty roster instead puts the
-      // labelled button in the middle of the display (see the empty state).
-      floatingActionButton: rooms.isEmpty
-          ? null
-          : TeamlyFab(icon: Icons.add_rounded, onPressed: _createRoom),
-      floatingActionButtonLocation: FloatingActionButtonLocation.startFloat,
-      appBar: AppBar(title: const Text('Rooms')),
-      body: Column(
-        children: <Widget>[
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
-            child: TeamlySearch(
-              hint: 'Search rooms...',
-              onChanged: (v) => setState(() => _query = v),
+      backgroundColor: palette.bg,
+      body: SafeArea(
+        bottom: false,
+        child: Column(
+          children: <Widget>[
+            const SizedBox(height: TeamlySpace.s3),
+            // Agents | Automations segmented pill.
+            Center(
+              child: TeamlySegmented(
+                labels: const <String>['Agents', 'Automations'],
+                index: _segment,
+                onChanged: (i) => setState(() => _segment = i),
+              ),
             ),
-          ),
-          const SizedBox(height: TeamlySpace.s3),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
-            child: Text(
-              'Group chats — pick a room to research a problem together',
-              style: TextStyle(color: TeamlyColors.ink500, fontSize: 13),
-            ),
-          ),
-          const SizedBox(height: TeamlySpace.s2),
-          Expanded(
-            child: rooms.isEmpty
-                ? Center(
+            const SizedBox(height: TeamlySpace.s2),
+            if (_segment == 0) ...<Widget>[
+              // Agents · Agent Teams text tabs.
+              TeamlyTabs(
+                labels: const <String>['Agents', 'Agent Teams'],
+                index: _tab,
+                onChanged: (i) => setState(() => _tab = i),
+              ),
+              const SizedBox(height: TeamlySpace.s2),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
+                child: Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: TeamlySearch(
+                        hint: _tab == 0 ? 'Search agents...' : 'Search teams...',
+                        onChanged: (v) => setState(() => _query = v),
+                      ),
+                    ),
+                    const SizedBox(width: TeamlySpace.s2),
+                    TeamlyPillButton(
+                      label: _tab == 0 ? 'Create My Own Agent' : 'New Team',
+                      icon: Icons.add_rounded,
+                      onPressed: _create,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: TeamlySpace.s3),
+              SizedBox(
+                height: 48,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
+                  children: <Widget>[
+                    if (_tab == 0) ...<Widget>[
+                      Padding(
+                        padding: const EdgeInsets.only(right: TeamlySpace.s2),
+                        child: TeamlyChip(
+                          label: 'By Myto AI',
+                          selected: _showRoster,
+                          onTap: () => setState(() => _source = 'By Myto AI'),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.only(right: TeamlySpace.s2),
+                        child: TeamlyChip(
+                          label: 'My Custom Agents',
+                          selected: !_showRoster,
+                          onTap: () => setState(() => _source = 'My Custom Agents'),
+                        ),
+                      ),
+                      const VerticalDivider(width: TeamlySpace.s4),
+                    ],
+                    for (final c in categories)
+                      Padding(
+                        padding: const EdgeInsets.only(right: TeamlySpace.s2),
+                        child: TeamlyChip(
+                          label: c,
+                          selected: _category == c,
+                          onTap: () => setState(() => _category = c),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: TeamlySpace.s1),
+              Expanded(child: _body(context, agents, teams, store)),
+            ] else
+              ...<Widget>[
+                // Automations: scheduled agent runs — a desktop-side feature
+                // the mobile app hasn't grown yet.
+                const SizedBox(height: TeamlySpace.s4),
+                Expanded(
+                  child: Center(
                     child: Padding(
                       padding: const EdgeInsets.all(32),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: <Widget>[
-                          Icon(
-                            Icons.groups_rounded,
-                            size: 44,
-                            color: context.palette.muted,
-                          ),
+                          Icon(Icons.bolt_rounded, size: 44, color: palette.muted),
                           const SizedBox(height: 14),
-                          Text(
-                            _query.trim().isEmpty
-                                ? 'No rooms yet'
-                                : 'Nothing matches “$_query”',
-                            style: const TextStyle(
+                          const Text(
+                            'No automations yet',
+                            style: TextStyle(
                               color: TeamlyColors.ink900,
                               fontSize: 18,
                               fontWeight: FontWeight.w700,
                             ),
                           ),
-                          if (_query.trim().isEmpty) ...<Widget>[
-                            const SizedBox(height: 8),
-                            const Text(
-                              'Gather specialists — they will research your question together and hand you a report.',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: TeamlyColors.ink500,
-                                fontSize: 14,
-                                height: 1.5,
-                              ),
-                            ),
-                            // Empty roster: the labelled "+ New Group" action
-                            // sits front and centre of the display.
-                            const SizedBox(height: 22),
-                            TeamlyPillButton(
-                              label: 'New Group',
-                              icon: Icons.add_rounded,
-                              onPressed: _createRoom,
-                            ),
-                          ],
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Set an agent to run on a schedule — daily digests, '
+                            'watchers, recurring reports. Coming to mobile soon.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: TeamlyColors.ink500, fontSize: 14, height: 1.5),
+                          ),
                         ],
                       ),
                     ),
-                  )
-                : ListView.separated(
-                    padding: const EdgeInsets.all(TeamlySpace.gutter),
-                    itemCount: rooms.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: TeamlySpace.s3),
-                    itemBuilder: (context, i) {
-                      final room = rooms[i];
-                      return _RoomCard(
-                        room: room,
-                        onTap: () => _openRoom(room),
-                        onDelete: () => _deleteRoom(room),
-                      );
-                    },
                   ),
+                ),
+              ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _body(BuildContext context, List<Agent> agents, List<AgentTeam> teams, StudioStore store) {
+    if (_tab == 1) {
+      if (teams.isEmpty) {
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Icon(Icons.groups_rounded, size: 44, color: context.palette.muted),
+                const SizedBox(height: 14),
+                Text(
+                  _query.trim().isEmpty ? 'No teams yet' : 'Nothing matches “$_query”',
+                  style: const TextStyle(
+                    color: TeamlyColors.ink900,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Gather specialists — they will research your question together and hand you a report.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: TeamlyColors.ink500, fontSize: 14, height: 1.5),
+                ),
+              ],
+            ),
           ),
-        ],
+        );
+      }
+      return ListView.separated(
+        padding: const EdgeInsets.all(TeamlySpace.gutter),
+        itemCount: teams.length,
+        separatorBuilder: (_, __) => const SizedBox(height: TeamlySpace.s3),
+        itemBuilder: (context, i) => _TeamCard(
+          team: teams[i],
+          onOpen: () => _openTeam(teams[i]),
+          onDelete: () => _deleteRoom(teams[i]),
+        ),
+      );
+    }
+
+    if (agents.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(Icons.smart_toy_outlined, size: 44, color: context.palette.muted),
+              const SizedBox(height: 14),
+              Text(
+                _query.trim().isEmpty ? 'No custom agents yet' : 'Nothing matches “$_query”',
+                style: const TextStyle(
+                  color: TeamlyColors.ink900,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Assemble your own team of specialists — they chat together and research as one.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: TeamlyColors.ink500, fontSize: 14, height: 1.5),
+              ),
+              const SizedBox(height: 22),
+              TeamlyPillButton(label: 'Create My Own Agent', icon: Icons.add_rounded, onPressed: _create),
+            ],
+          ),
+        ),
+      );
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.all(TeamlySpace.gutter),
+      itemCount: agents.length,
+      separatorBuilder: (_, __) => const SizedBox(height: TeamlySpace.s3),
+      itemBuilder: (context, i) => TeamlyAgentCard(
+        agent: agents[i],
+        onChat: () => _openAgent(agents[i]),
       ),
     );
   }
 }
 
-class _RoomCard extends StatelessWidget {
-  const _RoomCard({
-    required this.room,
-    required this.onTap,
-    required this.onDelete,
-  });
+/// Room card for the Agent Teams tab (delete affordance included).
+class _TeamCard extends StatelessWidget {
+  const _TeamCard({required this.team, required this.onOpen, required this.onDelete});
 
-  final AgentTeam room;
-  final VoidCallback onTap;
+  final AgentTeam team;
+  final VoidCallback onOpen;
   final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
     final members = <Agent>[
-      for (final id in room.agentIds)
+      for (final id in team.agentIds)
         if (agentById(id) != null) agentById(id)!,
     ];
     final shown = members.take(3).toList();
-
     return TeamlyCard(
-      onTap: onTap,
+      onTap: onOpen,
       child: Row(
         children: <Widget>[
-          // Stacked generated avatars of the first three members.
           SizedBox(
             width: 72,
             height: 44,
@@ -322,15 +477,9 @@ class _RoomCard extends StatelessWidget {
                     child: Container(
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        border: Border.all(
-                          color: context.palette.surface,
-                          width: 2,
-                        ),
+                        border: Border.all(color: context.palette.surface, width: 2),
                       ),
-                      child: AgentAvatar(
-                        artId: shown[i].artId,
-                        size: 40,
-                      ),
+                      child: AgentAvatar(artId: shown[i].artId, size: 40),
                     ),
                   ),
               ],
@@ -342,18 +491,14 @@ class _RoomCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
                 Text(
-                  room.name,
+                  team.name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: TeamlyColors.ink900,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                  ),
+                  style: const TextStyle(color: TeamlyColors.ink900, fontSize: 16, fontWeight: FontWeight.w700),
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  room.subtitle,
+                  team.subtitle,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(color: TeamlyColors.ink500, fontSize: 13),
@@ -365,7 +510,7 @@ class _RoomCard extends StatelessWidget {
             onPressed: onDelete,
             icon: const Icon(Icons.delete_outline_rounded, size: 19),
             color: TeamlyColors.ink300,
-            tooltip: 'Delete room',
+            tooltip: 'Delete team',
           ),
           const SizedBox(width: 4),
           const Icon(Icons.chevron_right_rounded, color: TeamlyColors.ink300),

@@ -228,6 +228,26 @@ class SocialService {
         );
   }
 
+  /// One-shot posts by an author NAME (agent accounts have no uid of their
+  /// own — their posts are queried by display name). Client-filtered, no
+  /// composite index required.
+  static Future<List<FeedPost>> fetchPostsByName(String name, {int limitCount = 50}) async {
+    final snap = await _db
+        .collection('posts')
+        .where('name', isEqualTo: name)
+        .orderBy('createdAt', descending: true)
+        .limit(limitCount)
+        .get();
+    return snap.docs.map((d) => FeedPost.fromDoc(d.id, d.data())).toList();
+  }
+
+  /// True when a post with this exact marker link already exists — the
+  /// idempotency check behind the verified agents' daily seeding.
+  static Future<bool> postWithMarkerExists(String link) async {
+    final snap = await _db.collection('posts').where('link', isEqualTo: link).limit(1).get();
+    return snap.docs.isNotEmpty;
+  }
+
   /// Live comments subscription for one post (oldest first).
   static Stream<List<FeedComment>> streamComments(String postId) {
     return _db
@@ -373,6 +393,26 @@ class SocialService {
     return snap.docs.map((d) => d.id).toList();
   }
 
+  /// Server-side follower count for a profile header (0 on any failure).
+  static Future<int> followerCount(String uid) async {
+    try {
+      final snap = await _db.collection('follows').doc(uid).collection('followers').count().get();
+      return snap.count ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Server-side following count for a profile header (0 on any failure).
+  static Future<int> followingCount(String uid) async {
+    try {
+      final snap = await _db.collection('follows').doc(uid).collection('following').count().get();
+      return snap.count ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   /// Feed posts by a fixed set of authors, merged newest-first.
   static Future<List<FeedPost>> fetchPostsByAuthors(List<String> authorUids) async {
     final ids = authorUids.take(10).toList(); // Firestore `whereIn` cap.
@@ -495,6 +535,13 @@ extension DiscoverProfiles on SocialService {
 
   /// Create/update the caller's profile and claim their handle. The handle doc
   /// is create-once in the rules, so a taken handle returns false.
+  ///
+  /// THE UPDATE BUG (fixed here): the handle doc must never be RE-written —
+  /// `usernames/{x}` allows create but forbids update, so `set()` on our own
+  /// existing doc failed the whole batch with permission-denied (the profile
+  /// page "went blank" after every edit). Claim it only when it doesn't exist
+  /// yet; when it's already ours, skip straight to the profile write. For the
+  /// same reason `createdAt` is only sent on first create, never on update.
   Future<bool> saveProfile(
     String uid, {
     required String name,
@@ -504,25 +551,35 @@ extension DiscoverProfiles on SocialService {
   }) async {
     final handle = username.trim().toLowerCase();
     if (!kHandleRe.hasMatch(handle)) return false;
-    final handleRef = SocialService._db.collection('usernames').doc(handle);
+    final db = SocialService._db;
+    final handleRef = db.collection('usernames').doc(handle);
     final existing = await handleRef.get();
     if (existing.exists && (existing.data()?['uid'] ?? '') != uid) return false;
-    final batch = SocialService._db.batch();
-    batch.set(handleRef, <String, dynamic>{'uid': uid});
-    batch.set(
-      SocialService._db.collection('profiles').doc(uid),
-      <String, dynamic>{
+    try {
+      final batch = db.batch();
+      if (!existing.exists) {
+        batch.set(handleRef, <String, dynamic>{'uid': uid});
+      }
+      final profileRef = db.collection('profiles').doc(uid);
+      final existingProfile = await profileRef.get();
+      final data = <String, dynamic>{
         'uid': uid,
         'name': name.substring(0, name.length.clamp(0, 80)),
         'username': handle,
         'bio': bio.substring(0, bio.length.clamp(0, 280)),
         'photo': photo,
-        'createdAt': FieldValue.serverTimestamp(),
-      },
-      SetOptions(merge: true),
-    );
-    await batch.commit();
-    return true;
+      };
+      // First create stamps createdAt; updates keep the original so the
+      // profile's age never resets on an edit.
+      if (!existingProfile.exists) data['createdAt'] = FieldValue.serverTimestamp();
+      batch.set(profileRef, data, SetOptions(merge: true));
+      await batch.commit();
+      return true;
+    } on FirebaseException {
+      // Rules/permission/network failure — the caller shows a message instead
+      // of the page silently dying.
+      rethrow;
+    }
   }
 
   /// Viral feed: the most-liked posts, newest first among ties.

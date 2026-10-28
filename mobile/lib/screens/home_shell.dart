@@ -6,22 +6,21 @@ import '../services/dm_service.dart';
 import '../services/studio_store.dart';
 import '../theme.dart';
 import '../widgets/teamly/kit.dart';
-import 'dm_list_screen.dart';
+import 'agents_screen.dart';
+import 'artifacts_screen.dart';
+import 'chat_home_screen.dart';
 import 'discover_screen.dart';
+import 'memory_screen.dart';
 import 'post_composer_page.dart';
-import 'profile_screen.dart';
-import 'search_screen.dart';
-import 'tools_hub_screen.dart';
 
-/// HomeShell — the app's single bottom navigation, Myto-community style:
+/// HomeShell — the app's single bottom navigation, Teamly-style five tabs:
 ///
-///   Home(Discover) · Search · DM ·  Post  · Profile
+///   Chat (landing) · Agents · Discover · Memory · Artifacts
 ///
-/// Home IS the Discover feed (like a social app's home timeline). The AI
-/// tools (AI Chat / Helper / Agents / Memory / Artifacts) live behind the
-/// Discover header's back button (a tools menu) and in the Profile tab's
-/// tool list — nothing from the old six-tab shell is lost. [IndexedStack]
-/// keeps every tab alive.
+/// The Chat tab is the home screen (chat list + DMs + search). Discover is
+/// the community feed — its header's back arrow returns here. [IndexedStack]
+/// keeps every tab alive, and Android's system back walks home first before
+/// it can leave the app.
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -66,65 +65,47 @@ class _HomeShellState extends State<HomeShell> {
     final palette = context.palette;
     final studio = context.watch<StudioStore>();
 
-    return Scaffold(
-      body: IndexedStack(
-        index: _tab,
-        children: <Widget>[
-          DiscoverScreen(onOpenTools: _openTools),
-          const SearchScreen(),
-          const DmListScreen(),
-          const ProfileScreen(),
-        ],
-      ),
-      bottomNavigationBar: Container(
-        decoration: BoxDecoration(
-          color: palette.surface,
-          border: Border(top: BorderSide(color: palette.border)),
-        ),
-        child: SafeArea(
-          top: false,
-          child: SizedBox(
-            height: 64,
-            child: Row(
-              children: <Widget>[
-                _item(0, Icons.home_outlined, Icons.home_rounded, 'Home'),
-                _item(1, Icons.search_rounded, Icons.search_rounded, 'Search'),
-                _item(2, Icons.chat_bubble_outline_rounded, Icons.chat_bubble_rounded, 'DM'),
-                _postButton(),
-                _item(3, Icons.person_outline_rounded, Icons.person_rounded, 'Profile',
-                    badge: studio.newCount),
-              ],
+    return PopScope(
+      // System back from any non-home tab walks home first; from the Chat tab
+      // it may leave the app as usual.
+      canPop: _tab == 0,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _go(0);
+      },
+      child: Scaffold(
+        body: IndexedStack(
+          index: _tab,
+          children: <Widget>[
+            ChatHomeScreen(onCompose: _openComposer),
+            const AgentsScreen(),
+            DiscoverScreen(onBack: () => _go(0)),
+            MemoryScreen(
+              onOpenProfile: () => _go(0),
+              onOpenArtifacts: () => _go(4),
             ),
+            const ArtifactsScreen(),
+          ],
+        ),
+        bottomNavigationBar: Container(
+          decoration: BoxDecoration(
+            color: palette.surface,
+            border: Border(top: BorderSide(color: palette.border)),
           ),
-        ),
-      ),
-    );
-  }
-
-  /// The back arrow on Discover's header opens the full-screen tools hub —
-  /// the original Myto screens (AI Chat, Agents, Helper, Memory, Artifacts).
-  void _openTools() {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => const ToolsHubScreen()),
-    );
-  }
-
-  /// The center Post action — a raised green disc, visually distinct from tabs.
-  Widget _postButton() {
-    final palette = context.palette;
-    return Expanded(
-      child: Center(
-        child: GestureDetector(
-          onTap: _openComposer,
-          child: Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: palette.accent,
-              shape: BoxShape.circle,
-              boxShadow: TeamlyElevation.green,
+          child: SafeArea(
+            top: false,
+            child: SizedBox(
+              height: 64,
+              child: Row(
+                children: <Widget>[
+                  _item(0, Icons.chat_bubble_outline_rounded, Icons.chat_bubble_rounded, 'Chat'),
+                  _item(1, Icons.smart_toy_outlined, Icons.smart_toy_rounded, 'Agents'),
+                  _item(2, Icons.explore_outlined, Icons.explore_rounded, 'Discover'),
+                  _item(3, Icons.psychology_outlined, Icons.psychology_rounded, 'Memory',
+                      badge: studio.newCount),
+                  _item(4, Icons.layers_outlined, Icons.layers_rounded, 'Artifacts'),
+                ],
+              ),
             ),
-            child: const Icon(Icons.add_rounded, size: 26, color: Colors.white),
           ),
         ),
       ),

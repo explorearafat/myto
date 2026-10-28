@@ -4,30 +4,39 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../services/agent_accounts.dart';
+import '../services/agent_feed_service.dart';
 import '../services/auth_service.dart';
 import '../services/social_service.dart';
 import '../theme.dart';
+import '../widgets/crypto_widget.dart';
 import '../widgets/teamly/kit.dart';
+import 'agent_profile_screen.dart';
 import 'notifications_sheet.dart';
 
 /// ---------------------------------------------------------------------------
-/// DiscoverScreen — Home: the Myto community feed, backed by Firestore (the
+/// DiscoverScreen — the Myto community feed, backed by Firestore (the
 /// same feed the website's /discover serves; see services/social_service.dart
 /// + firestore.rules).
 ///
-/// Header (per the design spec): back icon → tools menu, "Myto" in cursive,
-/// notification bell → activity sheet.
+/// Header (per the design spec): back icon → the Chat landing tab, "Myto" in
+/// cursive, notification bell → activity sheet.
 ///
 /// The "For you" feed flows by PRIORITY, not pure recency: engagement +
 /// recency + who-you-follow + a per-refresh jitter (see
 /// SocialService.prioritizePosts), and cards enter with a step-by-step
 /// staggered animation.
+///
+/// Verified agents (see services/agent_accounts.dart) post on a daily
+/// schedule: their cards show the blue tick, a display-only reaction count
+/// that climbs into the 90K–180K band, no comment composer, and — for the
+/// crypto desk — a live rate + chart widget in place of the plain text marker.
 /// ---------------------------------------------------------------------------
 class DiscoverScreen extends StatefulWidget {
-  const DiscoverScreen({super.key, this.onOpenTools});
+  const DiscoverScreen({super.key, this.onBack});
 
-  /// Opens the tools menu (AI Chat / Helper / Agents / Memory / Artifacts).
-  final VoidCallback? onOpenTools;
+  /// Returns to the Chat landing tab (the header's back arrow).
+  final VoidCallback? onBack;
 
   @override
   State<DiscoverScreen> createState() => _DiscoverScreenState();
@@ -58,6 +67,9 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
   void initState() {
     super.initState();
     _loadSets();
+    // The verified agents publish on a daily schedule — any slot that passed
+    // without a post (app was closed) seeds now. Best-effort, never blocks UI.
+    AgentFeedService.seedIfDue().catchError((_) {});
   }
 
   Future<void> _loadSets() async {
@@ -96,11 +108,11 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     return Scaffold(
       backgroundColor: palette.bg,
       appBar: AppBar(
-        // The spec's header: back icon · Myto (cursive) · notification bell.
+        // The spec's header: back icon (→ Chat landing) · Myto (cursive) · bell.
         leading: IconButton(
-          tooltip: 'Myto tools',
+          tooltip: 'Back to chats',
           icon: const Icon(Icons.arrow_back_rounded),
-          onPressed: widget.onOpenTools,
+          onPressed: widget.onBack,
         ),
         title: const Text(
           'Myto',
@@ -421,6 +433,8 @@ class _PostCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final agent = agentForPost(post);
+    final cryptoPair = cryptoMarkerPair(post.text);
     return TeamlyCard(
       padding: const EdgeInsets.all(TeamlySpace.s4),
       child: Column(
@@ -428,26 +442,46 @@ class _PostCard extends StatelessWidget {
         children: <Widget>[
           Row(
             children: <Widget>[
-              _Avatar(photo: post.photo, name: post.name, size: 38),
+              GestureDetector(
+                onTap: agent == null ? null : () => _openAgentProfile(context, agent),
+                child: _Avatar(photo: post.photo, name: post.name, size: 38),
+              ),
               const SizedBox(width: TeamlySpace.s3),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text(
-                      post.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: TeamlyColors.ink900),
-                    ),
-                    Text(
-                      _time(post.createdAtMs),
-                      style: const TextStyle(fontSize: 11.5, color: TeamlyColors.ink300),
-                    ),
-                  ],
+                child: GestureDetector(
+                  onTap: agent == null ? null : () => _openAgentProfile(context, agent),
+                  behavior: HitTestBehavior.opaque,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Row(
+                        children: <Widget>[
+                          Flexible(
+                            child: Text(
+                              post.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: TeamlyColors.ink900),
+                            ),
+                          ),
+                          // Blue verified tick — publisher accounts only.
+                          if (agent != null) ...<Widget>[
+                            const SizedBox(width: 4),
+                            const _VerifiedTick(size: 15),
+                          ],
+                        ],
+                      ),
+                      Text(
+                        _time(post.createdAtMs),
+                        style: const TextStyle(fontSize: 11.5, color: TeamlyColors.ink300),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-              if (meUid.isNotEmpty && post.uid != meUid)
+              // Real accounts follow real accounts — agents carry the tick
+              // instead, and the seeder never sees a delete button on them.
+              if (agent == null && meUid.isNotEmpty && post.uid != meUid)
                 GestureDetector(
                   onTap: onToggleFollow,
                   child: Container(
@@ -466,7 +500,7 @@ class _PostCard extends StatelessWidget {
                     ),
                   ),
                 ),
-              if (meUid.isNotEmpty && post.uid == meUid && onDelete != null)
+              if (agent == null && meUid.isNotEmpty && post.uid == meUid && onDelete != null)
                 IconButton(
                   visualDensity: VisualDensity.compact,
                   onPressed: () {
@@ -497,7 +531,12 @@ class _PostCard extends StatelessWidget {
           ),
           const SizedBox(height: TeamlySpace.s3),
           _PostText(text: post.text),
-          if (post.link.isNotEmpty) ...<Widget>[
+          // The crypto desk's live-rate marker renders as the chart widget.
+          if (cryptoPair != null) ...<Widget>[
+            const SizedBox(height: TeamlySpace.s3),
+            CryptoMiniCard(pair: cryptoPair),
+          ],
+          if (post.link.isNotEmpty && cryptoPair == null) ...<Widget>[
             const SizedBox(height: TeamlySpace.s3),
             _LinkCard(
               url: post.link,
@@ -529,7 +568,9 @@ class _PostCard extends StatelessWidget {
               _Action(
                 icon: liked ? Icons.favorite_rounded : Icons.favorite_border_rounded,
                 color: liked ? TeamlyColors.danger : TeamlyColors.ink500,
-                label: post.likeCount > 0 ? '${post.likeCount}' : 'Like',
+                // Verified agents display their pseudo-count (90K–180K base,
+                // real likes stack on top); everyone else shows the real one.
+                label: _likeLabel(post),
                 onTap: meUid.isEmpty ? null : onToggleLike,
               ),
               const SizedBox(width: 10),
@@ -561,6 +602,21 @@ class _PostCard extends StatelessWidget {
     );
   }
 
+  void _openAgentProfile(BuildContext context, AgentAccount agent) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => AgentProfileScreen(agent: agent)),
+    );
+  }
+
+  /// The like pill's label: raw count under 10K, K-compact above it (agent
+  /// pseudo-counts live in the 90K–180K band, so they always compact).
+  String _likeLabel(FeedPost post) {
+    final shown = displayLikeCount(post);
+    if (shown <= 0) return 'Like';
+    if (shown < 10000) return '$shown';
+    return '${(shown / 1000).toStringAsFixed(shown < 100000 ? 1 : 0)}K';
+  }
+
   String _time(int ms) {
     if (ms == 0) return 'just now';
     final diff = DateTime.now().millisecondsSinceEpoch - ms;
@@ -575,6 +631,8 @@ class _PostCard extends StatelessWidget {
 }
 
 /// Comment action that expands the thread inline beneath its own card.
+/// Verified agents' posts have comments turned OFF — the row reads "Off" and
+/// expanding shows the notice instead of a thread/composer.
 class _CommentsAction extends StatefulWidget {
   const _CommentsAction({
     required this.post,
@@ -597,16 +655,29 @@ class _CommentsActionState extends State<_CommentsAction> {
 
   @override
   Widget build(BuildContext context) {
+    final open = commentsOpenFor(widget.post);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
         _Action(
-          icon: Icons.chat_bubble_outline_rounded,
-          color: TeamlyColors.ink500,
-          label: widget.post.commentCount > 0 ? '${widget.post.commentCount}' : 'Comment',
-          onTap: () => setState(() => _open = !_open),
+          icon: open ? Icons.chat_bubble_outline_rounded : Icons.chat_bubble_rounded,
+          color: open ? TeamlyColors.ink500 : TeamlyColors.ink300,
+          label: !open
+              ? 'Off'
+              : widget.post.commentCount > 0
+                  ? '${widget.post.commentCount}'
+                  : 'Comment',
+          onTap: open ? () => setState(() => _open = !_open) : null,
         ),
-        if (_open)
+        if (!open)
+          const Padding(
+            padding: EdgeInsets.only(top: 2),
+            child: Text(
+              'Comments are turned off.',
+              style: TextStyle(fontSize: 11.5, color: TeamlyColors.ink300),
+            ),
+          ),
+        if (open && _open)
           _Comments(
             postId: widget.post.id,
             meUid: widget.meUid,
@@ -625,12 +696,15 @@ class _PostText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Crypto markers render as the live chart widget one row below — the raw
+    // `[[crypto:…]]` token never shows in the text itself.
+    final body = stripCryptoMarkers(text);
     final spans = <TextSpan>[];
     final re = RegExp(r'(https://[^\s]+)|(#([a-z0-9]{1,20}))', caseSensitive: false);
     var last = 0;
-    for (final m in re.allMatches(text)) {
+    for (final m in re.allMatches(body)) {
       if (m.start > last) {
-        spans.add(TextSpan(text: text.substring(last, m.start)));
+        spans.add(TextSpan(text: body.substring(last, m.start)));
       }
       if (m.group(1) != null) {
         spans.add(TextSpan(
@@ -645,13 +719,25 @@ class _PostText extends StatelessWidget {
       }
       last = m.end;
     }
-    if (last < text.length) spans.add(TextSpan(text: text.substring(last)));
+    if (last < body.length) spans.add(TextSpan(text: body.substring(last)));
     return SelectableText.rich(
       TextSpan(
         style: const TextStyle(fontSize: 14.5, height: 1.45, color: TeamlyColors.ink900),
         children: spans,
       ),
     );
+  }
+}
+
+/// The blue verified badge next to a publisher's name.
+class _VerifiedTick extends StatelessWidget {
+  const _VerifiedTick({this.size = 15});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return Icon(Icons.verified_rounded, size: size, color: const Color(0xFF1D9BF0));
   }
 }
 
@@ -781,7 +867,22 @@ class _Comments extends StatelessWidget {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: <Widget>[
-                                Text(c.name, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: TeamlyColors.ink900)),
+                                Row(
+                                  children: <Widget>[
+                                    Flexible(
+                                      child: Text(
+                                        c.name,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: TeamlyColors.ink900),
+                                      ),
+                                    ),
+                                    if (isAgentAuthor(c.name)) ...<Widget>[
+                                      const SizedBox(width: 3),
+                                      const _VerifiedTick(size: 12),
+                                    ],
+                                  ],
+                                ),
                                 Text(c.text, style: const TextStyle(fontSize: 13, height: 1.35, color: TeamlyColors.ink700)),
                               ],
                             ),
@@ -933,7 +1034,7 @@ class _SignInCard extends StatelessWidget {
       child: TeamlyCard(
         padding: const EdgeInsets.all(TeamlySpace.s4),
         child: const Text(
-          'Sign in (Profile tab) to post, react, comment, follow and DM — browsing is open to everyone.',
+          'Sign in (avatar on the Chat tab) to post, react, comment, follow and DM — browsing is open to everyone.',
           textAlign: TextAlign.center,
           style: TextStyle(fontSize: 13, color: TeamlyColors.ink500),
         ),

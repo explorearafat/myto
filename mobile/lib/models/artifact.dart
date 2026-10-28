@@ -141,7 +141,7 @@ class Artifact {
   factory Artifact.fromJson(Map<String, dynamic> json) => Artifact(
         id: (json['id'] as String?) ?? '',
         title: (json['title'] as String?) ?? 'Untitled artifact',
-        agentName: (json['agentName'] as String?) ?? 'Teamly Agent',
+        agentName: (json['agentName'] as String?) ?? 'Myto Agent',
         kind: ArtifactKind.values.firstWhere(
           (k) => k.name == json['kind'],
           orElse: () => ArtifactKind.video,
@@ -181,7 +181,7 @@ final List<Artifact> kSeedArtifacts = <Artifact>[
   Artifact(
     id: 'weekly-brief-md',
     title: 'Weekly Industry Brief',
-    agentName: 'Teamly Research',
+    agentName: 'Myto Research',
     kind: ArtifactKind.document,
     createdAt: DateTime.now().subtract(const Duration(days: 1, hours: 4)),
     media: const <ArtifactMedia>[

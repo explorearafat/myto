@@ -17,7 +17,14 @@ import '../widgets/teamly/parts.dart';
 /// row, the `Updates n` chip, and the badge on the bottom nav — three places,
 /// one number, and [StudioStore.newCount] is that number.
 class MemoryScreen extends StatefulWidget {
-  const MemoryScreen({super.key});
+  const MemoryScreen({super.key, this.onOpenProfile, this.onOpenArtifacts});
+
+  /// "My Profile" tile → the user's Discover profile (tab 3 of the old shell
+  /// lives behind this callback now).
+  final VoidCallback? onOpenProfile;
+
+  /// "My Artifacts" tile → the Artifacts tab.
+  final VoidCallback? onOpenArtifacts;
 
   @override
   State<MemoryScreen> createState() => _MemoryScreenState();
@@ -57,7 +64,8 @@ class _MemoryScreenState extends State<MemoryScreen> {
               spacing: TeamlySpace.s3,
               runSpacing: TeamlySpace.s3,
               children: <Widget>[
-                for (final d in system) _SystemTile(doc: d, store: store),
+                for (final d in system)
+                  _SystemTile(doc: d, store: store, onOpenProfile: widget.onOpenProfile, onOpenArtifacts: widget.onOpenArtifacts),
               ],
             ),
           ),
@@ -387,10 +395,17 @@ class _MemoryScreenState extends State<MemoryScreen> {
 /// glyph — the pattern the reference uses for Overview · My Profile · Next
 /// Actions · My Artifacts.
 class _SystemTile extends StatelessWidget {
-  const _SystemTile({required this.doc, required this.store});
+  const _SystemTile({
+    required this.doc,
+    required this.store,
+    this.onOpenProfile,
+    this.onOpenArtifacts,
+  });
 
   final WikiDoc doc;
   final StudioStore store;
+  final VoidCallback? onOpenProfile;
+  final VoidCallback? onOpenArtifacts;
 
   @override
   Widget build(BuildContext context) {
@@ -450,6 +465,16 @@ class _SystemTile extends StatelessWidget {
     final d = doc;
     final s = store;
     s.markDocRead(d.id);
+    // Two tiles navigate instead of opening the editor: the profile lives on
+    // its own destination, and artifacts on the Artifacts tab.
+    if (d.id == 'my-profile' && onOpenProfile != null) {
+      onOpenProfile!();
+      return;
+    }
+    if (d.id == 'my-artifacts' && onOpenArtifacts != null) {
+      onOpenArtifacts!();
+      return;
+    }
     // Reuse the same bottom-sheet reader by pushing a lightweight dialog.
     showModalBottomSheet<void>(
       context: context,

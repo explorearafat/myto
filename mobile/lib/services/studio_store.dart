@@ -463,9 +463,9 @@ class StudioStore extends ChangeNotifier {
       // -- Getting Started group ---------------------------------------------
       WikiDoc(
         id: 'welcome',
-        title: 'Welcome to Teamly',
-        subtitle: 'What Teamly is — Personal AI, agents & teams, group chats, crea...',
-        body: '# Welcome to Teamly\n\nTeamly is a personal AI workspace: agents do the work, '
+        title: 'Welcome to Myto',
+        subtitle: 'What Myto is — Personal AI, agents & teams, group chats, crea...',
+        body: '# Welcome to Myto\n\nMyto is a personal AI workspace: agents do the work, '
             'the wiki remembers it.\n',
         group: 'Getting Started',
         tags: const <String>['getting-started', 'onboarding'],
@@ -474,7 +474,7 @@ class StudioStore extends ChangeNotifier {
       ),
       WikiDoc(
         id: 'wiki-basics',
-        title: 'Teamly Wiki: Your Personal Knowledge Base',
+        title: 'Myto Wiki: Your Personal Knowledge Base',
         subtitle: 'How your private wiki builds itself from chats, handles conflicts, ...',
         body: '# Your Personal Knowledge Base\n\nThis page writes itself from your '
             'chats and resolves conflicts when two sources disagree.\n',

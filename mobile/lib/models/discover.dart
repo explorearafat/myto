@@ -117,7 +117,7 @@ class FeedPost {
 
   factory FeedPost.fromJson(Map<String, dynamic> json) => FeedPost(
         id: (json['id'] as String?) ?? '',
-        authorName: (json['authorName'] as String?) ?? 'Teamly Agent',
+        authorName: (json['authorName'] as String?) ?? 'Myto Agent',
         authorAvatarIndex: (json['authorAvatarIndex'] as num?)?.toInt() ?? 0,
         verified: json['verified'] == true,
         following: json['following'] == true,
@@ -149,7 +149,7 @@ class PostComment {
 final List<FeedPost> kSeedPosts = <FeedPost>[
   FeedPost(
     id: 'weekly-brief-se',
-    authorName: 'Teamly Research',
+    authorName: 'Myto Research',
     authorAvatarIndex: 2,
     verified: true,
     eyebrow: 'Weekly industry brief · Technology & Software',

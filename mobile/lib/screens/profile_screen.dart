@@ -14,9 +14,10 @@ import 'discover_profile.dart' show DiscoverProfileSetup, DiscoverProfileView;
 import 'memory_screen.dart';
 
 /// ---------------------------------------------------------------------------
-/// ProfileScreen — the nav's Profile tab: the user's public Discover profile
-/// (setup flow when absent) plus one-tap access to the tools that used to be
-/// bottom-nav tabs (Helper / Agents / Memory / Artifacts) and sign-out.
+/// ProfileScreen — the user's public Discover profile (setup flow when
+/// absent, Instagram-style view once created, with working Edit profile),
+/// plus one-tap access to the tools that used to be bottom-nav tabs
+/// (Helper / Agents / Memory / Artifacts) and sign-out.
 /// ---------------------------------------------------------------------------
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -28,6 +29,7 @@ class ProfileScreen extends StatefulWidget {
 class _ProfileScreenState extends State<ProfileScreen> {
   DiscoverProfile? _profile;
   bool _loaded = false;
+  bool _editing = false;
   final Set<String> _savedIds = <String>{};
 
   User? get _user => FirebaseAuth.instance.currentUser;
@@ -69,7 +71,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return Scaffold(
       backgroundColor: palette.bg,
       appBar: AppBar(
-        title: const Text('Profile'),
+        // The IG-style header: the username, centred.
+        title: _editing || _profile == null
+            ? const Text('Profile')
+            : Text(
+                '@${_profile!.username}',
+                style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: TeamlyColors.ink900),
+              ),
+        centerTitle: true,
         actions: <Widget>[
           IconButton(
             tooltip: 'Sign out',
@@ -101,76 +110,96 @@ class _ProfileScreenState extends State<ProfileScreen> {
       ),
       body: !_loaded
           ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              padding: const EdgeInsets.all(TeamlySpace.gutter),
-              children: <Widget>[
-                if (_profile == null)
-                  DiscoverProfileSetup(
-                    uid: _uid,
-                    defaultName: name,
-                    defaultPhoto: _user?.photoURL ?? '',
-                    onDone: (p) => setState(() => _profile = p),
-                  )
-                else
-                  DiscoverProfileView(
-                    uid: _uid,
-                    profile: _profile,
-                    savedIds: _savedIds,
-                    onUnsave: (id) async {
-                      await SocialService.unsaveFromProfile(id, _uid);
-                      if (!mounted) return;
-                      setState(() => _savedIds.remove(id));
-                      await _toast('Removed from your profile.');
-                    },
-                    onDelete: (id) async {
-                      await SocialService.deletePost(id);
-                      await _toast('Post deleted.');
-                    },
-                    onComment: (post, text) async {
-                      await SocialService.addComment(
-                        post.id,
-                        uid: _uid,
-                        name: _profile?.name ?? name,
-                        photo: _user?.photoURL ?? '',
-                        text: text,
-                      );
-                      await _toast('Comment added.');
-                    },
-                  ),
-                const SizedBox(height: TeamlySpace.s5),
-                const TeamlyGroupHeader(label: 'Myto tools'),
-                const SizedBox(height: TeamlySpace.s2),
-                _ToolTile(
-                  icon: Icons.chat_bubble_outline_rounded,
-                  title: 'AI Chat',
-                  subtitle: 'Talk with your models',
-                  onTap: () => _push(const ChatScreen()),
-                ),
-                _ToolTile(
-                  icon: Icons.assistant_outlined,
-                  title: 'Helper',
-                  subtitle: 'Your AI assistant',
-                  onTap: () => _push(const AssistantScreen()),
-                ),
-                _ToolTile(
-                  icon: Icons.smart_toy_outlined,
-                  title: 'Agents',
-                  subtitle: 'Create and run agents',
-                  onTap: () => _push(const AgentsScreen()),
-                ),
-                _ToolTile(
-                  icon: Icons.psychology_outlined,
-                  title: 'Memory',
-                  subtitle: 'What Myto remembers',
-                  onTap: () => _push(const MemoryScreen()),
-                ),
-                _ToolTile(
-                  icon: Icons.layers_outlined,
-                  title: 'Artifacts',
-                  subtitle: 'Generated media & files',
-                  onTap: () => _push(const ArtifactsScreen()),
-                ),
-              ],
+          : RefreshIndicator(
+              onRefresh: () async {
+                final p = await SocialService().getProfile(_uid);
+                if (mounted) setState(() => _profile = p);
+              },
+              child: ListView(
+                padding: const EdgeInsets.all(TeamlySpace.gutter),
+                children: <Widget>[
+                  if (_profile == null)
+                    DiscoverProfileSetup(
+                      uid: _uid,
+                      defaultName: name,
+                      defaultPhoto: _user?.photoURL ?? '',
+                      onDone: (p) => setState(() => _profile = p),
+                    )
+                  else if (_editing)
+                    DiscoverProfileSetup(
+                      uid: _uid,
+                      defaultName: name,
+                      defaultPhoto: _user?.photoURL ?? '',
+                      existing: _profile,
+                      onDone: (p) => setState(() {
+                        _profile = p;
+                        _editing = false;
+                      }),
+                    )
+                  else
+                    DiscoverProfileView(
+                      uid: _uid,
+                      profile: _profile,
+                      savedIds: _savedIds,
+                      onUnsave: (id) async {
+                        await SocialService.unsaveFromProfile(id, _uid);
+                        if (!mounted) return;
+                        setState(() => _savedIds.remove(id));
+                        await _toast('Removed from your profile.');
+                      },
+                      onDelete: (id) async {
+                        await SocialService.deletePost(id);
+                        await _toast('Post deleted.');
+                      },
+                      onComment: (post, text) async {
+                        await SocialService.addComment(
+                          post.id,
+                          uid: _uid,
+                          name: _profile?.name ?? name,
+                          photo: _user?.photoURL ?? '',
+                          text: text,
+                        );
+                        await _toast('Comment added.');
+                      },
+                      onEdit: () => setState(() => _editing = true),
+                    ),
+                  if (!_editing) ...<Widget>[
+                    const SizedBox(height: TeamlySpace.s5),
+                    const TeamlyGroupHeader(label: 'Myto tools'),
+                    const SizedBox(height: TeamlySpace.s2),
+                    _ToolTile(
+                      icon: Icons.chat_bubble_outline_rounded,
+                      title: 'AI Chat',
+                      subtitle: 'Talk with your models',
+                      onTap: () => _push(const ChatScreen()),
+                    ),
+                    _ToolTile(
+                      icon: Icons.assistant_outlined,
+                      title: 'Helper',
+                      subtitle: 'Your AI assistant',
+                      onTap: () => _push(const AssistantScreen()),
+                    ),
+                    _ToolTile(
+                      icon: Icons.smart_toy_outlined,
+                      title: 'Agents',
+                      subtitle: 'Create and run agents',
+                      onTap: () => _push(const AgentsScreen()),
+                    ),
+                    _ToolTile(
+                      icon: Icons.psychology_outlined,
+                      title: 'Memory',
+                      subtitle: 'What Myto remembers',
+                      onTap: () => _push(const MemoryScreen()),
+                    ),
+                    _ToolTile(
+                      icon: Icons.layers_outlined,
+                      title: 'Artifacts',
+                      subtitle: 'Generated media & files',
+                      onTap: () => _push(const ArtifactsScreen()),
+                    ),
+                  ],
+                ],
+              ),
             ),
     );
   }

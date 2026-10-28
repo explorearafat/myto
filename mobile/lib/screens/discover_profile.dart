@@ -2,13 +2,16 @@ import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../services/social_service.dart';
 import '../theme.dart';
 import '../widgets/teamly/kit.dart';
 
-/// First-time Discover profile setup: display name, unique @handle, bio.
-/// Shown inside the Profile destination before anything else.
+/// First-time Discover profile setup — doubles as the EDIT form when
+/// [existing] is passed: fields arrive prefilled, the unchanged handle passes
+/// the availability check (it's already the caller's), and the save button
+/// reads "Save changes". Shown inside the Profile destination.
 class DiscoverProfileSetup extends StatefulWidget {
   const DiscoverProfileSetup({
     super.key,
@@ -16,11 +19,16 @@ class DiscoverProfileSetup extends StatefulWidget {
     required this.defaultName,
     required this.defaultPhoto,
     required this.onDone,
+    this.existing,
   });
 
   final String uid;
   final String defaultName;
   final String defaultPhoto;
+
+  /// The profile being edited, or null for first-time setup.
+  final DiscoverProfile? existing;
+
   final void Function(DiscoverProfile profile) onDone;
 
   @override
@@ -28,14 +36,27 @@ class DiscoverProfileSetup extends StatefulWidget {
 }
 
 class _DiscoverProfileSetupState extends State<DiscoverProfileSetup> {
-  late final TextEditingController _name = TextEditingController(text: widget.defaultName);
-  final TextEditingController _username = TextEditingController();
-  final TextEditingController _bio = TextEditingController();
+  late final TextEditingController _name =
+      TextEditingController(text: widget.existing?.name ?? widget.defaultName);
+  late final TextEditingController _username =
+      TextEditingController(text: widget.existing?.username ?? '');
+  late final TextEditingController _bio =
+      TextEditingController(text: widget.existing?.bio ?? '');
   bool _checking = false;
   bool? _free;
   bool _busy = false;
   String _error = '';
   Timer? _debounce;
+
+  bool get _editing => widget.existing != null;
+
+  @override
+  void initState() {
+    super.initState();
+    // Editing with the current handle: skip the availability check — the
+    // handle is already ours (and create-once in the rules).
+    if (_editing) _free = true;
+  }
 
   @override
   void dispose() {
@@ -49,16 +70,73 @@ class _DiscoverProfileSetupState extends State<DiscoverProfileSetup> {
   void _onHandle(String value) {
     _debounce?.cancel();
     final handle = value.trim().toLowerCase();
+    // Keeping your own handle is always valid — the old code re-checked it
+    // and showed "taken", which blocked editing entirely.
+    if (_editing && handle == widget.existing!.username) {
+      setState(() => _free = true);
+      return;
+    }
     if (handle.isEmpty) {
       setState(() => _free = null);
       return;
     }
     setState(() => _checking = true);
     _debounce = Timer(const Duration(milliseconds: 450), () async {
-      final free = kHandleRe.hasMatch(handle) && await SocialService().isHandleFree(handle);
+      bool free;
+      try {
+        free = kHandleRe.hasMatch(handle) && await SocialService().isHandleFree(handle);
+      } catch (_) {
+        free = false;
+      }
       if (!mounted) return;
       setState(() => _free = free);
     });
+  }
+
+  Future<void> _save() async {
+    setState(() {
+      _busy = true;
+      _error = '';
+    });
+    try {
+      final ok = await SocialService().saveProfile(
+        widget.uid,
+        name: _name.text,
+        username: _username.text,
+        bio: _bio.text,
+        photo: widget.defaultPhoto,
+      );
+      if (!mounted) return;
+      setState(() => _busy = false);
+      if (ok) {
+        widget.onDone(
+          DiscoverProfile(
+            uid: widget.uid,
+            name: _name.text.trim(),
+            username: _username.text.trim().toLowerCase(),
+            bio: _bio.text,
+            photo: widget.defaultPhoto,
+            createdAtMs: widget.existing?.createdAtMs ?? DateTime.now().millisecondsSinceEpoch,
+          ),
+        );
+      } else {
+        setState(() => _error = 'That username was just taken — try another.');
+      }
+    } on FirebaseException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = e.code.contains('permission-denied')
+            ? 'Myto could not save your profile — sign in and try again.'
+            : 'Myto could not save your profile — check your connection and try again.';
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = 'Something went wrong — try again.';
+      });
+    }
   }
 
   @override
@@ -78,9 +156,9 @@ class _DiscoverProfileSetupState extends State<DiscoverProfileSetup> {
                 children: <Widget>[
                   _DProfileAvatar(photo: widget.defaultPhoto, name: _name.text, size: 56),
                   const SizedBox(height: TeamlySpace.s3),
-                  const Text(
-                    'Set up your profile',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: TeamlyColors.ink900),
+                  Text(
+                    _editing ? 'Edit profile' : 'Set up your profile',
+                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: TeamlyColors.ink900),
                   ),
                   const SizedBox(height: 6),
                   const Text(
@@ -111,7 +189,9 @@ class _DiscoverProfileSetupState extends State<DiscoverProfileSetup> {
                     ? 'Checking availability…'
                     : _free == true
                         ? '@${_username.text} is available'
-                        : '3-20 chars: a-z, 0-9, underscore',
+                        : _free == false
+                            ? 'That username is taken'
+                            : '3-20 chars: a-z, 0-9, underscore',
                 helperStyle: TextStyle(
                   color: _free == false ? TeamlyColors.danger : TeamlyColors.ink300,
                 ),
@@ -136,42 +216,10 @@ class _DiscoverProfileSetupState extends State<DiscoverProfileSetup> {
                 borderRadius: BorderRadius.circular(14),
                 child: InkWell(
                   borderRadius: BorderRadius.circular(14),
-                  onTap: valid && !_busy
-                      ? () async {
-                          setState(() {
-                            _busy = true;
-                            _error = '';
-                          });
-                          final ok = await SocialService().saveProfile(
-                            widget.uid,
-                            name: _name.text,
-                            username: _username.text,
-                            bio: _bio.text,
-                            photo: widget.defaultPhoto,
-                          );
-                          if (!mounted) return;
-                          setState(() => _busy = false);
-                          if (ok) {
-                            widget.onDone(
-                              DiscoverProfile(
-                                uid: widget.uid,
-                                name: _name.text,
-                                username: _username.text.trim().toLowerCase(),
-                                bio: _bio.text,
-                                photo: widget.defaultPhoto,
-                                createdAtMs: DateTime.now().millisecondsSinceEpoch,
-                              ),
-                            );
-                          } else {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('That username was just taken — try another.')),
-                            );
-                          }
-                        }
-                      : null,
+                  onTap: valid && !_busy ? _save : null,
                   child: Center(
                     child: Text(
-                      _busy ? 'Saving…' : 'Create profile',
+                      _busy ? 'Saving…' : (_editing ? 'Save changes' : 'Create profile'),
                       style: TextStyle(
                         fontSize: 15,
                         fontWeight: FontWeight.w600,
@@ -198,7 +246,10 @@ class _DiscoverProfileSetupState extends State<DiscoverProfileSetup> {
   }
 }
 
-/// The Profile destination: identity header + My posts / Saved tabs.
+/// The Profile view — Instagram layout: avatar raised on the LEFT, the
+/// posts/followers/following stats to its right, name + bio beneath, link
+/// chips, and an Edit profile / Share profile action row. Then the
+/// My posts | Saved tabs.
 class DiscoverProfileView extends StatefulWidget {
   const DiscoverProfileView({
     super.key,
@@ -208,6 +259,7 @@ class DiscoverProfileView extends StatefulWidget {
     required this.onUnsave,
     required this.onDelete,
     required this.onComment,
+    required this.onEdit,
   });
 
   final String uid;
@@ -216,6 +268,7 @@ class DiscoverProfileView extends StatefulWidget {
   final void Function(String postId) onUnsave;
   final void Function(String postId) onDelete;
   final void Function(FeedPost post, String text) onComment;
+  final VoidCallback onEdit;
 
   @override
   State<DiscoverProfileView> createState() => _DiscoverProfileViewState();
@@ -225,6 +278,8 @@ class _DiscoverProfileViewState extends State<DiscoverProfileView> {
   String _tab = 'posts';
   List<FeedPost>? _posts;
   List<FeedPost>? _saved;
+  int _followers = 0;
+  int _following = 0;
 
   @override
   void initState() {
@@ -233,6 +288,7 @@ class _DiscoverProfileViewState extends State<DiscoverProfileView> {
       if (mounted) setState(() => _posts = list);
     });
     _loadSaved();
+    _loadStats();
   }
 
   Future<void> _loadSaved() async {
@@ -240,65 +296,164 @@ class _DiscoverProfileViewState extends State<DiscoverProfileView> {
     if (mounted) setState(() => _saved = posts);
   }
 
+  Future<void> _loadStats() async {
+    final followers = await SocialService.followerCount(widget.uid);
+    final following = await SocialService.followingCount(widget.uid);
+    if (!mounted) return;
+    setState(() {
+      _followers = followers;
+      _following = following;
+    });
+  }
+
+  /// https links found in the bio — rendered as the IG-style link chips.
+  List<String> get _bioLinks {
+    final bio = widget.profile?.bio ?? '';
+    return RegExp(r'https://[^\s]+')
+        .allMatches(bio)
+        .map((m) => m.group(0)!)
+        .take(3)
+        .toList();
+  }
+
+  /// Bio with the link URLs stripped (they render as chips instead).
+  String get _bioText => (widget.profile?.bio ?? '')
+      .replaceAll(RegExp(r'https://\S+'), '')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+
+  Future<void> _shareProfile() async {
+    final username = widget.profile?.username ?? '';
+    final url = username.isEmpty
+        ? 'https://mytocode.vercel.app/discover'
+        : 'https://mytocode.vercel.app/discover?u=$username';
+    final messenger = ScaffoldMessenger.of(context);
+    await Clipboard.setData(ClipboardData(text: url));
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(content: Text('Profile link copied.')));
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Theme.of(context).palette;
+    final profile = widget.profile;
+    final postCount = _posts?.length ?? 0;
     final list = _tab == 'posts' ? _posts : _saved;
     return ListView(
       padding: const EdgeInsets.all(TeamlySpace.gutter),
       children: <Widget>[
-        TeamlyCard(
-          padding: const EdgeInsets.all(TeamlySpace.s4),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+        // ── Instagram-style identity header ────────────────────────────────
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            // The avatar sits slightly raised relative to the stats — the IG
+            // composition (photo top-left, numbers to the right).
+            Transform.translate(
+              offset: const Offset(0, -6),
+              child: _DProfileAvatar(
+                photo: profile?.photo ?? '',
+                name: profile?.name ?? 'You',
+                size: 84,
+              ),
+            ),
+            const SizedBox(width: TeamlySpace.s5),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 14),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: <Widget>[
+                    _Stat(count: '$postCount', label: 'posts'),
+                    _Stat(count: _compact(_followers), label: 'followers'),
+                    _Stat(count: _compact(_following), label: 'following'),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: TeamlySpace.s3),
+        if (profile?.username.isNotEmpty ?? false)
+          Text(
+            '@${profile!.username}',
+            style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: TeamlyColors.greenText),
+          ),
+        const SizedBox(height: 2),
+        Text(
+          profile?.name ?? 'You',
+          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: TeamlyColors.ink900),
+        ),
+        if (_bioText.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 3),
+            child: Text(
+              _bioText,
+              style: const TextStyle(fontSize: 13.5, height: 1.45, color: TeamlyColors.ink700),
+            ),
+          ),
+        if (_bioLinks.isNotEmpty) ...<Widget>[
+          const SizedBox(height: TeamlySpace.s2),
+          Wrap(
+            spacing: TeamlySpace.s2,
+            runSpacing: TeamlySpace.s2,
             children: <Widget>[
-              Row(
-                children: <Widget>[
-                  _DProfileAvatar(
-                    photo: widget.profile?.photo ?? '',
-                    name: widget.profile?.name ?? 'You',
-                    size: 52,
-                  ),
-                  const SizedBox(width: TeamlySpace.s3),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+              for (final url in _bioLinks)
+                GestureDetector(
+                  onTap: () async {
+                    await Clipboard.setData(ClipboardData(text: url));
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context)
+                      ..hideCurrentSnackBar()
+                      ..showSnackBar(const SnackBar(content: Text('Link copied.')));
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                    decoration: BoxDecoration(
+                      color: palette.chip,
+                      borderRadius: BorderRadius.circular(TeamlyRadius.pill),
+                      border: Border.all(color: palette.border),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
+                        const Icon(Icons.link_rounded, size: 14, color: TeamlyColors.ink700),
+                        const SizedBox(width: 6),
                         Text(
-                          widget.profile?.name ?? 'You',
+                          Uri.tryParse(url)?.host.replaceFirst('www.', '') ?? url,
                           style: const TextStyle(
-                              fontSize: 17, fontWeight: FontWeight.w700, color: TeamlyColors.ink900),
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                            color: TeamlyColors.ink900,
+                          ),
                         ),
-                        if (widget.profile?.username.isNotEmpty ?? false)
-                          Text('@${widget.profile!.username}',
-                              style: const TextStyle(fontSize: 13, color: TeamlyColors.greenText)),
                       ],
                     ),
                   ),
-                ],
-              ),
-              if (widget.profile?.bio.isNotEmpty ?? false)
-                Padding(
-                  padding: const EdgeInsets.only(top: TeamlySpace.s3),
-                  child: Text(
-                    widget.profile!.bio,
-                    style: const TextStyle(fontSize: 13.5, height: 1.45, color: TeamlyColors.ink700),
-                  ),
                 ),
-              const SizedBox(height: TeamlySpace.s3),
-              Row(
-                children: <Widget>[
-                  Text('${_posts?.length ?? 0} posts',
-                      style: const TextStyle(fontSize: 12.5, color: TeamlyColors.ink500)),
-                  const SizedBox(width: TeamlySpace.s4),
-                  Text('${widget.savedIds.length} saved',
-                      style: const TextStyle(fontSize: 12.5, color: TeamlyColors.ink500)),
-                ],
-              ),
             ],
           ),
+        ],
+        const SizedBox(height: TeamlySpace.s4),
+        // Action row — Edit profile / Share profile / overflow.
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: _ActionTile(label: 'Edit profile', onTap: widget.onEdit),
+            ),
+            const SizedBox(width: TeamlySpace.s2),
+            Expanded(
+              child: _ActionTile(label: 'Share profile', onTap: _shareProfile),
+            ),
+            const SizedBox(width: TeamlySpace.s2),
+            _ActionTile.icon(
+              icon: Icons.keyboard_arrow_down_rounded,
+              onTap: () => _moreSheet(context),
+            ),
+          ],
         ),
-        const SizedBox(height: TeamlySpace.s3),
+        const SizedBox(height: TeamlySpace.s4),
+        // ── My posts | Saved ───────────────────────────────────────────────
         Row(
           children: <Widget>[
             for (final t in const <String>['posts', 'saved'])
@@ -356,6 +511,111 @@ class _DiscoverProfileViewState extends State<DiscoverProfileView> {
               ),
             ),
       ],
+    );
+  }
+
+  void _moreSheet(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: context.palette.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const SizedBox(height: TeamlySpace.s2),
+            ListTile(
+              leading: const Icon(Icons.copy_rounded, size: 20, color: TeamlyColors.ink700),
+              title: const Text('Copy profile link', style: TextStyle(fontSize: 14.5)),
+              onTap: () {
+                Navigator.pop(context);
+                _shareProfile();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_outlined, size: 20, color: TeamlyColors.ink700),
+              title: const Text('Edit profile', style: TextStyle(fontSize: 14.5)),
+              onTap: () {
+                Navigator.pop(context);
+                widget.onEdit();
+              },
+            ),
+            const SizedBox(height: TeamlySpace.s2),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _compact(int n) {
+    if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(1)}M';
+    if (n >= 1000) return '${(n / 1000).toStringAsFixed(1)}K';
+    return '$n';
+  }
+}
+
+/// One number+label column in the stats row.
+class _Stat extends StatelessWidget {
+  const _Stat({required this.count, required this.label});
+
+  final String count;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Text(
+          count,
+          style: const TextStyle(
+            fontSize: 17,
+            fontWeight: FontWeight.w800,
+            color: TeamlyColors.ink900,
+            fontFeatures: <FontFeature>[FontFeature.tabularFigures()],
+          ),
+        ),
+        const SizedBox(height: 1),
+        Text(label, style: const TextStyle(fontSize: 12.5, color: TeamlyColors.ink500)),
+      ],
+    );
+  }
+}
+
+/// The IG-style bordered action pill (Edit profile / Share profile).
+class _ActionTile extends StatelessWidget {
+  const _ActionTile({required this.label, this.onTap}) : icon = null;
+
+  const _ActionTile.icon({required this.icon, this.onTap}) : label = null;
+
+  final String? label;
+  final IconData? icon;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        height: 40,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: palette.chip,
+          borderRadius: BorderRadius.circular(TeamlyRadius.sm),
+          border: Border.all(color: palette.border),
+        ),
+        child: label != null
+            ? Text(
+                label!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: TeamlyColors.ink900),
+              )
+            : Icon(icon, size: 20, color: TeamlyColors.ink700),
+      ),
     );
   }
 }

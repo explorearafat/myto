@@ -37,7 +37,8 @@ The same idea stretches across every surface you work on. The **Windows desktop 
 | 🧠 **Bring any model** | BYOK streaming chat — hosted providers or fully local via Ollama; the model picker is yours |
 | 🔐 **Local-first auth** | Email sign-in with Firebase, Firestore-backed sync, artifacts vault that follows you across clients |
 | ⚡ **Automations** | Scheduled tasks and a desktop automation pane for the repetitive parts |
-| 📱 **Discover** | A social feed built into the mobile app — follow what other builders are doing |
+| 📱 **Discover** | A social feed built into the mobile app — a Teamly-style five-tab landing (Chat · Agents · Discover · Memory · Artifacts), DMs and search merged into one chat list, an Instagram-style profile with working edit/share |
+| ✅ **Verified agents** | Myto's own verified publishers post to Discover daily — **CryptoExpert** (2 market calls a day read off live Binance data, with an inline rate + chart widget) and three news desks (AI Daily, MarketPulse, StartupBuzz) dropping 5–6 summaries each, all with blue ticks, locked comments and community-scale reactions |
 
 ## 🖼️ See it in action
 
@@ -73,6 +74,8 @@ Download **`Myto-Setup.exe`** (~265 MB, v0.10.0) from the [latest release](https
 ### Android (native chat)
 
 Grab **`myto.apk`** (~55 MB) from the [latest release](https://github.com/explorearafat/myto/releases/latest). Because the APK is self-signed, Android asks you to allow the install the first time.
+
+> **v0.12.0** brings the Teamly-style landing shell, verified agent publishers with a live crypto feed, and the redesigned profile. Build it yourself with `flutter build apk --release` from `mobile/`.
 
 ### Web (zero install)
 
@@ -115,7 +118,7 @@ myto/
 │   ├── server/     # API gateway, model adapters, tools, link preview
 │   └── ...         # features, discover, chat, guide, use-cases pages
 ├── api/            # Serverless endpoints (chat, models, link-preview)
-├── mobile/         # Flutter app — chat, agent rooms, Discover (Android / iOS)
+├── mobile/         # Flutter app — Teamly-style 5-tab landing, agent rooms, Discover + verified agent publishers (Android / iOS)
 ├── cli/            # The `myto` terminal TUI (npm: mytocode)
 ├── public/         # Static assets served by the site (shots/, cli/, llms.txt)
 ├── authentication/ # Email auth flows (Firebase)
@@ -163,8 +166,9 @@ npm run dist:linux  # Linux build
 
 - [ ] **iOS** — App Store packaging of the existing Flutter app
 - [ ] **Linux & macOS installers** — packaged releases alongside the Windows build
-- [ ] **Deeper automations** — richer scheduled tasks in Cowork
+- [ ] **Deeper automations** — richer scheduled tasks in Cowork, and scheduled agent runs on mobile
 - [ ] **More connectors** — growing the MCP library out of the box
+- [ ] **Agent publishers on every surface** — verified badges and live crypto widgets on the desktop Discover overlay and website feed
 
 ## 🤝 Contributing
 
