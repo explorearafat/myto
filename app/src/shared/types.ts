@@ -1804,6 +1804,8 @@ export interface TerminalApi {
 /** The full `window.myto` API surface exposed by the preload script. */
 export interface MytoApi {
   window: WindowApi
+  /** Kill every in-flight agent stream and background dev server (new-task teardown). */
+  cancelAll: () => Promise<void>
   /** Host platform string (e.g. 'win32', 'darwin', 'linux'). */
   platform: Platform
   /**

@@ -161,14 +161,31 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   boot: async () => {
-    // Opening the app always lands on a fresh, unsaved chat — never the last
-    // conversation restored — with the full history (global, not folder-scoped)
-    // loaded in the rail. Clear any stale project filter so "All chats" is shown.
+    // Reopen where the user left off: the most recent session WITH messages.
+    // A truly fresh install (or an empty history) still lands on the new-draft
+    // hero. Clear any stale project filter so "All chats" is shown.
     set({ activeProjectId: null })
+    try {
+      const last = await window.myto.sessions.mostRecent()
+      if (last) {
+        await get().open(last)
+        return
+      }
+    } catch {
+      // Fall through to the fresh draft.
+    }
     await get().newDraft()
   },
 
   newDraft: async () => {
+    // Starting fresh ENDS any run still going: every in-flight agent stream and
+    // background dev server from the old task is torn down in the main process,
+    // so the new task never inherits a live shell (the "shell stays open" bug).
+    try {
+      void window.myto.cancelAll?.()
+    } catch {
+      // The main process may be mid-quit — ignore.
+    }
     // A fresh landing page: clear the chat to an empty draft (sessionId = null →
     // the composer shows the EmptyState hero). No row is written yet — the first
     // send lazily calls create() to persist it, so the sidebar never fills with

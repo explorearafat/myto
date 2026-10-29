@@ -95,6 +95,7 @@ function installShim(): void {
   }
 
   const api: MytoApi = {
+  cancelAll: async () => undefined,
     window: {
       minimize: () => {},
       toggleMaximize: () => {},

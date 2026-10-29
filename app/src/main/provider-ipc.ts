@@ -103,6 +103,12 @@ import { insertFileSnapshot } from './db/snapshots'
 import { looksLikeBigTask } from './cowork-plan-core'
 import { relative } from 'node:path'
 import { approvalDetail, requiresApproval } from './tools/approvals'
+import {
+  commandAllowedBySettings,
+  launchConfigsPrompt,
+  readCodebaseMap
+} from './tools/myto-config'
+import { stopAllDevServers } from './tools/devServer'
 import { createToolCallParser, toolCallBlock, toolResultBlock, type ToolCall } from './tools/toolParser'
 import { executeArgv, formatRunResult, resolveShell } from './tools/runCode'
 import { resolveInWorkspace } from './tools/fs'
@@ -208,7 +214,7 @@ const MAX_TOOL_TURNS = 6
  * ends the loop, the closing turn still withholds tools so the reply never ends
  * mid-loop, and the user can always Stop sooner.
  */
-const MAX_TOOL_TURNS_COWORK = 120
+const MAX_TOOL_TURNS_COWORK = 240
 
 /**
  * Wall-clock budget for one agentic reply, independent of the turn cap. A slow
@@ -217,7 +223,7 @@ const MAX_TOOL_TURNS_COWORK = 120
  * When the budget is spent the loop exits through the same closing turn as the
  * turn cap: tools withheld, answer-with-what-you-have.
  */
-const COWORK_TIME_BUDGET_MS = 45 * 60_000
+const COWORK_TIME_BUDGET_MS = 120 * 60_000
 
 /**
  * When the running message history (system prompts + the growing tool round-trips)
@@ -232,7 +238,7 @@ const COWORK_TIME_BUDGET_MS = 45 * 60_000
  * slow generation. The remote ceiling makes the working memory last a whole task.
  */
 const COMPACT_OVER_CHARS_LOCAL = 90_000
-const COMPACT_OVER_CHARS_REMOTE = 360_000
+const COMPACT_OVER_CHARS_REMOTE = 1_500_000
 
 /**
  * How many of the most recent messages to keep verbatim when compacting. The last
@@ -241,7 +247,7 @@ const COMPACT_OVER_CHARS_REMOTE = 360_000
  * six full round-trips — enough working set that the model rarely needs to re-read
  * what it just saw.
  */
-const COMPACT_KEEP_RECENT = 12
+const COMPACT_KEEP_RECENT = 24
 
 /**
  * Stall guard: if the model issues this many IDENTICAL consecutive tool calls (same
@@ -274,7 +280,7 @@ const VERIFY_TIMEOUT_MS = 180_000
  * truncates a few times keeps going, while a file that truncates forever can't spin
  * endlessly — after the cap the run surfaces the honest notice and stops.
  */
-const MAX_TRUNCATION_CONTINUES = 6
+const MAX_TRUNCATION_CONTINUES = 10
 
 /**
  * Most tool calls the loop will execute from a SINGLE text-protocol generation (RC-7).
@@ -324,13 +330,13 @@ function thinkText(input: unknown): string {
  * the database untouched. ~200k tokens is comfortably inside a modern large-context model
  * while leaving generous room for the reply.
  */
-const SESSION_COMPACT_OVER_TOKENS = 200_000
+const SESSION_COMPACT_OVER_TOKENS = 400_000
 
 /** The session-compaction ceiling for local Ollama models, whose windows are often 8–32k. */
 const SESSION_COMPACT_OVER_TOKENS_LOCAL = 24_000
 
 /** Most recent conversation turns kept verbatim when a long session is compacted. */
-const SESSION_KEEP_RECENT = 10
+const SESSION_KEEP_RECENT = 16
 
 /** Tracks in-flight streams so the renderer can cancel them by id. */
 const activeStreams = new Map<string, AbortController>()
@@ -735,6 +741,21 @@ export function registerProviderIpc(): void {
           ensureMytoDir(workspaceDir)
           coworkMemory = readJournal(workspaceDir, recallQuery)
         }
+        // Codebase map (.myto/codebase-map.md): the persisted output of the
+        // map_codebase tool. When present, the big repo has ALREADY been read —
+        // inject it so every turn starts from that knowledge instead of
+        // re-exploring (the "read once, remember" guarantee).
+        let codebaseMap = ''
+        if (agentic && workspaceDir) {
+          try {
+            codebaseMap = readCodebaseMap(workspaceDir)
+          } catch {
+            // Best-effort.
+          }
+        }
+        // .myto/launch.json run configurations: the declared way to run this
+        // project, advertised so the agent starts the app via run_launch.
+        const launchPrompt = agentic && workspaceDir ? launchConfigsPrompt(workspaceDir) : ''
         // Runtime awareness (Track 1): hand the agent the interpreters/toolchains that
         // are actually installed and the EXACT command to invoke each, up front, so a
         // weaker model scripts deliverables with a real command instead of guessing
@@ -1484,6 +1505,19 @@ export function registerProviderIpc(): void {
                 }
               ]
             : []),
+          // Inject the codebase map so a big repo is read once and remembered.
+          ...(codebaseMap
+            ? [
+                {
+                  role: 'system' as const,
+                  content:
+                    'CODEBASE MAP — this project was already mapped (by map_codebase). Treat this as your knowledge of the repo; read only the specific files you are changing, and do NOT re-explore the project from scratch:\n\n' +
+                    codebaseMap
+                }
+              ]
+            : []),
+          // Advertise the declared run configurations.
+          ...(launchPrompt ? [{ role: 'system' as const, content: launchPrompt }] : []),
           // Attached files (Cowork): the user's uploads for THIS turn, already copied
           // into the working folder. Tell the agent exactly where they are so it reads
           // them directly instead of reporting it "couldn't find" the file.
@@ -2356,8 +2390,21 @@ export function registerProviderIpc(): void {
           // click/type act on real pages — and on the user's own logins under system-chrome —
           // so those two are always confirmed before they run. Read-only browser tools have
           // no sideEffect and never prompt; "allow always" still skips repeats within the run.
+          // .myto/settings.local.json allow-list: a command the user pre-approved
+          // in the project's local settings never prompts (exec tools only).
+          const settingsAllowed =
+            sideEffect === 'exec' &&
+            agentic &&
+            !!workspaceDir &&
+            commandAllowedBySettings(
+              workspaceDir,
+              typeof (call.input as Record<string, unknown> | null)?.command === 'string'
+                ? ((call.input as Record<string, unknown>).command as string)
+                : toolName
+            )
           const needsApproval =
             !planJustApproved &&
+            !settingsAllowed &&
             !(sideEffect && grantedAlways.has(sideEffect)) &&
             (agentic
               ? requiresApproval(permissionMode, sideEffect)
@@ -2608,6 +2655,14 @@ export function registerProviderIpc(): void {
     }
   )
 
+  // Kill EVERYTHING still running from past work: all in-flight agent streams
+  // and every background dev server. Called when the user starts a fresh task,
+  // so an old run's shell never lingers under the new one.
+  ipcMain.handle(IpcChannel.ChatCancelAll, (): void => {
+    cancelAllStreams()
+    stopAllDevServers()
+  })
+
   ipcMain.on(IpcChannel.ProvidersStreamCancel, (_event, streamId: string) => {
     activeStreams.get(streamId)?.abort()
     activeStreams.delete(streamId)
@@ -2710,7 +2765,15 @@ async function compactConversation(
     role: 'user',
     content: `Summary of earlier conversation (older messages were compacted to fit the context window):\n${note}`
   }
-  return [summaryTurn, ...recent]
+  // The task itself never compacts away: when the very first turn is the user's
+  // original instruction, keep it verbatim ahead of the summary so the goal,
+  // constraints and naming the model was given stay exact through every fold.
+  const task = older.find((m) => m.role === 'user' && m.content.trim())
+  const preserved: ChatMessage[] =
+    task && !recent.some((m) => m.content === task.content)
+      ? [{ role: 'user', content: `[ORIGINAL TASK — always in context]\n${task.content}` }]
+      : []
+  return [summaryTurn, ...preserved, ...recent]
 }
 
 /**

@@ -11,6 +11,8 @@ import { updatePlanTool } from './plan'
 import { presentPlanTool } from './present-plan'
 import { searchTools } from './search'
 import { runCommandTool } from './command'
+import { runLaunchTool } from './launch'
+import { mapCodebaseTool } from './codebase-map'
 import { runDevServerTool } from './devServer'
 import { detectRuntimesTool } from './runtimes'
 import { verifyFileTool } from './verify'
@@ -273,6 +275,8 @@ const ALL_TOOLS: readonly ToolDef[] = [
   runCodeTool,
   runCommandTool,
   runDevServerTool,
+  runLaunchTool,
+  mapCodebaseTool,
   detectRuntimesTool,
   ...fsTools,
   verifyFileTool,

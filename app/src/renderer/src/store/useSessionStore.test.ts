@@ -52,7 +52,7 @@ beforeEach(() => {
 
 describe('deriveTitle (instant heuristic)', () => {
   it('uses the first non-empty line, whitespace collapsed', () => {
-    expect(deriveTitle('  build   a  todo app  ')).toBe('build a todo app')
+    expect(deriveTitle('  build   a  todo app  ')).toBe('Build A Todo App')
     expect(deriveTitle('\n\n  Fix the login bug\nmore detail')).toBe('Fix the login bug')
   })
 
@@ -66,7 +66,7 @@ describe('deriveTitle (instant heuristic)', () => {
     const out = deriveTitle(long)
     expect(out.length).toBeLessThanOrEqual(49) // 48 + the ellipsis
     expect(out.endsWith('…')).toBe(true)
-    expect(out.startsWith('please build me')).toBe(true)
+    expect(out.startsWith('Please Build Me')).toBe(true)
   })
 })
 
@@ -79,7 +79,7 @@ describe('autoName (fixed title from the first message)', () => {
 
     const rename = vi.mocked(window.myto.sessions.rename)
     expect(rename).toHaveBeenCalledTimes(1)
-    expect(rename).toHaveBeenCalledWith('sess-1', 'build a todo app in react')
+    expect(rename).toHaveBeenCalledWith('sess-1', 'Build a Todo App in React')
     // No AI re-title pass — the name is set once from the first message and left fixed.
     expect(vi.mocked(window.myto.providers.getCompletion)).not.toHaveBeenCalled()
   })
@@ -90,7 +90,7 @@ describe('autoName (fixed title from the first message)', () => {
 
     await useSessionStore.getState().autoName('Fix the login bug\nmore detail here')
 
-    expect(vi.mocked(window.myto.sessions.rename)).toHaveBeenCalledWith('sess-1', 'Fix the login bug')
+    expect(vi.mocked(window.myto.sessions.rename)).toHaveBeenCalledWith('sess-1', 'Fix The Login Bug')
   })
 
   it('never touches a session that already carries a real title', async () => {
@@ -112,22 +112,39 @@ describe('autoName (fixed title from the first message)', () => {
   })
 })
 
-describe('boot (fresh landing page, never restores the last chat)', () => {
-  it('clears any stale project filter, shows an empty draft, and does NOT reopen mostRecent', async () => {
+describe('boot (reopens where you left off)', () => {
+  it('restores the most recent session that has messages', async () => {
     useSessionStore.setState({ activeProjectId: 'proj-old', activeSessionId: 'sess-old' })
     window.myto.sessions.mostRecent = vi.fn().mockResolvedValue('sess-recent')
+    window.myto.sessions.list = vi.fn().mockResolvedValue([])
+    window.myto.sessions.load = vi.fn().mockResolvedValue({
+      session: { id: 'sess-recent', title: 'Recent', projectRoot: '', projectId: null, createdAt: 0, updatedAt: 0, messageCount: 2, mode: 'chat' },
+      messages: [
+        { id: 'm1', role: 'user', content: 'hello' },
+        { id: 'm2', role: 'assistant', content: 'hi' }
+      ],
+      attachments: []
+    })
+
+    await useSessionStore.getState().boot()
+
+    // The project scope is reset to "All chats" and the last real conversation
+    // is reopened (the app resumes where the user left off).
+    expect(useSessionStore.getState().activeProjectId).toBeNull()
+    expect(useSessionStore.getState().activeSessionId).toBe('sess-recent')
+    expect(window.myto.sessions.mostRecent).toHaveBeenCalled()
+    expect(window.myto.sessions.load).toHaveBeenCalledWith('sess-recent')
+  })
+
+  it('falls back to a fresh draft when history is empty', async () => {
+    useSessionStore.setState({ activeProjectId: null, activeSessionId: null })
+    window.myto.sessions.mostRecent = vi.fn().mockResolvedValue(null)
     window.myto.sessions.list = vi.fn().mockResolvedValue([])
 
     await useSessionStore.getState().boot()
 
-    // A fresh landing page: the project scope is reset to "All chats"…
-    expect(useSessionStore.getState().activeProjectId).toBeNull()
-    // …no persisted session is active, and the chat is an unsaved draft
-    // (sessionId null → the composer renders the EmptyState hero).
     expect(useSessionStore.getState().activeSessionId).toBeNull()
     expect(useChatStore.getState().sessionId).toBeNull()
-    // The last conversation is deliberately NOT restored (reopen = clean slate).
-    expect(window.myto.sessions.mostRecent).not.toHaveBeenCalled()
   })
 })
 

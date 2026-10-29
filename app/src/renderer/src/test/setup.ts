@@ -9,6 +9,7 @@ import type { MytoApi } from '@shared/types'
  * value) works without a real main process.
  */
 const mytoMock: MytoApi = {
+  cancelAll: vi.fn().mockResolvedValue(undefined),
   window: {
     minimize: vi.fn(),
     toggleMaximize: vi.fn(),

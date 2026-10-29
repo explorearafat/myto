@@ -174,7 +174,18 @@ async function defaultDevCommand(cwd: string): Promise<string | null> {
 }
 
 /** Spawn the command, stream it to the Terminal, preview its URL, resolve to the model. */
-function startDevServer(command: string, cwd: string, ctx: ToolContext): Promise<string> {
+export function stopAllDevServers(): void {
+  for (const [key, s] of servers) {
+    try {
+      s.child.kill()
+    } catch {
+      // Already gone.
+    }
+    servers.delete(key)
+  }
+}
+
+export function startDevServer(command: string, cwd: string, ctx: ToolContext): Promise<string> {
   installQuitHook()
   // A restart in the same folder replaces the previous server.
   const prev = servers.get(cwd)

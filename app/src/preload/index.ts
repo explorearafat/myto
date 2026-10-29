@@ -6,6 +6,8 @@ import type { CompletionChunk, MytoApi } from '../shared/types'
 let streamCounter = 0
 
 const api: MytoApi = {
+  // Kill every in-flight agent stream + background dev server (new-task teardown).
+  cancelAll: () => ipcRenderer.invoke(IpcChannel.ChatCancelAll),
   window: {
     minimize: () => ipcRenderer.send(IpcChannel.WindowMinimize),
     toggleMaximize: () => ipcRenderer.send(IpcChannel.WindowToggleMaximize),

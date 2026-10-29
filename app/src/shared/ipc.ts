@@ -19,6 +19,7 @@ export const IpcChannel = {
   ProvidersStreamStart: 'providers:stream-start',
   /** Renderer → main: cancel an in-flight stream by streamId. */
   ProvidersStreamCancel: 'providers:stream-cancel',
+  ChatCancelAll: 'chat:cancel-all',
   /** Main → renderer: a chunk for an in-flight stream. */
   ProvidersStreamChunk: 'providers:stream-chunk',
 
