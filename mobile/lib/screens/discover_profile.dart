@@ -284,26 +284,41 @@ class _DiscoverProfileViewState extends State<DiscoverProfileView> {
   @override
   void initState() {
     super.initState();
-    SocialService.streamFeed(authorUid: widget.uid, limitCount: 50).listen((list) {
-      if (mounted) setState(() => _posts = list);
-    });
+    SocialService.streamFeed(authorUid: widget.uid, limitCount: 50).listen(
+      (list) {
+        if (mounted) setState(() => _posts = list);
+      },
+      // A failed subscription (offline, index hiccup) shows the empty state
+      // instead of a "Loading…" that never resolves.
+      onError: (_) {
+        if (mounted) setState(() => _posts = const <FeedPost>[]);
+      },
+    );
     _loadSaved();
     _loadStats();
   }
 
   Future<void> _loadSaved() async {
-    final posts = await SocialService.hydratePosts(widget.savedIds.toList());
-    if (mounted) setState(() => _saved = posts);
+    try {
+      final posts = await SocialService.hydratePosts(widget.savedIds.toList());
+      if (mounted) setState(() => _saved = posts);
+    } catch (_) {
+      if (mounted) setState(() => _saved = const <FeedPost>[]);
+    }
   }
 
   Future<void> _loadStats() async {
-    final followers = await SocialService.followerCount(widget.uid);
-    final following = await SocialService.followingCount(widget.uid);
-    if (!mounted) return;
-    setState(() {
-      _followers = followers;
-      _following = following;
-    });
+    try {
+      final followers = await SocialService.followerCount(widget.uid);
+      final following = await SocialService.followingCount(widget.uid);
+      if (!mounted) return;
+      setState(() {
+        _followers = followers;
+        _following = following;
+      });
+    } catch (_) {
+      // Stats stay at 0 — the header still renders.
+    }
   }
 
   /// https links found in the bio — rendered as the IG-style link chips.

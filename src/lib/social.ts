@@ -207,19 +207,35 @@ export async function deletePost(postId: string, uid: string): Promise<void> {
   // (saved lists are private) — saved cards hydrate from posts and render "deleted".
 }
 
-/** Live-feed subscription. `topic` filters by tag; `authorUid` pins one author. */
+/** Live-feed subscription. `topic` filters by tag; `authorUid` pins one author.
+ *
+ * A where-filter + orderBy on different fields needs a Firestore composite
+ * index; without one the query is rejected and the profile/feed silently
+ * never loads. Filtered queries therefore run equality-only (auto-indexed)
+ * and sort client-side; the unfiltered feed keeps the server-side orderBy. */
 export function streamFeed(
   opts: { topic?: string; authorUid?: string; pageSize?: number },
   onData: (posts: FeedPost[]) => void,
   onError?: (e: FirestoreError) => void
 ): Unsubscribe {
-  const clauses: QueryConstraint[] = [orderBy('createdAt', 'desc'), limit(opts.pageSize ?? 50)];
-  if (opts.topic) clauses.unshift(where('topics', 'array-contains', opts.topic));
-  if (opts.authorUid) clauses.unshift(where('uid', '==', opts.authorUid));
+  const filtered = Boolean(opts.topic || opts.authorUid);
+  const clauses: QueryConstraint[] = filtered
+    ? [limit(200)]
+    : [orderBy('createdAt', 'desc'), limit(opts.pageSize ?? 50)];
+  if (opts.topic) clauses.push(where('topics', 'array-contains', opts.topic));
+  if (opts.authorUid) clauses.push(where('uid', '==', opts.authorUid));
   const q = query(collection(db, 'posts'), ...clauses);
   return onSnapshot(
     q,
-    (snap) => onData(snap.docs.map((d) => toPost(d.id, d.data()))),
+    (snap) => {
+      const posts = snap.docs.map((d) => toPost(d.id, d.data()));
+      if (!filtered) {
+        onData(posts);
+        return;
+      }
+      posts.sort((a, b) => b.createdAtMs - a.createdAtMs);
+      onData(posts.slice(0, opts.pageSize ?? 50));
+    },
     (e) => onError?.(e)
   );
 }
@@ -374,12 +390,14 @@ export async function getFollowingIds(uid: string): Promise<string[]> {
 
 /** Feed posts by a fixed set of authors (the Following tab), merged newest-first. */
 export async function fetchPostsByAuthors(authorUids: string[]): Promise<FeedPost[]> {
-  const ids = authorUids.slice(0, 10); // Firestore `in` cap — the tab is "recent follows".
+  const ids = authorUids.slice(0, 10); // Firestore `in` cap.
   if (ids.length === 0) return [];
-  const snap = await getDocs(
-    query(collection(db, 'posts'), where('uid', 'in', ids), orderBy('createdAt', 'desc'), limit(50))
-  );
-  return snap.docs.map((d) => toPost(d.id, d.data()));
+  // whereIn + orderBy needs a composite index — equality-only + client sort.
+  const snap = await getDocs(query(collection(db, 'posts'), where('uid', 'in', ids), limit(200)));
+  return snap.docs
+    .map((d) => toPost(d.id, d.data()))
+    .sort((a, b) => b.createdAtMs - a.createdAtMs)
+    .slice(0, 50);
 }
 
 
@@ -449,8 +467,12 @@ export async function isHandleFree(username: string): Promise<boolean> {
 
 /**
  * Create (or update) the caller's Discover profile and claim their handle.
- * The handle registry doc is create-once in the rules, so a taken handle fails
- * here rather than silently reassigning. Returns false when the handle is taken.
+ * The handle registry doc is create-once in the rules — so on EDIT it must
+ * NOT be re-written (the rules reject the update and the whole batch fails,
+ * which read as "profile can't be saved"). Claim it only when new; when it
+ * already exists and is ours, skip straight to the profile write. createdAt
+ * is likewise only sent on first create so the profile's age never resets.
+ * Returns false when the handle is taken.
  */
 export async function saveProfile(
   uid: string,
@@ -461,45 +483,67 @@ export async function saveProfile(
   const handleRef = doc(db, 'usernames', username);
   const existing = await getDoc(handleRef);
   if (existing.exists() && existing.data().uid !== uid) return false;
+  const profileRef = doc(db, 'profiles', uid);
+  const existingProfile = await getDoc(profileRef);
   const batch = writeBatch(db);
-  batch.set(handleRef, { uid });
-  batch.set(doc(db, 'profiles', uid), {
+  if (!existing.exists()) {
+    batch.set(handleRef, { uid });
+  }
+  const data: Record<string, unknown> = {
     uid,
     name: input.name.trim().slice(0, 80) || username,
     username,
     bio: input.bio.trim().slice(0, 280),
     photo: input.photo.slice(0, 500),
-    createdAt: serverTimestamp(),
-  }, { merge: true });
+  };
+  if (!existingProfile.exists()) {
+    data.createdAt = serverTimestamp();
+  }
+  batch.set(profileRef, data, { merge: true });
   await batch.commit();
   return true;
 }
 
-/** Viral feed: the most-liked posts (likes are the engagement proxy). */
+/** Viral feed: the most-liked posts (likes are the engagement proxy).
+ * Two orderBys (or a topic filter + orderBy) need composite indexes — order
+ * by likeCount only server-side (or not at all with a topic filter) and
+ * tie-break client-side. */
 export function streamViralFeed(
   opts: { topic?: string; pageSize?: number },
   onData: (posts: FeedPost[]) => void,
   onError?: (e: unknown) => void
 ): Unsubscribe {
-  const clauses: QueryConstraint[] = [orderBy('likeCount', 'desc'), orderBy('createdAt', 'desc'), limit(opts.pageSize ?? 50)];
-  if (opts.topic) clauses.unshift(where('topics', 'array-contains', opts.topic));
+  const filtered = Boolean(opts.topic);
+  const clauses: QueryConstraint[] = filtered
+    ? [limit(200)]
+    : [orderBy('likeCount', 'desc'), limit(opts.pageSize ?? 50)];
+  if (opts.topic) clauses.push(where('topics', 'array-contains', opts.topic));
   const q = query(collection(db, 'posts'), ...clauses);
+  const rank = (a: FeedPost, b: FeedPost) =>
+    b.likeCount - a.likeCount || b.createdAtMs - a.createdAtMs;
   return onSnapshot(
     q,
-    (snap) => onData(snap.docs.map((d) => toPost(d.id, d.data()))),
+    (snap) => {
+      const posts = snap.docs.map((d) => toPost(d.id, d.data())).sort(rank);
+      onData(posts.slice(0, opts.pageSize ?? 50));
+    },
     (e) => onError?.(e)
   );
 }
 
-/** Public profile page data: the profile + that user's posts. */
+/** Public profile page data: the profile + that user's posts. Equality-only
+ * query (no composite index) with a client-side sort. */
 export async function loadProfileWithPosts(
   uid: string
 ): Promise<{ profile: DiscoverProfile | null; posts: FeedPost[] }> {
   const [profile, snap] = await Promise.all([
     getProfile(uid),
-    getDocs(query(collection(db, 'posts'), where('uid', '==', uid), orderBy('createdAt', 'desc'), limit(50))),
+    getDocs(query(collection(db, 'posts'), where('uid', '==', uid), limit(50))),
   ]);
-  return { profile, posts: snap.docs.map((d) => toPost(d.id, d.data())) };
+  const posts = snap.docs
+    .map((d) => toPost(d.id, d.data()))
+    .sort((a, b) => b.createdAtMs - a.createdAtMs);
+  return { profile, posts };
 }
 
 /** Resolve a handle to a uid (for /discover?u=<handle> profile links). */

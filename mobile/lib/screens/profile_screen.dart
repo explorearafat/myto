@@ -42,15 +42,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _load() async {
-    if (_uid.isEmpty) return;
-    final saved = await SocialService.listSavedIds(_uid);
-    final p = await SocialService().getProfile(_uid);
-    if (!mounted) return;
-    setState(() {
-      _savedIds.addAll(saved);
-      _profile = p;
-      _loaded = true;
-    });
+    // Resilient on purpose: a failed lookup (offline, rules hiccup, expired
+    // session) must never leave the screen on its loading spinner — which
+    // read as a "blank profile page".
+    try {
+      if (_uid.isEmpty) {
+        if (mounted) setState(() => _loaded = true);
+        return;
+      }
+      final saved = await SocialService.listSavedIds(_uid);
+      final p = await SocialService().getProfile(_uid);
+      if (!mounted) return;
+      setState(() {
+        _savedIds.addAll(saved);
+        _profile = p;
+        _loaded = true;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _loaded = true);
+    }
   }
 
   Future<void> _toast(String message) async {
@@ -118,7 +129,33 @@ class _ProfileScreenState extends State<ProfileScreen> {
               child: ListView(
                 padding: const EdgeInsets.all(TeamlySpace.gutter),
                 children: <Widget>[
-                  if (_profile == null)
+                  if (_uid.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 60),
+                      child: Column(
+                        children: <Widget>[
+                          const Icon(Icons.account_circle_outlined, size: 44, color: TeamlyColors.ink300),
+                          const SizedBox(height: TeamlySpace.s3),
+                          const Text(
+                            'You are signed out',
+                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: TeamlyColors.ink900),
+                          ),
+                          const SizedBox(height: 6),
+                          const Text(
+                            'Sign in again to see and edit your profile.',
+                            style: TextStyle(fontSize: 13, color: TeamlyColors.ink500),
+                          ),
+                          const SizedBox(height: TeamlySpace.s3),
+                          OutlinedButton(
+                            onPressed: () async {
+                              await context.read<AuthService>().signOut();
+                            },
+                            child: const Text('Go to sign in'),
+                          ),
+                        ],
+                      ),
+                    )
+                  else if (_profile == null)
                     DiscoverProfileSetup(
                       uid: _uid,
                       defaultName: name,

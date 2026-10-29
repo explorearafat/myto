@@ -215,17 +215,29 @@ class SocialService {
   }
 
   /// Live feed subscription, newest first, optionally filtered by topic or author.
+  ///
+  /// A where-filter + orderBy on different fields needs a Firestore composite
+  /// index; without one the query is rejected and the profile/feed silently
+  /// never loads. Filtered queries therefore run equality-only (auto-indexed)
+  /// and sort client-side; the unfiltered feed keeps the server-side orderBy.
   static Stream<List<FeedPost>> streamFeed({String? topic, String? authorUid, int limitCount = 50}) {
-    Query<Map<String, dynamic>> q = _db.collection('posts').orderBy('createdAt', descending: true).limit(limitCount);
+    final filtered = (topic != null && topic.isNotEmpty) || (authorUid != null && authorUid.isNotEmpty);
+    Query<Map<String, dynamic>> q = _db.collection('posts');
+    q = filtered
+        ? q.limit(200) // no server orderBy — arbitrary slice of a small feed
+        : q.orderBy('createdAt', descending: true).limit(limitCount);
     if (topic != null && topic.isNotEmpty) {
       q = q.where('topics', arrayContains: topic);
     }
     if (authorUid != null && authorUid.isNotEmpty) {
       q = q.where('uid', isEqualTo: authorUid);
     }
-    return q.snapshots().map(
-          (s) => s.docs.map((d) => FeedPost.fromDoc(d.id, d.data())).toList(),
-        );
+    return q.snapshots().map((s) {
+      final posts = s.docs.map((d) => FeedPost.fromDoc(d.id, d.data())).toList();
+      if (!filtered) return posts;
+      posts.sort((a, b) => b.createdAtMs.compareTo(a.createdAtMs));
+      return posts.take(limitCount).toList();
+    });
   }
 
   /// One-shot posts by an author NAME (agent accounts have no uid of their
@@ -416,17 +428,19 @@ class SocialService {
     }
   }
 
-  /// Feed posts by a fixed set of authors, merged newest-first.
+  /// Feed posts by a fixed set of authors, merged newest-first. Equality-only
+  /// (whereIn) query — sorted client-side, no composite index needed.
   static Future<List<FeedPost>> fetchPostsByAuthors(List<String> authorUids) async {
     final ids = authorUids.take(10).toList(); // Firestore `whereIn` cap.
     if (ids.isEmpty) return <FeedPost>[];
     final snap = await _db
         .collection('posts')
         .where('uid', whereIn: ids)
-        .orderBy('createdAt', descending: true)
-        .limit(50)
+        .limit(200)
         .get();
-    return snap.docs.map((d) => FeedPost.fromDoc(d.id, d.data())).toList();
+    final posts = snap.docs.map((d) => FeedPost.fromDoc(d.id, d.data())).toList()
+      ..sort((a, b) => b.createdAtMs.compareTo(a.createdAtMs));
+    return posts.take(50).toList();
   }
 
   /// One-shot recent posts (the Search screen filters this client-side).
@@ -587,17 +601,22 @@ extension DiscoverProfiles on SocialService {
 
   /// Viral feed: the most-liked posts, newest first among ties.
   Stream<List<FeedPost>> streamViralFeed({String? topic, int limitCount = 50}) {
-    Query<Map<String, dynamic>> q = SocialService._db
-        .collection('posts')
-        .orderBy('likeCount', descending: true)
-        .orderBy('createdAt', descending: true)
-        .limit(limitCount);
-    if (topic != null && topic.isNotEmpty) {
-      q = q.where('topics', arrayContains: topic);
-    }
-    return q.snapshots().map(
-          (s) => s.docs.map((d) => FeedPost.fromDoc(d.id, d.data())).toList(),
-        );
+    // Two orderBys (or a topic filter + orderBy) need composite indexes; a
+    // single orderBy rides the auto index. So: order server-side by likeCount
+    // only — or not at all when a topic filter is active — and tie-break
+    // client-side.
+    final filtered = topic != null && topic.isNotEmpty;
+    Query<Map<String, dynamic>> q = SocialService._db.collection('posts');
+    q = filtered ? q.limit(200) : q.orderBy('likeCount', descending: true).limit(limitCount);
+    if (filtered) q = q.where('topics', arrayContains: topic);
+    return q.snapshots().map((s) {
+      final posts = s.docs.map((d) => FeedPost.fromDoc(d.id, d.data())).toList()
+        ..sort((a, b) {
+          final byLikes = b.likeCount.compareTo(a.likeCount);
+          return byLikes != 0 ? byLikes : b.createdAtMs.compareTo(a.createdAtMs);
+        });
+      return posts.take(limitCount).toList();
+    });
   }
 }
 
