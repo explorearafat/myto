@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/byok_config.dart';
 import '../services/auth_service.dart';
 import '../services/byok_service.dart';
 import '../services/conversation_store.dart';
@@ -26,6 +27,7 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  String _selectedModel = '';
   bool _likes = true;
   bool _comments = true;
   bool _shares = true;
@@ -43,6 +45,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
+      _selectedModel = prefs.getString('sylor.chat.model') ?? '';
       _likes = prefs.getBool('sylor.notify.like') ?? true;
       _comments = prefs.getBool('sylor.notify.comment') ?? true;
       _shares = prefs.getBool('sylor.notify.share') ?? true;
@@ -153,6 +156,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 // ── AI app ──────────────────────────────────────────────────
                 const TeamlyGroupHeader(label: 'AI APP'),
                 const SizedBox(height: TeamlySpace.s2),
+                _WorkingModelSection(
+                  selected: _selectedModel,
+                  onPicked: (id) async {
+                    final prefs = await SharedPreferences.getInstance();
+                    await prefs.setString('sylor.chat.model', id);
+                    if (!mounted) return;
+                    setState(() => _selectedModel = id);
+                  },
+                ),
+                const SizedBox(height: TeamlySpace.s2),
                 TeamlyCard(
                   padding: const EdgeInsets.all(TeamlySpace.s4),
                   child: Column(
@@ -254,6 +267,116 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 }
 
+/// The chat's working model: every model from the user's synced AI config,
+/// with the picked one checked. Agent and group chats stream from it.
+class _WorkingModelSection extends StatelessWidget {
+  const _WorkingModelSection({required this.selected, required this.onPicked});
+
+  final String selected;
+  final ValueChanged<String> onPicked;
+
+  @override
+  Widget build(BuildContext context) {
+    final config = context.watch<ByokService>().config ?? ByokConfig.empty;
+    final models = config.models;
+    return TeamlyCard(
+      padding: const EdgeInsets.all(TeamlySpace.s4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              const Icon(Icons.memory_rounded, size: 18, color: TeamlyColors.greenText),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Working model',
+                  style: TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w700,
+                    color: TeamlyColors.ink900,
+                  ),
+                ),
+              ),
+              Text(
+                _currentLabel(config),
+                style: const TextStyle(fontSize: 12, color: TeamlyColors.ink500),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          if (!config.isConfigured)
+            const Text(
+              'No AI keys yet — add them at mytocode.vercel.app/authentication and the '
+              'available models will show up here.',
+              style: TextStyle(fontSize: 12.5, height: 1.45, color: TeamlyColors.ink500),
+            )
+          else
+            for (final m in models)
+              InkWell(
+                onTap: () => onPicked(m.id),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 7),
+                  child: Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text(
+                              m.name.isEmpty ? m.id : m.name,
+                              style: const TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                                color: TeamlyColors.ink900,
+                              ),
+                            ),
+                            if (m.name.isNotEmpty && m.id != m.id)
+                              Text(
+                                m.id,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 11.5, color: TeamlyColors.ink300),
+                              ),
+                          ],
+                        ),
+                      ),
+                      Icon(
+                        _isSelected(config, m)
+                            ? Icons.check_circle_rounded
+                            : Icons.radio_button_unchecked_rounded,
+                        size: 20,
+                        color: _isSelected(config, m)
+                            ? TeamlyColors.green500
+                            : TeamlyColors.ink300,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+        ],
+      ),
+    );
+  }
+
+  bool _isSelected(ByokConfig config, ByokModel m) {
+    if (selected.isNotEmpty) return m.id == selected;
+    return config.models.isNotEmpty && config.models.first.id == m.id;
+  }
+
+  String _currentLabel(ByokConfig config) {
+    if (config.models.isEmpty) return 'no models';
+    if (selected.isNotEmpty) {
+      for (final m in config.models) {
+        if (m.id == selected) return m.name.isEmpty ? m.id : m.name;
+      }
+    }
+    return config.models.first.name.isEmpty
+        ? config.models.first.id
+        : config.models.first.name;
+  }
+}
+
 class _SwitchTile extends StatelessWidget {
   const _SwitchTile({
     required this.icon,
@@ -287,7 +410,7 @@ class _SwitchTile extends StatelessWidget {
               ),
             ),
           ),
-          Switch(value: value, onChanged: onChanged, activeColor: TeamlyColors.green500),
+          Switch(value: value, onChanged: onChanged, activeThumbColor: TeamlyColors.green500),
         ],
       ),
     );

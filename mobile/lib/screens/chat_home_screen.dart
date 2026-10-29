@@ -10,12 +10,10 @@ import '../services/conversation_store.dart';
 import '../services/dm_service.dart';
 import '../services/social_service.dart';
 import '../services/studio_store.dart';
-import '../services/team_chat_store.dart';
 import '../theme.dart';
 import '../widgets/agent_avatar.dart';
 import '../widgets/teamly/kit.dart';
 import 'dm_chat_screen.dart';
-import 'myto_chat_screen.dart';
 import 'profile_screen.dart';
 import 'team_chat_screen.dart';
 
@@ -23,9 +21,9 @@ import 'team_chat_screen.dart';
 /// ChatHomeScreen — the app's LANDING tab, rebuilt messenger-style:
 ///
 ///   user avatar + name (→ profile) · search pill
-///   flat 1-by-1 rows, no cards or borders — AGENTS (the ten-chat roster),
-///   GROUPS (the user's created agent groups), CHATS (saved conversations)
-///   and MESSAGES (community DMs).
+///   flat 1-by-1 rows, no cards or borders — AGENTS (the ten-chat roster,
+///   most recently messaged on top), GROUPS (the user's created agent
+///   groups) and MESSAGES (community DMs).
 ///
 /// Every row opens as a pushed route, so the bottom nav disappears inside a
 /// conversation.
@@ -103,36 +101,10 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
     );
   }
 
-  void _openSaved(Conversation c) {
-    final channel = c.channel;
-    if (channel == null) {
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(builder: (_) => MytoChatScreen(conversationId: c.id)),
-      );
-      return;
-    }
-    final id = TeamChatStore.idFromKey(channel);
-    final room = channel.startsWith('room:') ? _roomById(id) : null;
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => TeamChatScreen.resume(
-          channel,
-          resumeTitle: c.title,
-          room: room,
-          agent: room == null ? agentById(id) : null,
-        ),
-      ),
-    );
-  }
-
   void _openProfile() {
     Navigator.of(context).push(
       MaterialPageRoute<void>(builder: (_) => const ProfileScreen()),
     );
-  }
-
-  AgentTeam? _roomById(String id) {
-    return context.read<StudioStore>().teamById(id);
   }
 
   void _openDm(DmThread thread) {
@@ -178,14 +150,49 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
     final userName = (user?.displayName ?? '').trim();
 
     final q = _query.trim().toLowerCase();
-    final rooms = studio.teams
-        .where((t) => q.isEmpty || t.name.toLowerCase().contains(q))
+
+    // One row per agent/group — WhatsApp ordering: whoever was messaged last
+    // sits on top, with the last message as the subtitle. Agents and groups
+    // WITHOUT history keep their roster place below. No duplicates: the saved
+    // conversation and its roster entry render as the same row.
+    final convByChannel = <String, Conversation>{};
+    for (final c in conversations) {
+      if (c.channel != null) convByChannel[c.channel!] = c;
+    }
+    final agentEntries = <({Agent agent, Conversation? conv, int index})>[
+      for (var i = 0; i < kSeedAgents.length; i++)
+        (
+          agent: kSeedAgents[i],
+          conv: convByChannel['agent:${kSeedAgents[i].id}'],
+          index: i,
+        ),
+    ];
+    agentEntries.sort((a, b) {
+      final aAt = a.conv?.updatedAt.millisecondsSinceEpoch ?? 0;
+      final bAt = b.conv?.updatedAt.millisecondsSinceEpoch ?? 0;
+      if (aAt != bAt) return bAt - aAt;
+      return a.index - b.index;
+    });
+    final agents = agentEntries
+        .where((e) => q.isEmpty || e.agent.name.toLowerCase().contains(q))
         .toList(growable: false);
-    final agents = kSeedAgents
-        .where((a) => q.isEmpty || a.name.toLowerCase().contains(q))
-        .toList(growable: false);
-    final saved = conversations
-        .where((c) => q.isEmpty || c.title.toLowerCase().contains(q))
+
+    final teamEntries = <({AgentTeam team, Conversation? conv, int index})>[
+      for (var i = 0; i < studio.teams.length; i++)
+        (
+          team: studio.teams[i],
+          conv: convByChannel['room:${studio.teams[i].id}'],
+          index: i,
+        ),
+    ];
+    teamEntries.sort((a, b) {
+      final aAt = a.conv?.updatedAt.millisecondsSinceEpoch ?? 0;
+      final bAt = b.conv?.updatedAt.millisecondsSinceEpoch ?? 0;
+      if (aAt != bAt) return bAt - aAt;
+      return a.index - b.index;
+    });
+    final rooms = teamEntries
+        .where((e) => q.isEmpty || e.team.name.toLowerCase().contains(q))
         .toList(growable: false);
 
     return Scaffold(
@@ -235,21 +242,19 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
               child: ListView(
                 padding: const EdgeInsets.only(top: 4, bottom: TeamlySpace.s6),
                 children: <Widget>[
-                  // ── Agents — the ten-chat roster, messenger rows ─────────
-                  if (agents.isNotEmpty)
-                    for (final a in agents)
-                      _chatRow(
-                        avatar: AgentAvatar(artId: a.artId, size: 46),
-                        title: a.name,
-                        subtitle: a.description,
-                        onTap: () => _openAgent(a),
-                      ),
+                  // ── Agents — one row each, most recently messaged on top ──
+                  for (final e in agents)
+                    _chatRow(
+                      avatar: AgentAvatar(artId: e.agent.artId, size: 46),
+                      title: e.agent.name,
+                      subtitle: e.conv == null || e.conv!.messages.isEmpty
+                          ? e.agent.description
+                          : e.conv!.messages.last.content.replaceAll(RegExp(r'\s+'), ' '),
+                      onTap: () => _openAgent(e.agent),
+                      trailing: e.conv == null ? null : _timeLabel(e.conv!.updatedAt),
+                    ),
                   // ── Groups — the user's created agent groups ─────────────
-                  if (rooms.isNotEmpty) ...<Widget>[
-                    for (final r in rooms) _groupRow(r, studio),
-                  ],
-                  // ── Saved conversations ──────────────────────────────────
-                  for (final c in saved) _conversationRow(c),
+                  for (final e in rooms) _groupEntryRow(e, studio),
                   // ── Community DMs ────────────────────────────────────────
                   if (_me.isNotEmpty)
                     StreamBuilder<List<DmThread>>(
@@ -285,7 +290,6 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
                       ),
                   if (agents.isEmpty &&
                       rooms.isEmpty &&
-                      saved.isEmpty &&
                       (_people == null || _people!.isEmpty))
                     Padding(
                       padding: const EdgeInsets.all(TeamlySpace.s8),
@@ -360,38 +364,17 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
     );
   }
 
-  Widget _groupRow(AgentTeam room, StudioStore studio) {
-    final members = <Agent>[
-      for (final id in room.agentIds)
-        if (agentById(id) != null) agentById(id)!,
-    ];
+  Widget _groupEntryRow(({AgentTeam team, Conversation? conv, int index}) entry, StudioStore studio) {
+    final room = entry.team;
     final art = room.avatarArt((id) => agentById(id)?.artId ?? '');
     return _chatRow(
       avatar: AgentAvatar(artId: art, size: 46),
       title: room.name,
-      subtitle: room.subtitle,
+      subtitle: entry.conv == null || entry.conv!.messages.isEmpty
+          ? room.subtitle
+          : entry.conv!.messages.last.content.replaceAll(RegExp(r'\s+'), ' '),
       onTap: () => _openRoom(room),
-      trailing: members.isEmpty ? null : '${members.length}',
-    );
-  }
-
-  Widget _conversationRow(Conversation c) {
-    final channelAvatar = c.channel == null
-        ? const AgentAvatar(artId: 'asset:agent-08', size: 46)
-        : c.channel!.startsWith('room:')
-            ? const AgentAvatar(artId: 'asset:agent-09', size: 46)
-            : AgentAvatar(
-                artId: agentById(TeamChatStore.idFromKey(c.channel!))?.artId ?? 'asset:agent-01',
-                size: 46,
-              );
-    return _chatRow(
-      avatar: channelAvatar,
-      title: c.title,
-      subtitle: c.messages.isEmpty
-          ? 'New chat'
-          : c.messages.last.content.replaceAll(RegExp(r'\s+'), ' '),
-      onTap: () => _openSaved(c),
-      trailing: _timeLabel(c.updatedAt),
+      trailing: entry.conv == null ? null : _timeLabel(entry.conv!.updatedAt),
     );
   }
 

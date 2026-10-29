@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import '../services/social_service.dart';
 import '../theme.dart';
 import '../widgets/teamly/kit.dart';
-import 'settings_screen.dart';
 
 /// The Artifacts tab — the user's vault of everything the models generated:
 /// images, video clips, SVGs, documents. Backed by Firestore, so the vault is
@@ -38,18 +37,7 @@ class _ArtifactsScreenState extends State<ArtifactsScreen> {
     final uid = _user?.uid ?? '';
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Artifacts'),
-        actions: <Widget>[
-          IconButton(
-            tooltip: 'Settings',
-            icon: const Icon(Icons.settings_outlined, size: 21),
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const SettingsScreen()),
-            ),
-          ),
-        ],
-      ),
+      appBar: AppBar(title: const Text('Artifacts')),
       body: uid.isEmpty
           ? const _Empty(text: 'Sign in to open your artifact vault.')
           : StreamBuilder<List<CloudArtifact>>(

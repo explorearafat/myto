@@ -379,6 +379,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
       children: <Widget>[
         for (final t in teams)
           InkWell(
+            onTap: () => _openTeam(t),
             onLongPress: () => _deleteTeam(t),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter, vertical: 8),

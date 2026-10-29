@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/agent.dart';
 import '../models/byok_config.dart';
@@ -36,6 +37,18 @@ import 'studio_store.dart';
 /// ---------------------------------------------------------------------------
 class TeamChatStore extends ChangeNotifier {
   TeamChatStore(this._conversations, this._studio);
+
+  /// The model agent chats run on: the user's Settings pick when it is still
+  /// in their configured model list, otherwise the first configured model.
+  static Future<String> _workingModelId(ByokConfig config) async {
+    if (config.models.isEmpty) return '';
+    final prefs = await SharedPreferences.getInstance();
+    final selected = prefs.getString('sylor.chat.model') ?? '';
+    for (final m in config.models) {
+      if (m.id == selected) return selected;
+    }
+    return config.models.first.id;
+  }
 
   final ConversationStore _conversations;
   final StudioStore _studio;
@@ -394,7 +407,7 @@ class TeamChatStore extends ChangeNotifier {
         <String, String>{'role': 'user', 'content': context},
     ];
 
-    final modelId = config.models.isNotEmpty ? config.models.first.id : '';
+    final modelId = await _workingModelId(config);
 
     // The gateway runs the server-side tool loop (web_search / web_fetch /
     // wiki_search) and streams the blocks as fenced text. We hide the fences

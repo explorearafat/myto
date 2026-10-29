@@ -36,10 +36,7 @@ import 'user_profile_screen.dart';
 /// crypto desk — a live rate + chart widget in place of the plain text marker.
 /// ---------------------------------------------------------------------------
 class DiscoverScreen extends StatefulWidget {
-  const DiscoverScreen({super.key, this.onBack});
-
-  /// Returns to the Chat landing tab (the header's back arrow).
-  final VoidCallback? onBack;
+  const DiscoverScreen({super.key});
 
   @override
   State<DiscoverScreen> createState() => _DiscoverScreenState();
@@ -154,12 +151,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     return Scaffold(
       backgroundColor: palette.bg,
       appBar: AppBar(
-        // The spec's header: back icon (→ Chat landing) · Myto (cursive) · bell.
-        leading: IconButton(
-          tooltip: 'Back to chats',
-          icon: const Icon(Icons.arrow_back_rounded),
-          onPressed: widget.onBack,
-        ),
+        // The spec's header: Myto (cursive) · messages · notifications bell.
         title: const Text(
           'Myto',
           style: TextStyle(

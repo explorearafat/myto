@@ -9,10 +9,11 @@ import 'agents_screen.dart';
 import 'artifacts_screen.dart';
 import 'chat_home_screen.dart';
 import 'discover_screen.dart';
+import 'settings_screen.dart';
 
-/// HomeShell — the app's single bottom navigation, Teamly-style four tabs:
+/// HomeShell — the app's single bottom navigation, Teamly-style five tabs:
 ///
-///   Chat (landing) · Agents · Discover · Artifacts
+///   Chat (landing) · Agents · Discover · Artifacts · Settings
 ///
 /// The Chat tab is the home screen (agent list + groups + DMs + search).
 /// Discover is the community feed — its header's back arrow returns here.
@@ -60,8 +61,9 @@ class _HomeShellState extends State<HomeShell> {
           children: <Widget>[
             const ChatHomeScreen(),
             const AgentsScreen(),
-            DiscoverScreen(onBack: () => _go(0)),
+            const DiscoverScreen(),
             const ArtifactsScreen(),
+            const SettingsScreen(),
           ],
         ),
         bottomNavigationBar: Container(
@@ -79,6 +81,7 @@ class _HomeShellState extends State<HomeShell> {
                   _item(1, Icons.smart_toy_outlined, Icons.smart_toy_rounded, 'Agents'),
                   _item(2, Icons.explore_outlined, Icons.explore_rounded, 'Discover'),
                   _item(3, Icons.layers_outlined, Icons.layers_rounded, 'Artifacts'),
+                  _item(4, Icons.settings_outlined, Icons.settings_rounded, 'Settings'),
                 ],
               ),
             ),
