@@ -103,6 +103,14 @@ class ConversationStore extends ChangeNotifier {
     _persist();
   }
 
+  /// Remove every saved conversation (Settings → Clear local AI chat history).
+  void clearAll() {
+    _conversations.clear();
+    _active = Conversation.create();
+    notifyListeners();
+    _persist();
+  }
+
   void delete(String id) {
     _conversations.removeWhere((c) => c.id == id);
     if (_active.id == id) {

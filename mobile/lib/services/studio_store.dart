@@ -43,11 +43,14 @@ class StudioStore extends ChangeNotifier {
   final List<AgentTeam> _teams = [];
   List<AgentTeam> get teams => List.unmodifiable(_teams);
 
-  /// Create a user-built room and add it to the Rooms list.
+  /// Create a user-built group chat and add it to the list. [avatar] is the
+  /// group photo override: 'asset:agent-XX' (one of the members) or
+  /// 'file:<path>' (a photo the user uploaded, persisted on-device).
   AgentTeam createTeam({
     required String name,
     required List<String> roles,
     required List<String> agentIds,
+    String avatar = '',
   }) {
     final team = AgentTeam(
       id: 'team-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
@@ -55,6 +58,7 @@ class StudioStore extends ChangeNotifier {
       roles: List<String>.from(roles),
       agentIds: List<String>.from(agentIds),
       memberCount: agentIds.length,
+      avatar: avatar,
     );
     _teams.insert(0, team);
     notifyListeners();
@@ -108,7 +112,7 @@ class StudioStore extends ChangeNotifier {
         // A user-built agent has no face of its own, so it wears the library's
         // neutral tile. AgentAvatar falls back to the vector emblem if the id
         // ever goes missing.
-        artId: 'prompt-engineer',
+        artId: 'asset:agent-01',
       ),
     );
     notifyListeners();

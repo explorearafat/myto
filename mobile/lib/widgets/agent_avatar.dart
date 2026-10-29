@@ -8,6 +8,7 @@
 /// ---------------------------------------------------------------------------
 library;
 
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -224,12 +225,14 @@ class AgentEmblemPainter extends CustomPainter {
       old.emblem != emblem || old.color != color || old.size != size;
 }
 
-/// The agent's profile picture — one of the hand-drawn faces from
-/// [kAgentArtLibrary], rendered from inline SVG and clipped to a circle.
+/// The agent's profile picture. Three sources, chosen by the [AgentAvatar.artId]
+/// scheme:
 ///
-/// The artwork ships as strings (see `agent_art_data.dart`), so nothing is
-/// loaded from disk or network and every face stays crisp at any size. An
-/// unknown [artId] falls back to the neutral vector emblem rather than an
+///   'asset:<name>'  — a bundled mascot portrait (assets/agents/chat/<name>.jpg)
+///   'file:<path>'   — a photo the user uploaded (copied into app storage)
+///   anything else   — a hand-drawn face from [kAgentArtIndex]
+///
+/// An unknown [artId] falls back to the neutral vector emblem rather than an
 /// empty hole, so a user-built agent always has a face.
 class AgentAvatar extends StatelessWidget {
   const AgentAvatar({
@@ -239,7 +242,7 @@ class AgentAvatar extends StatelessWidget {
     this.dot = false,
   });
 
-  /// Key into [kAgentArtIndex] — which face this agent wears.
+  /// Which face this agent wears.
   final String artId;
   final double size;
 
@@ -248,7 +251,34 @@ class AgentAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final AgentArt? art = kAgentArtIndex[artId];
+    final Widget inner;
+    if (artId.startsWith('asset:')) {
+      inner = Image.asset(
+        'assets/agents/chat/${artId.substring(6)}.jpg',
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => _AvatarFallback(size: size),
+      );
+    } else if (artId.startsWith('file:')) {
+      inner = Image.file(
+        File(artId.substring(5)),
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => _AvatarFallback(size: size),
+      );
+    } else {
+      final AgentArt? art = kAgentArtIndex[artId];
+      inner = art == null
+          ? _AvatarFallback(size: size)
+          : SvgPicture.string(
+              art.svg,
+              width: size,
+              height: size,
+              fit: BoxFit.cover,
+            );
+    }
 
     return SizedBox(
       width: size,
@@ -256,16 +286,7 @@ class AgentAvatar extends StatelessWidget {
       child: Stack(
         clipBehavior: Clip.none,
         children: <Widget>[
-          ClipOval(
-            child: art == null
-                ? _AvatarFallback(size: size)
-                : SvgPicture.string(
-                    art.svg,
-                    width: size,
-                    height: size,
-                    fit: BoxFit.cover,
-                  ),
-          ),
+          ClipOval(child: inner),
           if (dot)
             Positioned(
               right: 0,

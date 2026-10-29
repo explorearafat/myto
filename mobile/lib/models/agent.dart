@@ -1,21 +1,21 @@
 /// ---------------------------------------------------------------------------
 /// Agents model — the roster and the Rooms.
 ///
-/// The roster is the catalogue of 1-to-1 chat partners and room members. Every
-/// agent has its own hand-drawn profile picture: `artId` points at one of the
-/// inline SVGs in `widgets/agent_art_data.dart` (the Myto avatar library), so
-/// the app ships 19 distinct specialists with 19 distinct faces and no raster
-/// assets.
+/// The roster is the catalogue of 1-to-1 chat partners and group members. Each
+/// of the ten chat agents wears one of the bundled mascot portraits shipped as
+/// image assets (`assets/agents/chat/`); their `artId` uses the
+/// `asset:<name>` scheme understood by [AgentAvatar]. A group can additionally
+/// carry a user-uploaded photo (`file:<path>`), saved on-device.
 ///
-/// The app ships with NO demo data: no fake notifications, no seeded
-/// conversations. This roster is the product catalogue.
+/// The app ships with NO demo data: no seeded conversations and no prebuilt
+/// teams — teams are always created by the user from the Agents tab.
 /// ---------------------------------------------------------------------------
 
 /// Where an agent came from: the official catalogue, or one the user built.
 enum AgentSource { teamly, custom }
 
-/// A named room of agents — the "Rooms" section. Chats in a room are group
-/// chats whose members answer together.
+/// A named room of agents — the group chats the user assembles. Chats in a
+/// room are group chats whose members answer together.
 class AgentTeam {
   const AgentTeam({
     required this.id,
@@ -23,6 +23,7 @@ class AgentTeam {
     required this.roles,
     this.memberCount = 0,
     this.agentIds = const <String>[],
+    this.avatar = '',
   });
 
   final String id;
@@ -35,6 +36,11 @@ class AgentTeam {
   final List<String> agentIds;
   final int memberCount;
 
+  /// Group photo override: 'asset:agent-03' (one of the members) or
+  /// 'file:<path>' (a photo the user uploaded, copied into app storage).
+  /// Empty → the first member's portrait.
+  final String avatar;
+
   /// The subtitle exactly as the reference formats it: roles truncated at
   /// three plus an ellipsis when there are more.
   String get subtitle {
@@ -43,12 +49,24 @@ class AgentTeam {
     return '${roles.take(3).join(', ')},...';
   }
 
+  /// The artId the room's avatar renders: the explicit override, or the first
+  /// member's portrait.
+  String avatarArt(String Function(String) agentArtOf) {
+    if (avatar.isNotEmpty) return avatar;
+    for (final id in agentIds) {
+      final art = agentArtOf(id);
+      if (art.isNotEmpty) return art;
+    }
+    return '';
+  }
+
   Map<String, dynamic> toJson() => <String, dynamic>{
         'id': id,
         'name': name,
         'roles': roles,
         'agentIds': agentIds,
         'memberCount': memberCount,
+        if (avatar.isNotEmpty) 'avatar': avatar,
       };
 
   factory AgentTeam.fromJson(Map<String, dynamic> json) => AgentTeam(
@@ -61,6 +79,7 @@ class AgentTeam {
             .whereType<String>()
             .toList(),
         memberCount: (json['memberCount'] as num?)?.toInt() ?? 0,
+        avatar: (json['avatar'] as String?) ?? '',
       );
 }
 
@@ -89,7 +108,8 @@ class Agent {
   /// Social relationship state.
   final bool friends;
 
-  /// Which profile picture this agent wears — a key into `kAgentArtIndex`.
+  /// Which profile picture this agent wears — `asset:<name>` for the bundled
+  /// mascot portraits.
   final String artId;
 
   /// System prompt used when this agent chats 1-to-1 or inside a room.
@@ -122,7 +142,7 @@ class Agent {
         name: (json['name'] as String?) ?? 'Agent',
         description: (json['description'] as String?) ?? '',
         category: (json['category'] as String?) ?? 'All',
-        artId: (json['artId'] as String?) ?? 'prompt-engineer',
+        artId: (json['artId'] as String?) ?? 'asset:agent-01',
         source: json['source'] == 'custom' ? AgentSource.custom : AgentSource.teamly,
         friends: json['friends'] == true,
         prompt: (json['prompt'] as String?) ?? '',
@@ -133,258 +153,125 @@ class Agent {
 /// per distinct agent category.
 const List<String> kAgentCategories = <String>[
   'All',
-  'Quality',
-  'Debugging',
-  'Engineering',
-  'Cybersecurity',
-  'DevOps',
-  'AI',
-  'Automation',
-  'Data',
-  'Research',
-  'Design',
-  'Product',
-  'Marketing',
-  'Content',
-  'Social',
+  'Travel',
   'Finance',
-  'Legal',
-  'Management',
-  'Support',
+  'Games',
   'Health',
+  'Research',
+  'Photos',
+  'Trends',
+  'Presentations',
+  'Data',
+  'Planning',
 ];
 
-/// The official roster — 19 specialists, each with a distinct category and a
-/// distinct hand-drawn profile picture from the avatar library.
+/// The official roster — the ten chat agents, each with its own bundled
+/// mascot portrait (assets/agents/chat/agent-01..10.jpg).
 const List<Agent> kSeedAgents = <Agent>[
   Agent(
-    id: 'qa-tester',
-    name: 'QA Tester',
-    description:
-        'Creates test cases, checks edge cases, reproduces bugs, and validates releases before they ship.',
-    category: 'Quality',
-    artId: 'qa-tester',
+    id: 'scout',
+    name: 'Scout',
+    description: 'Places, routes and trip plans — tell Scout where you want to go.',
+    category: 'Travel',
+    artId: 'asset:agent-01',
     prompt:
-        'You are a QA Tester. Answer in at most 3 short lines. Give one sharp next step.',
+        'You are Scout, a travel and places agent. Answer in at most 3 short lines. '
+        'Give one concrete place, route or next step.',
   ),
   Agent(
-    id: 'bug-analyzer',
-    name: 'Bug Analyzer',
-    description:
-        'Reads stack traces and logs, narrows down root causes, and proposes targeted fixes.',
-    category: 'Debugging',
-    artId: 'bug-analyzer',
-    prompt:
-        'You are a Bug Analyzer. Answer in at most 3 short lines. Name the most likely root cause.',
-  ),
-  Agent(
-    id: 'code-reviewer',
-    name: 'Code Reviewer',
-    description:
-        'Reviews readability, architecture, security, performance, and maintainability with actionable feedback.',
-    category: 'Engineering',
-    artId: 'code-reviewer',
-    prompt:
-        'You are a Code Reviewer. Answer in at most 3 short lines. Flag the single most important issue.',
-  ),
-  Agent(
-    id: 'security-sentinel',
-    name: 'Security Sentinel',
-    description:
-        'Checks code and configurations for common vulnerabilities, risky dependencies, and exposed secrets.',
-    category: 'Cybersecurity',
-    artId: 'security-sentinel',
-    prompt:
-        'You are a Security Sentinel. Answer in at most 3 short lines. Name the biggest risk first.',
-  ),
-  Agent(
-    id: 'devops-engineer',
-    name: 'DevOps Engineer',
-    description:
-        'Helps with CI/CD, deployment configuration, observability, incident analysis, and release checklists.',
-    category: 'DevOps',
-    artId: 'devops-engineer',
-    prompt:
-        'You are a DevOps Engineer. Answer in at most 3 short lines. Be concrete about the pipeline step.',
-  ),
-  Agent(
-    id: 'prompt-engineer',
-    name: 'Prompt Engineer',
-    description:
-        'Designs, tests, and refines prompts and workflows to improve consistency and task completion.',
-    category: 'AI',
-    artId: 'prompt-engineer',
-    prompt:
-        'You are a Prompt Engineer. Answer in at most 3 short lines. Offer one improved prompt line.',
-  ),
-  Agent(
-    id: 'automation-engineer',
-    name: 'Automation Engineer',
-    description:
-        'Connects tools and APIs, designs repeatable workflows, and monitors failed runs for recovery.',
-    category: 'Automation',
-    artId: 'automation-engineer',
-    prompt:
-        'You are an Automation Engineer. Answer in at most 3 short lines with the workflow to automate.',
-  ),
-  Agent(
-    id: 'data-analyst',
-    name: 'Data Analyst',
-    description:
-        'Queries datasets, cleans data, spots trends, and explains results with clear metrics.',
-    category: 'Data',
-    artId: 'data-analyst',
-    prompt:
-        'You are a Data Analyst. Answer in at most 3 short lines. Name the metric that answers it.',
-  ),
-  Agent(
-    id: 'research-librarian',
-    name: 'Research Librarian',
-    description:
-        'Finds reliable sources, summarizes documents, maintains a knowledge base, and links related insights.',
-    category: 'Research',
-    artId: 'research-librarian',
-    prompt:
-        'You are a Research Librarian. Answer in at most 3 short lines. Point to the source that settles it.',
-  ),
-  Agent(
-    id: 'ux-designer',
-    name: 'UX Designer',
-    description:
-        'Maps user journeys, critiques interfaces, and suggests accessible, consistent interaction patterns.',
-    category: 'Design',
-    artId: 'ux-designer',
-    prompt:
-        'You are a UX Designer. Answer in at most 3 short lines. Name the friction you would fix first.',
-  ),
-  Agent(
-    id: 'product-strategist',
-    name: 'Product Strategist',
-    description:
-        'Turns user feedback and business goals into prioritized features, experiments, and roadmaps.',
-    category: 'Product',
-    artId: 'product-strategist',
-    prompt:
-        'You are a Product Strategist. Answer in at most 3 short lines. Give the highest-leverage bet.',
-  ),
-  Agent(
-    id: 'market-researcher',
-    name: 'Market Researcher',
-    description:
-        'Studies competitors, market signals, customer needs, and turns findings into concise reports.',
-    category: 'Marketing',
-    artId: 'market-researcher',
-    prompt:
-        'You are a Market Researcher. Answer in at most 3 short lines. Cite the competitor signal you see.',
-  ),
-  Agent(
-    id: 'content-creator',
-    name: 'Content Creator',
-    description:
-        'Plans content, drafts platform-specific posts, adapts tone, and prepares a publishing calendar.',
-    category: 'Content',
-    artId: 'content-creator',
-    prompt:
-        'You are a Content Creator. Answer in at most 3 short lines. Offer one hook the user can ship.',
-  ),
-  Agent(
-    id: 'social-media-manager',
-    name: 'Social Media Manager',
-    description:
-        'Organizes publishing, drafts replies, summarizes engagement, and flags comments needing human review.',
-    category: 'Social',
-    artId: 'social-media-manager',
-    prompt:
-        'You are a Social Media Manager. Answer in at most 3 short lines. Name the platform and the move.',
-  ),
-  Agent(
-    id: 'accounting-agent',
-    name: 'Accounting Agent',
-    description:
-        'Organizes expenses, categorizes transactions, builds budgets, and summarizes financial records.',
+    id: 'money-mentor',
+    name: 'MoneyMentor',
+    description: 'Budgets, spending breakdowns and saving plans in plain numbers.',
     category: 'Finance',
-    artId: 'accounting-agent',
+    artId: 'asset:agent-02',
     prompt:
-        'You are an Accounting Agent. Answer in at most 3 short lines. Ask for the number you need.',
+        'You are MoneyMentor, a personal finance agent. Answer in at most 3 short lines. '
+        'Use concrete numbers and end with one money move. Not financial advice.',
   ),
   Agent(
-    id: 'legal-advisor',
-    name: 'Legal Advisor',
-    description:
-        'Explains contract clauses, flags compliance and privacy obligations, and lists the questions to ask a lawyer.',
-    category: 'Legal',
-    artId: 'legal-advisor',
+    id: 'game-buddy',
+    name: 'GameBuddy',
+    description: 'Game picks, build tips and strategies for whatever you are playing.',
+    category: 'Games',
+    artId: 'asset:agent-03',
     prompt:
-        'You are a Legal Advisor, not a lawyer. Answer in at most 3 short lines and say this is general '
-        'information, not legal advice.',
+        'You are GameBuddy, a gaming agent. Answer in at most 3 short lines. '
+        'Be specific to the game and end with one actionable tip.',
   ),
   Agent(
-    id: 'project-manager',
-    name: 'Project Manager',
-    description:
-        'Breaks goals into tasks, assigns owners, tracks blockers, and keeps projects moving toward deadlines.',
-    category: 'Management',
-    artId: 'project-manager',
-    prompt:
-        'You are a Project Manager. Answer in at most 3 short lines. End with the next owner and date.',
-  ),
-  Agent(
-    id: 'support-lead',
-    name: 'Support Lead',
-    description:
-        'Triages support requests, drafts empathetic replies, and tracks recurring customer issues.',
-    category: 'Support',
-    artId: 'support-lead',
-    prompt:
-        'You are a Support Lead. Answer in at most 3 short lines in a warm, professional tone.',
-  ),
-  Agent(
-    id: 'doctor',
-    name: 'Doctor',
-    description:
-        'Offers general health information, explains medical terms, and helps prepare questions for a clinician.',
+    id: 'vital-coach',
+    name: 'VitalCoach',
+    description: 'Habits, fitness and plain-language health explanations.',
     category: 'Health',
-    artId: 'doctor',
+    artId: 'asset:agent-04',
     prompt:
-        'You are a Doctor-style health advisor. Answer in at most 3 short lines and add that this is not '
-        'a substitute for a real medical consultation.',
+        'You are VitalCoach, a health information agent. Answer in at most 3 short lines and add '
+        'that this is general information, not medical advice.',
+  ),
+  Agent(
+    id: 'gem-hunter',
+    name: 'GemHunter',
+    description: 'Deep research, product comparisons and the best options for your budget.',
+    category: 'Research',
+    artId: 'asset:agent-05',
+    prompt:
+        'You are GemHunter, a research agent. Answer in at most 3 short lines. '
+        'Compare options and end with one clear pick and why.',
+  ),
+  Agent(
+    id: 'pixel-eye',
+    name: 'PixelEye',
+    description: 'Photo critique and analysis — composition, lighting, what to fix.',
+    category: 'Photos',
+    artId: 'asset:agent-06',
+    prompt:
+        'You are PixelEye, a photography critique agent. Answer in at most 3 short lines. '
+        'Name what works, what to fix, and one concrete improvement.',
+  ),
+  Agent(
+    id: 'star-guide',
+    name: 'StarGuide',
+    description: 'Trends, forecasts and what is rising right now.',
+    category: 'Trends',
+    artId: 'asset:agent-07',
+    prompt:
+        'You are StarGuide, a trends agent. Answer in at most 3 short lines. '
+        'Name the trend and whether to ride it or wait.',
+  ),
+  Agent(
+    id: 'slide-sensei',
+    name: 'SlideSensei',
+    description: 'Decks, explainers and teaching plans that make ideas land.',
+    category: 'Presentations',
+    artId: 'asset:agent-08',
+    prompt:
+        'You are SlideSensei, a presentation and teaching agent. Answer in at most 3 short lines. '
+        'Give a slide-by-slide or step-by-step outline.',
+  ),
+  Agent(
+    id: 'data-forge',
+    name: 'DataForge',
+    description: 'Databases, queries and data engineering with working examples.',
+    category: 'Data',
+    artId: 'asset:agent-09',
+    prompt:
+        'You are DataForge, a data engineering agent. Answer in at most 3 short lines. '
+        'Prefer a short working snippet over prose.',
+  ),
+  Agent(
+    id: 'task-pilot',
+    name: 'TaskPilot',
+    description: 'Plans, schedules and checklists that break big goals into steps.',
+    category: 'Planning',
+    artId: 'asset:agent-10',
+    prompt:
+        'You are TaskPilot, a planning agent. Answer in at most 3 short lines. '
+        'End with a numbered next-step list.',
   ),
 ];
 
-/// The rooms — group chats whose members answer the user together.
-const List<AgentTeam> kSeedTeams = <AgentTeam>[
-  AgentTeam(
-    id: 'quality-bug-room',
-    name: 'Quality & Bug Room',
-    roles: const <String>['QA Tester', 'Bug Analyzer', 'Code Reviewer', 'Prompt Engineer'],
-    agentIds: const <String>['qa-tester', 'bug-analyzer', 'code-reviewer', 'prompt-engineer'],
-    memberCount: 4,
-  ),
-  AgentTeam(
-    id: 'startup-research-room',
-    name: 'Startup Research Room',
-    roles: const <String>[
-      'Market Researcher',
-      'Accounting Agent',
-      'Data Analyst',
-      'Content Creator'
-    ],
-    agentIds: const <String>[
-      'market-researcher',
-      'accounting-agent',
-      'data-analyst',
-      'content-creator'
-    ],
-    memberCount: 4,
-  ),
-  AgentTeam(
-    id: 'code-review-guild',
-    name: 'Code Review Guild',
-    roles: const <String>['Code Reviewer', 'QA Tester', 'Bug Analyzer'],
-    agentIds: const <String>['code-reviewer', 'qa-tester', 'bug-analyzer'],
-    memberCount: 3,
-  ),
-];
+/// The rooms ship empty — teams are always user-created.
+const List<AgentTeam> kSeedTeams = <AgentTeam>[];
 
 /// Look up a roster agent by id (used by rooms and the chat list).
 Agent? agentById(String id) {

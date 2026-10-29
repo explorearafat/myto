@@ -1,11 +1,9 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../services/dm_service.dart';
 import '../services/social_service.dart';
 import '../theme.dart';
-import '../widgets/teamly/kit.dart';
 import 'dm_chat_screen.dart';
 
 /// ---------------------------------------------------------------------------
@@ -43,18 +41,6 @@ class _DmListScreenState extends State<DmListScreen> {
           otherName: p?.name ?? 'Myto user',
           otherPhoto: p?.photo ?? '',
         ),
-      ),
-    );
-  }
-
-  /// Start a brand-new conversation from a community profile.
-  Future<void> _startChatWith(String uid, String name, String photo) async {
-    if (uid.isEmpty || uid == _me) return;
-    await DmService.ensureThread(_me, uid);
-    if (!mounted) return;
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => DmChatScreen(otherUid: uid, otherName: name, otherPhoto: photo),
       ),
     );
   }

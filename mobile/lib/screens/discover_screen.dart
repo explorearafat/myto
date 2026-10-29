@@ -7,12 +7,15 @@ import 'package:provider/provider.dart';
 import '../services/agent_accounts.dart';
 import '../services/agent_feed_service.dart';
 import '../services/auth_service.dart';
+import '../services/dm_service.dart';
 import '../services/social_service.dart';
 import '../theme.dart';
 import '../widgets/crypto_widget.dart';
 import '../widgets/teamly/kit.dart';
 import 'agent_profile_screen.dart';
+import 'dm_chat_screen.dart';
 import 'notifications_sheet.dart';
+import 'post_composer_page.dart';
 
 /// ---------------------------------------------------------------------------
 /// DiscoverScreen — the Myto community feed, backed by Firestore (the
@@ -43,15 +46,17 @@ class DiscoverScreen extends StatefulWidget {
 }
 
 class _DiscoverScreenState extends State<DiscoverScreen> {
-  // Three destinations: 'foryou' | 'viral' | 'following'.
-  String _dest = 'foryou';
-  String _topic = '';
   int _seed = 0; // re-jittered on pull-to-refresh so the flow changes
   final Set<String> _likedIds = <String>{};
   final Set<String> _savedIds = <String>{};
   final Set<String> _followingIds = <String>{};
-  bool _setsLoaded = false;
-  List<FeedPost>? _followingPosts;
+
+  // Smart search — community people + post hits, debounced one-shots. While a
+  // query is active the results replace the feed.
+  Timer? _searchDebounce;
+  String _query = '';
+  List<DiscoverProfile>? _people;
+  List<FeedPost>? _postHits;
 
   User? get _user => FirebaseAuth.instance.currentUser;
   String get _uid => _user?.uid ?? '';
@@ -80,7 +85,6 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     setState(() {
       _savedIds.addAll(saved);
       _followingIds.addAll(following);
-      _setsLoaded = true;
     });
   }
 
@@ -89,6 +93,59 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 2)));
+  }
+
+  void _onSearch(String v) {
+    setState(() => _query = v);
+    _searchDebounce?.cancel();
+    final q = v.trim().toLowerCase();
+    if (q.length < 2) {
+      _people = null;
+      _postHits = null;
+      return;
+    }
+    _searchDebounce = Timer(const Duration(milliseconds: 450), () async {
+      try {
+        final profiles = await SocialService.fetchProfileSample();
+        final posts = await SocialService.fetchRecentPosts();
+        if (!mounted) return;
+        setState(() {
+          _people = profiles
+              .where((p) => p.name.toLowerCase().contains(q) || p.username.contains(q))
+              .take(10)
+              .toList();
+          _postHits = posts.where((p) => p.text.toLowerCase().contains(q)).take(20).toList();
+        });
+      } catch (_) {
+        // Search quietly shows nothing new when Firestore is unreachable.
+      }
+    });
+  }
+
+  Future<void> _compose() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => PostComposerPage(
+          onPosted: () {
+            if (!mounted) return;
+            ScaffoldMessenger.of(context)
+              ..hideCurrentSnackBar()
+              ..showSnackBar(const SnackBar(content: Text('Posted to Discover.')));
+          },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openDm(DiscoverProfile p) async {
+    if (_uid.isEmpty || p.uid == _uid) return;
+    await DmService.ensureThread(_uid, p.uid);
+    if (!mounted) return;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => DmChatScreen(otherUid: p.uid, otherName: p.name, otherPhoto: p.photo),
+      ),
+    );
   }
 
   Future<void> _guard(Future<void> Function() action, String ok) async {
@@ -136,47 +193,29 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
       body: Column(
         children: <Widget>[
           const SizedBox(height: TeamlySpace.s2),
-          // Three destinations — For you / Viral / Following.
-          Container(
-            margin: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
-            padding: const EdgeInsets.all(3),
-            decoration: BoxDecoration(
-              color: palette.chip,
-              borderRadius: BorderRadius.circular(TeamlyRadius.pill),
-            ),
+          // Smart search — people + posts — with the post button at its right.
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
             child: Row(
               children: <Widget>[
-                for (final d in const <String, String>{
-                  'foryou': 'For you',
-                  'viral': 'Viral',
-                  'following': 'Following',
-                }.entries)
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: () => setState(() => _dest = d.key),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          color: _dest == d.key ? palette.surface : Colors.transparent,
-                          borderRadius: BorderRadius.circular(TeamlyRadius.pill),
-                        ),
-                        child: Text(
-                          d.value,
-                          style: TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: _dest == d.key ? FontWeight.w600 : FontWeight.w500,
-                            color: _dest == d.key ? palette.text : palette.muted,
-                          ),
-                        ),
-                      ),
-                    ),
+                Expanded(
+                  child: TeamlySearch(
+                    hint: 'Search people and posts',
+                    onChanged: _onSearch,
                   ),
+                ),
+                const SizedBox(width: TeamlySpace.s2),
+                GestureDetector(
+                  onTap: _uid.isEmpty ? null : _compose,
+                  child: Icon(
+                    Icons.add_circle_rounded,
+                    size: 30,
+                    color: _uid.isEmpty ? palette.muted : palette.accent,
+                  ),
+                ),
               ],
             ),
           ),
-          const SizedBox(height: TeamlySpace.s2),
-          _TopicChips(selected: _topic, onSelected: (t) => setState(() => _topic = t)),
           const SizedBox(height: TeamlySpace.s2),
           if (_uid.isEmpty) const _SignInCard(),
           Expanded(child: _feedArea(palette)),
@@ -186,61 +225,93 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
   }
 
   Widget _feedArea(MytoPalette palette) {
-    if (_dest == 'following') {
-      if (_uid.isEmpty) {
-        return _Empty(text: 'Sign in to follow authors and see their posts here.', palette: palette);
+    // While a search query is active, its results replace the feed.
+    final q = _query.trim().toLowerCase();
+    if (q.length >= 2) {
+      final people = _people;
+      final hits = _postHits;
+      if (people == null || hits == null) {
+        return _Empty(text: 'Searching…', palette: palette);
       }
-      if (_followingPosts == null && _setsLoaded) {
-        void load() {
-          SocialService.fetchPostsByAuthors(_followingIds.toList()).then((list) {
-            if (mounted) setState(() => _followingPosts = list);
-          });
-        }
-
-        load();
-        return _Empty(text: 'Loading…', palette: palette);
+      if (people.isEmpty && hits.isEmpty) {
+        return _Empty(text: 'Nothing matches “$_query”.', palette: palette);
       }
-      final list = _followingPosts ?? const <FeedPost>[];
-      if (list.isEmpty) {
-        return _Empty(text: 'Follow authors and their posts land here.', palette: palette);
-      }
-      return RefreshIndicator(
-        onRefresh: () async {
-          final list = await SocialService.fetchPostsByAuthors(_followingIds.toList());
-          if (mounted) setState(() => _followingPosts = list);
-        },
-        child: _StaggeredFeed(posts: list, buildCard: _buildCard),
+      return ListView(
+        padding: const EdgeInsets.all(TeamlySpace.gutter),
+        children: <Widget>[
+          if (people.isNotEmpty) ...<Widget>[
+            const TeamlyGroupHeader(label: 'PEOPLE'),
+            for (final p in people)
+              InkWell(
+                onTap: () => _openDm(p),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Row(
+                    children: <Widget>[
+                      _SearchAvatar(photo: p.photo, name: p.name),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text(
+                              p.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: TeamlyColors.ink900,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            if (p.username.isNotEmpty)
+                              Text(
+                                '@${p.username}',
+                                style: const TextStyle(
+                                  color: TeamlyColors.greenText,
+                                  fontSize: 12.5,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      const Icon(Icons.chat_bubble_outline_rounded, size: 18, color: TeamlyColors.ink300),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+          if (hits.isNotEmpty) ...<Widget>[
+            const SizedBox(height: TeamlySpace.s3),
+            const TeamlyGroupHeader(label: 'POSTS'),
+            for (final post in hits) _buildCard(post),
+          ],
+        ],
       );
     }
 
-    // For you + Viral both stream live; For you re-ranks with priority + jitter.
+    // The single live feed, re-ranked with priority + jitter.
     return StreamBuilder<List<FeedPost>>(
-      key: ValueKey<String>('feed:$_dest:$_topic'),
-      stream: _dest == 'viral'
-          ? SocialService().streamViralFeed(topic: _topic.isEmpty ? null : _topic)
-          : SocialService.streamFeed(topic: _topic.isEmpty ? null : _topic),
+      key: ValueKey<String>('feed:$_seed'),
+      stream: SocialService.streamFeed(),
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting && !snap.hasData) {
           return _Empty(text: 'Loading the feed…', palette: palette);
         }
         var posts = snap.data ?? const <FeedPost>[];
-        if (_dest == 'foryou') {
-          posts = SocialService.prioritizePosts(
-            posts,
-            following: _followingIds,
-            seed: _seed,
-          );
-        }
+        posts = SocialService.prioritizePosts(
+          posts,
+          following: _followingIds,
+          seed: _seed,
+        );
         if (posts.isEmpty) {
           return _Empty(
-            text: _dest == 'viral'
-                ? 'No popular posts yet — likes decide what rises.'
-                : 'Nothing here yet — tap the green + to post first.',
+            text: 'Nothing here yet — tap the + to post first.',
             palette: palette,
           );
         }
         return RefreshIndicator(
-          // A pull-to-refresh re-jitters the For you flow (new order, same posts).
+          // A pull-to-refresh re-jitters the flow (new order, same posts).
           onRefresh: () async => setState(() => _seed++),
           child: _StaggeredFeed(posts: posts, buildCard: _buildCard),
         );
@@ -292,13 +363,11 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
             await SocialService.unfollowAuthor(_uid, post.uid);
             setState(() {
               _followingIds.remove(post.uid);
-              _followingPosts = null;
             });
           } else {
             await SocialService.followAuthor(_uid, post.uid);
             setState(() {
               _followingIds.add(post.uid);
-              _followingPosts = null;
             });
             await _toast('Following ${post.name}.');
           }
@@ -319,7 +388,6 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
           ? () => _guard(
               () async {
                 await SocialService.deletePost(post.id);
-                setState(() => _followingPosts = null);
               },
               'Post deleted.',
             )
@@ -936,49 +1004,6 @@ class _Comments extends StatelessWidget {
 
 // ── Topic chips ────────────────────────────────────────────────────────────────
 
-class _TopicChips extends StatelessWidget {
-  const _TopicChips({required this.selected, required this.onSelected});
-
-  final String selected;
-  final void Function(String) onSelected;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 40,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
-        children: <Widget>[
-          for (final t in <String>['', ...kDiscoverTopics])
-            Padding(
-              padding: const EdgeInsets.only(right: TeamlySpace.s2),
-              child: GestureDetector(
-                onTap: () => onSelected(selected == t ? '' : t),
-                child: Container(
-                  height: 34,
-                  padding: const EdgeInsets.symmetric(horizontal: 14),
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: selected == t ? context.palette.accent : context.palette.chip,
-                    borderRadius: BorderRadius.circular(TeamlyRadius.pill),
-                  ),
-                  child: Text(
-                    t.isEmpty ? 'All' : '#$t',
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                      color: selected == t ? context.palette.onAccent : TeamlyColors.ink700,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
 
 // ── Shared bits ────────────────────────────────────────────────────────────────
 
@@ -1062,6 +1087,46 @@ class _Empty extends StatelessWidget {
             Text(text, textAlign: TextAlign.center, style: const TextStyle(fontSize: 14, height: 1.5, color: TeamlyColors.ink500)),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// A circular avatar for a search hit: photo when present, initial otherwise.
+class _SearchAvatar extends StatelessWidget {
+  const _SearchAvatar({required this.photo, required this.name});
+
+  final String photo;
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    if (photo.isNotEmpty) {
+      return ClipOval(
+        child: Image.network(
+          photo,
+          width: 42,
+          height: 42,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _initial(context),
+        ),
+      );
+    }
+    return _initial(context);
+  }
+
+  Widget _initial(BuildContext context) {
+    return Container(
+      width: 42,
+      height: 42,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: context.palette.pastel(1),
+        shape: BoxShape.circle,
+      ),
+      child: Text(
+        name.trim().isEmpty ? '?' : name.trim().substring(0, 1).toUpperCase(),
+        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: TeamlyColors.ink800),
       ),
     );
   }

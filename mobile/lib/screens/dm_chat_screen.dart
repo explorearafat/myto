@@ -5,9 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../services/dm_service.dart';
-import '../services/social_service.dart';
 import '../theme.dart';
-import '../widgets/teamly/kit.dart';
 
 /// ---------------------------------------------------------------------------
 /// DmChatScreen — a 1:1 WhatsApp-style text chat.

@@ -1,4 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 
 import '../models/agent.dart';
@@ -6,22 +10,19 @@ import '../services/studio_store.dart';
 import '../widgets/agent_avatar.dart';
 import '../theme.dart';
 import '../widgets/teamly/kit.dart';
-import '../widgets/teamly/parts.dart';
 import 'team_chat_screen.dart';
 
 /// ---------------------------------------------------------------------------
-/// AgentsScreen — the Agents tab, styled on the Teamly reference:
+/// AgentsScreen — the Agents tab, rebuilt:
 ///
-///   [Agents | Automations] segmented header
-///   Agents · Agent Teams  (text tabs)
-///   search + green "Create My Own Agent"
-///   [By Myto AI | My Custom Agents]  →  category chips (All, Quality, ...)
-///   agent cards (illustration avatar · title · description · green Chat)
+///   search pill (with a small + to its right once a group exists)
+///   the user's created agent groups as flat messenger rows
 ///
-/// "Agents" lists the roster (kSeedAgents — the catalogue Myto ships) and the
-/// user's custom agents; "Agent Teams" lists the research rooms. Automations
-/// is the scheduled-runs surface, which the mobile app doesn't have yet — an
-/// honest empty state.
+/// With no groups the body shows a two-line call to action — "No Agent
+/// created" / "+ Click to create agent team" — and the + starts the builder:
+/// pick 2+ of the ten chat agents, name the group, optionally set a group
+/// photo (a member's portrait or a picture the user uploads). No borders, no
+/// cards — everything prints 1 by 1, messenger style.
 /// ---------------------------------------------------------------------------
 class AgentsScreen extends StatefulWidget {
   const AgentsScreen({super.key});
@@ -31,130 +32,192 @@ class AgentsScreen extends StatefulWidget {
 }
 
 class _AgentsScreenState extends State<AgentsScreen> {
-  /// Agents | Automations.
-  int _segment = 0;
-
-  /// Agents | Agent Teams.
-  int _tab = 0;
-
-  /// By Myto AI | My Custom Agents.
-  String _source = 'By Myto AI';
-
-  String _category = 'All';
   String _query = '';
 
-  bool get _showRoster => _source == 'By Myto AI';
-
   Future<void> _create() async {
-    if (_tab == 1) {
-      await _createRoom();
-      return;
-    }
-    // On the Agents tab the green CTA routes to the team builder too —
-    // custom agents are rooms you assemble from the roster.
-    await _createRoom();
-  }
-
-  Future<void> _createRoom() async {
     final selected = <String>{};
-
+    String? avatar; // 'asset:agent-XX' or 'file:<path>'
     final nameCtrl = TextEditingController();
-    final ok = await showDialog<bool>(
+
+    final ok = await showModalBottomSheet<bool>(
       context: context,
+      isScrollControlled: true,
+      backgroundColor: context.palette.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
       builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          backgroundColor: context.palette.surface,
-          title: const Text('My own agent team'),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(TeamlyRadius.lg),
+        builder: (context, setSheetState) => Padding(
+          padding: EdgeInsets.only(
+            left: TeamlySpace.gutter,
+            right: TeamlySpace.gutter,
+            top: TeamlySpace.s4,
+            bottom: MediaQuery.of(context).viewInsets.bottom + TeamlySpace.s4,
           ),
-          content: SizedBox(
-            width: 360,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                TextField(
-                  controller: nameCtrl,
-                  autofocus: true,
-                  decoration: const InputDecoration(hintText: 'Team name (optional)'),
-                ),
-                const SizedBox(height: 14),
-                const Text(
-                  'Pick specialists',
-                  style: TextStyle(
-                    color: TeamlyColors.ink500,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 1.1,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Flexible(
-                  child: ListView(
-                    shrinkWrap: true,
-                    children: <Widget>[
-                      for (final agent in kSeedAgents)
-                        CheckboxListTile(
-                          value: selected.contains(agent.id),
-                          onChanged: (v) => setDialogState(() {
-                            if (v == true) {
-                              selected.add(agent.id);
-                            } else {
-                              selected.remove(agent.id);
-                            }
-                          }),
-                          controlAffinity: ListTileControlAffinity.leading,
-                          title: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              // ── Group photo + name ──────────────────────────────────────
+              Row(
+                children: <Widget>[
+                  GestureDetector(
+                    onTap: () async {
+                      // Pick a group photo: a selected member's portrait, or
+                      // the user's own upload (copied into app storage so it
+                      // survives restarts).
+                      final choice = await showModalBottomSheet<String>(
+                        context: context,
+                        backgroundColor: context.palette.surface,
+                        builder: (context) => SafeArea(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
                             children: <Widget>[
-                              AgentAvatar(artId: agent.artId),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: <Widget>[
-                                    Text(
-                                      agent.name,
-                                      style: const TextStyle(
-                                        color: TeamlyColors.ink900,
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                    Text(
-                                      agent.description,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                        color: TeamlyColors.ink500,
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                  ],
+                              for (final id in selected)
+                                ListTile(
+                                  leading: AgentAvatar(artId: kAgentIndex[id]?.artId ?? '', size: 36),
+                                  title: Text(kAgentIndex[id]?.name ?? id, style: const TextStyle(fontSize: 14.5)),
+                                  onTap: () => Navigator.pop(context, kAgentIndex[id]?.artId ?? ''),
                                 ),
+                              ListTile(
+                                leading: const Icon(Icons.photo_outlined, size: 22),
+                                title: const Text('Upload photo', style: TextStyle(fontSize: 14.5)),
+                                onTap: () => Navigator.pop(context, '_upload'),
                               ),
                             ],
                           ),
                         ),
-                    ],
+                      );
+                      if (choice == null || choice.isEmpty) return;
+                      if (choice == '_upload') {
+                        final path = await _pickAndStorePhoto();
+                        if (path != null) {
+                          setSheetState(() => avatar = 'file:$path');
+                        } else if (mounted) {
+                          ScaffoldMessenger.of(this.context)
+                            ..hideCurrentSnackBar()
+                            ..showSnackBar(const SnackBar(content: Text('Could not pick a photo.')));
+                        }
+                        return;
+                      }
+                      setSheetState(() => avatar = choice);
+                    },
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: <Widget>[
+                        AgentAvatar(artId: avatar ?? 'asset:agent-01', size: 52),
+                        const Positioned(
+                          right: -2,
+                          bottom: -2,
+                          child: CircleAvatar(
+                            radius: 10,
+                            backgroundColor: TeamlyColors.green500,
+                            child: Icon(Icons.edit_rounded, size: 11, color: Colors.white),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextField(
+                      controller: nameCtrl,
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        hintText: 'Group name',
+                        border: InputBorder.none,
+                      ),
+                      style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+                      onChanged: (_) => setSheetState(() {}),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: TeamlySpace.s2),
+              Text(
+                'Select at least 2 agents (${selected.length} selected)',
+                style: const TextStyle(color: TeamlyColors.ink500, fontSize: 12.5),
+              ),
+              const SizedBox(height: TeamlySpace.s1),
+              // ── The ten agents, messenger rows with a trailing check ────
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  padding: EdgeInsets.zero,
+                  children: <Widget>[
+                    for (final agent in kSeedAgents)
+                      InkWell(
+                        onTap: () => setSheetState(() {
+                          if (selected.contains(agent.id)) {
+                            selected.remove(agent.id);
+                            if (avatar == agent.artId) avatar = null;
+                          } else {
+                            selected.add(agent.id);
+                          }
+                        }),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 7),
+                          child: Row(
+                            children: <Widget>[
+                              AgentAvatar(artId: agent.artId, size: 42),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  agent.name,
+                                  style: const TextStyle(
+                                    color: TeamlyColors.ink900,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                              Icon(
+                                selected.contains(agent.id)
+                                    ? Icons.check_circle_rounded
+                                    : Icons.radio_button_unchecked_rounded,
+                                size: 20,
+                                color: selected.contains(agent.id)
+                                    ? TeamlyColors.green500
+                                    : TeamlyColors.ink300,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: TeamlySpace.s3),
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: Material(
+                  color: selected.length >= 2 && nameCtrl.text.trim().isNotEmpty
+                      ? context.palette.accent
+                      : context.palette.chip,
+                  borderRadius: BorderRadius.circular(14),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(14),
+                    onTap: selected.length >= 2 && nameCtrl.text.trim().isNotEmpty
+                        ? () => Navigator.pop(context, true)
+                        : null,
+                    child: Center(
+                      child: Text(
+                        'Create group chat',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          color: selected.length >= 2 && nameCtrl.text.trim().isNotEmpty
+                              ? context.palette.onAccent
+                              : TeamlyColors.ink300,
+                        ),
+                      ),
+                    ),
                   ),
                 ),
-              ],
-            ),
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel', style: TextStyle(color: TeamlyColors.ink500)),
-            ),
-            TextButton(
-              onPressed: selected.isEmpty ? null : () => Navigator.pop(context, true),
-              child: const Text(
-                'Create team',
-                style: TextStyle(color: TeamlyColors.greenText),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -167,17 +230,27 @@ class _AgentsScreenState extends State<AgentsScreen> {
                 kAgentIndex[id]?.name ?? 'Specialist',
             ],
             agentIds: selected.toList(),
+            avatar: avatar ?? '',
           );
       _openTeam(team);
     }
   }
 
-  void _openAgent(Agent agent) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => TeamChatScreen.direct(agent: agent, resumeTitle: agent.name),
-      ),
-    );
+  /// Pick a picture from the gallery and copy it into the app's documents
+  /// directory (the on-device storage that survives restarts). Returns the
+  /// copied file's path, or null when the user cancelled / picking failed.
+  Future<String?> _pickAndStorePhoto() async {
+    try {
+      final picked = await ImagePicker().pickImage(source: ImageSource.gallery, maxWidth: 512);
+      if (picked == null) return null;
+      final docs = await getApplicationDocumentsDirectory();
+      final name = 'group-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}.jpg';
+      final copy = File('${docs.path}/$name');
+      await File(picked.path).copy(copy.path);
+      return copy.path;
+    } catch (_) {
+      return null;
+    }
   }
 
   void _openTeam(AgentTeam team) {
@@ -188,15 +261,13 @@ class _AgentsScreenState extends State<AgentsScreen> {
     );
   }
 
-  Future<void> _deleteRoom(AgentTeam room) async {
+  Future<void> _deleteTeam(AgentTeam team) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: context.palette.surface,
-        title: const Text('Delete team?'),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(TeamlyRadius.lg),
-        ),
+        title: const Text('Delete group?'),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(TeamlyRadius.lg)),
         actions: <Widget>[
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -210,7 +281,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
       ),
     );
     if (ok == true && mounted) {
-      context.read<StudioStore>().removeTeam(room.id);
+      context.read<StudioStore>().removeTeam(team.id);
     }
   }
 
@@ -219,24 +290,10 @@ class _AgentsScreenState extends State<AgentsScreen> {
     final palette = context.palette;
     final store = context.watch<StudioStore>();
     final q = _query.trim().toLowerCase();
-
-    // Categories straight from the roster, alphabetical with All first.
-    final categories = <String>{'All', for (final a in kSeedAgents) a.category}.toList()..sort();
-
-    final agents = <Agent>[
-      if (_showRoster)
-        for (final a in kSeedAgents
-            .where((a) =>
-                (_category == 'All' || a.category == _category) &&
-                (q.isEmpty || a.name.toLowerCase().contains(q))))
-          a
-      else
-        ...store.agentsBy(AgentSource.custom)
-            .where((a) => (_category == 'All' || a.category == _category) && (q.isEmpty || a.name.toLowerCase().contains(q))),
-    ];
     final teams = store.teams
         .where((t) => q.isEmpty || t.name.toLowerCase().contains(q))
         .toList(growable: false);
+    final hasGroups = store.teams.isNotEmpty;
 
     return Scaffold(
       backgroundColor: palette.bg,
@@ -245,277 +302,119 @@ class _AgentsScreenState extends State<AgentsScreen> {
         child: Column(
           children: <Widget>[
             const SizedBox(height: TeamlySpace.s3),
-            // Agents | Automations segmented pill.
-            Center(
-              child: TeamlySegmented(
-                labels: const <String>['Agents', 'Automations'],
-                index: _segment,
-                onChanged: (i) => setState(() => _segment = i),
+            // ── Search bar, with the + at its right once a group exists ────
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
+              child: Row(
+                children: <Widget>[
+                  Expanded(
+                    child: TeamlySearch(
+                      hint: 'Search groups...',
+                      onChanged: (v) => setState(() => _query = v),
+                    ),
+                  ),
+                  if (hasGroups) ...<Widget>[
+                    const SizedBox(width: TeamlySpace.s2),
+                    GestureDetector(
+                      onTap: _create,
+                      child: Icon(Icons.add_circle_rounded, size: 30, color: palette.accent),
+                    ),
+                  ],
+                ],
               ),
             ),
             const SizedBox(height: TeamlySpace.s2),
-            if (_segment == 0) ...<Widget>[
-              // Agents · Agent Teams text tabs.
-              TeamlyTabs(
-                labels: const <String>['Agents', 'Agent Teams'],
-                index: _tab,
-                onChanged: (i) => setState(() => _tab = i),
-              ),
-              const SizedBox(height: TeamlySpace.s2),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
-                child: Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: TeamlySearch(
-                        hint: _tab == 0 ? 'Search agents...' : 'Search teams...',
-                        onChanged: (v) => setState(() => _query = v),
-                      ),
-                    ),
-                    const SizedBox(width: TeamlySpace.s2),
-                    TeamlyPillButton(
-                      label: _tab == 0 ? 'Create My Own Agent' : 'New Team',
-                      icon: Icons.add_rounded,
-                      onPressed: _create,
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: TeamlySpace.s3),
-              SizedBox(
-                height: 48,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter),
-                  children: <Widget>[
-                    if (_tab == 0) ...<Widget>[
-                      Padding(
-                        padding: const EdgeInsets.only(right: TeamlySpace.s2),
-                        child: TeamlyChip(
-                          label: 'By Myto AI',
-                          selected: _showRoster,
-                          onTap: () => setState(() => _source = 'By Myto AI'),
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.only(right: TeamlySpace.s2),
-                        child: TeamlyChip(
-                          label: 'My Custom Agents',
-                          selected: !_showRoster,
-                          onTap: () => setState(() => _source = 'My Custom Agents'),
-                        ),
-                      ),
-                      const VerticalDivider(width: TeamlySpace.s4),
-                    ],
-                    for (final c in categories)
-                      Padding(
-                        padding: const EdgeInsets.only(right: TeamlySpace.s2),
-                        child: TeamlyChip(
-                          label: c,
-                          selected: _category == c,
-                          onTap: () => setState(() => _category = c),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: TeamlySpace.s1),
-              Expanded(child: _body(context, agents, teams, store)),
-            ] else
-              ...<Widget>[
-                // Automations: scheduled agent runs — a desktop-side feature
-                // the mobile app hasn't grown yet.
-                const SizedBox(height: TeamlySpace.s4),
-                Expanded(
-                  child: Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(32),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: <Widget>[
-                          Icon(Icons.bolt_rounded, size: 44, color: palette.muted),
-                          const SizedBox(height: 14),
-                          const Text(
-                            'No automations yet',
-                            style: TextStyle(
-                              color: TeamlyColors.ink900,
-                              fontSize: 18,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          const Text(
-                            'Set an agent to run on a schedule — daily digests, '
-                            'watchers, recurring reports. Coming to mobile soon.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: TeamlyColors.ink500, fontSize: 14, height: 1.5),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+            Expanded(child: _body(context, teams)),
           ],
         ),
       ),
     );
   }
 
-  Widget _body(BuildContext context, List<Agent> agents, List<AgentTeam> teams, StudioStore store) {
-    if (_tab == 1) {
-      if (teams.isEmpty) {
-        return Center(
+  Widget _body(BuildContext context, List<AgentTeam> teams) {
+    if (teams.isEmpty) {
+      // The two-line empty state; the + line starts the group builder.
+      return Center(
+        child: GestureDetector(
+          onTap: _create,
+          behavior: HitTestBehavior.opaque,
           child: Padding(
             padding: const EdgeInsets.all(32),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                Icon(Icons.groups_rounded, size: 44, color: context.palette.muted),
-                const SizedBox(height: 14),
-                Text(
-                  _query.trim().isEmpty ? 'No teams yet' : 'Nothing matches “$_query”',
-                  style: const TextStyle(
+                const Text(
+                  'No Agent created',
+                  style: TextStyle(
                     color: TeamlyColors.ink900,
-                    fontSize: 18,
+                    fontSize: 19,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
                 const SizedBox(height: 8),
-                const Text(
-                  'Gather specialists — they will research your question together and hand you a report.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: TeamlyColors.ink500, fontSize: 14, height: 1.5),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Icon(Icons.add_circle_rounded, size: 18, color: context.palette.accent),
+                    const SizedBox(width: 6),
+                    const Text(
+                      'Click to create agent team',
+                      style: TextStyle(
+                        color: TeamlyColors.greenText,
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
-        );
-      }
-      return ListView.separated(
-        padding: const EdgeInsets.all(TeamlySpace.gutter),
-        itemCount: teams.length,
-        separatorBuilder: (_, __) => const SizedBox(height: TeamlySpace.s3),
-        itemBuilder: (context, i) => _TeamCard(
-          team: teams[i],
-          onOpen: () => _openTeam(teams[i]),
-          onDelete: () => _deleteRoom(teams[i]),
         ),
       );
     }
-
-    if (agents.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Icon(Icons.smart_toy_outlined, size: 44, color: context.palette.muted),
-              const SizedBox(height: 14),
-              Text(
-                _query.trim().isEmpty ? 'No custom agents yet' : 'Nothing matches “$_query”',
-                style: const TextStyle(
-                  color: TeamlyColors.ink900,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'Assemble your own team of specialists — they chat together and research as one.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: TeamlyColors.ink500, fontSize: 14, height: 1.5),
-              ),
-              const SizedBox(height: 22),
-              TeamlyPillButton(label: 'Create My Own Agent', icon: Icons.add_rounded, onPressed: _create),
-            ],
-          ),
-        ),
-      );
-    }
-    return ListView.separated(
-      padding: const EdgeInsets.all(TeamlySpace.gutter),
-      itemCount: agents.length,
-      separatorBuilder: (_, __) => const SizedBox(height: TeamlySpace.s3),
-      itemBuilder: (context, i) => TeamlyAgentCard(
-        agent: agents[i],
-        onChat: () => _openAgent(agents[i]),
-      ),
-    );
-  }
-}
-
-/// Room card for the Agent Teams tab (delete affordance included).
-class _TeamCard extends StatelessWidget {
-  const _TeamCard({required this.team, required this.onOpen, required this.onDelete});
-
-  final AgentTeam team;
-  final VoidCallback onOpen;
-  final VoidCallback onDelete;
-
-  @override
-  Widget build(BuildContext context) {
-    final members = <Agent>[
-      for (final id in team.agentIds)
-        if (agentById(id) != null) agentById(id)!,
-    ];
-    final shown = members.take(3).toList();
-    return TeamlyCard(
-      onTap: onOpen,
-      child: Row(
-        children: <Widget>[
-          SizedBox(
-            width: 72,
-            height: 44,
-            child: Stack(
-              children: <Widget>[
-                for (var i = 0; i < shown.length; i++)
-                  Positioned(
-                    left: i * 18.0,
-                    top: 0,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(color: context.palette.surface, width: 2),
-                      ),
-                      child: AgentAvatar(artId: shown[i].artId, size: 40),
+    // Flat messenger rows — avatar · gap · group name.
+    return ListView(
+      padding: const EdgeInsets.only(top: 4, bottom: TeamlySpace.s6),
+      children: <Widget>[
+        for (final t in teams)
+          InkWell(
+            onLongPress: () => _deleteTeam(t),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter, vertical: 8),
+              child: Row(
+                children: <Widget>[
+                  AgentAvatar(artId: t.avatarArt((id) => agentById(id)?.artId ?? ''), size: 46),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          t.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: TeamlyColors.ink900,
+                            fontSize: 15.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          t.subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: TeamlyColors.ink500, fontSize: 13),
+                        ),
+                      ],
                     ),
                   ),
-              ],
+                ],
+              ),
             ),
           ),
-          const SizedBox(width: TeamlySpace.s3),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  team.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: TeamlyColors.ink900, fontSize: 16, fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  team.subtitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: TeamlyColors.ink500, fontSize: 13),
-                ),
-              ],
-            ),
-          ),
-          IconButton(
-            onPressed: onDelete,
-            icon: const Icon(Icons.delete_outline_rounded, size: 19),
-            color: TeamlyColors.ink300,
-            tooltip: 'Delete team',
-          ),
-          const SizedBox(width: 4),
-          const Icon(Icons.chevron_right_rounded, color: TeamlyColors.ink300),
-        ],
-      ),
+      ],
     );
   }
 }

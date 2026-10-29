@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 
 import '../services/social_service.dart';
 import '../theme.dart';
-import '../widgets/teamly/kit.dart';
 
 /// ---------------------------------------------------------------------------
 /// PostComposerPage — the full-screen composer behind the nav's center Post

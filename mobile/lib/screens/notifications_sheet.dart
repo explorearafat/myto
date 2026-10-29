@@ -1,14 +1,14 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
-import '../services/social_service.dart';
-import '../theme.dart';
-import '../widgets/teamly/kit.dart';
+import '../../services/notification_service.dart';
+import '../../theme.dart';
 
 /// ---------------------------------------------------------------------------
-/// NotificationsSheet — what the Discover header's bell opens: recent comments
-/// on my posts (and my posts' like counts), gathered in bounded queries.
+/// NotificationsSheet — what the Discover header's bell opens. Everything the
+/// NotificationService filed while the app was open: likes, comments, shares
+/// on my posts, and new posts from people I follow. Opening the sheet marks
+/// everything read.
 /// ---------------------------------------------------------------------------
 Future<void> showNotificationsSheet(BuildContext context) async {
   await showModalBottomSheet<void>(
@@ -22,16 +22,6 @@ Future<void> showNotificationsSheet(BuildContext context) async {
   );
 }
 
-class _ActivityItem {
-  const _ActivityItem({required this.kind, required this.text, required this.who, required this.whenMs, required this.postPreview});
-
-  final String kind; // 'comment' | 'like'
-  final String text;
-  final String who;
-  final int whenMs;
-  final String postPreview;
-}
-
 class _NotificationsSheet extends StatefulWidget {
   const _NotificationsSheet();
 
@@ -40,55 +30,23 @@ class _NotificationsSheet extends StatefulWidget {
 }
 
 class _NotificationsSheetState extends State<_NotificationsSheet> {
-  List<_ActivityItem>? _items;
+  String? _uid;
 
   @override
   void initState() {
     super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    final me = FirebaseAuth.instance.currentUser?.uid;
-    if (me == null || me.isEmpty) {
-      if (mounted) setState(() => _items = const <_ActivityItem>[]);
-      return;
-    }
-    final items = <_ActivityItem>[];
-    try {
-      final myPosts = await FirebaseFirestore.instance
-          .collection('posts')
-          .where('uid', isEqualTo: me)
-          .orderBy('createdAt', descending: true)
-          .limit(10)
-          .get();
-      for (final post in myPosts.docs) {
-        final preview = ((post.data()['text'] ?? '') as String);
-        final comments = await post.reference.collection('comments').limit(20).get();
-        for (final c in comments.docs) {
-          final d = c.data();
-          items.add(_ActivityItem(
-            kind: 'comment',
-            text: (d['text'] ?? '') as String,
-            who: (d['name'] ?? 'Someone') as String,
-            whenMs: (d['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0,
-            postPreview: preview.length > 60 ? preview.substring(0, 60) : preview,
-          ));
-        }
-      }
-      items.sort((a, b) => b.whenMs.compareTo(a.whenMs));
-    } on FirebaseException catch (_) {
-      // Reading notifications is best-effort.
-    }
-    if (mounted) setState(() => _items = items);
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    _uid = uid.isEmpty ? null : uid;
+    if (_uid != null) NotificationService.markAllRead(_uid!);
   }
 
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
+    final uid = _uid;
     return SafeArea(
       child: SizedBox(
-        height: MediaQuery.of(context).size.height * 0.6,
+        height: MediaQuery.of(context).size.height * 0.65,
         child: Column(
           children: <Widget>[
             Padding(
@@ -111,74 +69,63 @@ class _NotificationsSheetState extends State<_NotificationsSheet> {
             ),
             const Divider(height: 1),
             Expanded(
-              child: _items == null
-                  ? const Center(child: CircularProgressIndicator())
-                  : _items!.isEmpty
-                      ? Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: <Widget>[
-                              Icon(Icons.notifications_off_rounded, size: 36, color: palette.muted),
-                              const SizedBox(height: 10),
-                              const Text(
-                                'No activity yet —\ncomments on your posts will show up here.',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(fontSize: 13.5, height: 1.5, color: TeamlyColors.ink500),
-                              ),
-                            ],
-                          ),
-                        )
-                      : ListView(
+              child: uid == null
+                  ? const Center(
+                      child: Text(
+                        'Sign in to see notifications about your posts.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 13.5, color: TeamlyColors.ink500),
+                      ),
+                    )
+                  : StreamBuilder<List<AppNotification>>(
+                      stream: NotificationService.stream(uid),
+                      builder: (context, snap) {
+                        final items = snap.data ?? const <AppNotification>[];
+                        if (items.isEmpty) {
+                          return Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: <Widget>[
+                                Icon(Icons.notifications_off_rounded, size: 36, color: palette.muted),
+                                const SizedBox(height: 10),
+                                const Text(
+                                  'No notifications yet.\nLikes, comments, shares on your posts and\n'
+                                  'new posts from people you follow land here.',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(fontSize: 13.5, height: 1.5, color: TeamlyColors.ink500),
+                                ),
+                              ],
+                            ),
+                          );
+                        }
+                        return ListView(
                           padding: const EdgeInsets.all(TeamlySpace.gutter),
                           children: <Widget>[
-                            for (final item in _items!)
+                            for (final n in items)
                               Padding(
                                 padding: const EdgeInsets.only(bottom: TeamlySpace.s3),
                                 child: Row(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: <Widget>[
-                                    CircleAvatar(
-                                      radius: 16,
-                                      backgroundColor: palette.tagBg,
-                                      child: Text(
-                                        item.who.isNotEmpty ? item.who.substring(0, 1).toUpperCase() : '?',
-                                        style: const TextStyle(
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w700,
-                                          color: TeamlyColors.greenText,
-                                        ),
-                                      ),
-                                    ),
+                                    _NotifAvatar(n: n),
                                     const SizedBox(width: TeamlySpace.s3),
                                     Expanded(
                                       child: Column(
                                         crossAxisAlignment: CrossAxisAlignment.start,
                                         children: <Widget>[
-                                          RichText(
-                                            text: TextSpan(
-                                              style: const TextStyle(
-                                                fontSize: 13.5,
-                                                height: 1.35,
-                                                color: TeamlyColors.ink900,
-                                              ),
-                                              children: <TextSpan>[
-                                                TextSpan(
-                                                  text: item.who,
-                                                  style: const TextStyle(fontWeight: FontWeight.w700),
-                                                ),
-                                                const TextSpan(text: ' commented: '),
-                                                TextSpan(
-                                                  text: item.text,
-                                                  style: const TextStyle(color: TeamlyColors.ink700),
-                                                ),
-                                              ],
+                                          Text(
+                                            n.headline(),
+                                            style: const TextStyle(
+                                              fontSize: 13.5,
+                                              height: 1.35,
+                                              color: TeamlyColors.ink900,
                                             ),
                                           ),
-                                          if (item.postPreview.isNotEmpty)
+                                          if (n.postPreview.isNotEmpty)
                                             Padding(
                                               padding: const EdgeInsets.only(top: 2),
                                               child: Text(
-                                                'on: ${item.postPreview}',
+                                                'on: ${n.postPreview}',
                                                 maxLines: 1,
                                                 overflow: TextOverflow.ellipsis,
                                                 style: const TextStyle(
@@ -187,18 +134,95 @@ class _NotificationsSheetState extends State<_NotificationsSheet> {
                                                 ),
                                               ),
                                             ),
+                                          if (n.atMs > 0)
+                                            Padding(
+                                              padding: const EdgeInsets.only(top: 2),
+                                              child: Text(
+                                                _relTime(n.atMs),
+                                                style: const TextStyle(
+                                                  fontSize: 11,
+                                                  color: TeamlyColors.ink300,
+                                                ),
+                                              ),
+                                            ),
                                         ],
                                       ),
                                     ),
+                                    _KindIcon(kind: n.kind),
                                   ],
                                 ),
                               ),
                           ],
-                        ),
+                        );
+                      },
+                    ),
             ),
           ],
         ),
       ),
     );
+  }
+
+  String _relTime(int ms) {
+    final diff = DateTime.now().millisecondsSinceEpoch - ms;
+    if (diff < 60000) return 'just now';
+    if (diff < 3600000) return '${diff ~/ 60000}m ago';
+    if (diff < 86400000) return '${diff ~/ 3600000}h ago';
+    return '${diff ~/ 86400000}d ago';
+  }
+}
+
+class _NotifAvatar extends StatelessWidget {
+  const _NotifAvatar({required this.n});
+
+  final AppNotification n;
+
+  @override
+  Widget build(BuildContext context) {
+    if (n.fromPhoto.isNotEmpty) {
+      return ClipOval(
+        child: Image.network(
+          n.fromPhoto,
+          width: 32,
+          height: 32,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _initial(context),
+        ),
+      );
+    }
+    return _initial(context);
+  }
+
+  Widget _initial(BuildContext context) {
+    return CircleAvatar(
+      radius: 16,
+      backgroundColor: context.palette.tagBg,
+      child: Text(
+        n.fromName.isNotEmpty ? n.fromName.substring(0, 1).toUpperCase() : '?',
+        style: const TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w700,
+          color: TeamlyColors.greenText,
+        ),
+      ),
+    );
+  }
+}
+
+class _KindIcon extends StatelessWidget {
+  const _KindIcon({required this.kind});
+
+  final String kind;
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, color) = switch (kind) {
+      'like' => (Icons.favorite_rounded, TeamlyColors.danger),
+      'comment' => (Icons.chat_bubble_rounded, TeamlyColors.greenText),
+      'share' => (Icons.repeat_rounded, TeamlyColors.ink700),
+      'post' => (Icons.edit_note_rounded, TeamlyColors.greenText),
+      _ => (Icons.notifications_rounded, TeamlyColors.ink500),
+    };
+    return Icon(icon, size: 17, color: color);
   }
 }

@@ -16,24 +16,22 @@ import '../widgets/agent_avatar.dart';
 import '../widgets/teamly/kit.dart';
 import 'dm_chat_screen.dart';
 import 'myto_chat_screen.dart';
-import 'post_composer_page.dart';
 import 'profile_screen.dart';
 import 'team_chat_screen.dart';
 
 /// ---------------------------------------------------------------------------
-/// ChatHomeScreen — the app's LANDING tab, styled on the Teamly reference:
-/// avatar · Myto AI · green + header, the search pill, the Myto assistant row,
-/// then grouped card lists — AGENTS (the 1-to-1 roster), ROOMS (research
-/// groups), CHATS (saved conversations) and MESSAGES (community DMs — merged
-/// here from the old Messages tab so everything conversation-shaped lives in
-/// one list). Every row opens as a pushed route, so the bottom nav disappears
-/// inside a conversation.
+/// ChatHomeScreen — the app's LANDING tab, rebuilt messenger-style:
+///
+///   user avatar + name (→ profile) · search pill
+///   flat 1-by-1 rows, no cards or borders — AGENTS (the ten-chat roster),
+///   GROUPS (the user's created agent groups), CHATS (saved conversations)
+///   and MESSAGES (community DMs).
+///
+/// Every row opens as a pushed route, so the bottom nav disappears inside a
+/// conversation.
 /// ---------------------------------------------------------------------------
 class ChatHomeScreen extends StatefulWidget {
-  const ChatHomeScreen({super.key, this.onCompose});
-
-  /// The header's green + — opens the Discover post composer.
-  final VoidCallback? onCompose;
+  const ChatHomeScreen({super.key});
 
   @override
   State<ChatHomeScreen> createState() => _ChatHomeScreenState();
@@ -42,8 +40,7 @@ class ChatHomeScreen extends StatefulWidget {
 class _ChatHomeScreenState extends State<ChatHomeScreen> {
   String _query = '';
   final Map<String, DiscoverProfile?> _dmProfiles = <String, DiscoverProfile?>{};
-  // The old Search tab's job, merged in: community people + post hits under
-  // the chat matches, debounced one-shots.
+  // Community people + post hits under the chat matches, debounced one-shots.
   Timer? _searchDebounce;
   List<DiscoverProfile>? _people;
   List<FeedPost>? _postHits;
@@ -128,12 +125,6 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
     );
   }
 
-  void _openMytoChat() {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => const MytoChatScreen()),
-    );
-  }
-
   void _openProfile() {
     Navigator.of(context).push(
       MaterialPageRoute<void>(builder: (_) => const ProfileScreen()),
@@ -141,9 +132,6 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
   }
 
   AgentTeam? _roomById(String id) {
-    for (final t in kSeedTeams) {
-      if (t.id == id) return t;
-    }
     return context.read<StudioStore>().teamById(id);
   }
 
@@ -187,6 +175,7 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
     final studio = context.watch<StudioStore>();
     final conversations = context.watch<ConversationStore>().conversations;
     final user = FirebaseAuth.instance.currentUser;
+    final userName = (user?.displayName ?? '').trim();
 
     final q = _query.trim().toLowerCase();
     final rooms = studio.teams
@@ -205,32 +194,32 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
         bottom: false,
         child: Column(
           children: <Widget>[
-            // ── Header: avatar · Myto AI · green + ────────────────────────
+            // ── Header: the user's picture + name — that's all ─────────────
             Padding(
               padding: const EdgeInsets.fromLTRB(
                 TeamlySpace.gutter, TeamlySpace.s3, TeamlySpace.gutter, 0,
               ),
-              child: Row(
-                children: <Widget>[
-                  GestureDetector(
-                    onTap: _openProfile,
-                    child: _UserAvatar(photo: user?.photoURL ?? '', name: user?.displayName ?? 'You'),
-                  ),
-                  const Spacer(),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: <Widget>[
-                      const AgentAvatar(artId: 'myto', size: 30),
-                      const SizedBox(width: TeamlySpace.s2),
-                      const Text(
-                        'Myto AI',
-                        style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800, color: TeamlyColors.ink900),
+              child: GestureDetector(
+                onTap: _openProfile,
+                behavior: HitTestBehavior.opaque,
+                child: Row(
+                  children: <Widget>[
+                    _UserAvatar(photo: user?.photoURL ?? '', name: user?.displayName ?? 'You'),
+                    const SizedBox(width: TeamlySpace.s3),
+                    Expanded(
+                      child: Text(
+                        userName.isEmpty ? 'You' : userName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w800,
+                          color: TeamlyColors.ink900,
+                        ),
                       ),
-                    ],
-                  ),
-                  const Spacer(),
-                  TeamlyFab(icon: Icons.add_rounded, onPressed: widget.onCompose ?? _compose),
-                ],
+                    ),
+                  ],
+                ),
               ),
             ),
             const SizedBox(height: TeamlySpace.s4),
@@ -241,41 +230,27 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
                 onChanged: _onSearch,
               ),
             ),
-            const SizedBox(height: TeamlySpace.s3),
+            const SizedBox(height: TeamlySpace.s2),
             Expanded(
               child: ListView(
-                padding: const EdgeInsets.only(bottom: TeamlySpace.s6),
+                padding: const EdgeInsets.only(top: 4, bottom: TeamlySpace.s6),
                 children: <Widget>[
-                  // ── The assistant — the always-on companion row ──────────
-                  _row(
-                    avatar: const AgentAvatar(artId: 'myto', size: 46, dot: true),
-                    title: 'Myto',
-                    subtitle: 'The assistant — coding, research, writing',
-                    badge: Icons.auto_awesome,
-                    onTap: _openMytoChat,
-                  ),
-                  // ── Agents ────────────────────────────────────────────────
-                  if (agents.isNotEmpty) ...<Widget>[
-                    TeamlyGroupHeader(label: 'AGENTS', count: agents.length),
+                  // ── Agents — the ten-chat roster, messenger rows ─────────
+                  if (agents.isNotEmpty)
                     for (final a in agents)
-                      _row(
+                      _chatRow(
                         avatar: AgentAvatar(artId: a.artId, size: 46),
                         title: a.name,
                         subtitle: a.description,
                         onTap: () => _openAgent(a),
                       ),
-                  ],
-                  // ── Rooms ─────────────────────────────────────────────────
+                  // ── Groups — the user's created agent groups ─────────────
                   if (rooms.isNotEmpty) ...<Widget>[
-                    TeamlyGroupHeader(label: 'ROOMS', count: rooms.length),
-                    for (final r in rooms) _roomRow(r, studio),
+                    for (final r in rooms) _groupRow(r, studio),
                   ],
-                  // ── Saved conversations ───────────────────────────────────
-                  if (saved.isNotEmpty) ...<Widget>[
-                    TeamlyGroupHeader(label: 'CHATS', count: saved.length),
-                    for (final c in saved) _conversationRow(c),
-                  ],
-                  // ── Community DMs ─────────────────────────────────────────
+                  // ── Saved conversations ──────────────────────────────────
+                  for (final c in saved) _conversationRow(c),
+                  // ── Community DMs ────────────────────────────────────────
                   if (_me.isNotEmpty)
                     StreamBuilder<List<DmThread>>(
                       stream: DmService.streamThreads(_me),
@@ -283,92 +258,40 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
                         final threads = (snap.data ?? const <DmThread>[])
                             .where((t) => q.isEmpty)
                             .toList(growable: false);
-                        if (threads.isEmpty) return const SizedBox.shrink();
                         return Column(
                           children: <Widget>[
-                            TeamlyGroupHeader(label: 'MESSAGES', count: threads.length),
                             for (final t in threads) _dmRow(t),
                           ],
                         );
                       },
                     ),
-                  // ── Community people (from the old Search tab) ────────────
-                  if (_people != null && _people!.isNotEmpty) ...<Widget>[
-                    TeamlyGroupHeader(label: 'PEOPLE', count: _people!.length),
+                  // ── Community people (search hits) ────────────────────────
+                  if (_people != null)
                     for (final p in _people!)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter, vertical: 4),
-                        child: TeamlyCard(
-                          onTap: () => _startChatWith(p.uid, p.name, p.photo),
-                          padding: const EdgeInsets.all(TeamlySpace.s4),
-                          child: Row(
-                            children: <Widget>[
-                              _UserAvatar(photo: p.photo, name: p.name, size: 42),
-                              const SizedBox(width: TeamlySpace.s3),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: <Widget>[
-                                    Text(
-                                      p.name,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                        color: TeamlyColors.ink900,
-                                        fontSize: 15.5,
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                                    Text(
-                                      p.username.isEmpty ? 'On Myto' : '@${p.username}',
-                                      style: const TextStyle(color: TeamlyColors.greenText, fontSize: 12.5),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              const Icon(Icons.chat_bubble_outline_rounded, size: 18, color: TeamlyColors.ink300),
-                            ],
-                          ),
-                        ),
+                      _chatRow(
+                        avatar: _UserAvatar(photo: p.photo, name: p.name, size: 46),
+                        title: p.name,
+                        subtitle: p.username.isEmpty ? 'On Myto' : '@${p.username}',
+                        onTap: () => _startChatWith(p.uid, p.name, p.photo),
                       ),
-                  ],
-                  // ── Community post hits ───────────────────────────────────
-                  if (_postHits != null && _postHits!.isNotEmpty) ...<Widget>[
-                    TeamlyGroupHeader(label: 'DISCOVER', count: _postHits!.length),
+                  // ── Community post hits ──────────────────────────────────
+                  if (_postHits != null && _postHits!.isNotEmpty)
                     for (final post in _postHits!)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter, vertical: 4),
-                        child: TeamlyCard(
-                          padding: const EdgeInsets.all(TeamlySpace.s4),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: <Widget>[
-                              Text(
-                                post.name,
-                                style: const TextStyle(
-                                  color: TeamlyColors.ink900,
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                post.text,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(color: TeamlyColors.ink500, fontSize: 13, height: 1.4),
-                              ),
-                            ],
-                          ),
-                        ),
+                      _chatRow(
+                        avatar: _UserAvatar(photo: '', name: post.name, size: 46),
+                        title: post.name,
+                        subtitle: post.text,
+                        onTap: () {},
                       ),
-                  ],
-                  if (agents.isEmpty && rooms.isEmpty && saved.isEmpty)
+                  if (agents.isEmpty &&
+                      rooms.isEmpty &&
+                      saved.isEmpty &&
+                      (_people == null || _people!.isEmpty))
                     Padding(
                       padding: const EdgeInsets.all(TeamlySpace.s8),
                       child: Text(
                         _query.trim().isEmpty
-                            ? 'Pick an agent to start — or tap Myto for the assistant.'
+                            ? 'Pick an agent to start chatting.'
                             : 'Nothing matches “$_query”.',
                         textAlign: TextAlign.center,
                         style: const TextStyle(color: TeamlyColors.ink300, fontSize: 14, height: 1.5),
@@ -383,39 +306,23 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
     );
   }
 
-  Future<void> _compose() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => PostComposerPage(
-          onPosted: () {
-            if (!mounted) return;
-            ScaffoldMessenger.of(context)
-              ..hideCurrentSnackBar()
-              ..showSnackBar(const SnackBar(content: Text('Posted to Discover.')));
-          },
-        ),
-      ),
-    );
-  }
+  // ── Rows — flat, messenger-style: avatar · gap · text. No boxes. ────────────
 
-  // ── Rows ────────────────────────────────────────────────────────────────────
-
-  Widget _row({
+  Widget _chatRow({
     required Widget avatar,
     required String title,
     required String subtitle,
     required VoidCallback onTap,
-    IconData? badge,
+    String? trailing,
   }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter, vertical: 4),
-      child: TeamlyCard(
-        onTap: onTap,
-        padding: const EdgeInsets.all(TeamlySpace.s4),
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter, vertical: 8),
         child: Row(
           children: <Widget>[
             avatar,
-            const SizedBox(width: TeamlySpace.s3),
+            const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -430,150 +337,61 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
                       fontWeight: FontWeight.w700,
                     ),
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: TeamlyColors.ink500, fontSize: 13),
-                  ),
+                  if (subtitle.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: TeamlyColors.ink500, fontSize: 13),
+                    ),
+                  ],
                 ],
               ),
             ),
-            if (badge != null) ...<Widget>[
-              const SizedBox(width: TeamlySpace.s2),
-              Container(
-                width: 26,
-                height: 26,
-                decoration: BoxDecoration(
-                  color: context.palette.chip,
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(badge, size: 14, color: TeamlyColors.ink700),
+            if (trailing != null)
+              Text(
+                trailing,
+                style: const TextStyle(color: TeamlyColors.ink300, fontSize: 11),
               ),
-            ],
-            const Icon(Icons.chevron_right_rounded, size: 20, color: TeamlyColors.ink300),
           ],
         ),
       ),
     );
   }
 
-  Widget _roomRow(AgentTeam room, StudioStore studio) {
+  Widget _groupRow(AgentTeam room, StudioStore studio) {
     final members = <Agent>[
       for (final id in room.agentIds)
         if (agentById(id) != null) agentById(id)!,
     ];
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter, vertical: 4),
-      child: TeamlyCard(
-        onTap: () => _openRoom(room),
-        padding: const EdgeInsets.all(TeamlySpace.s4),
-        child: Row(
-          children: <Widget>[
-            SizedBox(
-              width: 62,
-              height: 46,
-              child: Stack(
-                children: <Widget>[
-                  for (var i = 0; i < members.take(3).length; i++)
-                    Positioned(
-                      left: i * 16.0,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          border: Border.all(color: context.palette.surface, width: 2),
-                        ),
-                        child: AgentAvatar(artId: members[i].artId, size: 42),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            const SizedBox(width: TeamlySpace.s3),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    room.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: TeamlyColors.ink900,
-                      fontSize: 15.5,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    room.subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: TeamlyColors.ink500, fontSize: 13),
-                  ),
-                ],
-              ),
-            ),
-            const Icon(Icons.chevron_right_rounded, size: 20, color: TeamlyColors.ink300),
-          ],
-        ),
-      ),
+    final art = room.avatarArt((id) => agentById(id)?.artId ?? '');
+    return _chatRow(
+      avatar: AgentAvatar(artId: art, size: 46),
+      title: room.name,
+      subtitle: room.subtitle,
+      onTap: () => _openRoom(room),
+      trailing: members.isEmpty ? null : '${members.length}',
     );
   }
 
   Widget _conversationRow(Conversation c) {
     final channelAvatar = c.channel == null
-        ? const AgentAvatar(artId: 'myto', size: 42)
+        ? const AgentAvatar(artId: 'asset:agent-08', size: 46)
         : c.channel!.startsWith('room:')
-            ? const AgentAvatar(artId: 'project-manager', size: 42)
+            ? const AgentAvatar(artId: 'asset:agent-09', size: 46)
             : AgentAvatar(
-                artId: agentById(TeamChatStore.idFromKey(c.channel!))?.artId ?? 'prompt-engineer',
-                size: 42,
+                artId: agentById(TeamChatStore.idFromKey(c.channel!))?.artId ?? 'asset:agent-01',
+                size: 46,
               );
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter, vertical: 4),
-      child: TeamlyCard(
-        onTap: () => _openSaved(c),
-        padding: const EdgeInsets.all(TeamlySpace.s4),
-        child: Row(
-          children: <Widget>[
-            channelAvatar,
-            const SizedBox(width: TeamlySpace.s3),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    c.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: TeamlyColors.ink900,
-                      fontSize: 15.5,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    c.messages.isEmpty
-                        ? 'New chat'
-                        : c.messages.last.content.replaceAll(RegExp(r'\s+'), ' '),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: TeamlyColors.ink500, fontSize: 13),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: TeamlySpace.s2),
-            Text(
-              _timeLabel(c.updatedAt),
-              style: const TextStyle(color: TeamlyColors.ink300, fontSize: 11),
-            ),
-          ],
-        ),
-      ),
+    return _chatRow(
+      avatar: channelAvatar,
+      title: c.title,
+      subtitle: c.messages.isEmpty
+          ? 'New chat'
+          : c.messages.last.content.replaceAll(RegExp(r'\s+'), ' '),
+      onTap: () => _openSaved(c),
+      trailing: _timeLabel(c.updatedAt),
     );
   }
 
@@ -581,43 +399,11 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
     final other = thread.otherUid(_me);
     if (other.isNotEmpty) _loadDmProfile(other);
     final p = _dmProfiles[other];
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.gutter, vertical: 4),
-      child: TeamlyCard(
-        onTap: () => _openDm(thread),
-        padding: const EdgeInsets.all(TeamlySpace.s4),
-        child: Row(
-          children: <Widget>[
-            _UserAvatar(photo: p?.photo ?? '', name: p?.name ?? '?', size: 42),
-            const SizedBox(width: TeamlySpace.s3),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    p?.name ?? 'Myto user',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: TeamlyColors.ink900,
-                      fontSize: 15.5,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Open conversation',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: TeamlyColors.ink500, fontSize: 13),
-                  ),
-                ],
-              ),
-            ),
-            const Icon(Icons.chevron_right_rounded, size: 20, color: TeamlyColors.ink300),
-          ],
-        ),
-      ),
+    return _chatRow(
+      avatar: _UserAvatar(photo: p?.photo ?? '', name: p?.name ?? '?', size: 46),
+      title: p?.name ?? 'Myto user',
+      subtitle: 'Open conversation',
+      onTap: () => _openDm(thread),
     );
   }
 }

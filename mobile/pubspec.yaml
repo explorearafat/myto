@@ -1,7 +1,7 @@
 name: sylor
 description: "Myto — a local-first AI coding workspace. The mobile chat companion."
 publish_to: "none"
-version: 0.12.3+20
+version: 0.13.0+21
 
 environment:
   sdk: ">=3.6.0 <4.0.0"
@@ -42,6 +42,10 @@ dependencies:
   # (Android SpeechRecognizer); degrades gracefully to a snackbar when unavailable or denied.
   speech_to_text: ^7.0.0
 
+  # Group-chat photo upload: pick from gallery, copy into app documents storage.
+  image_picker: ^1.1.2
+  path_provider: ^2.1.4
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -52,6 +56,10 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  # The ten chat agents' mascot portraits (bundled with the app).
+  assets:
+    - assets/agents/chat/
 
   # The cursive wordmark ("Myto" on the Discover header) — Dancing Script (OFL).
   fonts:
