@@ -86,7 +86,7 @@ export function analyseCoin({ coin, price, open24, hourly, daily }) {
     smaFast: fast,
     smaSlow: slow,
     weekTrendPct: weekTrend,
-    strength: score * 10 + Math.min(Math.max(Math.abs(weekTrendPct), 0), 20),
+    strength: score * 10 + Math.min(Math.max(Math.abs(weekTrend), 0), 20),
   };
 }
 

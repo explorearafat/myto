@@ -40,3 +40,7 @@ coverage/
 
 # Uploads staging area (runtime artifacts, not source)
 /uploads/
+
+# Firebase Admin service-account keys — never commit
+service-account*.json
+sylor-29cab-*.json
