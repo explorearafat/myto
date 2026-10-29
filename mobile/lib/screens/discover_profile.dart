@@ -355,8 +355,13 @@ class _DiscoverProfileViewState extends State<DiscoverProfileView> {
     final profile = widget.profile;
     final postCount = _posts?.length ?? 0;
     final list = _tab == 'posts' ? _posts : _saved;
-    return ListView(
-      padding: const EdgeInsets.all(TeamlySpace.gutter),
+    // A Column, NOT a ListView: this view is embedded in the ProfileScreen's
+    // own scrolling ListView, and a nested viewport-based ListView gets
+    // unbounded height there — the layout exception that rendered the whole
+    // profile body blank in release builds. The outer screen does the
+    // scrolling for both.
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
         // ── Instagram-style identity header ────────────────────────────────
         Row(
