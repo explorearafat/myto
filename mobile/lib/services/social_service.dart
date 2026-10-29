@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 
 /// ---------------------------------------------------------------------------
@@ -596,6 +597,17 @@ extension DiscoverProfiles on SocialService {
       if (!existingProfile.exists) data['createdAt'] = FieldValue.serverTimestamp();
       batch.set(profileRef, data, SetOptions(merge: true));
       await batch.commit();
+      // Keep the signed-in identity in step: the chat headers and the message
+      // list read the AUTH display name, so a profile rename must land there
+      // too or the old name lingers everywhere outside Discover.
+      try {
+        final user = FirebaseAuth.instance.currentUser;
+        if (user != null && name.trim().isNotEmpty && user.displayName != name.trim()) {
+          await user.updateProfile(displayName: name.trim());
+        }
+      } catch (_) {
+        // Cosmetic sync — a failure must not fail the save.
+      }
       return true;
     } on FirebaseException {
       // Rules/permission/network failure — the caller shows a message instead

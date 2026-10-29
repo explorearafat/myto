@@ -148,6 +148,11 @@ class NotificationService {
     // ── Watcher 2: new posts from people I follow ────────────────────────────
     _watchFollowedPosts();
 
+    // Backfill: surface engagement from the LAST 24 HOURS that this device has
+    // never notified about (seen-ids persist in shared_preferences), so the
+    // bell has content on the very first open instead of only after watching.
+    _backfill(uid);
+
     // ── Watcher 3: direct messages (instant — thread previews stream live) ───
     _dmSub = FirebaseFirestore.instance
         .collection('threads')
@@ -190,6 +195,115 @@ class NotificationService {
     _followSub = null;
     _dmSub = null;
     _uid = null;
+  }
+
+  /// Scan my recent posts for engagement from the last 24h that was never
+  /// notified (seen-ids persisted across restarts). One-shot, best-effort.
+  Future<void> _backfill(String uid) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final seen = prefs.getStringList('sylor.notify.seen') ?? <String>[];
+      final seenSet = seen.toSet();
+      final cutoff = DateTime.now().subtract(const Duration(hours: 24)).millisecondsSinceEpoch;
+      final fresh = <AppNotification>[];
+
+      final posts = await FirebaseFirestore.instance
+          .collection('posts')
+          .where('uid', isEqualTo: uid)
+          .limit(10)
+          .get();
+      for (final post in posts.docs) {
+        final preview = ((post.data()['text'] ?? '') as String)
+            .replaceAll('\n', ' ')
+            .replaceAll(RegExp(r'\[\[crypto:[^\]]+\]\]'), '')
+            .trim();
+        final comments = await post.reference.collection('comments').limit(20).get();
+        for (final c in comments.docs) {
+          final d = c.data();
+          final actor = (d['uid'] ?? '') as String;
+          if (actor.isEmpty || actor == uid) continue;
+          final at = ((d['createdAt'] as Timestamp?)?.millisecondsSinceEpoch) ?? 0;
+          if (at < cutoff) continue;
+          final key = 'c:${c.id}';
+          if (seenSet.contains(key)) continue;
+          seenSet.add(key);
+          fresh.add(AppNotification(
+            id: 'c-${c.id}',
+            kind: 'comment',
+            fromUid: actor,
+            fromName: (d['name'] ?? 'Someone') as String,
+            fromPhoto: (d['photo'] ?? '') as String,
+            postId: post.id,
+            postPreview: preview,
+            snippet: ((d['text'] ?? '') as String).trim(),
+            atMs: at,
+            read: false,
+          ));
+        }
+        final likers = await post.reference.collection('likes').limit(30).get();
+        for (final l in likers.docs) {
+          final actor = l.id;
+          if (actor == uid) continue;
+          final key = 'l:${post.id}:$actor';
+          if (seenSet.contains(key)) continue;
+          seenSet.add(key);
+          fresh.add(AppNotification(
+            id: 'l-${post.id}-$actor',
+            kind: 'like',
+            fromUid: actor,
+            fromName: '',
+            fromPhoto: '',
+            postId: post.id,
+            postPreview: preview,
+            snippet: '',
+            atMs: DateTime.now().millisecondsSinceEpoch,
+            read: false,
+          ));
+        }
+        final sharers = await post.reference.collection('shares').limit(30).get();
+        for (final sh in sharers.docs) {
+          final actor = sh.id;
+          if (actor == uid) continue;
+          final key = 's:${post.id}:$actor';
+          if (seenSet.contains(key)) continue;
+          seenSet.add(key);
+          fresh.add(AppNotification(
+            id: 's-${post.id}-$actor',
+            kind: 'share',
+            fromUid: actor,
+            fromName: (sh.data()['name'] ?? 'Someone') as String,
+            fromPhoto: '',
+            postId: post.id,
+            postPreview: preview,
+            snippet: '',
+            atMs: DateTime.now().millisecondsSinceEpoch,
+            read: false,
+          ));
+        }
+      }
+
+      if (fresh.isNotEmpty) {
+        fresh.sort((a, b) => b.atMs.compareTo(a.atMs));
+        final batch = FirebaseFirestore.instance.batch();
+        for (final n in fresh.take(20)) {
+          batch.set(
+            FirebaseFirestore.instance.collection('users').doc(uid).collection('config').doc('notif:${n.id}'),
+            n.toMap(),
+            SetOptions(merge: true),
+          );
+        }
+        await batch.commit();
+      }
+      final trimmed = seenSet
+          .toList()
+          ..removeWhere((k) => !k.startsWith('c:') && !k.startsWith('l:') && !k.startsWith('s:'));
+      await prefs.setStringList(
+        'sylor.notify.seen',
+        trimmed.length > 500 ? trimmed.sublist(trimmed.length - 500) : trimmed,
+      );
+    } on FirebaseException {
+      // Best-effort.
+    }
   }
 
   /// Opening a thread silences further notifications for it until the next

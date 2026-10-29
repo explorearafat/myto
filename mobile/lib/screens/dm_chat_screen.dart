@@ -116,6 +116,9 @@ class _DmChatScreenState extends State<DmChatScreen> {
     setState(() => _replyTo = null);
     _flushTyping(false);
     try {
+      // Self-heal: a thread doc missing (first message after a purge) is
+      // created here, so a send never dies on the preview update.
+      await DmService.ensureThread(_me, widget.otherUid);
       await DmService.sendMessage(
         threadId: _threadId,
         from: _me,

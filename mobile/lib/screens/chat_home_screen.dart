@@ -147,7 +147,6 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
     final studio = context.watch<StudioStore>();
     final conversations = context.watch<ConversationStore>().conversations;
     final user = FirebaseAuth.instance.currentUser;
-    final userName = (user?.displayName ?? '').trim();
 
     final q = _query.trim().toLowerCase();
 
@@ -202,32 +201,41 @@ class _ChatHomeScreenState extends State<ChatHomeScreen> {
         child: Column(
           children: <Widget>[
             // ── Header: the user's picture + name — that's all ─────────────
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                TeamlySpace.gutter, TeamlySpace.s3, TeamlySpace.gutter, 0,
-              ),
-              child: GestureDetector(
-                onTap: _openProfile,
-                behavior: HitTestBehavior.opaque,
-                child: Row(
-                  children: <Widget>[
-                    _UserAvatar(photo: user?.photoURL ?? '', name: user?.displayName ?? 'You'),
-                    const SizedBox(width: TeamlySpace.s3),
-                    Expanded(
-                      child: Text(
-                        userName.isEmpty ? 'You' : userName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w800,
-                          color: TeamlyColors.ink900,
+            // userChanges() keeps it live: a profile rename (which also updates
+            // the auth display name) lands here without a restart.
+            StreamBuilder<User?>(
+              stream: FirebaseAuth.instance.userChanges(),
+              builder: (context, userSnap) {
+                final live = userSnap.data ?? user;
+                final liveName = (live?.displayName ?? '').trim();
+                return Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    TeamlySpace.gutter, TeamlySpace.s3, TeamlySpace.gutter, 0,
+                  ),
+                  child: GestureDetector(
+                    onTap: _openProfile,
+                    behavior: HitTestBehavior.opaque,
+                    child: Row(
+                      children: <Widget>[
+                        _UserAvatar(photo: live?.photoURL ?? '', name: live?.displayName ?? 'You'),
+                        const SizedBox(width: TeamlySpace.s3),
+                        Expanded(
+                          child: Text(
+                            liveName.isEmpty ? 'You' : liveName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w800,
+                              color: TeamlyColors.ink900,
+                            ),
+                          ),
                         ),
-                      ),
+                      ],
                     ),
-                  ],
-                ),
-              ),
+                  ),
+                );
+              },
             ),
             const SizedBox(height: TeamlySpace.s4),
             Padding(

@@ -37,7 +37,7 @@ class UserProfileScreen extends StatefulWidget {
 
 class _UserProfileScreenState extends State<UserProfileScreen> {
   DiscoverProfile? _profile;
-  int _postCount = 0;
+  List<FeedPost> _posts = const <FeedPost>[];
   int _followers = 0;
   int _following = 0;
   bool _followingThem = false;
@@ -75,7 +75,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       if (!mounted) return;
       setState(() {
         _profile = profile;
-        _postCount = posts.length;
+        _posts = posts;
         _followers = followers;
         _following = following;
         _followingThem = followingThem;
@@ -115,7 +115,14 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
   Future<void> _message() async {
     if (_me.isEmpty || _me == widget.uid) return;
-    await DmService.ensureThread(_me, widget.uid);
+    // Robust on purpose: a thread-create hiccup (offline, rules race) must
+    // never swallow the tap — the chat still opens and the first send retries
+    // the thread creation itself.
+    try {
+      await DmService.ensureThread(_me, widget.uid);
+    } catch (_) {
+      // The chat screen self-heals the thread on send.
+    }
     if (!mounted) return;
     NotificationService.markDmSeen(DmService.threadIdFor(_me, widget.uid));
     Navigator.of(context).push(
@@ -169,7 +176,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                           children: <Widget>[
-                            _Stat(count: '$_postCount', label: 'posts'),
+                            _Stat(count: '${_posts.length}', label: 'posts'),
                             _Stat(count: followers, label: 'followers'),
                             _Stat(count: _compact(_following), label: 'following'),
                           ],
@@ -280,6 +287,24 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                       ),
                     ],
                   ),
+                if (_posts.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: TeamlySpace.s5),
+                  const Text(
+                    'POSTS',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.1,
+                      color: TeamlyColors.ink300,
+                    ),
+                  ),
+                  const SizedBox(height: TeamlySpace.s2),
+                  for (final post in _posts)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: TeamlySpace.s3),
+                      child: _PostPreview(post: post),
+                    ),
+                ],
               ],
             ),
     );
@@ -356,5 +381,62 @@ class _Stat extends StatelessWidget {
         Text(label, style: const TextStyle(fontSize: 12.5, color: TeamlyColors.ink500)),
       ],
     );
+  }
+}
+
+/// A compact read-only post card for the profile's POSTS section.
+class _PostPreview extends StatelessWidget {
+  const _PostPreview({required this.post});
+
+  final FeedPost post;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: context.palette.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: context.palette.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            post.text,
+            maxLines: 4,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 14, height: 1.45, color: TeamlyColors.ink900),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: <Widget>[
+              const Icon(Icons.favorite_rounded, size: 14, color: TeamlyColors.danger),
+              const SizedBox(width: 4),
+              Text('${post.likeCount}', style: const TextStyle(fontSize: 12, color: TeamlyColors.ink500)),
+              const SizedBox(width: 14),
+              const Icon(Icons.chat_bubble_outline_rounded, size: 14, color: TeamlyColors.ink300),
+              const SizedBox(width: 4),
+              Text('${post.commentCount}', style: const TextStyle(fontSize: 12, color: TeamlyColors.ink500)),
+              const Spacer(),
+              Text(
+                _relTime(post.createdAtMs),
+                style: const TextStyle(fontSize: 11, color: TeamlyColors.ink300),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _relTime(int ms) {
+    if (ms == 0) return '';
+    final diff = DateTime.now().millisecondsSinceEpoch - ms;
+    if (diff < 60000) return 'now';
+    if (diff < 3600000) return '${diff ~/ 60000}m';
+    if (diff < 86400000) return '${diff ~/ 3600000}h';
+    return '${diff ~/ 86400000}d';
   }
 }

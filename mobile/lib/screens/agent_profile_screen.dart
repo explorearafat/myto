@@ -1,3 +1,5 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../services/agent_accounts.dart';
@@ -28,11 +30,17 @@ class AgentProfileScreen extends StatefulWidget {
 
 class _AgentProfileScreenState extends State<AgentProfileScreen> {
   List<FeedPost>? _posts;
+  bool _following = false;
+
+  /// Agents participate in the follow graph under a stable pseudo-uid derived
+  /// from the handle, so a follow survives roster edits.
+  String get _agentUid => 'agent:${widget.agent.handle}';
 
   @override
   void initState() {
     super.initState();
     _load();
+    _loadFollowState();
   }
 
   Future<void> _load() async {
@@ -45,6 +53,60 @@ class _AgentProfileScreenState extends State<AgentProfileScreen> {
       if (!mounted) return;
       setState(() => _posts = const <FeedPost>[]);
     }
+  }
+
+  Future<void> _loadFollowState() async {
+    final me = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (me.isEmpty) return;
+    try {
+      final edge = await FirebaseFirestore.instance
+          .collection('follows')
+          .doc(me)
+          .collection('following')
+          .doc(_agentUid)
+          .get();
+      if (!mounted) return;
+      setState(() => _following = edge.exists);
+    } on FirebaseException {
+      // Badge only.
+    }
+  }
+
+  Future<void> _toggleFollow() async {
+    final me = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (me.isEmpty) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(content: Text('Sign in to follow.')));
+      return;
+    }
+    try {
+      if (_following) {
+        await SocialService.unfollowAuthor(me, _agentUid);
+        if (!mounted) return;
+        setState(() => _following = false);
+      } else {
+        await SocialService.followAuthor(me, _agentUid);
+        if (!mounted) return;
+        setState(() => _following = true);
+      }
+    } on FirebaseException {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(content: Text('Could not update — try again.')));
+    }
+  }
+
+  void _message() {
+    // Agents are publishers, not chat partners: the button exists (the roster
+    // reads better with it) but a direct message would never get a reply.
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(
+        content: Text('AI agents do not reply to direct messages.'),
+        duration: Duration(seconds: 2),
+      ));
   }
 
   @override
@@ -96,6 +158,74 @@ class _AgentProfileScreenState extends State<AgentProfileScreen> {
                       _Stat(label: 'followers', count: agent.followersLabel),
                       _Stat(label: 'following', count: agent.followingLabel),
                     ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: TeamlySpace.s3),
+          // Follow / Message — the same row real profiles have. Follow wires
+          // into the follow graph; Message is honest about being one-way.
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: SizedBox(
+                  height: 44,
+                  child: Material(
+                    color: _following ? context.palette.chip : context.palette.accent,
+                    borderRadius: BorderRadius.circular(12),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(12),
+                      onTap: _toggleFollow,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: <Widget>[
+                          Icon(
+                            _following ? Icons.person_rounded : Icons.person_add_alt_rounded,
+                            size: 17,
+                            color: _following ? TeamlyColors.greenText : context.palette.onAccent,
+                          ),
+                          const SizedBox(width: 7),
+                          Text(
+                            _following ? 'Following' : 'Follow',
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                              color: _following ? TeamlyColors.greenText : context.palette.onAccent,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: TeamlySpace.s2),
+              Expanded(
+                child: SizedBox(
+                  height: 44,
+                  child: Material(
+                    color: context.palette.chip,
+                    borderRadius: BorderRadius.circular(12),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(12),
+                      onTap: _message,
+                      child: const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: <Widget>[
+                          Icon(Icons.chat_bubble_outline_rounded, size: 16, color: TeamlyColors.ink900),
+                          SizedBox(width: 7),
+                          Text(
+                            'Message',
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                              color: TeamlyColors.ink900,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
               ),

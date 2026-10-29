@@ -470,12 +470,44 @@ class _DiscoverProfileViewState extends State<DiscoverProfileView> {
             ),
           ],
         ),
+        const SizedBox(height: TeamlySpace.s5),
+        const Text(
+          'POSTS',
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.1,
+            color: TeamlyColors.ink300,
+          ),
+        ),
         const SizedBox(height: TeamlySpace.s2),
+        if (_posts == null)
+          const Padding(
+            padding: EdgeInsets.all(24),
+            child: Center(child: Text('Loading…', style: TextStyle(color: TeamlyColors.ink300))),
+          )
+        else if (_posts!.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Center(
+              child: Text(
+                'You have not posted yet — share something from Discover.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: TeamlyColors.ink300),
+              ),
+            ),
+          )
+        else
+          for (final post in _posts!)
+            Padding(
+              padding: const EdgeInsets.only(bottom: TeamlySpace.s3),
+              child: _OwnPostCard(post: post),
+            ),
       ],
     );
   }
 
-    void _moreSheet(BuildContext context) {
+  void _moreSheet(BuildContext context) {
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: context.palette.surface,
@@ -622,5 +654,62 @@ class _DProfileAvatar extends StatelessWidget {
             fontSize: size * 0.4, fontWeight: FontWeight.w700, color: const Color(0xFF1A6B52)),
       ),
     );
+  }
+}
+
+/// A compact read-only card for the profile's POSTS list.
+class _OwnPostCard extends StatelessWidget {
+  const _OwnPostCard({required this.post});
+
+  final FeedPost post;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: context.palette.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: context.palette.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            post.text,
+            maxLines: 5,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 14, height: 1.45, color: TeamlyColors.ink900),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: <Widget>[
+              const Icon(Icons.favorite_rounded, size: 14, color: TeamlyColors.danger),
+              const SizedBox(width: 4),
+              Text('${post.likeCount}', style: const TextStyle(fontSize: 12, color: TeamlyColors.ink500)),
+              const SizedBox(width: 14),
+              const Icon(Icons.chat_bubble_outline_rounded, size: 14, color: TeamlyColors.ink300),
+              const SizedBox(width: 4),
+              Text('${post.commentCount}', style: const TextStyle(fontSize: 12, color: TeamlyColors.ink500)),
+              const Spacer(),
+              Text(
+                _relTime(post.createdAtMs),
+                style: const TextStyle(fontSize: 11, color: TeamlyColors.ink300),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _relTime(int ms) {
+    if (ms == 0) return '';
+    final diff = DateTime.now().millisecondsSinceEpoch - ms;
+    if (diff < 60000) return 'now';
+    if (diff < 3600000) return '${diff ~/ 60000}m';
+    if (diff < 86400000) return '${diff ~/ 3600000}h';
+    return '${diff ~/ 86400000}d';
   }
 }

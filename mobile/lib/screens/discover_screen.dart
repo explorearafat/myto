@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import '../services/agent_accounts.dart';
 import '../services/agent_feed_service.dart';
 import '../services/auth_service.dart';
+import '../services/verified.dart';
 import '../services/social_service.dart';
 import '../theme.dart';
 import '../widgets/crypto_widget.dart';
@@ -319,15 +320,27 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
       liked: _likedIds.contains(post.id),
       saved: _savedIds.contains(post.id),
       following: _followingIds.contains(post.uid),
-      onToggleLike: () => _guard(
-        () async {
-          final nowLiked = await SocialService.toggleLike(post.id, _uid);
+      onToggleLike: () {
+        // Optimistic: the heart flips instantly from local state; the write
+        // lands in the background and reverts on failure. No await in the UI
+        // path — the feed never waits on the network for a like.
+        final wasLiked = _likedIds.contains(post.id);
+        setState(() => wasLiked ? _likedIds.remove(post.id) : _likedIds.add(post.id));
+        SocialService.toggleLike(post.id, _uid).then((nowLiked) {
+          if (!mounted) return;
           setState(() {
-            nowLiked ? _likedIds.add(post.id) : _likedIds.remove(post.id);
+            if (nowLiked) {
+              _likedIds.add(post.id);
+            } else {
+              _likedIds.remove(post.id);
+            }
           });
-        },
-        '',
-      ),
+        }).catchError((_) {
+          if (!mounted) return;
+          setState(() => wasLiked ? _likedIds.add(post.id) : _likedIds.remove(post.id));
+          _toast('Could not save that — try again.');
+        });
+      },
       onShare: () => _guard(
         () async {
           final created = await SocialService.sharePost(post.id, uid: _uid, name: _name);
@@ -405,6 +418,7 @@ class _StaggeredFeed extends StatelessWidget {
       itemCount: posts.length,
       itemBuilder: (context, i) {
         return _StaggerIn(
+          key: ValueKey<String>(posts[i].id),
           delay: Duration(milliseconds: 60 * (i < 10 ? i : 10)),
           child: Padding(
             padding: const EdgeInsets.only(bottom: TeamlySpace.s3),
@@ -417,7 +431,7 @@ class _StaggeredFeed extends StatelessWidget {
 }
 
 class _StaggerIn extends StatefulWidget {
-  const _StaggerIn({required this.delay, required this.child});
+  const _StaggerIn({super.key, required this.delay, required this.child});
 
   final Duration delay;
   final Widget child;
@@ -516,15 +530,9 @@ class _PostCard extends StatelessWidget {
                     children: <Widget>[
                       Row(
                         children: <Widget>[
-                          Flexible(
-                            child: Text(
-                              post.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: TeamlyColors.ink900),
-                            ),
-                          ),
-                          // Blue verified tick — publisher accounts only.
+                          _AuthorLabel(post: post, agent: agent),
+                          // Blue verified tick — publisher accounts and the
+                          // verified real account.
                           if (agent != null) ...<Widget>[
                             const SizedBox(width: 4),
                             const _VerifiedTick(size: 15),
@@ -1135,6 +1143,73 @@ class _SearchAvatar extends StatelessWidget {
         name.trim().isEmpty ? '?' : name.trim().substring(0, 1).toUpperCase(),
         style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: TeamlyColors.ink800),
       ),
+    );
+  }
+}
+
+/// The post's author line: real users show their @handle (falling back to the
+/// display name) with the blue tick once their profile is verified; agents
+/// render as before. The profile facts load once per author and are cached for
+/// the whole session, so the feed never re-fetches while scrolling.
+class _AuthorLabel extends StatefulWidget {
+  const _AuthorLabel({required this.post, required this.agent});
+
+  final FeedPost post;
+  final AgentAccount? agent;
+
+  @override
+  State<_AuthorLabel> createState() => _AuthorLabelState();
+}
+
+class _AuthorLabelState extends State<_AuthorLabel> {
+  ({bool verified, String username})? _facts;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.agent == null && widget.post.uid.isNotEmpty) {
+      final cached = authorFactsCached(widget.post.uid);
+      if (cached != null) {
+        _facts = cached;
+      } else {
+        loadAuthorFacts(widget.post.uid).then((f) {
+          if (!mounted || f == null) return;
+          setState(() => _facts = f);
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.agent != null) {
+      return Flexible(
+        child: Text(
+          widget.post.name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: TeamlyColors.ink900),
+        ),
+      );
+    }
+    final facts = _facts;
+    final label = (facts != null && facts.username.isNotEmpty) ? '@${facts.username}' : widget.post.name;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Flexible(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: TeamlyColors.ink900),
+          ),
+        ),
+        if (facts != null && facts.verified) ...<Widget>[
+          const SizedBox(width: 4),
+          const Icon(Icons.verified_rounded, size: 14, color: Color(0xFF1D9BF0)),
+        ],
+      ],
     );
   }
 }
