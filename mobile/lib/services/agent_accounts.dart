@@ -10,8 +10,8 @@ import '../services/social_service.dart';
 /// catch-up backup using the same UTC slot markers. The agents always carry
 /// the blue verified tick and never accept comments. Their reaction counts
 /// are a display transform (see [displayLikeCount]): each post grows at a
-/// steady 300–450 likes/hour toward an 8K–10K first-day total, and real
-/// users' likes then stack on top of that.
+/// steady 420–450 likes/hour (a 7–7.5-like tick per minute) through its
+/// first day, and real users' likes then stack on top of that.
 ///
 /// Identity works without any schema or rules change: an agent post is a
 /// normal Firestore post whose `link` field carries the marker URL built by
@@ -200,10 +200,9 @@ double stableHash01(String s) {
 
 /// The like count a post DISPLAYS. Real posts show their real count; agent
 /// posts show a steady organic-looking climb: a deterministic hourly rate of
-/// 300–450 likes/hour (seeded by the post id, so it never changes for a given
-/// post) that accumulates for the first 24 hours — landing each post in the
-/// 8K–10K band by the end of its first day — plus whatever real likes have
-/// accumulated on top.
+/// 420–450 likes/hour (seeded by the post id, so it never changes for a given
+/// post) — a visible tick of 7–7.5 likes every minute — that accumulates for
+/// the first 24 hours, plus whatever real likes have accumulated on top.
 ///
 ///   displayed = rate * min(ageHours, 24) + realLikeCount
 ///
@@ -212,9 +211,9 @@ int displayLikeCount(FeedPost post, {int? nowMs}) {
   if (!isAgentPost(post)) return post.likeCount;
   final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
   final h = stableHash01('likes:${post.id}');
-  const dailyMin = 8000.0;
-  const dailyMax = 10000.0;
-  final rate = dailyMin / 24 + h * ((dailyMax - dailyMin) / 24); // ≈333–417/h
+  const rateMin = 420.0;
+  const rateMax = 450.0;
+  final rate = rateMin + h * (rateMax - rateMin); // 420–450/h ≈ 7–7.5/min
   final ageHours = ((now - post.createdAtMs) / 3600000).clamp(0.0, 24.0);
   return (rate * ageHours).floor() + post.likeCount;
 }

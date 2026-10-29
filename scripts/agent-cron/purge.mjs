@@ -20,7 +20,7 @@ async function main() {
 
   let deleted = 0;
   for (const doc of posts) {
-    const text = doc.data?.fields?.text?.stringValue ?? '';
+    const text = doc.fields?.text?.stringValue ?? '';
     const preview = text.slice(0, 70).replace(/\n/g, ' ');
     if (dry) {
       console.log(`  · ${doc.name.split('/').pop()} — ${preview}`);

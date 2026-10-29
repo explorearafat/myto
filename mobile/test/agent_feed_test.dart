@@ -111,7 +111,7 @@ void main() {
       expect(displayLikeCount(p, nowMs: 9999999999999), 42);
     });
 
-    test('agent posts climb at 300–450/hour, deterministically', () {
+    test('agent posts climb at 420–450/hour, deterministically', () {
       final now = DateTime.now().millisecondsSinceEpoch;
       final p = post(
         id: 'agent-1',
@@ -122,14 +122,26 @@ void main() {
       final a = displayLikeCount(p);
       final b = displayLikeCount(p);
       expect(a, same(b)); // stable per post
-      // 3 hours of growth at 300–450/hour.
-      expect(a, inInclusiveRange(900, 1350));
+      // 3 hours of growth at 420–450/hour.
+      expect(a, inInclusiveRange(1260, 1350));
     });
 
-    test('a day-old agent post lands in the 8K–10K band and stays there', () {
+    test('the climb ticks ~7–7.5 likes per minute', () {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final p = post(
+        id: 'agent-2',
+        name: 'AI Daily',
+        link: markerFor('ai_daily', '2026-10-28', 0),
+        createdAtMs: now - 3600000, // exactly 1h old
+      );
+      final perMinute = displayLikeCount(p, nowMs: now) / 60;
+      expect(perMinute, inInclusiveRange(6.9, 7.6));
+    });
+
+    test('a day-old agent post stops growing at ~10K', () {
       final now = DateTime.now().millisecondsSinceEpoch;
       FeedPost at(int ageHours) => post(
-            id: 'agent-2',
+            id: 'agent-3',
             name: 'AI Daily',
             link: markerFor('ai_daily', '2026-10-28', 0),
             createdAtMs: now - ageHours * 3600000,
@@ -137,21 +149,21 @@ void main() {
       final at12h = displayLikeCount(at(12), nowMs: now);
       final at24h = displayLikeCount(at(24), nowMs: now);
       final at72h = displayLikeCount(at(72), nowMs: now);
-      expect(at12h, inInclusiveRange(4000, 5000)); // half a day of growth
-      expect(at24h, inInclusiveRange(8000, 10000)); // the daily band
+      expect(at12h, inInclusiveRange(5040, 5400)); // half a day of growth
+      expect(at24h, inInclusiveRange(10080, 10800)); // the 24h ceiling
       expect(at72h, at24h); // growth caps after the first day
     });
 
     test('the climb is visible hour over hour', () {
       final now = DateTime.now().millisecondsSinceEpoch;
       final fresh = post(
-        id: 'agent-3',
+        id: 'agent-4',
         name: 'MarketPulse',
         link: markerFor('market_pulse', '2026-10-28', 0),
         createdAtMs: now - 5 * 60000, // 5 minutes old
       );
       final later = post(
-        id: 'agent-3',
+        id: 'agent-4',
         name: 'MarketPulse',
         link: markerFor('market_pulse', '2026-10-28', 0),
         createdAtMs: now - 2 * 3600000, // 2 hours old
@@ -165,14 +177,14 @@ void main() {
     test('real likes stack on top of the pseudo-count', () {
       final now = DateTime.now().millisecondsSinceEpoch;
       final withLikes = post(
-        id: 'agent-4',
+        id: 'agent-5',
         name: 'CryptoExpert',
         link: markerFor('cryptoexpert', '2026-10-28', 0),
         likeCount: 250,
         createdAtMs: now - 3 * 3600000,
       );
       final withoutLikes = post(
-        id: 'agent-4',
+        id: 'agent-5',
         name: 'CryptoExpert',
         link: markerFor('cryptoexpert', '2026-10-28', 0),
         likeCount: 0,

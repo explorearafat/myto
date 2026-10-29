@@ -15,10 +15,33 @@
 // ---------------------------------------------------------------------------
 
 import { AGENTS, markerFor, slotOf } from './lib/agents.mjs';
-import { postWithMarkerExists, createPost } from './lib/firebase.mjs';
+import { postWithMarkerExists, createPost, findAgentPosts, deleteDocument } from './lib/firebase.mjs';
 import { fetchNews } from './lib/feeds.mjs';
 import { writeNewsPost } from './lib/openrouter.mjs';
 import { strongestSignal, cryptoPostBody } from './lib/binance.mjs';
+
+/// Old builds of the mobile app seeded standdown notes when a feed failed.
+/// They must never stay in the feed: every run sweeps any agent post carrying
+/// the fallback text, so stale spam from a not-yet-updated client dies within
+/// one cron cycle.
+const FALLBACK_TEXT = 'feed temporarily unavailable';
+
+async function sweepFallbackPosts() {
+  const posts = await findAgentPosts(AGENTS.map((a) => a.name));
+  const spam = posts.filter((p) =>
+    (p.fields?.text?.stringValue ?? '').includes(FALLBACK_TEXT),
+  );
+  if (spam.length === 0) return;
+  console.log(`🧹 sweeping ${spam.length} fallback-text post(s)`);
+  for (const doc of spam) {
+    try {
+      await deleteDocument(doc.name);
+      console.log(`  🗑  deleted ${doc.name.split('/').pop()}`);
+    } catch (e) {
+      console.error(`  ❌ sweep delete failed ${doc.name.split('/').pop()}: ${e.message}`);
+    }
+  }
+}
 
 /// Same stable-hash pick the mobile seeder used, so a catch-up post lands on
 /// the same article a client run would have chosen.
@@ -100,6 +123,12 @@ async function main() {
   ];
 
   console.log(`Agent feed run at ${now.toISOString()} — slots: ${slots.map((s) => `${s.day}#${s.slot}`).join(', ')}`);
+
+  try {
+    await sweepFallbackPosts();
+  } catch (e) {
+    console.error(`Fallback sweep failed (continuing): ${e.message}`);
+  }
 
   let ok = 0;
   let failed = 0;

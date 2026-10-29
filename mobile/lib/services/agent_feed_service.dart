@@ -326,6 +326,10 @@ class AgentFeedService {
         try {
           if (await _postExists(marker)) continue;
           final post = await generate(agent, slot, dayKey);
+          // Hard guard: a standdown/fallback note must never reach the feed.
+          if (post.text.contains('feed temporarily unavailable')) {
+            throw StateError('${agent.handle}: fallback text blocked from publishing');
+          }
           await SocialService.createPost(
             uid: uid,
             name: agent.name,

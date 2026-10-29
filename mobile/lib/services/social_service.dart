@@ -229,16 +229,19 @@ class SocialService {
   }
 
   /// One-shot posts by an author NAME (agent accounts have no uid of their
-  /// own — their posts are queried by display name). Client-filtered, no
-  /// composite index required.
+  /// own — their posts are queried by display name). Equality-only query —
+  /// sorting happens client-side, so no composite index is required (a
+  /// where+orderBy pair would silently fail without one and the agent
+  /// profiles would show no posts at all).
   static Future<List<FeedPost>> fetchPostsByName(String name, {int limitCount = 50}) async {
     final snap = await _db
         .collection('posts')
         .where('name', isEqualTo: name)
-        .orderBy('createdAt', descending: true)
         .limit(limitCount)
         .get();
-    return snap.docs.map((d) => FeedPost.fromDoc(d.id, d.data())).toList();
+    final posts = snap.docs.map((d) => FeedPost.fromDoc(d.id, d.data())).toList()
+      ..sort((a, b) => b.createdAtMs.compareTo(a.createdAtMs));
+    return posts;
   }
 
   /// True when a post with this exact marker link already exists — the

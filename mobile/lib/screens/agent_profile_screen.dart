@@ -36,9 +36,15 @@ class _AgentProfileScreenState extends State<AgentProfileScreen> {
   }
 
   Future<void> _load() async {
-    final posts = await SocialService.fetchPostsByName(widget.agent.name);
-    if (!mounted) return;
-    setState(() => _posts = posts);
+    try {
+      final posts = await SocialService.fetchPostsByName(widget.agent.name);
+      if (!mounted) return;
+      setState(() => _posts = posts);
+    } catch (_) {
+      // A failed lookup must not leave the profile on "Loading…" forever.
+      if (!mounted) return;
+      setState(() => _posts = const <FeedPost>[]);
+    }
   }
 
   @override
