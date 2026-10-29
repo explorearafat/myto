@@ -8,8 +8,14 @@ export const LINKS = {
   // there, and updates automatically whenever a new tag ships.
   /** Direct Windows installer (latest GitHub release). */
   download: 'https://github.com/explorearafat/myto/releases/latest/download/Myto-Setup.exe',
-  /** Native Android APK (latest GitHub release). */
-  androidApk: 'https://github.com/explorearafat/myto/releases/latest/download/myto.apk',
+  /**
+   * Native Android APK — pinned to the CURRENT release tag, NOT /releases/latest/.
+   * The /latest/ URL keeps one path across releases, so phone browsers (and
+   * download managers) happily serve a week-old cached APK; a version-scoped
+   * URL is unique per release and can never go stale. Bump together with
+   * RELEASE.version below.
+   */
+  androidApk: 'https://github.com/explorearafat/myto/releases/download/v0.12.2/myto.apk',
   /** The platform chooser — where the header/footer Download links point. */
   downloadPage: '/download',
   /** The Myto chat — a full chat interface, client-side, that answers questions about Myto. */
@@ -43,9 +49,9 @@ export const LINKS = {
  * new tag ships, or the download page will quietly understate the version.
  */
 export const RELEASE = {
-  version: 'v0.10.0',
-  date: '25 October 2026',
-  size: '265 MB',
+  version: 'v0.12.2',
+  date: '30 October 2026',
+  size: '278 MB',
 };
 
 /**
