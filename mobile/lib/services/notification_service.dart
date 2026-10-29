@@ -84,10 +84,17 @@ class AppNotification {
         return '$who shared your post';
       case 'post':
         return '$who posted: $snippet';
+      case 'dm':
+        return '$who messaged you: $snippet';
       default:
         return who;
     }
   }
+}
+
+int _ms(Object? value) {
+  if (value is Timestamp) return value.millisecondsSinceEpoch;
+  return 0;
 }
 
 class NotificationService {
@@ -96,8 +103,10 @@ class NotificationService {
 
   StreamSubscription? _postsSub;
   StreamSubscription? _followSub;
+  StreamSubscription? _dmSub;
   String? _uid;
   Timer? _debounce;
+  final Map<String, int> _dmSeenAt = <String, int>{}; // threadId -> last notified lastAtMs
 
   /// Baselines per post id: the counters the watchers last saw. The FIRST
   /// snapshot only sets the baseline (no retroactive notifications for
@@ -138,15 +147,55 @@ class NotificationService {
 
     // ── Watcher 2: new posts from people I follow ────────────────────────────
     _watchFollowedPosts();
+
+    // ── Watcher 3: direct messages (instant — thread previews stream live) ───
+    _dmSub = FirebaseFirestore.instance
+        .collection('threads')
+        .where('members', arrayContains: uid)
+        .limit(100)
+        .snapshots()
+        .listen((snap) async {
+      for (final doc in snap.docs) {
+        final d = doc.data();
+        final lastFrom = (d['lastFrom'] ?? '') as String;
+        if (lastFrom.isEmpty || lastFrom == uid) continue; // my own message
+        final at = _ms(d['lastAt']);
+        if (at == 0) continue;
+        final seenAt = _dmSeenAt[doc.id] ?? 0;
+        if (at <= seenAt) continue;
+        _dmSeenAt[doc.id] = at;
+        if (!await _enabled('dm')) continue;
+        await _file(AppNotification(
+          id: 'dm-${doc.id}-$at',
+          kind: 'dm',
+          fromUid: lastFrom,
+          fromName: '',
+          fromPhoto: '',
+          postId: '',
+          postPreview: '',
+          snippet: ((d['lastText'] ?? '') as String).trim(),
+          atMs: at,
+          read: false,
+        ));
+      }
+    });
   }
 
   void stop() {
     _postsSub?.cancel();
     _followSub?.cancel();
+    _dmSub?.cancel();
     _debounce?.cancel();
     _postsSub = null;
     _followSub = null;
+    _dmSub = null;
     _uid = null;
+  }
+
+  /// Opening a thread silences further notifications for it until the next
+  /// incoming message. Called from the chat screen.
+  static void markDmSeen(String threadId) {
+    instance._dmSeenAt[threadId] = DateTime.now().millisecondsSinceEpoch;
   }
 
   Future<void> _sweepMyPosts(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) async {

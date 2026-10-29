@@ -220,6 +220,12 @@ service cloud.firestore {
     // (':' never appears in a Firebase uid, so split(':') is exact). members mirrors
     // the id. Messages, typing state and the thread's last-message preview live under
     // the thread; presence lives at the top level.
+    //
+    // RETENTION: every message carries `expireAt` (sent time + 24h). Clients sweep
+    // their own aged-out messages, and a Firestore TTL policy on the `expireAt`
+    // field of the `messages` collection group deletes them server-side too —
+    // configure it once in the console: Firestore → Data → TTL policy → field
+    // `expireAt`, collection group `messages`.
 
     function isThreadParty(threadId) {
       return signedIn() && request.auth.uid in threadId.split(':');
@@ -246,10 +252,16 @@ service cloud.firestore {
           && request.resource.data.createdAt == request.time;
         // Seen receipts: only the RECIPIENT may flip `seen` on, and nothing else
         // on the message may change (reply previews are denormalized at send time).
+        // Emoji reactions: any thread party may edit ONLY the `reactions` map
+        // (reactions.<uid> = emoji, one per user) — `seen` and `reactions` can
+        // never move in the same write.
         allow update: if isThreadParty(threadId)
-          && resource.data.from != request.auth.uid
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['seen'])
-          && request.resource.data.seen == true;
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['seen', 'reactions'])
+          && (request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['reactions'])
+              || (resource.data.from != request.auth.uid
+                  && request.resource.data.seen == true));
         allow delete: if signedIn() && resource.data.from == request.auth.uid;
       }
 

@@ -512,6 +512,7 @@ class DiscoverProfile {
     required this.bio,
     required this.photo,
     required this.createdAtMs,
+    this.verified = false,
   });
 
   final String uid;
@@ -521,6 +522,9 @@ class DiscoverProfile {
   final String photo;
   final int createdAtMs;
 
+  /// Myto's own blue tick (the founder account), stamped into the profile doc.
+  final bool verified;
+
   static DiscoverProfile fromDoc(String id, Map<String, dynamic> d) {
     return DiscoverProfile(
       uid: id,
@@ -529,6 +533,7 @@ class DiscoverProfile {
       bio: (d['bio'] ?? '') as String,
       photo: (d['photo'] ?? '') as String,
       createdAtMs: _ms(d['createdAt']),
+      verified: d['verified'] == true,
     );
   }
 }

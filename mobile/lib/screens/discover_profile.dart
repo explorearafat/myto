@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/social_service.dart';
+import '../services/verified.dart';
 import '../theme.dart';
 import '../widgets/teamly/kit.dart';
 
@@ -275,9 +276,7 @@ class DiscoverProfileView extends StatefulWidget {
 }
 
 class _DiscoverProfileViewState extends State<DiscoverProfileView> {
-  String _tab = 'posts';
   List<FeedPost>? _posts;
-  List<FeedPost>? _saved;
   int _followers = 0;
   int _following = 0;
 
@@ -294,17 +293,7 @@ class _DiscoverProfileViewState extends State<DiscoverProfileView> {
         if (mounted) setState(() => _posts = const <FeedPost>[]);
       },
     );
-    _loadSaved();
     _loadStats();
-  }
-
-  Future<void> _loadSaved() async {
-    try {
-      final posts = await SocialService.hydratePosts(widget.savedIds.toList());
-      if (mounted) setState(() => _saved = posts);
-    } catch (_) {
-      if (mounted) setState(() => _saved = const <FeedPost>[]);
-    }
   }
 
   Future<void> _loadStats() async {
@@ -353,8 +342,9 @@ class _DiscoverProfileViewState extends State<DiscoverProfileView> {
   Widget build(BuildContext context) {
     final palette = Theme.of(context).palette;
     final profile = widget.profile;
+    final verified = profile?.verified == true;
+    final followersLabel = verified ? kVerifiedFollowersLabel : _compact(_followers);
     final postCount = _posts?.length ?? 0;
-    final list = _tab == 'posts' ? _posts : _saved;
     // A Column, NOT a ListView: this view is embedded in the ProfileScreen's
     // own scrolling ListView, and a nested viewport-based ListView gets
     // unbounded height there — the layout exception that rendered the whole
@@ -385,7 +375,7 @@ class _DiscoverProfileViewState extends State<DiscoverProfileView> {
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: <Widget>[
                     _Stat(count: '$postCount', label: 'posts'),
-                    _Stat(count: _compact(_followers), label: 'followers'),
+                    _Stat(count: followersLabel, label: 'followers'),
                     _Stat(count: _compact(_following), label: 'following'),
                   ],
                 ),
@@ -395,9 +385,17 @@ class _DiscoverProfileViewState extends State<DiscoverProfileView> {
         ),
         const SizedBox(height: TeamlySpace.s3),
         if (profile?.username.isNotEmpty ?? false)
-          Text(
-            '@${profile!.username}',
-            style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: TeamlyColors.greenText),
+          Row(
+            children: <Widget>[
+              Text(
+                '@${profile!.username}',
+                style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: TeamlyColors.greenText),
+              ),
+              if (verified) ...<Widget>[
+                const SizedBox(width: 5),
+                const Icon(Icons.verified_rounded, size: 16, color: Color(0xFF1D9BF0)),
+              ],
+            ],
           ),
         const SizedBox(height: 2),
         Text(
@@ -472,69 +470,12 @@ class _DiscoverProfileViewState extends State<DiscoverProfileView> {
             ),
           ],
         ),
-        const SizedBox(height: TeamlySpace.s4),
-        // ── My posts | Saved ───────────────────────────────────────────────
-        Row(
-          children: <Widget>[
-            for (final t in const <String>['posts', 'saved'])
-              Expanded(
-                child: GestureDetector(
-                  onTap: () => setState(() => _tab = t),
-                  child: Container(
-                    margin: EdgeInsets.only(right: t == 'posts' ? TeamlySpace.s2 : 0),
-                    padding: const EdgeInsets.symmetric(vertical: 9),
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: _tab == t ? palette.accent : palette.chip,
-                      borderRadius: BorderRadius.circular(TeamlyRadius.pill),
-                    ),
-                    child: Text(
-                      t == 'posts' ? 'My posts' : 'Saved',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: _tab == t ? palette.onAccent : TeamlyColors.ink700,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        ),
-        const SizedBox(height: TeamlySpace.s3),
-        if (list == null)
-          const Padding(
-            padding: EdgeInsets.all(24),
-            child: Center(child: Text('Loading…', style: TextStyle(color: TeamlyColors.ink300))),
-          )
-        else if (list.isEmpty)
-          Padding(
-            padding: const EdgeInsets.all(24),
-            child: Center(
-              child: Text(
-                _tab == 'posts' ? 'You have not posted yet.' : 'Nothing saved yet — tap Save on a post.',
-                style: const TextStyle(color: TeamlyColors.ink300),
-              ),
-            ),
-          )
-        else
-          for (final p in list)
-            Padding(
-              padding: const EdgeInsets.only(bottom: TeamlySpace.s3),
-              child: _DProfilePostCard(
-                post: p,
-                meUid: widget.uid,
-                meName: widget.profile?.name ?? 'You',
-                saved: _tab == 'saved',
-                onUnsave: _tab == 'saved' ? () => widget.onUnsave(p.id) : null,
-                onDelete: _tab == 'posts' ? () => widget.onDelete(p.id) : null,
-              ),
-            ),
+        const SizedBox(height: TeamlySpace.s2),
       ],
     );
   }
 
-  void _moreSheet(BuildContext context) {
+    void _moreSheet(BuildContext context) {
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: context.palette.surface,
@@ -640,58 +581,6 @@ class _ActionTile extends StatelessWidget {
   }
 }
 
-/// A compact read-mostly post card for the profile lists.
-class _DProfilePostCard extends StatelessWidget {
-  const _DProfilePostCard({
-    required this.post,
-    required this.meUid,
-    required this.meName,
-    required this.saved,
-    this.onUnsave,
-    this.onDelete,
-  });
-
-  final FeedPost post;
-  final String meUid;
-  final String meName;
-  final bool saved;
-  final VoidCallback? onUnsave;
-  final VoidCallback? onDelete;
-
-  @override
-  Widget build(BuildContext context) {
-    return TeamlyCard(
-      padding: const EdgeInsets.all(TeamlySpace.s4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Text(
-            post.text,
-            style: const TextStyle(fontSize: 14, height: 1.45, color: TeamlyColors.ink900),
-          ),
-          const SizedBox(height: TeamlySpace.s2),
-          Row(
-            children: <Widget>[
-              Text('${post.likeCount} likes · ${post.commentCount} comments',
-                  style: const TextStyle(fontSize: 11.5, color: TeamlyColors.ink300)),
-              const Spacer(),
-              if (onUnsave != null)
-                TextButton(
-                  onPressed: onUnsave,
-                  child: const Text('Remove', style: TextStyle(fontSize: 12, color: TeamlyColors.ink500)),
-                ),
-              if (onDelete != null)
-                TextButton(
-                  onPressed: onDelete,
-                  child: const Text('Delete', style: TextStyle(fontSize: 12, color: TeamlyColors.ink500)),
-                ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
 
 class _DProfileAvatar extends StatelessWidget {
   const _DProfileAvatar({required this.photo, required this.name, required this.size});

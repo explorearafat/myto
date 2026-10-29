@@ -30,6 +30,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _comments = true;
   bool _shares = true;
   bool _posts = true;
+  bool _dms = true;
   bool _loaded = false;
 
   @override
@@ -46,6 +47,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _comments = prefs.getBool('sylor.notify.comment') ?? true;
       _shares = prefs.getBool('sylor.notify.share') ?? true;
       _posts = prefs.getBool('sylor.notify.post') ?? true;
+      _dms = prefs.getBool('sylor.notify.dm') ?? true;
       _loaded = true;
     });
   }
@@ -103,6 +105,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   title: 'New posts from people I follow',
                   value: _posts,
                   onChanged: (v) => _setToggle('post', v),
+                ),
+                _SwitchTile(
+                  icon: Icons.chat_bubble_rounded,
+                  color: TeamlyColors.ink700,
+                  title: 'Direct messages',
+                  value: _dms,
+                  onChanged: (v) => _setToggle('dm', v),
                 ),
                 const SizedBox(height: TeamlySpace.s2),
                 TeamlyCard(

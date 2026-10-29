@@ -61,6 +61,7 @@ class DmMessage {
     required this.replyText,
     required this.replyFrom,
     required this.createdAtMs,
+    this.reactions = const <String, String>{},
   });
 
   final String id;
@@ -72,9 +73,14 @@ class DmMessage {
   final String replyFrom;
   final int createdAtMs;
 
+  /// Per-user emoji reaction: {uid: emoji}. One reaction per user — reacting
+  /// again replaces it.
+  final Map<String, String> reactions;
+
   bool get isReply => replyToId.isNotEmpty;
 
   static DmMessage fromDoc(String id, Map<String, dynamic> d) {
+    final raw = (d['reactions'] ?? const <String, dynamic>{}) as Map<String, dynamic>;
     return DmMessage(
       id: id,
       from: (d['from'] ?? '') as String,
@@ -84,9 +90,15 @@ class DmMessage {
       replyText: (d['replyText'] ?? '') as String,
       replyFrom: (d['replyFrom'] ?? '') as String,
       createdAtMs: _ms(d['createdAt']),
+      reactions: raw.map((k, v) => MapEntry(k, '$v')),
     );
   }
 }
+
+/// The message retention window: every message self-destructs 24 hours after
+/// it was sent (client sweeps + an optional Firestore TTL policy on
+/// `expireAt` make it true even in the database).
+const Duration kDmRetention = Duration(hours: 24);
 
 /// One contact's presence: online right now, or when they were last seen.
 class Presence {
@@ -168,11 +180,13 @@ class DmService {
         .orderBy('createdAt')
         .limit(300)
         .snapshots()
-        .map(
-          (s) => s.docs
-              .map((d) => DmMessage.fromDoc(d.id, d.data()))
-              .toList(),
-        );
+        .map((s) {
+      final cutoff = DateTime.now().subtract(kDmRetention).millisecondsSinceEpoch;
+      return s.docs
+          .map((d) => DmMessage.fromDoc(d.id, d.data()))
+          .where((m) => m.createdAtMs == 0 || m.createdAtMs >= cutoff)
+          .toList();
+    });
   }
 
   /// Send a text message (optionally replying to one) + advance the thread's
@@ -198,6 +212,10 @@ class DmService {
           'replyFrom': replyTo.from,
         },
         'createdAt': FieldValue.serverTimestamp(),
+        // The TTL field — a Firestore TTL policy on `expireAt` (collection
+        // group `messages`) deletes aged-out messages in the database even
+        // when neither participant opens the app again.
+        'expireAt': Timestamp.fromDate(DateTime.now().add(kDmRetention)),
       },
     );
     batch.update(_db.collection('threads').doc(threadId), <String, dynamic>{
@@ -226,6 +244,83 @@ class DmService {
       batch.update(d.reference, <String, dynamic>{'seen': true});
     }
     await batch.commit();
+  }
+
+  /// Toggle my emoji reaction on a message (stored in the message doc as
+  /// reactions.<uid>; reacting again replaces the emoji, tapping the same one
+  /// clears it). Needs the reactions rule — see firestore.rules.
+  static Future<void> react(
+    String threadId,
+    String messageId,
+    String uid,
+    String emoji,
+  ) async {
+    await _db
+        .collection('threads')
+        .doc(threadId)
+        .collection('messages')
+        .doc(messageId)
+        .set(<String, dynamic>{
+      'reactions': <String, dynamic>{uid: emoji},
+    }, SetOptions(merge: true));
+  }
+
+  /// Unsend: the author deletes their own message (the rules pin deletes to
+  /// the author).
+  static Future<void> unsendMessage(String threadId, String messageId) async {
+    await _db
+        .collection('threads')
+        .doc(threadId)
+        .collection('messages')
+        .doc(messageId)
+        .delete();
+  }
+
+  /// Delete MY messages in this thread that aged out (the rules pin message
+  /// deletes to the author, so each participant sweeps their own half; paired
+  /// with the TTL policy the database stays clean regardless).
+  /// Returns how many were removed.
+  static Future<int> sweepExpired(String threadId, String myUid) async {
+    try {
+      final snap = await _db
+          .collection('threads')
+          .doc(threadId)
+          .collection('messages')
+          .limit(300)
+          .get();
+      final cutoff = DateTime.now().subtract(kDmRetention).millisecondsSinceEpoch;
+      final batch = _db.batch();
+      var removed = 0;
+      for (final doc in snap.docs) {
+        final d = doc.data();
+        if ((d['from'] ?? '') != myUid) continue;
+        final at = _ms(d['createdAt']);
+        if (at != 0 && at >= cutoff) continue;
+        batch.delete(doc.reference);
+        removed++;
+      }
+      if (removed > 0) await batch.commit();
+      return removed;
+    } on FirebaseException {
+      return 0;
+    }
+  }
+
+  /// Sweep every one of my threads for my aged-out messages (called when the
+  /// messages list opens — keeps the database clean without opening a chat).
+  static Future<void> sweepAllMine(String myUid) async {
+    try {
+      final threads = await _db
+          .collection('threads')
+          .where('members', arrayContains: myUid)
+          .limit(100)
+          .get();
+      for (final t in threads.docs) {
+        await sweepExpired(t.id, myUid);
+      }
+    } on FirebaseException {
+      // Best-effort.
+    }
   }
 
   /// The other participant's typing state, live. Emit null when idle.

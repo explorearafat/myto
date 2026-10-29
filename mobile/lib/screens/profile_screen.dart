@@ -2,8 +2,11 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+
 import '../services/auth_service.dart';
 import '../services/social_service.dart';
+import '../services/verified.dart';
 import '../theme.dart';
 import 'discover_profile.dart' show DiscoverProfileSetup, DiscoverProfileView;
 
@@ -45,7 +48,28 @@ class _ProfileScreenState extends State<ProfileScreen> {
         return;
       }
       final saved = await SocialService.listSavedIds(_uid);
-      final p = await SocialService().getProfile(_uid);
+      var p = await SocialService().getProfile(_uid);
+      // Stamp the blue tick onto the founder account's own profile doc so
+      // every other client sees it too (extra profile fields pass the rules).
+      if (p != null && !p.verified && isVerifiedEmail(_user?.email)) {
+        try {
+          await FirebaseFirestore.instance.collection('profiles').doc(_uid).set(
+            <String, dynamic>{'verified': true},
+            SetOptions(merge: true),
+          );
+          p = DiscoverProfile(
+            uid: p.uid,
+            name: p.name,
+            username: p.username,
+            bio: p.bio,
+            photo: p.photo,
+            createdAtMs: p.createdAtMs,
+            verified: true,
+          );
+        } on FirebaseException {
+          // Cosmetic — ignore.
+        }
+      }
       if (!mounted) return;
       setState(() {
         _savedIds.addAll(saved);

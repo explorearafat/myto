@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../services/dm_service.dart';
+import '../services/notification_service.dart';
 import '../theme.dart';
 
 /// ---------------------------------------------------------------------------
@@ -41,9 +42,36 @@ class _DmChatScreenState extends State<DmChatScreen> {
   Timer? _typingStop;
   List<DmMessage>? _messages;
   Timer? _markSeenDebounce;
+  bool _removedNotice = false;
+  bool _otherVerified = false;
 
   String get _me => FirebaseAuth.instance.currentUser?.uid ?? '';
   late final String _threadId = DmService.threadIdFor(_me, widget.otherUid);
+
+  @override
+  void initState() {
+    super.initState();
+    // 24h retention: delete my aged-out messages from the database, and let
+    // the user know history was purged when the thread now sits empty.
+    DmService.sweepExpired(_threadId, _me).then((removed) {
+      if (removed > 0 && mounted) setState(() => _removedNotice = true);
+    });
+    NotificationService.markDmSeen(_threadId);
+    _loadOtherVerified();
+  }
+
+  Future<void> _loadOtherVerified() async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('profiles')
+          .doc(widget.otherUid)
+          .get();
+      if (!mounted) return;
+      setState(() => _otherVerified = snap.data()?['verified'] == true);
+    } on FirebaseException {
+      // Badge is cosmetic — ignore.
+    }
+  }
 
   @override
   void dispose() {
@@ -142,15 +170,26 @@ class _DmChatScreenState extends State<DmChatScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
-                  Text(
-                    widget.otherName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
-                      color: TeamlyColors.ink900,
-                    ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Flexible(
+                        child: Text(
+                          widget.otherName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                            color: TeamlyColors.ink900,
+                          ),
+                        ),
+                      ),
+                      if (_otherVerified) ...<Widget>[
+                        const SizedBox(width: 4),
+                        const Icon(Icons.verified_rounded, size: 15, color: Color(0xFF1D9BF0)),
+                      ],
+                    ],
                   ),
                   _StatusLine(uid: widget.otherUid, threadId: _threadId),
                 ],
@@ -161,6 +200,17 @@ class _DmChatScreenState extends State<DmChatScreen> {
       ),
       body: Column(
         children: <Widget>[
+          if (_removedNotice)
+            Container(
+              width: double.infinity,
+              color: palette.chip,
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: const Text(
+                'Due to security, we removed all your texts.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 11.5, color: TeamlyColors.ink500),
+              ),
+            ),
           Expanded(
             child: StreamBuilder<List<DmMessage>>(
               stream: DmService.streamMessages(_threadId),
@@ -201,10 +251,26 @@ class _DmChatScreenState extends State<DmChatScreen> {
                       mine: mine,
                       showSeenBadge: showSeen,
                       newBatch: isNewBatch,
+                      myUid: _me,
                       onReply: () => setState(() {
                         _replyTo = m;
                         _focus.requestFocus();
                       }),
+                      onReact: (emoji) async {
+                        final existing = m.reactions[_me];
+                        await DmService.react(
+                          _threadId,
+                          m.id,
+                          _me,
+                          existing == emoji ? '' : emoji,
+                        );
+                      },
+                      onUnsend: mine
+                          ? () async {
+                              await DmService.unsendMessage(_threadId, m.id);
+                              setState(() => _removedNotice = false);
+                            }
+                          : null,
                     );
                   },
                 );
@@ -314,14 +380,77 @@ class _Bubble extends StatelessWidget {
     required this.mine,
     required this.showSeenBadge,
     required this.newBatch,
+    required this.myUid,
     required this.onReply,
+    required this.onReact,
+    this.onUnsend,
   });
 
   final DmMessage message;
   final bool mine;
   final bool showSeenBadge;
   final bool newBatch;
+  final String myUid;
   final VoidCallback onReply;
+  final ValueChanged<String> onReact;
+  final VoidCallback? onUnsend;
+
+  static const List<String> _emojis = <String>['\u2764\uFE0F', '\uD83D\uDE02', '\uD83D\uDD25', '\uD83D\uDC4D', '\uD83D\uDE2E', '\uD83D\uDE22'];
+
+  Future<void> _actions(BuildContext context) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: context.palette.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            // Emoji reactions — WhatsApp-style row.
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: <Widget>[
+                  for (final e in _emojis)
+                    GestureDetector(
+                      onTap: () {
+                        Navigator.pop(context);
+                        onReact(e);
+                      },
+                      child: Text(e, style: const TextStyle(fontSize: 26)),
+                    ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.reply_rounded, size: 20),
+              title: const Text('Reply', style: TextStyle(fontSize: 14.5)),
+              onTap: () {
+                Navigator.pop(context);
+                onReply();
+              },
+            ),
+            if (onUnsend != null)
+              ListTile(
+                leading: const Icon(Icons.undo_rounded, size: 20, color: TeamlyColors.danger),
+                title: const Text(
+                  'Unsend',
+                  style: TextStyle(fontSize: 14.5, color: TeamlyColors.danger),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  onUnsend!();
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -352,6 +481,7 @@ class _Bubble extends StatelessWidget {
               child: const Icon(Icons.reply_rounded, color: TeamlyColors.greenText),
             ),
             child: GestureDetector(
+              onLongPress: () => _actions(context),
               onDoubleTap: onReply,
               child: Container(
                 constraints: BoxConstraints(
@@ -383,15 +513,7 @@ class _Bubble extends StatelessWidget {
                         Text(_clock(message.createdAtMs), style: timeStyle),
                         if (mine) ...<Widget>[
                           const SizedBox(width: 4),
-                          Icon(
-                            message.seen
-                                ? Icons.done_all_rounded
-                                : Icons.done_rounded,
-                            size: 13,
-                            color: message.seen
-                                ? const Color(0xFF4FC3F7)
-                                : palette.onAccent.withValues(alpha: 0.75),
-                          ),
+                          _Ticks(message: message, palette: palette),
                         ],
                       ],
                     ),
@@ -400,11 +522,39 @@ class _Bubble extends StatelessWidget {
               ),
             ),
           ),
+          // Reaction chips under the bubble.
+          if (message.reactions.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Wrap(
+                spacing: 4,
+                children: <Widget>[
+                  for (final entry in message.reactions.entries)
+                    GestureDetector(
+                      onTap: () => onReact(entry.value),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: palette.chip,
+                          borderRadius: BorderRadius.circular(12),
+                          border: entry.key == myUid
+                              ? Border.all(color: TeamlyColors.green500, width: 1)
+                              : null,
+                        ),
+                        child: Text(
+                          entry.value,
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
           if (mine && showSeenBadge)
             Padding(
               padding: const EdgeInsets.only(top: 2, right: 4),
               child: Text(
-                message.seen ? 'Seen' : 'Sent',
+                message.seen ? 'Seen' : 'Delivered',
                 style: const TextStyle(fontSize: 10.5, color: TeamlyColors.ink300),
               ),
             ),
@@ -414,11 +564,35 @@ class _Bubble extends StatelessWidget {
   }
 
   String _clock(int ms) {
-    if (ms == 0) return '…';
+    if (ms == 0) return '...';
     final d = DateTime.fromMillisecondsSinceEpoch(ms);
     final hh = d.hour % 12 == 0 ? 12 : d.hour % 12;
     final mm = d.minute.toString().padLeft(2, '0');
-    return '$hh:${mm} ${d.hour < 12 ? 'AM' : 'PM'}';
+    return '$hh:$mm${d.hour < 12 ? ' AM' : ' PM'}';
+  }
+}
+
+/// The WhatsApp-style receipt ticks: clock while the write is in flight,
+/// one tick once sent, two grey ticks delivered, two blue ticks seen.
+class _Ticks extends StatelessWidget {
+  const _Ticks({required this.message, required this.palette});
+
+  final DmMessage message;
+  final MytoPalette palette;
+
+  @override
+  Widget build(BuildContext context) {
+    if (message.createdAtMs == 0) {
+      return Icon(Icons.schedule_rounded, size: 12, color: palette.onAccent.withValues(alpha: 0.75));
+    }
+    if (message.seen) {
+      return const Icon(Icons.done_all_rounded, size: 13, color: Color(0xFF4FC3F7));
+    }
+    return Icon(
+      Icons.done_all_rounded,
+      size: 13,
+      color: palette.onAccent.withValues(alpha: 0.75),
+    );
   }
 }
 

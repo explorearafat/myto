@@ -7,15 +7,15 @@ import 'package:provider/provider.dart';
 import '../services/agent_accounts.dart';
 import '../services/agent_feed_service.dart';
 import '../services/auth_service.dart';
-import '../services/dm_service.dart';
 import '../services/social_service.dart';
 import '../theme.dart';
 import '../widgets/crypto_widget.dart';
 import '../widgets/teamly/kit.dart';
 import 'agent_profile_screen.dart';
-import 'dm_chat_screen.dart';
+import 'messages_screen.dart';
 import 'notifications_sheet.dart';
 import 'post_composer_page.dart';
+import 'user_profile_screen.dart';
 
 /// ---------------------------------------------------------------------------
 /// DiscoverScreen — the Myto community feed, backed by Firestore (the
@@ -137,17 +137,6 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     );
   }
 
-  Future<void> _openDm(DiscoverProfile p) async {
-    if (_uid.isEmpty || p.uid == _uid) return;
-    await DmService.ensureThread(_uid, p.uid);
-    if (!mounted) return;
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => DmChatScreen(otherUid: p.uid, otherName: p.name, otherPhoto: p.photo),
-      ),
-    );
-  }
-
   Future<void> _guard(Future<void> Function() action, String ok) async {
     try {
       await action();
@@ -182,6 +171,13 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
         ),
         centerTitle: false,
         actions: <Widget>[
+          IconButton(
+            tooltip: 'Messages',
+            icon: const Icon(Icons.chat_bubble_outline_rounded, size: 22),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const MessagesScreen()),
+            ),
+          ),
           IconButton(
             tooltip: 'Notifications',
             icon: const Icon(Icons.notifications_none_rounded, size: 24),
@@ -243,7 +239,11 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
             const TeamlyGroupHeader(label: 'PEOPLE'),
             for (final p in people)
               InkWell(
-                onTap: () => _openDm(p),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => UserProfileScreen(uid: p.uid, name: p.name, photo: p.photo),
+                  ),
+                ),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(vertical: 8),
                   child: Row(
@@ -511,13 +511,13 @@ class _PostCard extends StatelessWidget {
           Row(
             children: <Widget>[
               GestureDetector(
-                onTap: agent == null ? null : () => _openAgentProfile(context, agent),
+                onTap: () => _openAuthor(context, agent, post),
                 child: _Avatar(photo: post.photo, name: post.name, size: 38),
               ),
               const SizedBox(width: TeamlySpace.s3),
               Expanded(
                 child: GestureDetector(
-                  onTap: agent == null ? null : () => _openAgentProfile(context, agent),
+                  onTap: () => _openAuthor(context, agent, post),
                   behavior: HitTestBehavior.opaque,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -673,6 +673,21 @@ class _PostCard extends StatelessWidget {
   void _openAgentProfile(BuildContext context, AgentAccount agent) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(builder: (_) => AgentProfileScreen(agent: agent)),
+    );
+  }
+
+  /// An author row: verified agents open their agent profile; real users open
+  /// their public profile (Follow / Message).
+  void _openAuthor(BuildContext context, AgentAccount? agent, FeedPost post) {
+    if (agent != null) {
+      _openAgentProfile(context, agent);
+      return;
+    }
+    if (post.uid.isEmpty) return;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => UserProfileScreen(uid: post.uid, name: post.name, photo: post.photo),
+      ),
     );
   }
 
