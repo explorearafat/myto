@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 
@@ -8,23 +6,27 @@ import 'binance_service.dart';
 import 'social_service.dart';
 
 /// ---------------------------------------------------------------------------
-/// AgentFeedService — generates and seeds the verified agents' daily posts.
+/// AgentFeedService — catch-up backup for the verified agents' posts.
+///
+/// Publishing is driven by the server-side cron (GitHub Action →
+/// `scripts/agent-cron/run.mjs`) every 4 hours; news summaries there are
+/// written by OpenRouter models. This service is the client-side safety net:
+/// when the app opens (and on resume) it checks the last 48h of UTC 4-hour
+/// slots and publishes any the cron missed — with the SAME marker links, so
+/// it can never double-post a slot the cron already filled.
 ///
 /// The crypto desk reads REAL Binance market data (24h ticker + hourly and
 /// daily klines) and turns it into a deterministic technical read: SMA7/25
 /// cross, 14-RSI, 24h momentum and the 7-day trend decide a BUY / ACCUMULATE /
-/// SELL / HOLD verdict on the strongest coin. The news desks pull free public
-/// feeds (CryptoCompare for markets, VentureBeat for AI, TechCrunch for
-/// startups) and condense each headline into a 2–4 line summary with the real
+/// SELL / HOLD verdict on the strongest coin. The news desks pull the desk's
+/// free public feeds and condense one headline into a summary with the real
 /// article link.
 ///
-/// Seeding is IDEMPOTENT per (day, slot): each post carries the marker link
-/// from [markerFor], and before writing we check whether a post with that
-/// marker already exists — so whichever device opens the app first after a
-/// slot passes publishes it, and every other device sees the same post. No
-/// Firestore schema or rules changes; the posts are ordinary posts authored
-/// with the account's name/photo, which is how desktop and website display
-/// them as normal feed content.
+/// Seeding is IDEMPOTENT per (utcDay, slot): each post carries the marker
+/// link from [markerFor], and before writing we check whether a post with
+/// that marker already exists. A slot whose feed fetch fails is SKIPPED —
+/// never padded with a standdown note — so it retries on the next open
+/// within the 48h window and the feed never fills with filler posts.
 ///
 /// All analysis functions are pure and unit-tested (see
 /// test/agent_feed_test.dart); the network wiring around them is not.
@@ -204,79 +206,77 @@ String summarise(String text, {int maxSentences = 3, int maxChars = 280}) {
   return '${lastSpace > 80 ? cut.substring(0, lastSpace) : cut}…';
 }
 
-/// Which public feed a news desk reads.
-const Map<String, String> kNewsFeeds = <String, String>{
-  'ai_daily': 'https://venturebeat.com/category/ai/feed/',
-  'market_pulse': 'https://www.coindesk.com/arc/outboundfeeds/rss/',
-  'startup_buzz': 'https://techcrunch.com/feed/',
+/// Which public feed a news desk reads. The server cron tries the same
+/// primary sources; a desk whose primary feed is blocked (CryptoCompare now
+/// needs a key, VentureBeat rate-limits) falls back to these mirrors.
+const Map<String, List<String>> kNewsFeeds = <String, List<String>>{
+  'ai_daily': <String>[
+    'https://techcrunch.com/category/artificial-intelligence/feed/',
+    'https://www.theverge.com/rss/ai-artificial-intelligence/index.xml',
+  ],
+  'market_pulse': <String>[
+    'https://cointelegraph.com/rss',
+    'https://www.coindesk.com/arc/outboundfeeds/rss/',
+    'https://decrypt.co/feed',
+  ],
+  'startup_buzz': <String>[
+    'https://techcrunch.com/feed/',
+    'https://www.theverge.com/rss/index.xml',
+  ],
 };
 
 /// Fetch a news desk's feed and return its recent items (RSS via regex —
-/// well-formed publisher feeds, no XML package needed).
+/// well-formed publisher feeds, no XML package needed). The desk's sources
+/// are tried in order; a browser User-Agent keeps Cloudflare-fronted
+/// publishers from 403-ing the default Dart one.
 Future<List<NewsItem>> fetchNews(String handle, {int limit = 20}) async {
-  // CryptoCompare's public news API is JSON and richer for markets.
-  if (handle == 'market_pulse') {
+  final sources = kNewsFeeds[handle] ?? const <String>[];
+  for (final feedUrl in sources) {
     try {
-      final res = await http
-          .get(Uri.parse('https://min-api.cryptocompare.com/data/v2/news/?lang=EN'))
-          .timeout(const Duration(seconds: 12));
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body) as Map<String, dynamic>;
-        final list = ((data['Data'] ?? const <dynamic>[]) as List).cast<Map<String, dynamic>>();
-        return <NewsItem>[
-          for (final n in list.take(limit))
-            NewsItem(
-              title: stripHtml('${n['title'] ?? ''}'),
-              summary: summarise('${n['body'] ?? ''}', maxSentences: 3, maxChars: 260),
-              url: '${n['url'] ?? ''}',
-              image: '${n['imageurl'] ?? ''}',
-            ),
-        ].where((n) => n.title.isNotEmpty && n.url.startsWith('https://')).toList();
+      final res = await http.get(Uri.parse(feedUrl), headers: const <String, String>{
+        'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept': 'application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8',
+      }).timeout(const Duration(seconds: 12));
+      if (res.statusCode != 200) continue;
+      final xml = res.body;
+      final items = <NewsItem>[];
+      final re = RegExp(
+        r'<item>([\s\S]*?)</item>|<entry>([\s\S]*?)</entry>',
+        caseSensitive: false,
+      );
+      String? tag(String src, String name) {
+        final m = RegExp(r'<$name[^>]*>([\s\S]*?)</$name>', caseSensitive: false).firstMatch(src);
+        return m?.group(1)?.trim();
       }
-    } catch (_) {
-      // fall through to the RSS attempt below
-    }
-  }
-  final feedUrl = kNewsFeeds[handle];
-  if (feedUrl == null) return const <NewsItem>[];
-  try {
-    final res = await http.get(Uri.parse(feedUrl)).timeout(const Duration(seconds: 12));
-    if (res.statusCode != 200) return const <NewsItem>[];
-    final xml = res.body;
-    final items = <NewsItem>[];
-    final re = RegExp(
-      r'<item>([\s\S]*?)</item>|<entry>([\s\S]*?)</entry>',
-      caseSensitive: false,
-    );
-    String? tag(String src, String name) {
-      final m = RegExp(r'<$name[^>]*>([\s\S]*?)</$name>', caseSensitive: false).firstMatch(src);
-      return m?.group(1)?.trim();
-    }
 
-    for (final m in re.allMatches(xml)) {
-      final block = m.group(1) ?? m.group(2) ?? '';
-      final title = stripHtml(tag(block, 'title') ?? '');
-      var link = tag(block, 'link') ?? '';
-      // Atom puts the link in an href attribute.
-      if (link.isEmpty || link.contains('<')) {
-        final href = RegExp(r'href="([^"]+)"').firstMatch(block)?.group(1) ?? '';
-        link = href;
+      for (final m in re.allMatches(xml)) {
+        final block = m.group(1) ?? m.group(2) ?? '';
+        final title = stripHtml(tag(block, 'title') ?? '');
+        var link = tag(block, 'link') ?? '';
+        // Atom puts the link in an href attribute.
+        if (link.isEmpty || link.contains('<')) {
+          final href = RegExp(r'href="([^"]+)"').firstMatch(block)?.group(1) ?? '';
+          link = href;
+        }
+        final description = tag(block, 'description') ?? tag(block, 'content') ?? '';
+        final image = RegExp(r'url="([^"]+)"').firstMatch(block)?.group(1) ?? '';
+        if (title.isEmpty || !link.startsWith('https://')) continue;
+        items.add(NewsItem(
+          title: title,
+          summary: summarise(description, maxSentences: 3, maxChars: 260),
+          url: link,
+          image: image.startsWith('http') ? image : '',
+        ));
+        if (items.length >= limit) break;
       }
-      final description = tag(block, 'description') ?? tag(block, 'content') ?? '';
-      final image = RegExp(r'url="([^"]+)"').firstMatch(block)?.group(1) ?? '';
-      if (title.isEmpty || !link.startsWith('https://')) continue;
-      items.add(NewsItem(
-        title: title,
-        summary: summarise(description, maxSentences: 3, maxChars: 260),
-        url: link,
-        image: image.startsWith('http') ? image : '',
-      ));
-      if (items.length >= limit) break;
+      if (items.isNotEmpty) return items;
+    } catch (_) {
+      // Try the desk's next source.
     }
-    return items;
-  } catch (_) {
-    return const <NewsItem>[];
   }
+  return const <NewsItem>[];
 }
 
 /// Build one news post: headline + summary lines + the real article link.
@@ -305,61 +305,58 @@ class AgentFeedService {
   AgentFeedService._();
 
   /// Seed every due agent slot in the last 48h that has no post yet. Call on
-  /// Discover open (and app resume). Best-effort: network or Firestore
-  /// failures leave the slot for the next open.
+  /// Discover open (and app resume). Slots are the server cron's UTC 4-hour
+  /// buckets, so markers always agree with it. Best-effort: network or
+  /// Firestore failures leave the slot for the next open.
   static Future<void> seedIfDue({DateTime? now}) async {
     final user = FirebaseAuth.instance.currentUser;
     final uid = user?.uid ?? '';
     if (uid.isEmpty) return;
 
-    final t = now ?? DateTime.now();
+    final t = now ?? DateTime.now().toUtc();
     for (final agent in kAgentAccounts) {
-      for (var dayOffset = 1; dayOffset >= 0; dayOffset--) {
-        final day = DateTime(t.year, t.month, t.day - dayOffset);
-        final dayKey = _dayKey(day);
-        for (var i = 0; i < agent.slots.length; i++) {
-          final parts = agent.slots[i].split(':');
-          final when = day.add(Duration(hours: int.parse(parts[0]), minutes: int.parse(parts[1])));
-          if (when.isAfter(t)) continue;
-          final marker = markerFor(agent.handle, dayKey, i);
-          try {
-            if (await _postExists(marker)) continue;
-            final post = await generate(agent, i, dayKey);
-            await SocialService.createPost(
-              uid: uid,
-              name: agent.name,
-              photo: agent.photo,
-              text: post.text,
-              topics: post.topics,
-              link: marker,
-              linkMeta: <String, String>{
-                'title': post.linkTitle,
-                'image': post.linkImage,
-                'site': post.linkSite,
-              },
-            );
-          } catch (_) {
-            // Miss this slot this time; the next open retries it (within 48h).
-          }
+      for (var slotOffset = 12; slotOffset >= 0; slotOffset--) {
+        // 12 four-hour slots = 48h of catch-up window.
+        final slotStart = DateTime.utc(t.year, t.month, t.day, t.hour)
+            .subtract(Duration(hours: slotOffset * 4));
+        if (slotStart.isAfter(t)) continue;
+        final dayKey = _dayKey(slotStart);
+        final slot = slotStart.hour ~/ 4;
+        final marker = markerFor(agent.handle, dayKey, slot);
+        try {
+          if (await _postExists(marker)) continue;
+          final post = await generate(agent, slot, dayKey);
+          await SocialService.createPost(
+            uid: uid,
+            name: agent.name,
+            photo: agent.photo,
+            text: post.text,
+            topics: post.topics,
+            link: marker,
+            linkMeta: <String, String>{
+              'title': post.linkTitle,
+              'image': post.linkImage,
+              'site': post.linkSite,
+            },
+          );
+        } catch (_) {
+          // Miss this slot this time; the next open retries it (within 48h).
         }
       }
     }
   }
 
   /// Generate the content for one slot. Crypto slots read Binance; news slots
-  /// read the desk's feed and pick deterministically so re-runs converge.
+  /// read the desk's feeds and pick deterministically so re-runs converge.
+  /// An empty feed THROWS — the slot is skipped and retried later, never
+  /// padded with a standdown note.
   static Future<GeneratedPost> generate(AgentAccount agent, int slot, String dayKey) async {
     if (agent.handle == 'cryptoexpert') {
       return _cryptoPost();
     }
     final items = await fetchNews(agent.handle);
     if (items.isEmpty) {
-      // Feed unavailable — a short standdown note keeps the cadence honest.
-      return GeneratedPost(
-        text: '${agent.name} brief: feed temporarily unavailable — the next '
-            'drop lands at the usual time.',
-        topics: agent.topics,
-      );
+      throw StateError('${agent.handle}: all news sources unavailable');
     }
     // Deterministic per-day headline pick; the marker keeps any accidental
     // collision from publishing twice.

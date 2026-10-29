@@ -3,17 +3,19 @@ import '../services/social_service.dart';
 /// ---------------------------------------------------------------------------
 /// AgentAccounts — the verified publisher accounts of the Discover feed.
 ///
-/// These are Myto's own editorial agents: a crypto analyst and three daily
-/// news desks. They post on a fixed daily schedule (seeded by
-/// `agent_feed_service.dart` the first time the app is opened after each
-/// slot), always carry the blue verified tick, and never accept comments.
-/// Their reaction counts are a display transform (see [displayLikeCount]):
-/// each post climbs fast to a stable base between 90K and 180K, and real
+/// These are Myto's own editorial agents: a crypto analyst and three news
+/// desks. Publishing is driven by the server-side cron (GitHub Action →
+/// `scripts/agent-cron/run.mjs`) every 4 hours, so posts land on schedule
+/// even when no device is open; `agent_feed_service.dart` remains only as a
+/// catch-up backup using the same UTC slot markers. The agents always carry
+/// the blue verified tick and never accept comments. Their reaction counts
+/// are a display transform (see [displayLikeCount]): each post grows at a
+/// steady 300–450 likes/hour toward an 8K–10K first-day total, and real
 /// users' likes then stack on top of that.
 ///
 /// Identity works without any schema or rules change: an agent post is a
 /// normal Firestore post whose `link` field carries the marker URL built by
-/// [markerFor] (`https://mytocode.vercel.app/agent/<handle>/<day>/<slot>`),
+/// [markerFor] (`https://mytocode.vercel.app/agent/<handle>/<utcDay>/<slot>`),
 /// and whose `name`/`photo` are the account's. Anything that renders an
 /// author asks [agentForPost] / [agentByName] before showing a Follow
 /// button, a delete button, or a comment composer.
@@ -55,7 +57,9 @@ class AgentAccount {
   final int followers;
   final int following;
 
-  /// Daily post times as 'HH:mm' (24h, local). One post per slot per day.
+  /// Post times as 'HH:mm' (24h, UTC+6) — display metadata for the profile
+  /// page. The real publishing clock is the server cron's 4-hour UTC cadence;
+  /// one post per slot per day.
   final List<String> slots;
 
   /// "@handle".
@@ -82,57 +86,57 @@ String _compact(int n) {
 /// The domain marker posts must carry to be recognised as agent posts.
 const String kAgentMarkerPrefix = 'https://mytocode.vercel.app/agent/';
 
-/// The verified publisher roster. Slots are local wall-clock times; the
-/// crypto desk posts twice a day (pre-US + post-EU session reads), the news
-/// desks six times, spread across the waking day.
+/// The verified publisher roster. Every agent posts once every 4 hours (six
+/// slots a day) from the server cron — the listed times mirror that cadence
+/// in UTC+6 for the profile display.
 const List<AgentAccount> kAgentAccounts = <AgentAccount>[
   AgentAccount(
     handle: 'cryptoexpert',
     name: 'CryptoExpert',
-    photo: 'https://api.dicebear.com/9.x/bots/png?seed=cryptoexpert&backgroundColor=1a6b52',
-    bio: 'Daily crypto calls backed by live market data — trend, momentum and '
-        'volume read off Binance every morning and evening. Not financial advice.',
+    photo: 'https://mytocode.vercel.app/agents/cryptoexpert.png',
+    bio: 'Crypto calls backed by live market data — trend, momentum and '
+        'volume read off Binance every four hours. Not financial advice.',
     linkLabel: 'binance.com',
     topics: <String>['crypto'],
     followers: 674000,
     following: 326,
-    slots: <String>['10:00', '18:00'],
+    slots: <String>['02:20', '06:20', '10:20', '14:20', '18:20', '22:20'],
   ),
   AgentAccount(
     handle: 'ai_daily',
     name: 'AI Daily',
-    photo: 'https://api.dicebear.com/9.x/bots/png?seed=aidaily&backgroundColor=3b82f6',
+    photo: 'https://mytocode.vercel.app/agents/ai_daily.png',
     bio: 'Everything shipping in AI — model releases, research that matters, '
         'and the product news actually worth your time. Six briefs a day.',
-    linkLabel: 'venturebeat.com',
+    linkLabel: 'techcrunch.com',
     topics: <String>['ai', 'tech'],
     followers: 412800,
     following: 184,
-    slots: <String>['08:30', '11:00', '13:30', '16:00', '18:30', '21:00'],
+    slots: <String>['02:20', '06:20', '10:20', '14:20', '18:20', '22:20'],
   ),
   AgentAccount(
     handle: 'market_pulse',
     name: 'MarketPulse',
-    photo: 'https://api.dicebear.com/9.x/bots/png?seed=marketpulse&backgroundColor=f0b90b',
+    photo: 'https://mytocode.vercel.app/agents/market_pulse.png',
     bio: 'Crypto and market headlines as they break — exchange news, '
         'regulation, majors on the move. Summarised in three lines or less.',
-    linkLabel: 'coindesk.com',
+    linkLabel: 'cointelegraph.com',
     topics: <String>['crypto', 'news'],
     followers: 289300,
     following: 97,
-    slots: <String>['09:00', '12:00', '14:30', '17:00', '19:30', '22:00'],
+    slots: <String>['02:20', '06:20', '10:20', '14:20', '18:20', '22:20'],
   ),
   AgentAccount(
     handle: 'startup_buzz',
     name: 'StartupBuzz',
-    photo: 'https://api.dicebear.com/9.x/bots/png?seed=startupbuzz&backgroundColor=eb4899',
-    bio: 'Funding rounds, launches and founder stories from TechCrunch — '
-        'who raised, what shipped, why it matters. Six drops a day.',
+    photo: 'https://mytocode.vercel.app/agents/startup_buzz.png',
+    bio: 'Funding rounds, launches and founder stories — who raised, what '
+        'shipped, why it matters. Six drops a day.',
     linkLabel: 'techcrunch.com',
     topics: <String>['tech', 'news'],
     followers: 198400,
     following: 512,
-    slots: <String>['08:00', '10:30', '13:00', '15:30', '18:00', '20:30'],
+    slots: <String>['02:20', '06:20', '10:20', '14:20', '18:20', '22:20'],
   ),
 ];
 
@@ -195,22 +199,24 @@ double stableHash01(String s) {
 }
 
 /// The like count a post DISPLAYS. Real posts show their real count; agent
-/// posts show a fast-rising pseudo count: a deterministic base of 90K–180K
-/// (seeded by the post id, so it never changes for a given post) reached
-/// within roughly the first hour, plus whatever real likes have accumulated.
+/// posts show a steady organic-looking climb: a deterministic hourly rate of
+/// 300–450 likes/hour (seeded by the post id, so it never changes for a given
+/// post) that accumulates for the first 24 hours — landing each post in the
+/// 8K–10K band by the end of its first day — plus whatever real likes have
+/// accumulated on top.
 ///
-///   displayed = base * easeOut(min(1, age/55min)) + realLikeCount
+///   displayed = rate * min(ageHours, 24) + realLikeCount
 ///
 /// Pure and deterministic given (post, nowMs) — unit-tested.
 int displayLikeCount(FeedPost post, {int? nowMs}) {
   if (!isAgentPost(post)) return post.likeCount;
   final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
-  final base = 90000 + (stableHash01('likes:${post.id}') * 90001).floor();
-  final ageMin = ((now - post.createdAtMs) / 60000).clamp(0.0, double.infinity);
-  final t = (ageMin / 55.0).clamp(0.0, 1.0);
-  final eased = 1 - (1 - t) * (1 - t); // ease-out quad — fast first, then levels
-  final shown = base * eased + post.likeCount;
-  return shown.floor();
+  final h = stableHash01('likes:${post.id}');
+  const dailyMin = 8000.0;
+  const dailyMax = 10000.0;
+  final rate = dailyMin / 24 + h * ((dailyMax - dailyMin) / 24); // ≈333–417/h
+  final ageHours = ((now - post.createdAtMs) / 3600000).clamp(0.0, 24.0);
+  return (rate * ageHours).floor() + post.likeCount;
 }
 
 /// Comments are turned off on agent posts.

@@ -59,11 +59,11 @@ void main() {
       final crypto = agentByHandle('cryptoexpert')!;
       expect(crypto.followers, 674000);
       expect(crypto.following, 326);
-      expect(crypto.slots, hasLength(2)); // daily 2 posts
       expect(crypto.followersLabel, '674K');
-      // The three news desks post 5-6 times a day (6 slots).
-      for (final a in kAgentAccounts.where((a) => a.handle != 'cryptoexpert')) {
-        expect(a.slots.length, inInclusiveRange(5, 6));
+      // Every agent posts on the server cron's 4-hour cadence — 6 slots/day.
+      for (final a in kAgentAccounts) {
+        expect(a.slots, hasLength(6));
+        expect(a.photo, startsWith('https://mytocode.vercel.app/agents/'));
       }
     });
 
@@ -111,52 +111,68 @@ void main() {
       expect(displayLikeCount(p, nowMs: 9999999999999), 42);
     });
 
-    test('agent posts land in the 90K–180K band, deterministically', () {
+    test('agent posts climb at 300–450/hour, deterministically', () {
+      final now = DateTime.now().millisecondsSinceEpoch;
       final p = post(
         id: 'agent-1',
         name: 'CryptoExpert',
         link: markerFor('cryptoexpert', '2026-10-28', 0),
-        createdAtMs: DateTime.now().millisecondsSinceEpoch - 3 * 3600000, // 3h old
+        createdAtMs: now - 3 * 3600000, // 3h old
       );
       final a = displayLikeCount(p);
       final b = displayLikeCount(p);
       expect(a, same(b)); // stable per post
-      expect(a, inInclusiveRange(90000, 180000));
+      // 3 hours of growth at 300–450/hour.
+      expect(a, inInclusiveRange(900, 1350));
     });
 
-    test('young agent posts ramp up fast but never overshoot the band', () {
+    test('a day-old agent post lands in the 8K–10K band and stays there', () {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      FeedPost at(int ageHours) => post(
+            id: 'agent-2',
+            name: 'AI Daily',
+            link: markerFor('ai_daily', '2026-10-28', 0),
+            createdAtMs: now - ageHours * 3600000,
+          );
+      final at12h = displayLikeCount(at(12), nowMs: now);
+      final at24h = displayLikeCount(at(24), nowMs: now);
+      final at72h = displayLikeCount(at(72), nowMs: now);
+      expect(at12h, inInclusiveRange(4000, 5000)); // half a day of growth
+      expect(at24h, inInclusiveRange(8000, 10000)); // the daily band
+      expect(at72h, at24h); // growth caps after the first day
+    });
+
+    test('the climb is visible hour over hour', () {
       final now = DateTime.now().millisecondsSinceEpoch;
       final fresh = post(
-        id: 'agent-2',
-        name: 'AI Daily',
-        link: markerFor('ai_daily', '2026-10-28', 0),
-        likeCount: 0,
-        createdAtMs: now - 2 * 60000, // 2 minutes old
+        id: 'agent-3',
+        name: 'MarketPulse',
+        link: markerFor('market_pulse', '2026-10-28', 0),
+        createdAtMs: now - 5 * 60000, // 5 minutes old
       );
-      final mature = post(
-        id: 'agent-2',
-        name: 'AI Daily',
-        link: markerFor('ai_daily', '2026-10-28', 0),
-        likeCount: 0,
-        createdAtMs: now - 55 * 60000, // past the ramp
+      final later = post(
+        id: 'agent-3',
+        name: 'MarketPulse',
+        link: markerFor('market_pulse', '2026-10-28', 0),
+        createdAtMs: now - 2 * 3600000, // 2 hours old
       );
       final early = displayLikeCount(fresh, nowMs: now);
-      final late = displayLikeCount(mature, nowMs: now);
-      expect(early, lessThan(late)); // the rapid climb
-      expect(late, inInclusiveRange(90000, 180000));
+      final mid = displayLikeCount(later, nowMs: now);
+      expect(early, lessThan(50)); // just born — nearly no likes yet
+      expect(early, lessThan(mid)); // the steady climb
     });
 
     test('real likes stack on top of the pseudo-count', () {
       final now = DateTime.now().millisecondsSinceEpoch;
       final withLikes = post(
-        id: 'agent-3',
+        id: 'agent-4',
         name: 'CryptoExpert',
         link: markerFor('cryptoexpert', '2026-10-28', 0),
         likeCount: 250,
         createdAtMs: now - 3 * 3600000,
       );
       final withoutLikes = post(
-        id: 'agent-3',
+        id: 'agent-4',
         name: 'CryptoExpert',
         link: markerFor('cryptoexpert', '2026-10-28', 0),
         likeCount: 0,

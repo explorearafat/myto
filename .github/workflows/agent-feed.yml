@@ -1,0 +1,50 @@
+name: agent-feed
+
+# The verified agents' publishing cron. Runs every 4 hours on GitHub's
+# servers, so posts go out on schedule even when every developer machine is
+# asleep. Content generation (news fetch + OpenRouter summary) and the
+# Firestore write both happen here; the marker link keeps each 4-hour slot
+# idempotent, so late or repeated runs never double-post.
+
+on:
+  schedule:
+    # Every 4 hours, offset 20 min past the boundary (GitHub crons cluster on
+    # the hour and routinely delay top-of-hour jobs by many minutes).
+    - cron: '20 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'post = publish due slots; purge = delete all agent posts'
+        default: 'post'
+        type: choice
+        options: [post, purge]
+
+concurrency:
+  group: agent-feed
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Publish due agent slots
+        if: ${{ github.event_name == 'schedule' || inputs.mode == 'post' }}
+        run: node scripts/agent-cron/run.mjs
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          OPENROUTER_API_KEYS: ${{ secrets.OPENROUTER_API_KEYS }}
+
+      - name: Purge all agent posts
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'purge' }}
+        run: node scripts/agent-cron/purge.mjs
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}

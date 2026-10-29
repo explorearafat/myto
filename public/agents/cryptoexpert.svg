@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0e7a5c"/>
+      <stop offset="1" stop-color="#0a3f30"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.12"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#f5c451"/>
+      <stop offset="1" stop-color="#ffe9b0"/>
+    </linearGradient>
+  </defs>
+  <circle cx="256" cy="256" r="256" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="252" fill="none" stroke="url(#ring)" stroke-width="8"/>
+  <!-- rising trend line -->
+  <path d="M96 372 L196 272 L268 320 L416 152" fill="none" stroke="url(#gold)" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M416 152 L416 236 M416 152 L332 152" fill="none" stroke="url(#gold)" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- candle bars under the line -->
+  <rect x="118" y="330" width="34" height="86" rx="10" fill="#ffffff" opacity="0.92"/>
+  <rect x="238" y="286" width="34" height="110" rx="10" fill="#ffffff" opacity="0.75"/>
+</svg>

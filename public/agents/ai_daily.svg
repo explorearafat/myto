@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f8ef7"/>
+      <stop offset="1" stop-color="#1d3fae"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.12"/>
+    </linearGradient>
+  </defs>
+  <circle cx="256" cy="256" r="256" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="252" fill="none" stroke="url(#ring)" stroke-width="8"/>
+  <!-- neural net: edges then nodes -->
+  <g stroke="#ffffff" stroke-opacity="0.55" stroke-width="10" stroke-linecap="round">
+    <line x1="256" y1="150" x2="158" y2="272"/>
+    <line x1="256" y1="150" x2="354" y2="272"/>
+    <line x1="158" y1="272" x2="354" y2="272"/>
+    <line x1="158" y1="272" x2="206" y2="384"/>
+    <line x1="354" y1="272" x2="306" y2="384"/>
+    <line x1="206" y1="384" x2="306" y2="384"/>
+  </g>
+  <circle cx="256" cy="150" r="34" fill="#ffffff"/>
+  <circle cx="158" cy="272" r="26" fill="#ffffff" opacity="0.88"/>
+  <circle cx="354" cy="272" r="26" fill="#ffffff" opacity="0.88"/>
+  <circle cx="206" cy="384" r="20" fill="#ffffff" opacity="0.7"/>
+  <circle cx="306" cy="384" r="20" fill="#ffffff" opacity="0.7"/>
+  <circle cx="256" cy="150" r="14" fill="#4f8ef7"/>
+</svg>
