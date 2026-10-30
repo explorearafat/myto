@@ -234,8 +234,13 @@ service cloud.firestore {
     match /threads/{threadId} {
       // Thread docs: members array (exactly the two uids) + lastText/lastFrom/lastAt
       // preview, updated by the sender alongside each message write.
-      allow read: if isThreadParty(threadId)
-        && request.auth.uid in resource.data.members;
+      // Reads deliberately DROP the id-derivation check: list queries filter
+      // on FIELDS, and the rules engine cannot prove "uid is in the doc ID"
+      // from a where('members', 'array-contains') — so the whole inbox query
+      // was denied and no thread ever appeared in the Messages list. The
+      // members-array check alone is the real gate (it mirrors the id), and
+      // an array-contains query proves it for every doc it can return.
+      allow read: if signedIn() && request.auth.uid in resource.data.members;
       allow create: if isThreadParty(threadId)
         && request.resource.data.members.size() == 2
         && request.auth.uid in request.resource.data.members;

@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import '../services/agent_accounts.dart';
 import '../services/agent_feed_service.dart';
 import '../services/auth_service.dart';
+import '../services/notification_service.dart';
 import '../services/verified.dart';
 import '../services/social_service.dart';
 import '../theme.dart';
@@ -171,11 +172,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
               MaterialPageRoute<void>(builder: (_) => const MessagesScreen()),
             ),
           ),
-          IconButton(
-            tooltip: 'Notifications',
-            icon: const Icon(Icons.notifications_none_rounded, size: 24),
-            onPressed: () => showNotificationsSheet(context),
-          ),
+          _BellWithBadge(onTap: () => showNotificationsSheet(context)),
           const SizedBox(width: TeamlySpace.s1),
         ],
       ),
@@ -1210,6 +1207,68 @@ class _AuthorLabelState extends State<_AuthorLabel> {
           const Icon(Icons.verified_rounded, size: 14, color: Color(0xFF1D9BF0)),
         ],
       ],
+    );
+  }
+}
+
+/// The header bell with a live red unread badge. The count is the user's
+/// unread notifications (NotificationService), so a new DM, like, comment or
+/// share lights the badge as it arrives; opening the sheet (or the messages
+/// list, for DMs) marks things read and the badge clears on the same stream.
+class _BellWithBadge extends StatelessWidget {
+  const _BellWithBadge({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (uid.isEmpty) {
+      return IconButton(
+        tooltip: 'Notifications',
+        icon: const Icon(Icons.notifications_none_rounded, size: 24),
+        onPressed: onTap,
+      );
+    }
+    return StreamBuilder<List<AppNotification>>(
+      stream: NotificationService.stream(uid),
+      builder: (context, snap) {
+        final unread =
+            (snap.data ?? const <AppNotification>[]).where((n) => !n.read).length;
+        return IconButton(
+          tooltip: 'Notifications',
+          icon: Stack(
+            clipBehavior: Clip.none,
+            children: <Widget>[
+              const Icon(Icons.notifications_none_rounded, size: 24),
+              if (unread > 0)
+                Positioned(
+                  right: -5,
+                  top: -5,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                    constraints: const BoxConstraints(minWidth: 15),
+                    decoration: BoxDecoration(
+                      color: TeamlyColors.danger,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.white, width: 1),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      unread > 9 ? '9+' : '$unread',
+                      style: const TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          onPressed: onTap,
+        );
+      },
     );
   }
 }

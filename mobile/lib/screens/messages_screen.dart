@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
@@ -31,7 +30,12 @@ class _MessagesScreenState extends State<MessagesScreen> {
   @override
   void initState() {
     super.initState();
-    if (_me.isNotEmpty) DmService.sweepAllMine(_me);
+    if (_me.isNotEmpty) {
+      DmService.sweepAllMine(_me);
+      // Seeing the conversation list settles every DM notification — the
+      // bell's unread count drops the moment the inbox is opened.
+      NotificationService.markKindRead(_me, 'dm');
+    }
   }
 
   Future<void> _loadProfile(String uid) async {
@@ -86,6 +90,24 @@ class _MessagesScreenState extends State<MessagesScreen> {
           : StreamBuilder<List<DmThread>>(
               stream: DmService.streamThreads(_me),
               builder: (context, snap) {
+                // A denied/offline query must say so — rendering it as "no
+                // messages" is what made threads look like they vanished.
+                if (snap.hasError) {
+                  return const Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Icon(Icons.cloud_off_rounded, size: 36, color: TeamlyColors.ink300),
+                        SizedBox(height: 10),
+                        Text(
+                          'Could not load your messages.\nCheck your connection and reopen.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(fontSize: 13.5, height: 1.5, color: TeamlyColors.ink500),
+                        ),
+                      ],
+                    ),
+                  );
+                }
                 final threads = snap.data ?? const <DmThread>[];
                 if (threads.isEmpty) {
                   return Center(

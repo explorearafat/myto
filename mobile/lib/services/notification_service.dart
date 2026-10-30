@@ -69,7 +69,10 @@ class AppNotification {
         'postPreview': postPreview,
         'snippet': snippet,
         'at': FieldValue.serverTimestamp(),
-        'read': false,
+        // 'read' deliberately NOT written on file: a re-file (e.g. the DM
+        // watcher re-notifying an old preview after a restart) must never
+        // un-read an existing notification — absence reads as unread for new
+        // docs, and a true value survives merge.
       };
 
   /// "Asha liked your post" / "Asha commented: …" / "Asha posted: …"
@@ -536,6 +539,26 @@ class NotificationService {
       ]..sort((a, b) => b.atMs.compareTo(a.atMs));
       return items;
     });
+  }
+
+  /// Mark every notification of ONE kind read (e.g. opening the messages
+  /// list settles all 'dm' notifications without touching like/comment ones).
+  static Future<void> markKindRead(String uid, String kind) async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .collection('config')
+          .where('kind', isEqualTo: kind)
+          .get();
+      for (final doc in snap.docs) {
+        if (!doc.id.startsWith('notif:')) continue;
+        if (doc.data()['read'] == true) continue;
+        await doc.reference.set(<String, dynamic>{'read': true}, SetOptions(merge: true));
+      }
+    } on FirebaseException {
+      // Best-effort.
+    }
   }
 
   /// Mark everything read (called when the sheet opens).
