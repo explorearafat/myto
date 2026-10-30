@@ -169,6 +169,20 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Raise flutter_webrtc compileSdk (plugin targets 31, androidx needs 34)
+        # flutter_webrtc 0.12.x declares compileSdkVersion 31 while the androidx
+        # libraries it pulls in require 34 — the AAR metadata check then fails
+        # for :flutter_webrtc. Patch the plugin's gradle in the pub cache before
+        # the build (the android/ folder is regenerated per-build anyway).
+        run: |
+          CACHE="${PUB_CACHE:-$HOME/.pub-cache}/hosted/pub.dev"
+          for GRADLE in "$CACHE"/flutter_webrtc-*/android/build.gradle; do
+            if [ -f "$GRADLE" ]; then
+              sed -i 's/compileSdkVersion 31/compileSdkVersion 34/' "$GRADLE"
+              echo "Raised compileSdk in $GRADLE"
+            fi
+          done
+
       - name: Generate the launcher icon
         # Stamp the Myto star over the default Flutter icon that `flutter create` emitted, into the
         # freshly generated android/. Reads the flutter_launcher_icons config + assets/icon/*.png
