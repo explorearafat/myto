@@ -313,7 +313,13 @@ class _AvatarWithDot extends StatelessWidget {
     return StreamBuilder<Presence?>(
       stream: uid.isEmpty ? const Stream<Presence?>.empty() : DmService.streamPresence(uid),
       builder: (context, snap) {
-        final online = snap.data?.online ?? false;
+        final p = snap.data;
+        // Same freshness rule as presenceLine — a killed app's stale "online"
+        // flag must not light the dot forever.
+        final online = (p?.online ?? false) &&
+            p!.lastSeenMs != 0 &&
+            DateTime.now().millisecondsSinceEpoch - p.lastSeenMs <
+                kPresenceStaleWindow.inMilliseconds;
         return Stack(
           clipBehavior: Clip.none,
           children: <Widget>[

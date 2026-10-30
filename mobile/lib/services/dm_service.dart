@@ -121,9 +121,18 @@ int _ms(Object? value) {
 }
 
 /// Human "last seen" / "active" line for a chat header.
+///
+/// The `online` flag is only trusted for STALENESS_WINDOW — a phone that died
+/// mid-session (app killed, no clean pause callback) would otherwise broadcast
+/// "online" forever. After the window the last-seen line takes over.
+const Duration kPresenceStaleWindow = Duration(minutes: 5);
+
 String presenceLine(Presence? p) {
   if (p == null) return 'offline';
-  if (p.online) return 'online';
+  final fresh = p.lastSeenMs != 0 &&
+      DateTime.now().millisecondsSinceEpoch - p.lastSeenMs <
+          kPresenceStaleWindow.inMilliseconds;
+  if (p.online && fresh) return 'online';
   if (p.lastSeenMs == 0) return 'offline';
   final diff = DateTime.now().millisecondsSinceEpoch - p.lastSeenMs;
   final s = diff ~/ 1000;
@@ -147,13 +156,25 @@ class DmService {
   /// Create the thread doc when it doesn't exist yet (owner-pinned by the rules).
   /// Sending later messages only touches the preview fields, so this must run
   /// once before the first message of a brand-new conversation.
+  ///
+  /// Uses create() — NOT a get() first. The rules deny reading a thread that
+  /// does not exist yet (the members check has nothing to match), so the old
+  /// get-then-set threw permission-denied on every FIRST contact and the send
+  /// surfaced "Message failed". create() on an existing doc just reports
+  /// already-exists, which is exactly the outcome we want.
   static Future<void> ensureThread(String me, String other) async {
     final ref = _db.collection('threads').doc(threadIdFor(me, other));
-    final snap = await ref.get();
-    if (snap.exists) return;
-    await ref.set(<String, dynamic>{
-      'members': <String>[me, other]..sort(),
-    });
+    try {
+      await ref.set(<String, dynamic>{
+        'members': <String>[me, other]..sort(),
+      });
+    } on FirebaseException catch (e) {
+      // permission-denied on THIS write means the thread already exists: the
+      // rules let a thread be created but forbid rewriting `members` on an
+      // existing one — which is exactly the outcome we wanted. Anything else
+      // (offline, genuinely gated) rethrows.
+      if (e.code != 'permission-denied') rethrow;
+    }
   }
 
   /// All of the user's conversations, newest activity first (sorted client-side —
