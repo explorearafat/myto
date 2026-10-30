@@ -26,7 +26,16 @@ interface NotifyBody {
   data?: unknown;
 }
 
-const KINDS = new Set(['dm', 'like', 'comment', 'share', 'follow']);
+const KINDS = new Set(['dm', 'like', 'comment', 'share', 'follow', 'call']);
+// The 'call' kind is the desktop calling the SAME account's phone back when a
+// task finishes — the one legitimate self-push. Everything else (social
+// notifications) stays blocked from self-pushing.
+const SELF_PUSH_KINDS = new Set(['call']);
+// Incoming-call pushes ring on their own channel so the phone can treat them
+// differently from social notifications (high-importance, full-screen intent).
+function channelFor(kind: string): string {
+  return kind === 'call' ? 'calls' : 'messages';
+}
 let cachedSaToken: { token: string; expiresAt: number } | null = null;
 
 function serviceAccount(): { client_email: string; private_key: string } {
@@ -113,7 +122,7 @@ async function recipientTokens(toUid: string): Promise<string[]> {
 }
 
 /** Send one FCM v1 push; returns false when the token is dead (unregistered). */
-async function sendFcm(token: string, title: string, body: string, data: Record<string, string>): Promise<boolean> {
+async function sendFcm(token: string, title: string, body: string, data: Record<string, string>, kind: string): Promise<boolean> {
   const saToken = await saAccessToken();
   const res = await fetch(
     `https://fcm.googleapis.com/v1/projects/${PROJECT_ID}/messages:send`,
@@ -129,12 +138,17 @@ async function sendFcm(token: string, title: string, body: string, data: Record<
           notification: { title: title.slice(0, 120), body: body.slice(0, 240) },
           data,
           android: {
-            priority: 'HIGH',
-            notification: { channel_id: 'messages', notification_priority: 'PRIORITY_HIGH' },
+            priority: kind === 'call' ? 'HIGH' : 'HIGH',
+            notification: {
+              channel_id: channelFor(kind),
+              notification_priority: 'PRIORITY_HIGH',
+              // Call pushes wake the screen like a real incoming call.
+              ...(kind === 'call' ? { default_sound: true } : {}),
+            },
           },
         },
       }),
-    },
+    }
   );
   if (res.ok) return true;
   const text = await res.text();
@@ -174,7 +188,9 @@ export async function POST(req: Request): Promise<Response> {
   // gets nothing.
   const fromUid = await verifyIdToken(idToken);
   if (!fromUid) return json(401, { error: 'unauthorized' });
-  if (fromUid === toUid) return json(200, { sent: 0 }); // never push to yourself
+  // Never push to yourself — EXCEPT the call kind: the desktop calls the same
+  // account's phone back when a task finishes (Myto Remote callbacks).
+  if (fromUid === toUid && !SELF_PUSH_KINDS.has(kind)) return json(200, { sent: 0 });
 
   const tokens = await recipientTokens(toUid);
   if (tokens.length === 0) return json(200, { sent: 0 });
@@ -183,7 +199,7 @@ export async function POST(req: Request): Promise<Response> {
   const dead: string[] = [];
   for (const token of tokens) {
     try {
-      const ok = await sendFcm(token, title, body, { kind, ...data });
+      const ok = await sendFcm(token, title, body, { kind, ...data }, kind);
       if (ok) sent++;
       else dead.push(token);
     } catch {

@@ -78,6 +78,19 @@ service cloud.firestore {
       match /saved/{postId} {
         allow read, write: if signedIn() && request.auth.uid == uid;
       }
+
+      // Voice calls (Myto Remote): the call lifecycle doc + its signaling
+      // subcollection (WebRTC offers/answers/ICE). Both the phone and the desktop
+      // are signed into the SAME account, so owner-only is exactly the pairing
+      // model: nobody can even see that a call exists, let alone join it. SDP
+      // payloads are opaque connection data — capped at a sane SDP size.
+      match /calls/{callId} {
+        allow read, write: if signedIn() && request.auth.uid == uid;
+
+        match /signals/{signalId} {
+          allow read, write: if signedIn() && request.auth.uid == uid;
+        }
+      }
     }
 
     // ── 2. Public social feed (Discover) ──────────────────────────────────────
