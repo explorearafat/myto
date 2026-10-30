@@ -141,7 +141,9 @@ async function sendFcm(token: string, title: string, body: string, data: Record<
   return !text.includes('UNREGISTERED') && !text.includes('INVALID_ARGUMENT');
 }
 
-export default async function handler(req: Request): Promise<Response> {
+// Node runtime on Vercel wants a NAMED HTTP-method export (default export
+// returning a Response is treated as void here and the request hangs).
+export async function POST(req: Request): Promise<Response> {
   if (req.method !== 'POST') {
     return json(405, { error: 'method_not_allowed' });
   }
