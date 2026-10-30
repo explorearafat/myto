@@ -1,7 +1,7 @@
 name: sylor
 description: "Myto — a local-first AI coding workspace. The mobile chat companion."
 publish_to: "none"
-version: 0.17.0+27
+version: 0.17.1+28
 
 environment:
   sdk: ">=3.6.0 <4.0.0"
@@ -49,6 +49,9 @@ dependencies:
   # Real push notifications (FCM): system-tray pushes when the app is
   # closed/backgrounded, exactly like WhatsApp/Facebook.
   firebase_messaging: ^15.1.6
+
+  # Opens the profile social links (instagram.com / wa.me / tiktok.com).
+  url_launcher: ^6.3.0
 
 dev_dependencies:
   flutter_test:

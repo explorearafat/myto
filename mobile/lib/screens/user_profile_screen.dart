@@ -6,6 +6,7 @@ import '../services/dm_service.dart';
 import '../services/notification_service.dart';
 import '../services/social_service.dart';
 import '../services/verified.dart';
+import '../widgets/profile_social.dart';
 import '../theme.dart';
 import 'dm_chat_screen.dart';
 
@@ -216,6 +217,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                       style: const TextStyle(fontSize: 13.5, height: 1.45, color: TeamlyColors.ink700),
                     ),
                   ),
+                if (profile != null && !profile.socials.isEmpty) ...<Widget>[
+                  const SizedBox(height: TeamlySpace.s3),
+                  ProfileSocialBox(links: profile.socials),
+                ],
                 const SizedBox(height: TeamlySpace.s4),
                 // ── Follow / Message ───────────────────────────────────────
                 if (_me.isNotEmpty && _me != widget.uid)

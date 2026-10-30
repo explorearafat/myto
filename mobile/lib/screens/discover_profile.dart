@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import '../services/social_service.dart';
 import '../services/verified.dart';
+import '../widgets/profile_social.dart';
 import '../theme.dart';
 import '../widgets/teamly/kit.dart';
 
@@ -43,6 +44,12 @@ class _DiscoverProfileSetupState extends State<DiscoverProfileSetup> {
       TextEditingController(text: widget.existing?.username ?? '');
   late final TextEditingController _bio =
       TextEditingController(text: widget.existing?.bio ?? '');
+  late final TextEditingController _instagram =
+      TextEditingController(text: widget.existing?.socials.instagram ?? '');
+  late final TextEditingController _whatsapp =
+      TextEditingController(text: widget.existing?.socials.whatsapp ?? '');
+  late final TextEditingController _tiktok =
+      TextEditingController(text: widget.existing?.socials.tiktok ?? '');
   bool _checking = false;
   bool? _free;
   bool _busy = false;
@@ -65,6 +72,9 @@ class _DiscoverProfileSetupState extends State<DiscoverProfileSetup> {
     _name.dispose();
     _username.dispose();
     _bio.dispose();
+    _instagram.dispose();
+    _whatsapp.dispose();
+    _tiktok.dispose();
     super.dispose();
   }
 
@@ -100,12 +110,18 @@ class _DiscoverProfileSetupState extends State<DiscoverProfileSetup> {
       _error = '';
     });
     try {
+      String digits(String v) => v.replaceAll(RegExp(r'[^0-9]'), '');
       final ok = await SocialService().saveProfile(
         widget.uid,
         name: _name.text,
         username: _username.text,
         bio: _bio.text,
         photo: widget.defaultPhoto,
+        socials: SocialLinks(
+          instagram: _instagram.text.trim().replaceAll('@', ''),
+          whatsapp: digits(_whatsapp.text),
+          tiktok: _tiktok.text.trim().replaceAll('@', ''),
+        ),
       );
       if (!mounted) return;
       setState(() => _busy = false);
@@ -118,6 +134,11 @@ class _DiscoverProfileSetupState extends State<DiscoverProfileSetup> {
             bio: _bio.text,
             photo: widget.defaultPhoto,
             createdAtMs: widget.existing?.createdAtMs ?? DateTime.now().millisecondsSinceEpoch,
+            socials: SocialLinks(
+              instagram: _instagram.text.trim().replaceAll('@', ''),
+              whatsapp: _whatsapp.text.trim().replaceAll(RegExp(r'[^0-9]'), ''),
+              tiktok: _tiktok.text.trim().replaceAll('@', ''),
+            ),
           ),
         );
       } else {
@@ -207,6 +228,50 @@ class _DiscoverProfileSetupState extends State<DiscoverProfileSetup> {
                 labelText: 'Bio (optional)',
                 counterText: '',
                 alignLabelWithHint: true,
+              ),
+            ),
+            const SizedBox(height: TeamlySpace.s3),
+            const Text(
+              'SOCIAL LINKS (optional)',
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.1,
+                color: TeamlyColors.ink300,
+              ),
+            ),
+            const SizedBox(height: TeamlySpace.s2),
+            TextField(
+              controller: _instagram,
+              maxLength: 30,
+              decoration: const InputDecoration(
+                labelText: 'Instagram username',
+                counterText: '',
+                prefixText: '@ ',
+                helperText: 'Shown under your bio; opens your Instagram',
+              ),
+            ),
+            const SizedBox(height: TeamlySpace.s3),
+            TextField(
+              controller: _whatsapp,
+              maxLength: 15,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(
+                labelText: 'WhatsApp number',
+                counterText: '',
+                prefixText: '+ ',
+                helperText: 'International digits, e.g. 8801XXXXXXXXX',
+              ),
+            ),
+            const SizedBox(height: TeamlySpace.s3),
+            TextField(
+              controller: _tiktok,
+              maxLength: 24,
+              decoration: const InputDecoration(
+                labelText: 'TikTok username',
+                counterText: '',
+                prefixText: '@ ',
+                helperText: 'Shown under your bio; opens your TikTok',
               ),
             ),
             const SizedBox(height: TeamlySpace.s4),
@@ -452,6 +517,8 @@ class _DiscoverProfileViewState extends State<DiscoverProfileView> {
             ],
           ),
         ],
+        const SizedBox(height: TeamlySpace.s3),
+        ProfileSocialBox(links: profile?.socials),
         const SizedBox(height: TeamlySpace.s4),
         // Action row — Edit profile / Share profile / overflow.
         Row(

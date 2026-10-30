@@ -92,7 +92,12 @@ service cloud.firestore {
         && validHandle(request.resource.data.username)
         && isString(request.resource.data.bio, 0, 280)
         && request.resource.data.photo is string
-        && request.resource.data.photo.size() <= 500;
+        && request.resource.data.photo.size() <= 500
+        // Social links (optional; '' clears). Capped so nobody hides megabytes
+        // inside a handle field.
+        && request.resource.data.get('instagram', '').size() <= 50
+        && request.resource.data.get('whatsapp', '').size() <= 20
+        && request.resource.data.get('tiktok', '').size() <= 50;
       allow delete: if false;
     }
 

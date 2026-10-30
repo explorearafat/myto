@@ -505,6 +505,34 @@ class SocialService {
 // ── Profiles, handles, viral feed ──────────────────────────────────────────────
 
 /// A Discover profile: how the community sees a builder.
+/// The three profile social links (all optional; '' = not set).
+class SocialLinks {
+  const SocialLinks({this.instagram = '', this.whatsapp = '', this.tiktok = ''});
+
+  /// The Instagram handle (without @).
+  final String instagram;
+
+  /// The WhatsApp NUMBER in international digits (e.g. 8801XXXXXXXXX) — no +.
+  final String whatsapp;
+
+  /// The TikTok handle (without @).
+  final String tiktok;
+
+  bool get isEmpty => instagram.isEmpty && whatsapp.isEmpty && tiktok.isEmpty;
+
+  static SocialLinks fromDoc(Map<String, dynamic> d) => SocialLinks(
+        instagram: (d['instagram'] ?? '') as String,
+        whatsapp: (d['whatsapp'] ?? '') as String,
+        tiktok: (d['tiktok'] ?? '') as String,
+      );
+
+  Map<String, dynamic> toMap() => <String, dynamic>{
+        'instagram': instagram,
+        'whatsapp': whatsapp,
+        'tiktok': tiktok,
+      };
+}
+
 class DiscoverProfile {
   const DiscoverProfile({
     required this.uid,
@@ -514,6 +542,7 @@ class DiscoverProfile {
     required this.photo,
     required this.createdAtMs,
     this.verified = false,
+    this.socials = const SocialLinks(),
   });
 
   final String uid;
@@ -526,6 +555,9 @@ class DiscoverProfile {
   /// Myto's own blue tick (the founder account), stamped into the profile doc.
   final bool verified;
 
+  /// Instagram / WhatsApp / TikTok links shown under the bio.
+  final SocialLinks socials;
+
   static DiscoverProfile fromDoc(String id, Map<String, dynamic> d) {
     return DiscoverProfile(
       uid: id,
@@ -535,6 +567,7 @@ class DiscoverProfile {
       photo: (d['photo'] ?? '') as String,
       createdAtMs: _ms(d['createdAt']),
       verified: d['verified'] == true,
+      socials: SocialLinks.fromDoc(d),
     );
   }
 }
@@ -571,6 +604,7 @@ extension DiscoverProfiles on SocialService {
     required String username,
     required String bio,
     required String photo,
+    SocialLinks socials = const SocialLinks(),
   }) async {
     final handle = username.trim().toLowerCase();
     if (!kHandleRe.hasMatch(handle)) return false;
@@ -591,6 +625,11 @@ extension DiscoverProfiles on SocialService {
         'username': handle,
         'bio': bio.substring(0, bio.length.clamp(0, 280)),
         'photo': photo,
+        // Socials ride along; empty strings CLEAR a link the user removed
+        // (merge:true keeps the rest of the doc intact).
+        'instagram': socials.instagram.trim(),
+        'whatsapp': socials.whatsapp.trim(),
+        'tiktok': socials.tiktok.trim(),
       };
       // First create stamps createdAt; updates keep the original so the
       // profile's age never resets on an edit.
