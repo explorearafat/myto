@@ -8,6 +8,7 @@ import '../services/agent_accounts.dart';
 import '../services/agent_feed_service.dart';
 import '../services/auth_service.dart';
 import '../services/notification_service.dart';
+import '../services/push_service.dart';
 import '../services/verified.dart';
 import '../services/social_service.dart';
 import '../theme.dart';
@@ -165,13 +166,9 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
         ),
         centerTitle: false,
         actions: <Widget>[
-          IconButton(
-            tooltip: 'Messages',
-            icon: const Icon(Icons.chat_bubble_outline_rounded, size: 22),
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const MessagesScreen()),
-            ),
-          ),
+          _MessagesIconWithBadge(onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const MessagesScreen()),
+          )),
           _BellWithBadge(onTap: () => showNotificationsSheet(context)),
           const SizedBox(width: TeamlySpace.s1),
         ],
@@ -323,6 +320,15 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
         // path — the feed never waits on the network for a like.
         final wasLiked = _likedIds.contains(post.id);
         setState(() => wasLiked ? _likedIds.remove(post.id) : _likedIds.add(post.id));
+        if (!wasLiked && post.uid != _uid) {
+          PushService.pushTo(
+            toUid: post.uid,
+            kind: 'like',
+            title: '$_name liked your post',
+            body: post.text,
+            data: <String, String>{'postId': post.id, 'kind': 'like'},
+          );
+        }
         SocialService.toggleLike(post.id, _uid).then((nowLiked) {
           if (!mounted) return;
           setState(() {
@@ -341,6 +347,15 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
       onShare: () => _guard(
         () async {
           final created = await SocialService.sharePost(post.id, uid: _uid, name: _name);
+          if (created && post.uid != _uid) {
+            PushService.pushTo(
+              toUid: post.uid,
+              kind: 'share',
+              title: '$_name shared your post',
+              body: post.text,
+              data: <String, String>{'postId': post.id, 'kind': 'share'},
+            );
+          }
           await _toast(created ? 'Reposted to your profile.' : 'Already in your profile.');
         },
         '',
@@ -371,21 +386,39 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
             setState(() {
               _followingIds.add(post.uid);
             });
+            PushService.pushTo(
+              toUid: post.uid,
+              kind: 'follow',
+              title: '$_name started following you',
+              body: '',
+              data: <String, String>{'kind': 'follow'},
+            );
             await _toast('Following ${post.name}.');
           }
         },
         '',
       ),
-      onComment: (text) => _guard(
-        () => SocialService.addComment(
-          post.id,
-          uid: _uid,
-          name: _name,
-          photo: _photo,
-          text: text,
-        ),
-        'Comment added.',
-      ),
+      onComment: (text) async {
+        if (post.uid != _uid) {
+          PushService.pushTo(
+            toUid: post.uid,
+            kind: 'comment',
+            title: '$_name commented on your post',
+            body: text,
+            data: <String, String>{'postId': post.id, 'kind': 'comment'},
+          );
+        }
+        await _guard(
+          () => SocialService.addComment(
+            post.id,
+            uid: _uid,
+            name: _name,
+            photo: _photo,
+            text: text,
+          ),
+          'Comment added.',
+        );
+      },
       onDelete: post.uid == _uid
           ? () => _guard(
               () async {
@@ -1261,6 +1294,58 @@ class _BellWithBadge extends StatelessWidget {
                         fontWeight: FontWeight.w700,
                         color: Colors.white,
                       ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          onPressed: onTap,
+        );
+      },
+    );
+  }
+}
+
+/// The header message icon with a red unread badge that stays until the user
+/// opens the inbox (which settles every 'dm' notification).
+class _MessagesIconWithBadge extends StatelessWidget {
+  const _MessagesIconWithBadge({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (uid.isEmpty) {
+      return IconButton(
+        tooltip: 'Messages',
+        icon: const Icon(Icons.chat_bubble_outline_rounded, size: 22),
+        onPressed: onTap,
+      );
+    }
+    return StreamBuilder<List<AppNotification>>(
+      stream: NotificationService.stream(uid),
+      builder: (context, snap) {
+        final unread = (snap.data ?? const <AppNotification>[])
+            .where((n) => n.kind == 'dm' && !n.read)
+            .length;
+        return IconButton(
+          tooltip: 'Messages',
+          icon: Stack(
+            clipBehavior: Clip.none,
+            children: <Widget>[
+              const Icon(Icons.chat_bubble_outline_rounded, size: 22),
+              if (unread > 0)
+                Positioned(
+                  right: -4,
+                  top: -4,
+                  child: Container(
+                    width: 11,
+                    height: 11,
+                    decoration: BoxDecoration(
+                      color: TeamlyColors.danger,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 1.5),
                     ),
                   ),
                 ),

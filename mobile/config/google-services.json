@@ -1,0 +1,40 @@
+{
+  "project_info": {
+    "project_number": "148077878463",
+    "firebase_url": "https://sylor-29cab-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "sylor-29cab",
+    "storage_bucket": "sylor-29cab.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:148077878463:android:ca55ea6ddbb9c71d85fa0a",
+        "android_client_info": {
+          "package_name": "com.sylor.sylor"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "148077878463-lc2loqbvknd23uk7pdesfkvojk0cglb6.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDYjf5julyQt7HUM1dIg_rBkEt_INjnUjE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "148077878463-lc2loqbvknd23uk7pdesfkvojk0cglb6.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../services/dm_service.dart';
 import '../services/notification_service.dart';
+import '../services/push_service.dart';
 import '../theme.dart';
 
 /// ---------------------------------------------------------------------------
@@ -125,6 +126,18 @@ class _DmChatScreenState extends State<DmChatScreen> {
         text: text,
         replyTo: reply,
       );
+      // System-tray push on the recipient's phone (WhatsApp-style) — even with
+      // the app closed. Fire-and-forget; the message itself already landed.
+      if (reply == null) {
+        final me = FirebaseAuth.instance.currentUser;
+        PushService.pushTo(
+          toUid: widget.otherUid,
+          kind: 'dm',
+          title: (me?.displayName ?? '').trim().isEmpty ? 'New message' : me!.displayName!,
+          body: text,
+          data: <String, String>{'threadId': _threadId, 'kind': 'dm'},
+        );
+      }
       _scrollToBottom();
     } on FirebaseException {
       if (mounted) {

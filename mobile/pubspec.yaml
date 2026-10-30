@@ -1,7 +1,7 @@
 name: sylor
 description: "Myto — a local-first AI coding workspace. The mobile chat companion."
 publish_to: "none"
-version: 0.16.2+26
+version: 0.17.0+27
 
 environment:
   sdk: ">=3.6.0 <4.0.0"
@@ -45,6 +45,10 @@ dependencies:
   # Group-chat photo upload: pick from gallery, copy into app documents storage.
   image_picker: ^1.1.2
   path_provider: ^2.1.4
+
+  # Real push notifications (FCM): system-tray pushes when the app is
+  # closed/backgrounded, exactly like WhatsApp/Facebook.
+  firebase_messaging: ^15.1.6
 
 dev_dependencies:
   flutter_test:

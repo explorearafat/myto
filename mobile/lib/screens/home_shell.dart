@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../services/dm_service.dart';
 import '../services/notification_service.dart';
+import '../services/push_service.dart';
 import '../theme.dart';
 import '../widgets/teamly/kit.dart';
 import 'agents_screen.dart';
@@ -37,6 +38,9 @@ class _HomeShellState extends State<HomeShell> {
     // Engagement + follow notifications while the app is open (no badge —
     // the Discover header's bell shows them).
     NotificationService.instance.start();
+    // FCM push: asks for the Android notification permission on first run and
+    // keeps this device's token filed so system pushes arrive when closed.
+    PushService.init();
   }
 
   void _go(int i) {
