@@ -4,6 +4,17 @@ import { LINKS } from '../data';
 
 const RELEASES = [
   {
+    v: 'v0.18.0',
+    date: 'October 30, 2026',
+    notes: [
+      'Myto Remote — a Call tab on the phone: ring your desktop agent and talk to it in natural voice (on-device speech recognition in, en-IN-NeerjaNeural voice out)',
+      'Remote PowerShell with permission tiers — read-only flows, dev commands confirm on the ask tier, destructive always asks; every execution audited',
+      'Project tasks keep running after you hang up, and Myto calls you back with the result when it finishes (with retries and missed-call notifications)',
+      'Desktop presence on the Call tab: online / busy / offline, call history, callback log',
+      'Native call UI: 5–7s real ringing, mute, keypad, speaker, hold, live latency and connection quality',
+    ],
+  },
+  {
     v: 'v0.9.2',
     date: 'October 24, 2026',
     notes: [

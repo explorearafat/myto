@@ -15,7 +15,7 @@ export const LINKS = {
    * URL is unique per release and can never go stale. Bump together with
    * RELEASE.version below.
    */
-  androidApk: 'https://github.com/explorearafat/myto/releases/download/v0.17.1/myto.apk',
+  androidApk: 'https://github.com/explorearafat/myto/releases/download/v0.18.0/myto.apk',
   /** The platform chooser — where the header/footer Download links point. */
   downloadPage: '/download',
   /** The Myto chat — a full chat interface, client-side, that answers questions about Myto. */
@@ -49,7 +49,7 @@ export const LINKS = {
  * new tag ships, or the download page will quietly understate the version.
  */
 export const RELEASE = {
-  version: 'v0.17.1',
+  version: 'v0.18.0',
   date: '30 October 2026',
   size: '278 MB',
 };
@@ -103,10 +103,10 @@ export const PLATFORMS: Platform[] = [
     status: 'Available now',
     ready: true,
     requires: 'Recent Android phones and tablets',
-    body: 'A native chat app, built with Flutter — sign in, pick a model, and stream replies on your phone. Like the Windows build it is self-signed, so Android asks you to allow the install the first time.',
+    body: 'A native chat app, built with Flutter — sign in, pick a model, and stream replies on your phone. Like the Windows build it is self-signed, so Android asks you to allow the install the first time. Now with the Call tab: talk to your desktop Myto with your voice.',
     href: LINKS.androidApk,
     cta: 'Download the APK',
-    size: '55 MB',
+    size: '93 MB',
   },
   {
     name: 'Windows',
@@ -117,7 +117,7 @@ export const PLATFORMS: Platform[] = [
     note: 'Self-signed, so SmartScreen warns on first run: click More info, then Run anyway.',
     href: LINKS.download,
     cta: 'Download the installer',
-    size: '265 MB',
+    size: '278 MB',
   },
   {
     name: 'iOS',
