@@ -127,6 +127,11 @@ const VALID_SCHEMAS: AuthSchema[] = ['none', 'bearer', 'header']
 const VALID_THEMES: Theme[] = ['light', 'dark']
 const VALID_MODES: ChatMode[] = ['chat', 'cowork', 'research']
 const VALID_PERMISSION_MODES: CoworkPermissionMode[] = ['ask', 'autoApprove', 'bypass']
+const VALID_CALL_PERMISSION_MODES: ProviderSettings['call']['permissionMode'][] = [
+  'ask',
+  'autoReadOnly',
+  'autoDev'
+]
 const VALID_TRANSPORTS: McpTransport[] = ['stdio', 'http', 'sse']
 const VALID_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'max']
 const VALID_OUTPUT_STYLES: OutputStyle[] = ['default', 'concise', 'explanatory', 'learning']
@@ -232,6 +237,11 @@ export function normalise(raw: unknown): ProviderSettings {
   const cowork = (o.cowork ?? {}) as Partial<ProviderSettings['cowork']>
   const coworkHooks = (cowork.hooks ?? {}) as Partial<ProviderSettings['cowork']['hooks']>
   const background = (o.background ?? {}) as Partial<ProviderSettings['background']>
+  const call = (o.call ?? {}) as Partial<ProviderSettings['call']>
+  const callTurn = (call.turn ?? {}) as Partial<ProviderSettings['call']['turn']>
+  const callCallbacks = (call.callbacks ?? {}) as Partial<
+    ProviderSettings['call']['callbacks']
+  >
 
   const activeProvider =
     o.activeProvider && VALID_PROVIDERS.includes(o.activeProvider)
@@ -341,6 +351,46 @@ export function normalise(raw: unknown): ProviderSettings {
         typeof background.inboxEvery10min === 'boolean'
           ? background.inboxEvery10min
           : d.background.inboxEvery10min
+    },
+    // Voice calls (Myto Remote): every field coalesces to its default on a partial/
+    // old settings file, so the block can never half-load. The permission mode and
+    // ring delay are range-checked rather than trusted verbatim.
+    call: {
+      enabled: typeof call.enabled === 'boolean' ? call.enabled : d.call.enabled,
+      autoAnswer: typeof call.autoAnswer === 'boolean' ? call.autoAnswer : d.call.autoAnswer,
+      answerDelayMs:
+        typeof call.answerDelayMs === 'number' &&
+        call.answerDelayMs >= 1500 &&
+        call.answerDelayMs <= 30000
+          ? Math.round(call.answerDelayMs)
+          : d.call.answerDelayMs,
+      turn: {
+        urls: Array.isArray(callTurn.urls)
+          ? callTurn.urls.filter((u): u is string => typeof u === 'string' && u.trim().length > 0)
+          : d.call.turn.urls,
+        username: typeof callTurn.username === 'string' ? callTurn.username : d.call.turn.username,
+        credential:
+          typeof callTurn.credential === 'string' ? callTurn.credential : d.call.turn.credential
+      },
+      permissionMode: VALID_CALL_PERMISSION_MODES.includes(
+        call.permissionMode as ProviderSettings['call']['permissionMode']
+      )
+        ? (call.permissionMode as ProviderSettings['call']['permissionMode'])
+        : d.call.permissionMode,
+      callbacks: {
+        enabled:
+          typeof callCallbacks.enabled === 'boolean'
+            ? callCallbacks.enabled
+            : d.call.callbacks.enabled,
+        retryLimit:
+          typeof callCallbacks.retryLimit === 'number' && callCallbacks.retryLimit >= 0
+            ? Math.min(10, Math.round(callCallbacks.retryLimit))
+            : d.call.callbacks.retryLimit,
+        retryAfterMin:
+          typeof callCallbacks.retryAfterMin === 'number' && callCallbacks.retryAfterMin >= 1
+            ? Math.min(1440, Math.round(callCallbacks.retryAfterMin))
+            : d.call.callbacks.retryAfterMin
+      }
     }
   }
 }

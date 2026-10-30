@@ -34,15 +34,35 @@ function clip(text: string): string {
 function titleCaseWords(words: string[]): string {
   return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ')
 }
+
+/**
+ * Words kept lowercase mid-title when smart-casing a longer lowercase prompt —
+ * "build a todo app in react" → "Build a Todo App in React".
+ */
+const SMALL_WORDS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'of', 'to', 'for', 'with', 'at', 'by', 'from'
+])
+
 export function deriveTitle(prompt: string): string {
   const firstLine = prompt.split('\n').map((l) => l.trim()).find((l) => l.length > 0)
   if (!firstLine) return ''
   const cleaned = firstLine.replace(/[^a-zA-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim()
-  const words = cleaned.split(' ').filter(Boolean).slice(0, 5)
+  if (!cleaned) return ''
+  const words = cleaned.split(' ').filter(Boolean)
   if (words.length <= 2) return clip(firstLine)
-  const core = words.slice(0, Math.min(5, Math.max(3, words.length)))
-  const title = titleCaseWords(core)
-  return title || clip(firstLine)
+  // The user already wrote a cased sentence ("Fix the login bug") — keep it.
+  const isAllLowercase = cleaned === cleaned.toLowerCase()
+  if (!isAllLowercase) return clip(firstLine)
+  if (words.length <= 4) {
+    // Short all-lowercase ask ("build a todo app") reads best fully Title Cased.
+    return titleCaseWords(words)
+  }
+  // Longer all-lowercase ask ("build a todo app in react"): smart-case content
+  // words, keep the small ones down, then clip at a word boundary.
+  const cased = words.map((w, i) =>
+    i > 0 && SMALL_WORDS.has(w.toLowerCase()) ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
+  )
+  return clip(cased.join(' '))
 }
 
 /**

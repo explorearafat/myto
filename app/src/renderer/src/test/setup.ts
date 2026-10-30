@@ -129,6 +129,16 @@ const mytoMock: MytoApi = {
     listFiles: vi.fn().mockResolvedValue([]),
     openBrowserSetup: vi.fn().mockResolvedValue(undefined)
   },
+  call: {
+    authSync: vi.fn().mockResolvedValue({ uid: null }),
+    getState: vi
+      .fn()
+      .mockResolvedValue({ available: false, activeCallId: null, tasks: [] }),
+    onStatus: vi.fn().mockReturnValue(() => {}),
+    onAuthNeeded: vi.fn().mockReturnValue(() => {}),
+    onPeerControl: vi.fn().mockReturnValue(() => {}),
+    peerEvent: vi.fn()
+  },
   credentials: {
     list: vi.fn().mockResolvedValue([]),
     save: vi.fn().mockResolvedValue([]),

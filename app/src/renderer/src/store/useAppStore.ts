@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type {
+  CallSettings,
   CoworkHooks,
   CoworkPermissionMode,
   BrowserTarget,
@@ -139,6 +140,8 @@ export interface AppState {
    * OFF by default; the main process reconciles the tray on save. See BackgroundSettings.
    */
   setBackgroundKeepAlive: (on: boolean) => Promise<void>
+  /** Patch the voice-call settings block (Myto Remote) and persist it. */
+  setCallSettings: (patch: Partial<CallSettings>) => Promise<void>
 
   // ── Connectors (MCP) ──
   /** Live status of every configured connector, keyed by server id (main-process pushed). */
@@ -323,6 +326,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().saveSettings({
       ...settings,
       background: { ...settings.background, keepAliveInTray: on }
+    })
+  },
+
+  setCallSettings: async (patch) => {
+    const { settings } = get()
+    await get().saveSettings({
+      ...settings,
+      call: { ...settings.call, ...patch }
     })
   },
 

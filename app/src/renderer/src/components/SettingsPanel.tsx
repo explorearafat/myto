@@ -15,6 +15,7 @@ type SettingsCategory =
   | 'appearance'
   | 'model'
   | 'tools'
+  | 'calls'
   | 'connectors'
   | 'skills'
   | 'plugins'
@@ -30,6 +31,10 @@ const CATEGORY_META: Record<SettingsCategory, { label: string; subtitle: string 
   appearance: { label: 'Appearance', subtitle: 'Theme and visual style.' },
   model: { label: 'Model', subtitle: 'The model Myto talks to, from your Myto account.' },
   tools: { label: 'Tools', subtitle: 'What Myto can do beyond chatting — search the web, run code.' },
+  calls: {
+    label: 'Calls',
+    subtitle: 'Myto Remote — call this PC from the Myto phone app and talk to your agent.'
+  },
   connectors: {
     label: 'Connectors',
     subtitle: 'MCP servers that give Myto extra tools — files, APIs, and more.'
@@ -104,6 +109,17 @@ function CategoryIcon({ id }: { id: SettingsCategory }): ReactNode {
           />
         </svg>
       )
+    case 'calls':
+      return (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path
+            d="M3.2 2.6 5 2.2c.5-.1 1 .1 1.2.6l.9 2.1c.2.4.1.9-.3 1.2l-1.1 1c.7 1.6 2 2.9 3.6 3.6l1-1.1c.3-.4.8-.5 1.2-.3l2.1.9c.5.2.7.7.6 1.2l-.4 1.8c-.1.5-.6.9-1.1.9A11.3 11.3 0 0 1 2.3 3.7c0-.5.4-1 .9-1.1z"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )
     case 'skills':
       return (
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -151,6 +167,7 @@ const CATEGORY_ORDER: SettingsCategory[] = [
   'assistant',
   'model',
   'tools',
+  'calls',
   'connectors',
   'skills',
   'plugins',
@@ -380,6 +397,115 @@ function ToolsPane() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Calls pane (Myto Remote)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CALL_PERMISSION_OPTIONS: ReadonlyArray<{ id: 'ask' | 'autoReadOnly' | 'autoDev'; label: string }> = [
+  { id: 'ask', label: 'Ask always' },
+  { id: 'autoReadOnly', label: 'Auto read-only' },
+  { id: 'autoDev', label: 'Auto dev' }
+]
+
+/**
+ * Myto Remote: the phone calls this PC. Everything sensitive stays gated — the
+ * permission tier below controls what the phone may run without confirmation,
+ * and destructive/elevated commands ALWAYS ask regardless of tier.
+ */
+function CallsPane() {
+  const call = useAppStore((s) => s.settings.call)
+  const setCallSettings = useAppStore((s) => s.setCallSettings)
+  const turnText = call.turn.urls.join(', ')
+
+  return (
+    <div className="divide-y divide-border">
+      <SettingRow
+        title="Voice calls"
+        description="Publish presence and answer calls from the Myto phone app (signed into the same account). Calls are end-to-end WebRTC audio; signaling goes through your own Firestore, owner-only."
+      >
+        <Segmented
+          ariaLabel="Voice calls"
+          value={call.enabled ? 'on' : 'off'}
+          options={ON_OFF}
+          onChange={(v) => void setCallSettings({ enabled: v === 'on' })}
+        />
+      </SettingRow>
+      <SettingRow
+        title="Answer automatically"
+        description="Myto answers after the ring window (~5–7s, real ringing — the connection starts only at accept). Turn off to keep the desktop silent; the phone then always lands on “no answer”."
+      >
+        <Segmented
+          ariaLabel="Answer automatically"
+          value={call.autoAnswer ? 'on' : 'off'}
+          options={ON_OFF}
+          onChange={(v) => void setCallSettings({ autoAnswer: v === 'on' })}
+        />
+      </SettingRow>
+      <SettingRow
+        title="Command permission tier"
+        description="What the phone may run on this PC without asking. Ask always confirms every dev command; Auto read-only only confirms writes/exec; Auto dev also runs builds/tests on its own. Destructive and elevated commands ALWAYS ask, in every tier."
+      >
+        <Segmented
+          ariaLabel="Command permission tier"
+          value={call.permissionMode}
+          options={CALL_PERMISSION_OPTIONS}
+          onChange={(v) => void setCallSettings({ permissionMode: v })}
+        />      </SettingRow>
+      <SettingRow
+        title="Call back when a task finishes"
+        description="When a task Myto started from a call completes (or blocks), it calls you back and speaks the summary. Missed callbacks retry, then fall back to a notification."
+      >
+        <Segmented
+          ariaLabel="Call back when a task finishes"
+          value={call.callbacks.enabled ? 'on' : 'off'}
+          options={ON_OFF}
+          onChange={(v) => void setCallSettings({ callbacks: { ...call.callbacks, enabled: v === 'on' } })}
+        />
+      </SettingRow>
+      <SettingRow
+        title="TURN relay"
+        description="Fallback relay for strict NATs (carrier networks, some offices). Defaults to the free public OpenRelay; replace with your own server for production use. Comma-separated URLs."
+      >
+        <div className="flex w-72 flex-col gap-2">
+          <input
+            type="text"
+            value={turnText}
+            onChange={(e) =>
+              void setCallSettings({
+                turn: {
+                  ...call.turn,
+                  urls: e.target.value
+                    .split(',')
+                    .map((u) => u.trim())
+                    .filter(Boolean)
+                }
+              })
+            }
+            placeholder="turn:host:3478, turn:host:443?transport=tcp"
+            className="w-full rounded-lg border border-border bg-bg px-3 py-1.5 text-[12px] text-text outline-none focus:border-primary"
+          />
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={call.turn.username}
+              onChange={(e) => void setCallSettings({ turn: { ...call.turn, username: e.target.value } })}
+              placeholder="username"
+              className="w-full rounded-lg border border-border bg-bg px-3 py-1.5 text-[12px] text-text outline-none focus:border-primary"
+            />
+            <input
+              type="password"
+              value={call.turn.credential}
+              onChange={(e) => void setCallSettings({ turn: { ...call.turn, credential: e.target.value } })}
+              placeholder="credential"
+              className="w-full rounded-lg border border-border bg-bg px-3 py-1.5 text-[12px] text-text outline-none focus:border-primary"
+            />
+          </div>
+        </div>
+      </SettingRow>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Model pane (read-only mirror of the account's Firestore config)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -558,6 +684,7 @@ export function SettingsPanel() {
               {category === 'assistant' && <AssistantPane />}
               {category === 'appearance' && <AppearancePane />}
               {category === 'tools' && <ToolsPane />}
+              {category === 'calls' && <CallsPane />}
               {category === 'model' && <ModelPane />}
               {category === 'connectors' && <ConnectorsPane />}
               {category === 'skills' && <SkillsPane />}

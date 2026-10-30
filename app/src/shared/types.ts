@@ -230,6 +230,67 @@ export interface BackgroundSettings {
 }
 
 /**
+ * TURN relay credentials for voice-call WebRTC. Both peers (phone + desktop) need
+ * the same relay to fall back on when a direct P2P path can't traverse the two
+ * networks' NATs. These are shared *transport* credentials — not desktop secrets —
+ * and are handed to the phone inside the desktop's presence document at call time.
+ * Defaults point at the free public OpenRelay (metered.ca); users with their own
+ * TURN server replace them in Settings.
+ */
+export interface TurnServerConfig {
+  /** TURN/STUN URLs, e.g. `turn:host:3478` / `turn:host:443?transport=tcp`. */
+  urls: string[]
+  /** TURN username (shared; often short-lived in production setups). */
+  username: string
+  /** TURN password/credential (shared). */
+  credential: string
+}
+
+/**
+ * How a voice call's requests to act are permissioned on the desktop. The strict
+ * tier (`ask`) requires an explicit yes/no (spoken or tapped on the phone) for
+ * anything side-effecting; higher tiers auto-approve progressively more, but
+ * destructive operations (deletion, admin elevation, credentials) ALWAYS ask.
+ */
+export type CallPermissionMode = 'ask' | 'autoReadOnly' | 'autoDev'
+
+/**
+ * Voice-call preferences (Myto Remote). The call system is authenticated by the
+ * user's own Firebase session (the desktop and the phone are signed into the same
+ * account); these settings govern availability, ring behavior, relay config, and
+ * how much the phone may do on the PC without asking.
+ */
+export interface CallSettings {
+  /** Master switch: publish presence + accept calls from the paired phone. */
+  enabled: boolean
+  /** Answer incoming calls automatically after the ring period (Myto is an agent). */
+  autoAnswer: boolean
+  /**
+   * Base ring time before auto-answering, in ms (default 5500). Small per-call
+   * jitter (0–1500ms) is added so the ringing phase lands in the natural 5–7s
+   * band. The WebRTC negotiation only starts at accept, so this is genuine
+   * ringing — not an artificial delay after an already-open connection.
+   */
+  answerDelayMs: number
+  /** TURN relay the phone falls back to when a direct P2P path fails. */
+  turn: TurnServerConfig
+  /** Command-execution permission tier for call-driven work (see CallPermissionMode). */
+  permissionMode: CallPermissionMode
+  /** Task-completion callback behavior (the "Myto calls you back" flow). */
+  callbacks: CallCallbackSettings
+}
+
+/** Task-completion callback preferences. */
+export interface CallCallbackSettings {
+  /** Call the phone back when a task started from a call reaches a terminal state. */
+  enabled: boolean
+  /** Missed-call retry attempts before giving up (0 disables retries). */
+  retryLimit: number
+  /** Minutes between retry attempts. */
+  retryAfterMin: number
+}
+
+/**
  * How a connector (MCP server) is reached:
  *  - `stdio` → a local process Myto spawns (command + args), talking over stdin/stdout.
  *              The classic MCP model: `npx @modelcontextprotocol/server-filesystem …`.
@@ -542,6 +603,12 @@ export interface ProviderSettings {
    * as before". See {@link BackgroundSettings}.
    */
   background: BackgroundSettings
+  /**
+   * Voice-call (Myto Remote) preferences: availability, ring timing, TURN relay,
+   * and the permission tier for call-driven command execution. See
+   * {@link CallSettings}.
+   */
+  call: CallSettings
   /**
    * What the active model produces (Feature B). Absent/`undefined` means "auto-detect from
    * the model id" — the safe default, under which every current chat model stays a chat
@@ -1744,6 +1811,82 @@ export interface ScheduledTasksApi {
   onFire: (callback: (fire: ScheduledTaskFire) => void) => () => void
 }
 
+// ---------------------------------------------------------------------------
+// Voice calls (Myto Remote): wire types crossing the call IPC boundary. The
+// main process orchestrates; the renderer hosts the Chromium WebRTC peer.
+// ---------------------------------------------------------------------------
+
+/** A WebRTC ICE server description (STUN or TURN). */
+export interface CallIceServer {
+  urls: string[]
+  username?: string
+  credential?: string
+}
+
+/** Main → renderer: drive the renderer-hosted WebRTC peer. */
+export type CallPeerControl =
+  | { action: 'init'; callId: string; role: 'offerer' | 'answerer'; iceServers: CallIceServer[] }
+  | { action: 'set-remote'; callId: string; description: { type: 'offer' | 'answer'; sdp: string } }
+  | { action: 'add-ice'; callId: string; candidate: unknown }
+  | { action: 'tts-play'; callId: string; sentenceId: number; mp3Base64: string; sentence: string }
+  | { action: 'tts-stop'; callId: string }
+  | { action: 'send-dc'; callId: string; json: string }
+  | { action: 'ice-restart'; callId: string }
+  | { action: 'close'; callId: string }
+
+/** Renderer → main: peer events (signaling, data channel, playback, stats). */
+export type CallPeerEvent =
+  | { callId: string; kind: 'local-description'; description: { type: 'offer' | 'answer'; sdp: string } }
+  | { callId: string; kind: 'ice'; candidate: unknown }
+  | { callId: string; kind: 'dc-open' }
+  | { callId: string; kind: 'dc-message'; json: string }
+  | { callId: string; kind: 'dc-closed' }
+  | { callId: string; kind: 'peer-state'; state: 'connected' | 'disconnected' | 'failed' | 'closed' }
+  | { callId: string; kind: 'tts-playing' }
+  | { callId: string; kind: 'tts-idle' }
+  | { callId: string; kind: 'stats'; rttMs: number; quality: 'direct' | 'relay' | 'unknown' }
+  | { callId: string; kind: 'error'; detail: string }
+
+/** Main → renderer: call lifecycle status (the header indicator). */
+export type CallStatusEvent =
+  | { state: 'idle' }
+  | { state: 'ringing'; callId: string; direction: 'm2d' | 'd2m' }
+  | { state: 'connecting'; callId: string }
+  | { state: 'active'; callId: string }
+  | { state: 'ended'; callId: string; outcome?: string; detail?: string }
+
+/** A task started from a call, as surfaced in the desktop UI. */
+export interface CallTaskSummary {
+  id: string
+  status: string
+  summary: string
+  prompt: string
+  createdAt: number
+}
+
+/** Snapshot for late-mounting call UI. */
+export interface CallSnapshot {
+  available: boolean
+  activeCallId: string | null
+  tasks: CallTaskSummary[]
+}
+
+/** Renderer-facing API for the voice-call system. */
+export interface CallApi {
+  /** Forward the signed-in Firebase ID token (bootstraps main's Firestore access). */
+  authSync: (idToken: string) => Promise<{ uid: string | null }>
+  /** Snapshot of call availability + active call + recent tasks. */
+  getState: () => Promise<CallSnapshot>
+  /** Subscribe to call lifecycle changes. Returns an unsubscribe fn. */
+  onStatus: (callback: (event: CallStatusEvent) => void) => () => void
+  /** Main asks for a fresh token (401 recovery). */
+  onAuthNeeded: (callback: () => void) => () => void
+  /** WebRTC control commands from main. Returns an unsubscribe fn. */
+  onPeerControl: (callback: (msg: CallPeerControl) => void) => () => void
+  /** Send a peer event back to main. */
+  peerEvent: (event: CallPeerEvent) => void
+}
+
 /** The outcome of spawning (or re-attaching to) a session's interactive PTY (#2). */
 export interface TerminalSpawnResult {
   /** True when a live PTY is available (spawned now or already running). */
@@ -1828,6 +1971,8 @@ export interface MytoApi {
   files: FilesApi
   /** Cowork (agentic mode): the working-folder picker. */
   cowork: CoworkApi
+  /** Voice calls (Myto Remote): auth sync + the renderer-hosted WebRTC peer. */
+  call: CallApi
   /** Myto's preview pane: open a preview target in the user's external browser. */
   preview: PreviewApi
   /** Connectors (MCP servers): live status, (re)connect, and probe. */

@@ -1,4 +1,4 @@
-import { ipcMain, type IpcMainInvokeEvent } from 'electron'
+import { ipcMain } from 'electron'
 import { IpcChannel } from '../shared/ipc'
 import type {
   ApprovalDecision,
@@ -353,6 +353,22 @@ let approvalCounter = 0
 const pendingQuestions = new Map<string, (answers: string[]) => void>()
 let questionCounter = 0
 
+/** Settle a pending approval programmatically — the phone answering on a voice call. */
+export function decideApproval(approvalId: string, decision: ApprovalDecision): void {
+  pendingApprovals.get(approvalId)?.(decision)
+}
+
+/** Settle a pending `ask_user` question programmatically (the voice-call flow). */
+export function answerCallQuestions(questionId: string, answers: string[]): void {
+  pendingQuestions.get(questionId)?.(Array.isArray(answers) ? answers : [])
+}
+
+/** Abort an in-flight stream by id — the call session cancelling its own run. */
+export function cancelStream(streamId: string): void {
+  activeStreams.get(streamId)?.abort()
+  activeStreams.delete(streamId)
+}
+
 /**
  * Registers all Phase 2 provider IPC handlers: settings read/write, model
  * listing, connection testing, and (streaming) completions. All network I/O
@@ -395,9 +411,49 @@ export function registerProviderIpc(): void {
     }
   )
 
-  ipcMain.handle(
-    IpcChannel.ProvidersStreamStart,
-    async (event: IpcMainInvokeEvent, streamId: string, request: CompletionRequest): Promise<void> => {
+  ipcMain.handle(IpcChannel.ChatCancelAll, (): void => {
+    cancelAllStreams()
+    stopAllDevServers()
+  })
+
+  ipcMain.on(IpcChannel.ProvidersStreamCancel, (_event, streamId: string) => {
+    cancelStream(streamId)
+  })
+
+  ipcMain.on(
+    IpcChannel.ProvidersApprovalDecision,
+    (_event, approvalId: string, decision: ApprovalDecision) => {
+      // Settling removes the entry; a stray/duplicate decision is a harmless no-op.
+      decideApproval(approvalId, decision)
+    }
+  )
+
+  ipcMain.on(
+    IpcChannel.ProvidersQuestionAnswer,
+    (_event, questionId: string, answers: string[]) => {
+      // Settling removes the entry; a stray/duplicate answer is a harmless no-op.
+      answerCallQuestions(questionId, answers)
+    }
+  )
+
+  ipcMain.handle(IpcChannel.ProvidersStreamStart, handleStreamStart)
+}
+
+/**
+ * The streaming agent turn, LIFTED out of {@link registerProviderIpc} so callers
+ * inside the main process (the voice-call session / task manager) can run the
+ * SAME agent loop headlessly: they pass a synthetic `event` whose `sender`
+ * mirrors every chunk to the real window (so the desktop UI still shows the
+ * session) and additionally taps it. Structurally compatible with
+ * `IpcMainInvokeEvent`, so the IPC registration above typechecks unchanged.
+ */
+export async function handleStreamStart(
+  event: {
+    sender: { isDestroyed(): boolean; send(channel: string, payload: unknown): void }
+  },
+  streamId: string,
+  request: CompletionRequest
+): Promise<void> {
       const controller = new AbortController()
       activeStreams.set(streamId, controller)
       const sender = event.sender
@@ -2652,37 +2708,6 @@ export function registerProviderIpc(): void {
         await (browserController as BrowserController | null)?.dispose().catch(() => {})
         activeStreams.delete(streamId)
       }
-    }
-  )
-
-  // Kill EVERYTHING still running from past work: all in-flight agent streams
-  // and every background dev server. Called when the user starts a fresh task,
-  // so an old run's shell never lingers under the new one.
-  ipcMain.handle(IpcChannel.ChatCancelAll, (): void => {
-    cancelAllStreams()
-    stopAllDevServers()
-  })
-
-  ipcMain.on(IpcChannel.ProvidersStreamCancel, (_event, streamId: string) => {
-    activeStreams.get(streamId)?.abort()
-    activeStreams.delete(streamId)
-  })
-
-  ipcMain.on(
-    IpcChannel.ProvidersApprovalDecision,
-    (_event, approvalId: string, decision: ApprovalDecision) => {
-      // Settling removes the entry; a stray/duplicate decision is a harmless no-op.
-      pendingApprovals.get(approvalId)?.(decision)
-    }
-  )
-
-  ipcMain.on(
-    IpcChannel.ProvidersQuestionAnswer,
-    (_event, questionId: string, answers: string[]) => {
-      // Settling removes the entry; a stray/duplicate answer is a harmless no-op.
-      pendingQuestions.get(questionId)?.(Array.isArray(answers) ? answers : [])
-    }
-  )
 }
 
 /** Total characters across a message history — a cheap proxy for token pressure. */

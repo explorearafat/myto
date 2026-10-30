@@ -228,7 +228,28 @@ export const IpcChannel = {
   /** Renderer → main (invoke): critique a baked result against a goal with a vision model. */
   EditorCritique: 'editor:critique',
   /** Main → renderer: a bake-progress tick (carries the caller's jobId). */
-  EditorBakeProgress: 'editor:bake-progress'
+  EditorBakeProgress: 'editor:bake-progress',
+
+  // Voice calls (Myto Remote): the phone reaches the desktop agent over Firestore
+  // signaling + a WebRTC audio path. Signaling and session logic live entirely in
+  // the MAIN process (it owns presence, the agent loop, TTS, and execution); the
+  // renderer only hosts the Chromium WebRTC peer + the audio playback graph, driven
+  // by these four channels.
+  /** Renderer → main (invoke): forward the signed-in Firebase ID token so main can
+   *  open its own Firestore session (presence + signaling) under the same account. */
+  CallAuthSync: 'call:auth-sync',
+  /** Main → renderer: the forwarded token expired — send a fresh one. */
+  CallAuthNeeded: 'call:auth-needed',
+  /** Renderer → main (invoke): snapshot of the current call state (for late UI mounts). */
+  CallGetState: 'call:get-state',
+  /** Main → renderer: call lifecycle status changed (idle / ringing / active / ended…). */
+  CallStatus: 'call:status',
+  /** Main → renderer: drive the WebRTC peer (configure, offer, apply-remote, add-ice,
+   *  play TTS audio, stop audio, send on the data channel, close). */
+  CallPeerControl: 'call:peer-control',
+  /** Renderer → main: peer events back (local description, ICE, data-channel messages,
+   *  connection state, stats, errors). */
+  CallPeerEvent: 'call:peer-event'
 } as const
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel]

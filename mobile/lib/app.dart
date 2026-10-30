@@ -5,6 +5,7 @@ import 'screens/home_shell.dart';
 import 'screens/sign_in_screen.dart';
 import 'services/auth_service.dart';
 import 'services/byok_service.dart';
+import 'services/call/call_service.dart';
 import 'services/conversation_store.dart';
 import 'services/studio_store.dart';
 import 'services/team_chat_store.dart';
@@ -35,6 +36,9 @@ class MytoApp extends StatelessWidget {
         ChangeNotifierProvider<TeamChatStore>.value(
           value: TeamChatStore(store, studio),
         ),
+        // Myto Remote voice calls (singleton service — presence watch, WebRTC
+        // peer, STT, and the call state machine live here).
+        ChangeNotifierProvider<CallService>.value(value: CallService.instance),
       ],
       child: MaterialApp(
         title: 'Myto',
@@ -60,7 +64,7 @@ class _Gate extends StatelessWidget {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
     final authed = context.select<AuthService, bool>((a) => a.isAuthed);
-    // Signed-in users land on the five-tab Teamly shell — Chat is the first tab,
+    // Signed-in users land on the six-tab Teamly shell — Chat is the first tab,
     // exactly as the reference app opens on Chat.
     return authed ? const HomeShell() : const SignInScreen();
   }

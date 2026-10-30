@@ -90,7 +90,9 @@ describe('autoName (fixed title from the first message)', () => {
 
     await useSessionStore.getState().autoName('Fix the login bug\nmore detail here')
 
-    expect(vi.mocked(window.myto.sessions.rename)).toHaveBeenCalledWith('sess-1', 'Fix The Login Bug')
+    // The line is already a cased sentence, so it's kept as written — the
+    // smart-casing path only applies to all-lowercase prompts (deriveTitle).
+    expect(vi.mocked(window.myto.sessions.rename)).toHaveBeenCalledWith('sess-1', 'Fix the login bug')
   })
 
   it('never touches a session that already carries a real title', async () => {

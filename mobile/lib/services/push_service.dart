@@ -4,7 +4,10 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:http/http.dart' as http;
+
+import 'call/call_service.dart';
 
 /// ---------------------------------------------------------------------------
 /// PushService — real system-tray push notifications (FCM), WhatsApp-style:
@@ -28,8 +31,56 @@ import 'package:http/http.dart' as http;
 /// this handles anything extra later.
 @pragma('vm:entry-point')
 Future<void> fcmBackgroundHandler(RemoteMessage message) async {
-  // Intentionally empty: notification payloads render without it. Present so
-  // data-only pushes and future deep-linking have a registered entry point.
+  // A callback call arriving while the app is closed/backgrounded: FCM renders
+  // the notification payload in the tray on the `calls` channel (full-screen
+  // intent); nothing extra is required here. The payload data survives and is
+  // handled by the tap listeners in PushService.init().
+}
+
+/// Local-notification plumbing: the `calls` channel is a full-screen-intent
+/// channel so a callback can wake the screen like a real incoming call.
+final FlutterLocalNotificationsPlugin _localNotifications =
+    FlutterLocalNotificationsPlugin();
+
+Future<void> _ensureCallChannel() async {
+  const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+  const init = InitializationSettings(android: androidInit);
+  await _localNotifications.initialize(
+    init,
+    onDidReceiveNotificationResponse: (response) {
+      final payload = response.payload;
+      if (payload != null && payload.isNotEmpty) {
+        _openIncomingCall(payload);
+      }
+    },
+  );
+  await _localNotifications
+      .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(const AndroidNotificationChannel(
+        'calls',
+        'Myto calls',
+        description: 'Incoming calls from Myto on your desktop',
+        importance: Importance.max,
+        playSound: true,
+        enableVibration: true,
+        // Android 14 gates this permission per-channel; the CI manifest also
+        // declares USE_FULL_SCREEN_INTENT so this surfaces as a call.
+        enableLights: true,
+      ));
+}
+
+void _openIncomingCall(String callId) {
+  // Deep link into the incoming-call UI (the service flips the phase; the
+  // HomeShell overlay renders on top of whatever screen is open).
+  CallService.instance.showIncoming(callId, '');
+}
+
+/// Route a `kind == call` data payload into the call flow.
+void _handleCallData(Map<String, dynamic> data) {
+  if (data['type'] == 'call' && data['callId'] is String) {
+    _openIncomingCall(data['callId'] as String);
+  }
 }
 
 class PushService {
@@ -51,13 +102,38 @@ class PushService {
         alert: true,
         badge: true,
         sound: true,
+        // Android 13+ full-screen intent for incoming calls.
+        provisional: false,
       );
+      await _ensureCallChannel();
       await _fileToken(await messaging.getToken());
       // Token rotation (app restore, instance churn) re-files automatically.
       FirebaseMessaging.instance.onTokenRefresh.listen((token) {
         _fileToken(token);
       });
       FirebaseMessaging.onBackgroundMessage(fcmBackgroundHandler);
+
+      // Foreground: a callback push while the app is open goes straight into
+      // the incoming-call UI (no tray bubble needed — the screen IS the ring).
+      FirebaseMessaging.onMessage.listen((message) {
+        final data = message.data;
+        if (data['kind'] == 'call') {
+          _handleCallData(data);
+        }
+      });
+      // Tapped from the tray while backgrounded.
+      FirebaseMessaging.onMessageOpenedApp.listen((message) {
+        final data = message.data;
+        if (data['kind'] == 'call') {
+          _handleCallData(data);
+        }
+      });
+      // Tapped from the tray when the app was fully closed.
+      messaging.getInitialMessage().then((message) {
+        if (message != null && message.data['kind'] == 'call') {
+          _handleCallData(message.data);
+        }
+      });
     } catch (_) {
       // Push is an enhancement — a permission denial or a failed token fetch
       // must never break app startup.

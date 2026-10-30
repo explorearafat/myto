@@ -92,5 +92,32 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
   background: {
     keepAliveInTray: false,
     inboxEvery10min: false
+  },
+  // Voice calls (Myto Remote): ON, but every side-effecting action still asks
+  // (permissionMode 'ask') — the phone can talk to the agent out of the box, while
+  // command execution stays a per-action confirmation until the user raises the tier.
+  // TURN defaults to the free public OpenRelay fallback; a private relay replaces it
+  // in Settings. The ring delay is the genuine pre-accept ringing window (5–7s band
+  // with jitter), not a post-connection stall.
+  call: {
+    enabled: true,
+    autoAnswer: true,
+    answerDelayMs: 5500,
+    turn: {
+      urls: [
+        'stun:stun.l.google.com:19302',
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp'
+      ],
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    },
+    permissionMode: 'ask',
+    callbacks: {
+      enabled: true,
+      retryLimit: 2,
+      retryAfterMin: 5
+    }
   }
 }

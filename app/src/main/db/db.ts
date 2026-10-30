@@ -38,7 +38,7 @@ export function __setDbPathForTest(path: string): void {
 }
 
 /** Current schema version; bump + extend {@link migrate} for additive changes. */
-export const SCHEMA_VERSION = 11
+export const SCHEMA_VERSION = 12
 
 /**
  * Open the database once (lazily), applying pragmas and running migrations. All
@@ -312,6 +312,47 @@ function migrate(handle: DatabaseSync): void {
       );
 
       CREATE INDEX IF NOT EXISTS idx_snapshots_session ON file_snapshots(session_id, id);
+    `)
+  }
+
+  if (current < 12) {
+    // Voice calls (Myto Remote). `call_tasks` — tasks started from a phone call,
+    // with the callback state machine (running → terminal → calling → called /
+    // acknowledged, retries counted) so a completed task triggers exactly one
+    // call-back. `call_audit` — every command executed on the desktop's behalf
+    // during a call: command, permission tier, who approved, how it ended. The
+    // audit is the paper trail that makes remote execution reviewable.
+    handle.exec(`
+      CREATE TABLE IF NOT EXISTS call_tasks (
+        id                TEXT PRIMARY KEY,
+        call_id           TEXT,
+        session_id        TEXT NOT NULL,
+        workspace_dir     TEXT NOT NULL,
+        prompt            TEXT NOT NULL,
+        status            TEXT NOT NULL,
+        terminal_status   TEXT,
+        summary           TEXT NOT NULL DEFAULT '',
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL,
+        terminal_at       INTEGER,
+        callback_attempts INTEGER NOT NULL DEFAULT 0,
+        last_callback_at  INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS call_audit (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        call_id     TEXT NOT NULL,
+        task_id     TEXT,
+        ts          INTEGER NOT NULL,
+        command     TEXT NOT NULL,
+        tier        TEXT NOT NULL,
+        approved_by TEXT NOT NULL,
+        exit_code   INTEGER,
+        outcome     TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_call_tasks_status ON call_tasks(status);
+      CREATE INDEX IF NOT EXISTS idx_call_audit_ts ON call_audit(ts);
     `)
   }
 

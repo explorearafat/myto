@@ -12,6 +12,8 @@ import { useSessionStore } from '@renderer/store/useSessionStore'
 import { useChatStore } from '@renderer/store/useChatStore'
 import { useProjectStore } from '@renderer/store/useProjectStore'
 import { useByokConfig } from '@renderer/lib/useByokConfig'
+import { startCallClient } from '@renderer/lib/call/call-client'
+import { CallIndicator } from '@renderer/components/CallIndicator'
 
 export default function App() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
@@ -51,6 +53,11 @@ export default function App() {
     return unsubscribe
   }, [watchConnectorStatus, refreshConnectorStatus])
 
+  // Voice calls (Myto Remote): forward the Firebase session to main (presence +
+  // signaling) and host the WebRTC peer + TTS audio graph. One-time; disposed on
+  // hot reload.
+  useEffect(() => startCallClient(), [])
+
   // Scheduled tasks (#12): the main process pushes a "fire" when a task comes due.
   // Each fire opens a fresh session in the task's mode and submits its prompt, so
   // the task runs in its own conversation without disturbing whatever's on screen.
@@ -68,6 +75,7 @@ export default function App() {
   return (
     <div className="relative flex h-full flex-col">
       <TitleBar />
+      <CallIndicator />
       {/* min-h-0 is required so the panel group can shrink inside the flex column.
           `relative` anchors the full-screen Settings overlay so it fills this area
           (below the title bar) rather than covering the window controls.

@@ -1,6 +1,8 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
+import '../services/call/call_service.dart';
 import '../services/dm_service.dart';
 import '../services/notification_service.dart';
 import '../services/push_service.dart';
@@ -8,18 +10,22 @@ import '../theme.dart';
 import '../widgets/teamly/kit.dart';
 import 'agents_screen.dart';
 import 'artifacts_screen.dart';
+import 'call_tab.dart';
 import 'chat_home_screen.dart';
 import 'discover_screen.dart';
+import 'incoming_call_screen.dart';
 import 'settings_screen.dart';
 
-/// HomeShell — the app's single bottom navigation, Teamly-style five tabs:
+/// HomeShell — the app's single bottom navigation, Teamly-style six tabs:
 ///
-///   Chat (landing) · Agents · Discover · Artifacts · Settings
+///   Chat (landing) · Call · Agents · Discover · Artifacts · Settings
 ///
 /// The Chat tab is the home screen (agent list + groups + DMs + search).
+/// Call is Myto Remote — calling the desktop agent with your voice.
 /// Discover is the community feed — its header's back arrow returns here.
 /// [IndexedStack] keeps every tab alive, and Android's system back walks home
-/// first before it can leave the app.
+/// first before it can leave the app. An incoming callback renders as a
+/// full-screen overlay above any tab.
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -41,6 +47,10 @@ class _HomeShellState extends State<HomeShell> {
     // FCM push: asks for the Android notification permission on first run and
     // keeps this device's token filed so system pushes arrive when closed.
     PushService.init();
+    // Myto Remote: watch the desktop's presence + incoming callbacks while
+    // signed in.
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) CallService.instance.start(user);
   }
 
   void _go(int i) {
@@ -51,47 +61,59 @@ class _HomeShellState extends State<HomeShell> {
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
+    // The incoming-call overlay listens to the call service directly.
+    final incoming = context.select<CallService, bool>(
+      (c) => c.phase == CallPhase.incoming,
+    );
 
-    return PopScope(
-      // System back from any non-home tab walks home first; from the Chat tab
-      // it may leave the app as usual.
-      canPop: _tab == 0,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) _go(0);
-      },
-      child: Scaffold(
-        body: IndexedStack(
-          index: _tab,
-          children: <Widget>[
-            const ChatHomeScreen(),
-            const AgentsScreen(),
-            const DiscoverScreen(),
-            const ArtifactsScreen(),
-            const SettingsScreen(),
-          ],
-        ),
-        bottomNavigationBar: Container(
-          decoration: BoxDecoration(
-            color: palette.surface,
-            border: Border(top: BorderSide(color: palette.border)),
-          ),
-          child: SafeArea(
-            top: false,
-            child: SizedBox(
-              height: 64,
-              child: Row(
-                children: <Widget>[
-                  _item(0, Icons.chat_bubble_outline_rounded, Icons.chat_bubble_rounded, 'Chat'),
-                  _item(1, Icons.smart_toy_outlined, Icons.smart_toy_rounded, 'Agents'),
-                  _item(2, Icons.explore_outlined, Icons.explore_rounded, 'Discover'),
-                  _item(3, Icons.layers_outlined, Icons.layers_rounded, 'Artifacts'),
-                  _item(4, Icons.settings_outlined, Icons.settings_rounded, 'Settings'),
-                ],
+    return Stack(
+      children: <Widget>[
+        PopScope(
+          // System back from any non-home tab walks home first; from the Chat tab
+          // it may leave the app as usual.
+          canPop: _tab == 0,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) _go(0);
+          },
+          child: Scaffold(
+            body: IndexedStack(
+              index: _tab,
+              children: <Widget>[
+                const ChatHomeScreen(),
+                const CallTab(),
+                const AgentsScreen(),
+                const DiscoverScreen(),
+                const ArtifactsScreen(),
+                const SettingsScreen(),
+              ],
+            ),
+            bottomNavigationBar: Container(
+              decoration: BoxDecoration(
+                color: palette.surface,
+                border: Border(top: BorderSide(color: palette.border)),
+              ),
+              child: SafeArea(
+                top: false,
+                child: SizedBox(
+                  height: 64,
+                  child: Row(
+                    children: <Widget>[
+                      _item(0, Icons.chat_bubble_outline_rounded, Icons.chat_bubble_rounded, 'Chat'),
+                      _item(1, Icons.call_outlined, Icons.call_rounded, 'Call'),
+                      _item(2, Icons.smart_toy_outlined, Icons.smart_toy_rounded, 'Agents'),
+                      _item(3, Icons.explore_outlined, Icons.explore_rounded, 'Discover'),
+                      _item(4, Icons.layers_outlined, Icons.layers_rounded, 'Artifacts'),
+                      _item(5, Icons.settings_outlined, Icons.settings_rounded, 'Settings'),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
         ),
-      ),
+        // Full-screen incoming callback over whatever tab is open.
+        if (incoming) const IncomingCallScreen(),
+      ],
     );
   }
 

@@ -114,6 +114,34 @@ const api: MytoApi = {
     listFiles: (query: string) => ipcRenderer.invoke(IpcChannel.CoworkListFiles, query),
     openBrowserSetup: () => ipcRenderer.invoke(IpcChannel.BrowserOpenSetup)
   },
+  call: {
+    authSync: (idToken) => ipcRenderer.invoke(IpcChannel.CallAuthSync, idToken),
+    getState: () => ipcRenderer.invoke(IpcChannel.CallGetState),
+    onStatus: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, evt: Parameters<typeof callback>[0]) =>
+        callback(evt)
+      ipcRenderer.on(IpcChannel.CallStatus, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.CallStatus, listener)
+      }
+    },
+    onAuthNeeded: (callback) => {
+      const listener = (): void => callback()
+      ipcRenderer.on(IpcChannel.CallAuthNeeded, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.CallAuthNeeded, listener)
+      }
+    },
+    onPeerControl: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, msg: Parameters<typeof callback>[0]) =>
+        callback(msg)
+      ipcRenderer.on(IpcChannel.CallPeerControl, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.CallPeerControl, listener)
+      }
+    },
+    peerEvent: (event) => ipcRenderer.send(IpcChannel.CallPeerEvent, event)
+  },
   credentials: {
     list: () => ipcRenderer.invoke(IpcChannel.CredentialsList),
     save: (input) => ipcRenderer.invoke(IpcChannel.CredentialsSave, input),

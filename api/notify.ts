@@ -138,7 +138,7 @@ async function sendFcm(token: string, title: string, body: string, data: Record<
           notification: { title: title.slice(0, 120), body: body.slice(0, 240) },
           data,
           android: {
-            priority: kind === 'call' ? 'HIGH' : 'HIGH',
+            priority: 'HIGH',
             notification: {
               channel_id: channelFor(kind),
               notification_priority: 'PRIORITY_HIGH',

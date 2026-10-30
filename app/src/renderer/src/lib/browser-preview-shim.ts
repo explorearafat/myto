@@ -250,6 +250,15 @@ function installShim(): void {
       // No Electron BrowserWindow in the browser preview; opening the setup window is a no-op.
       openBrowserSetup: () => Promise.resolve()
     },
+    call: {
+      // Voice calls don't run in the browser preview: an inert, signed-out stub.
+      authSync: () => Promise.resolve({ uid: null }),
+      getState: () => Promise.resolve({ available: false, activeCallId: null, tasks: [] }),
+      onStatus: () => () => undefined,
+      onAuthNeeded: () => () => undefined,
+      onPeerControl: () => () => undefined,
+      peerEvent: () => undefined
+    },
     credentials: {
       // No credential vault in the browser preview: an empty, inert list.
       list: () => Promise.resolve([]),

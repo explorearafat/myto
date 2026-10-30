@@ -132,7 +132,9 @@ String presenceLine(Presence? p) {
   final fresh = p.lastSeenMs != 0 &&
       DateTime.now().millisecondsSinceEpoch - p.lastSeenMs <
           kPresenceStaleWindow.inMilliseconds;
-  if (p.online && fresh) return 'online';
+  // A live broadcast with no last-seen stamp yet (presence doc just created)
+  // trusts the online flag — there is no timestamp to go stale.
+  if (p.online && (fresh || p.lastSeenMs == 0)) return 'online';
   if (p.lastSeenMs == 0) return 'offline';
   final diff = DateTime.now().millisecondsSinceEpoch - p.lastSeenMs;
   final s = diff ~/ 1000;

@@ -18,6 +18,7 @@ import { registerAssistantIpc } from './assistant/assistant-ipc'
 import { registerScheduledTasksIpc } from './scheduled-tasks-ipc'
 import { registerTerminalIpc } from './terminal-ipc'
 import { registerEditorIpc } from './editor-ipc'
+import { registerCallIpc, stopCallSystem } from './call'
 import { syncSkills } from './skills/manager'
 import { discoverSkills } from './skills/discovery'
 import type { SkillConfig } from '../shared/types'
@@ -155,6 +156,9 @@ app.whenReady().then(() => {
   registerScheduledTasksIpc()
   registerTerminalIpc()
   registerEditorIpc()
+  // Voice calls (Myto Remote): presence + signaling + the call session live in
+  // main; the renderer only hosts the WebRTC peer. Bootstraps on auth sync.
+  registerCallIpc(app.getPath('userData'))
 
   createWindow()
 
@@ -230,6 +234,12 @@ app.on('before-quit', () => {
   markQuitting()
   // Abort any in-flight provider streams and close the DB so nothing outlives the app.
   cancelAllStreams()
+  // End any live voice call and clear desktop presence before teardown.
+  try {
+    stopCallSystem()
+  } catch (error) {
+    console.error('[myto] call system teardown failed:', error)
+  }
   closeDb()
   // Close connector (MCP) connections — kills any spawned stdio server processes.
   void disposeConnectors()

@@ -1,7 +1,7 @@
 name: sylor
 description: "Myto — a local-first AI coding workspace. The mobile chat companion."
 publish_to: "none"
-version: 0.17.1+28
+version: 0.18.0+29
 
 environment:
   sdk: ">=3.6.0 <4.0.0"
@@ -49,6 +49,17 @@ dependencies:
   # Real push notifications (FCM): system-tray pushes when the app is
   # closed/backgrounded, exactly like WhatsApp/Facebook.
   firebase_messaging: ^15.1.6
+
+  # Myto Remote voice calls: WebRTC audio + data channel to the desktop agent.
+  flutter_webrtc: ^0.12.4
+
+  # Incoming-call presentation: a full-screen-intent notification channel that
+  # wakes the screen and deep-links into the incoming-call screen, WhatsApp-style.
+  flutter_local_notifications: ^18.0.1
+
+  # Fallback voice when the desktop's Edge TTS is unavailable: Myto speaks the
+  # same sentences with the phone's own TTS engine.
+  flutter_tts: ^4.2.0
 
   # Opens the profile social links (instagram.com / wa.me / tiktok.com).
   url_launcher: ^6.3.0
