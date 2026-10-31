@@ -4,6 +4,22 @@ import { LINKS } from '../data';
 
 const RELEASES = [
   {
+    v: 'v0.18.4',
+    date: 'October 31, 2026',
+    notes: [
+      'Call work folder: voice calls now work in their own dedicated folder (auto-created, changeable in Settings › Calls) — say “ei folder e jaw, eita koro” and Myto works there, then calls you back when done',
+      'Full call sound set: a custom marimba ringtone + vibration for incoming callbacks, a ringback tone while dialing, and a connect chime when the call goes live',
+    ],
+  },
+  {
+    v: 'v0.18.2–3',
+    date: 'October 31, 2026',
+    notes: [
+      'Fixed: the phone never sent its WebRTC offer after accept (calls hung on “Connecting” forever) — proven from a live Firestore capture and rebuilt',
+      'Fixed: a rate-limited TTS silently dropped replies — failed sentences now fall back to the phone\u2019s own voice instantly, and Myto\u2019s replies also appear as transcript bubbles',
+    ],
+  },
+  {
     v: 'v0.18.1',
     date: 'October 31, 2026',
     notes: [
