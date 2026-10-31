@@ -4,6 +4,14 @@ import { LINKS } from '../data';
 
 const RELEASES = [
   {
+    v: 'v0.18.1',
+    date: 'October 31, 2026',
+    notes: [
+      'Scan-to-pair: the desktop shows a QR — scanning it with the phone\u2019s camera opens Myto and starts the first call instantly; after that, calls work from the Call tab',
+      'Call reliability: fixed the Firestore device-registry path, a half-filled TURN now degrades to STUN safely instead of killing the call, and the full connection flow is logged',
+    ],
+  },
+  {
     v: 'v0.18.0',
     date: 'October 30, 2026',
     notes: [
