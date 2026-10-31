@@ -1,7 +1,7 @@
 name: sylor
 description: "Myto — a local-first AI coding workspace. The mobile chat companion."
 publish_to: "none"
-version: 0.18.5+34
+version: 0.18.6+35
 
 environment:
   sdk: ">=3.6.0 <4.0.0"

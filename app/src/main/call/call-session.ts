@@ -80,6 +80,9 @@ export interface CallSessionDeps {
 
 const NEGOTIATION_TIMEOUT_MS = 60_000
 
+/** Doc states that mean the call is over — a session must not linger past them. */
+const TERMINAL_CALL_STATES = new Set(['ended', 'failed', 'declined', 'missed', 'cancelled'])
+
 export class CallSessionManager {
   private readonly deps: CallSessionDeps
   private current: LiveCallSession | null = null
@@ -281,6 +284,7 @@ class LiveCallSession {
       // Signal exchange loop (fast while negotiating; once the DC is open the
       // poll only watches for hangup — everything else rides the data channel).
       const negotiateDeadline = Date.now() + NEGOTIATION_TIMEOUT_MS
+      let docChecks = 0
       while (!this.ended) {
         await pollSignals(this.deps.auth, this.callId, this.seenSignals, (sig) => {
           if (sig.from !== 'mobile') return
@@ -293,6 +297,20 @@ class LiveCallSession {
         if (!this.negotiated && !this.ended && Date.now() > negotiateDeadline) {
           await this.hangup('timeout')
           return
+        }
+        // Watchdog: a connected call whose phone vanished mid-call (network
+        // switch, dead battery, app kill) never sends a hangup signal — and a
+        // session that lingers blocks EVERY later call with 'busy'. Every ~15s
+        // read the doc: terminal (or gone) → clean up locally.
+        if (this.negotiated && !this.ended && ++docChecks % 10 === 0) {
+          const doc = await getCallDoc(this.deps.auth, this.callId).catch(() => null)
+          if (!doc || TERMINAL_CALL_STATES.has(doc.state)) {
+            console.log(
+              `[call:${this.callId}] remote gone (doc: ${doc?.state ?? 'missing'}) — releasing session`
+            )
+            await this.hangup('remote-gone')
+            return
+          }
         }
         await sleepPolling(this.negotiated ? 1_500 : NEGOTIATION_POLL_MS)
       }

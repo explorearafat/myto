@@ -153,6 +153,10 @@ class CallService extends ChangeNotifier {
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _signalSub;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _callsSub;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _presenceSub;
+  /// Watches OUR OWN call document for desktop-written terminal states (the
+  /// desktop declines a busy call by writing `declined` — without this listener
+  /// the phone would ring uselessly for the whole 35s window).
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _callDocSub;
   Timer? _ringTimer;
   Timer? _negotiateTimer;
   Timer? _durationTimer;
@@ -281,6 +285,7 @@ class CallService extends ChangeNotifier {
     });
     await _setupPeer(role: 'answerer');
     _listenSignals();
+    _watchCallDoc();
   }
 
   Future<void> declineIncoming() async {
@@ -351,6 +356,7 @@ class CallService extends ChangeNotifier {
     // The caller offers — but only once the desktop ACCEPTS (the ring is real).
     await _setupPeer(role: 'offerer');
     _listenSignals();
+    _watchCallDoc();
 
     _ringTimer?.cancel();
     _ringTimer = Timer(const Duration(seconds: 35), () {
@@ -508,6 +514,45 @@ class CallService extends ChangeNotifier {
           // how the user can tell us where the call stuck.
           _log('err', 'signal ${(d['kind'] as String?) ?? '?'} failed: $e');
         }
+      }
+    });
+  }
+
+  /// Watch the call doc for desktop-written terminal states. Reacts ONLY while
+  /// this side is still live — our own terminal writes echo back and are ignored.
+  void _watchCallDoc() {
+    final uid = _uid();
+    final id = _callId;
+    if (uid == null || id == null) return;
+    _callDocSub?.cancel();
+    _callDocSub = FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .collection('calls')
+        .doc(id)
+        .snapshots()
+        .listen((snap) {
+      final d = snap.data();
+      if (d == null) return;
+      final state = d['state'] as String?;
+      if (state == null) return;
+      final live = _phase == CallPhase.calling ||
+          _phase == CallPhase.connecting ||
+          _phase == CallPhase.active ||
+          _phase == CallPhase.reconnecting;
+      if (!live) return;
+      if (state == 'declined') {
+        final detail = (d['detail'] as String?) ?? '';
+        _failReason = detail.isNotEmpty ? detail : 'Myto was busy on another call.';
+        _log('info', 'declined by desktop: $_failReason');
+        _endCallLocally(outcome: 'declined', state: 'failed');
+      } else if (state == 'ended' || state == 'failed' || state == 'missed' || state == 'cancelled') {
+        _failReason = (d['detail'] as String?) ?? '';
+        _log('info', 'desktop ended the call ($state)');
+        _endCallLocally(
+          outcome: d['outcome'] as String? ?? 'hangup',
+          state: state == 'failed' ? 'failed' : 'ended',
+        );
       }
     });
   }
@@ -886,6 +931,21 @@ class CallService extends ChangeNotifier {
     _taskInProgress = false;
     _approval = null;
     _question = null;
+    // TELL the desktop we're gone — a phone-side timeout that stays silent
+    // leaves the desktop session alive forever, and then EVERY later call is
+    // declined as 'busy'. The signal is idempotent on the desktop.
+    if (_callId != null && state != 'idle') {
+      _patchCall(<String, dynamic>{
+        'state': state,
+        'outcome': outcome,
+        'endedAt': DateTime.now().millisecondsSinceEpoch,
+      });
+      _pushSignal('hangup', '{"by":"phone","outcome":"$outcome"}');
+    }
+    _signalSub?.cancel();
+    _signalSub = null;
+    _callDocSub?.cancel();
+    _callDocSub = null;
     if (state == 'failed') {
       _phase = CallPhase.failed;
     } else if (state == 'idle') {
@@ -915,6 +975,8 @@ class CallService extends ChangeNotifier {
   void _cleanup() {
     _signalSub?.cancel();
     _signalSub = null;
+    _callDocSub?.cancel();
+    _callDocSub = null;
     _ringTimer?.cancel();
     _negotiateTimer?.cancel();
     _durationTimer?.cancel();
