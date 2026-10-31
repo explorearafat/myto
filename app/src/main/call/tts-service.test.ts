@@ -4,6 +4,8 @@ import {
   extractSentences,
   splitSentences,
   spokenText,
+  expressify,
+  parseRatePercent,
   TtsService
 } from './tts-service'
 
@@ -52,6 +54,43 @@ describe('spokenText', () => {
   it('drops code fences, emphasis and link targets', () => {
     expect(spokenText('Run `npm test` — see [the docs](https://x.y) *now*.'))
       .toBe('Run npm test — see the docs now.')
+  })
+})
+
+describe('expressify', () => {
+  it('turns laughter markers into a spoken giggle with bright prosody', () => {
+    const e = expressify('Haha that is so true!', 'default')
+    expect(e.text).toContain('ha ha ha')
+    expect(e.text).not.toMatch(/haha/i)
+    expect(e.rate).toMatch(/^\+\d+%$/)
+    expect(e.pitch).toMatch(/^\+\d+Hz$/)
+    expect(Number.parseInt(e.rate, 10)).toBeGreaterThanOrEqual(10)
+  })
+
+  it('lifts questions and slows them slightly', () => {
+    const q = expressify('Are you sure about that?', 'default')
+    expect(q.pitch).toMatch(/^\+\d+Hz$/)
+  })
+
+  it('converts sighs and keeps everything in clamp range', () => {
+    const e = expressify('Ugh, this build failed again. [sighs] Let me check the logs and try once more, this time with the cache cleared properly so we can see whether the error persists across runs.', 'default')
+    expect(e.text).toContain('ahh,')
+    const r = Number.parseInt(e.rate, 10)
+    expect(r).toBeGreaterThanOrEqual(-25)
+    expect(r).toBeLessThanOrEqual(30)
+  })
+
+  it('applies the user offset on top of the expressive delta', () => {
+    const base = expressify('A calm statement.', 'default')
+    const lifted = expressify('A calm statement.', '+10%')
+    expect(Number.parseInt(lifted.rate, 10)).toBeGreaterThan(Number.parseInt(base.rate, 10))
+  })
+
+  it('parseRatePercent reads offsets and rejects junk', () => {
+    expect(parseRatePercent('+10%')).toBe(10)
+    expect(parseRatePercent('-5%')).toBe(-5)
+    expect(parseRatePercent('default')).toBe(0)
+    expect(parseRatePercent('garbage')).toBe(0)
   })
 })
 
