@@ -358,6 +358,9 @@ class _ActiveCallView extends StatelessWidget {
           _ApprovalCard(approval: service.approval!, service: service)
         else if (service.question != null)
           _QuestionCard(question: service.question!, service: service),
+        // Typed input: always-works fallback for when on-device speech
+        // recognition is unavailable — same path as speech, answer by voice.
+        const _TypedInput(),
         // 3×2 native control grid.
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: TeamlySpace.s6),
@@ -562,6 +565,81 @@ class _QuestionCard extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 // Controls & sheets
 // ─────────────────────────────────────────────────────────────────────────────
+
+class _TypedInput extends StatefulWidget {
+  const _TypedInput();
+
+  @override
+  State<_TypedInput> createState() => _TypedInputState();
+}
+
+class _TypedInputState extends State<_TypedInput> {
+  final _controller = TextEditingController();
+  bool _sending = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _send(CallService service) {
+    final text = _controller.text.trim();
+    if (text.isEmpty || _sending) return;
+    setState(() => _sending = true);
+    service.sendTypedText(text);
+    _controller.clear();
+    Future.delayed(const Duration(milliseconds: 400), () {
+      if (mounted) setState(() => _sending = false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: TextField(
+              controller: _controller,
+              style: const TextStyle(fontSize: 13),
+              textInputAction: TextInputAction.send,
+              onSubmitted: (_) => _send(context.read<CallService>()),
+              decoration: InputDecoration(
+                hintText: 'Type to Myto…',
+                hintStyle: TextStyle(fontSize: 12.5, color: palette.muted),
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                filled: true,
+                fillColor: palette.surface,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(TeamlyRadius.pill),
+                  borderSide: BorderSide(color: palette.border),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(TeamlyRadius.pill),
+                  borderSide: BorderSide(color: palette.border),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: () => _send(context.read<CallService>()),
+            child: Container(
+              width: 40,
+              height: 40,
+              decoration: const BoxDecoration(color: TeamlyColors.green500, shape: BoxShape.circle),
+              child: const Icon(Icons.send_rounded, size: 18, color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 class _GridControl extends StatelessWidget {
   const _GridControl({

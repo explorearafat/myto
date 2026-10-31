@@ -239,6 +239,7 @@ export function normalise(raw: unknown): ProviderSettings {
   const background = (o.background ?? {}) as Partial<ProviderSettings['background']>
   const call = (o.call ?? {}) as Partial<ProviderSettings['call']>
   const callTurn = (call.turn ?? {}) as Partial<ProviderSettings['call']['turn']>
+  const callStt = (call.stt ?? {}) as Partial<ProviderSettings['call']['stt']>
   const callCallbacks = (call.callbacks ?? {}) as Partial<
     ProviderSettings['call']['callbacks']
   >
@@ -377,6 +378,14 @@ export function normalise(raw: unknown): ProviderSettings {
       )
         ? (call.permissionMode as ProviderSettings['call']['permissionMode'])
         : d.call.permissionMode,
+      stt: {
+        endpoint: typeof callStt.endpoint === 'string' ? callStt.endpoint.trim() : d.call.stt.endpoint,
+        apiKey: typeof callStt.apiKey === 'string' ? callStt.apiKey : d.call.stt.apiKey,
+        model:
+          typeof callStt.model === 'string' && callStt.model.trim()
+            ? callStt.model.trim()
+            : d.call.stt.model
+      },
       callWorkspaceDir:
         typeof call.callWorkspaceDir === 'string' ? call.callWorkspaceDir : d.call.callWorkspaceDir,
       callbacks: {

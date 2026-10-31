@@ -533,6 +533,36 @@ function CallsPane() {
         />
       </SettingRow>
       <SettingRow
+        title="Desktop speech recognition (fallback)"
+        description="If the phone's own voice input fails during calls, the desktop can transcribe the phone's mic audio instead. Paste any OpenAI-compatible /audio/transcriptions endpoint — a FREE Groq key (console.groq.com) with whisper-large-v3-turbo works great. Empty = off (phone recognizer only)."
+      >
+        <div className="flex w-72 flex-col gap-2">
+          <input
+            type="text"
+            value={call.stt.endpoint}
+            onChange={(e) => void setCallSettings({ stt: { ...call.stt, endpoint: e.target.value } })}
+            placeholder="https://api.groq.com/openai/v1/audio/transcriptions"
+            className="w-full rounded-lg border border-border bg-bg px-3 py-1.5 text-[12px] text-text outline-none focus:border-primary"
+          />
+          <div className="flex gap-2">
+            <input
+              type="password"
+              value={call.stt.apiKey}
+              onChange={(e) => void setCallSettings({ stt: { ...call.stt, apiKey: e.target.value } })}
+              placeholder="API key"
+              className="w-full rounded-lg border border-border bg-bg px-3 py-1.5 text-[12px] text-text outline-none focus:border-primary"
+            />
+            <input
+              type="text"
+              value={call.stt.model}
+              onChange={(e) => void setCallSettings({ stt: { ...call.stt, model: e.target.value } })}
+              placeholder="model"
+              className="w-32 rounded-lg border border-border bg-bg px-3 py-1.5 text-[12px] text-text outline-none focus:border-primary"
+            />
+          </div>
+        </div>
+      </SettingRow>
+      <SettingRow
         title="TURN relay"
         description="Fallback relay for strict NATs (carrier networks, some offices). Defaults to the free public OpenRelay; replace with your own server for production use. Comma-separated URLs."
       >

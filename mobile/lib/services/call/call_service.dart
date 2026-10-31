@@ -881,6 +881,17 @@ class CallService extends ChangeNotifier {
     _sendDc(<String, dynamic>{'t': 'keypad', 'digits': digits});
   }
 
+  /// Type to Myto mid-call — rides the exact same path as speech (stt_final),
+  /// so the agent hears it and answers by voice + transcript.
+  void sendTypedText(String text) {
+    final clean = text.trim();
+    if (clean.isEmpty) return;
+    _sendDc(<String, dynamic>{'t': 'stt_final', 'text': clean});
+    _transcript.add(TranscriptLine(role: 'user', text: clean));
+    if (_transcript.length > 60) _transcript.removeRange(0, _transcript.length - 60);
+    notifyListeners();
+  }
+
   void setVoiceRate(String rate) {
     _sendDc(<String, dynamic>{'t': 'voice_rate', 'rate': rate});
   }

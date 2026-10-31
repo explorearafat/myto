@@ -38,6 +38,12 @@ class DesktopPeerHost {
   private pendingIce: PendingIce[] = []
   private remoteSet = false
   private statsTimer: number | null = null
+  // Desktop-side speech recognition: record the phone's mic track in complete
+  // 4-second WebM segments and hand each to main for transcription. A fresh
+  // recorder per segment keeps every blob independently decodable.
+  private sttEnabled = false
+  private sttRecorder: MediaRecorder | null = null
+  private remoteStream: MediaStream | null = null
 
   start(): void {
     window.myto.call.onPeerControl((msg) => void this.onControl(msg))
@@ -51,6 +57,7 @@ class DesktopPeerHost {
     try {
       switch (msg.action) {
         case 'init':
+          this.sttEnabled = msg.sttEnabled
           await this.init(msg.callId, msg.role, msg.iceServers)
           break
         case 'set-remote':
@@ -96,8 +103,15 @@ class DesktopPeerHost {
     // sentence plays — no local spill).
     for (const track of this.dest.stream.getAudioTracks()) this.pc.addTrack(track, this.dest.stream)
 
-    // The phone's mic arrives as a remote track — received, never played.
-    this.pc.ontrack = () => undefined
+    // The phone's mic arrives as a remote track — received, never played
+    // locally. When desktop STT is enabled, it's ALSO the transcription feed.
+    this.pc.ontrack = (event) => {
+      const stream = event.streams[0]
+      if (stream && this.sttEnabled && this.sttRecorder === null) {
+        this.remoteStream = stream
+        this.startSttRecording()
+      }
+    }
 
     this.pc.onicecandidate = (event) => {
       if (event.candidate) {
@@ -148,6 +162,46 @@ class DesktopPeerHost {
       if (typeof event.data === 'string') {
         this.emit({ callId: this.callId ?? '', kind: 'dc-message', json: event.data })
       }
+    }
+  }
+
+  /**
+   * Desktop-side STT capture: record the phone's mic in COMPLETE 4-second
+   * WebM segments (a fresh recorder per segment — with timeslice, only the
+   * first chunk carries the WebM header), base64 each blob to main, and let
+   * the configured transcription endpoint turn it into text.
+   */
+  private startSttRecording(): void {
+    const stream = this.remoteStream
+    if (!stream || !this.pc || this.pc.connectionState === 'closed') return
+    try {
+      const rec = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' })
+      this.sttRecorder = rec
+      rec.ondataavailable = (e) => {
+        if (e.data.size < 2_000) return // pure silence — skip the round trip
+        const reader = new FileReader()
+        reader.onload = () => {
+          const b64 = String(reader.result).slice(String(reader.result).indexOf(',') + 1)
+          this.emit({ callId: this.callId ?? '', kind: 'stt-audio', audioBase64: b64, mime: e.data.type || 'audio/webm' })
+        }
+        reader.readAsDataURL(e.data)
+      }
+      rec.onstop = () => {
+        this.sttRecorder = null
+        if (this.sttEnabled && this.pc && this.pc.connectionState !== 'closed') {
+          setTimeout(() => this.startSttRecording(), 150)
+        }
+      }
+      rec.start()
+      setTimeout(() => {
+        try {
+          if (rec.state !== 'inactive') rec.stop()
+        } catch {
+          /* already stopped */
+        }
+      }, 4_000)
+    } catch (error) {
+      this.emit({ callId: this.callId ?? '', kind: 'error', detail: `stt recorder: ${String(error)}` })
     }
   }
 
@@ -280,6 +334,14 @@ class DesktopPeerHost {
       clearInterval(this.statsTimer)
       this.statsTimer = null
     }
+    this.sttEnabled = false
+    try {
+      this.sttRecorder?.stop()
+    } catch {
+      /* already stopped */
+    }
+    this.sttRecorder = null
+    this.remoteStream = null
     this.stopTts()
     try {
       this.dc?.close()

@@ -114,6 +114,16 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
       credential: 'openrelayproject'
     },
     permissionMode: 'ask',
+    // Desktop-side fallback speech recognition: empty endpoint = off. The
+    // phone's on-device recognizer is primary; this rescues devices whose
+    // SpeechRecognizer can't run during a WebRTC call (mic is held by WebRTC).
+    // Any OpenAI-compatible /audio/transcriptions endpoint works — e.g. a free
+    // Groq key with whisper-large-v3-turbo.
+    stt: {
+      endpoint: '',
+      apiKey: '',
+      model: 'whisper-large-v3-turbo'
+    },
     // Calls work in their OWN folder so voice-driven files never mix with the
     // main workspace. Empty = auto-persist `Documents\Myto Call Work` on the
     // first call; the user can point it anywhere from Settings › Calls.

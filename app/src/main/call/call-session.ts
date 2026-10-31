@@ -49,6 +49,7 @@ import {
   NEGOTIATION_POLL_MS
 } from './signaling'
 import { TtsService } from './tts-service'
+import { sttEnabled, transcribeSegment } from './stt'
 import { buildIceServers, describeResult, looksLikeTask, matchQuickCommand, yesNo } from './call-text'
 import {
   appendAssistantMessage,
@@ -235,6 +236,8 @@ class LiveCallSession {
   private voiceConfirmations = new Map<string, (text: string) => void>()
   private taskRunning = false
   private taskSummaryLine = ''
+  /** Last time the phone's own recognizer sent speech — desktop STT stays quiet while it's alive. */
+  private lastPhoneSttAt = 0
 
   constructor(deps: CallSessionDeps, callId: string, _dir: 'm2d' | 'd2m', role: 'offerer' | 'answerer', openingScript?: string) {
     this.deps = deps
@@ -278,7 +281,11 @@ class LiveCallSession {
         action: 'init',
         callId: this.callId,
         role: this.role,
-        iceServers: buildIceServers(turn)
+        iceServers: buildIceServers(turn),
+        // When a desktop STT endpoint is configured, the renderer also streams
+        // the phone's mic audio back in segments so speech still works even if
+        // the phone's own recognizer can't run during a WebRTC call.
+        sttEnabled: getSettings().call.stt.endpoint.trim() !== ''
       })
 
       // Signal exchange loop (fast while negotiating; once the DC is open the
@@ -411,7 +418,27 @@ class LiveCallSession {
       case 'error':
         console.warn(`[call:${this.callId}] peer error: ${event.detail}`)
         break
+      case 'stt-audio':
+        void this.onDesktopStt(event.audioBase64, event.mime)
+        break
     }
+  }
+
+  /**
+   * Desktop-side speech: a segment of the phone's mic audio came back from the
+   * renderer — transcribe it and treat it exactly like the phone's own
+   * stt_final. Skipped while the phone's recognizer is alive (any stt traffic
+   * in the last 10s) so the two never double-feed the agent.
+   */
+  private async onDesktopStt(audioBase64: string, mime: string): Promise<void> {
+    if (this.ended || this.hold || this.muted) return
+    if (!sttEnabled()) return
+    if (Date.now() - this.lastPhoneSttAt < 10_000) return // phone STT is alive
+    const text = await transcribeSegment({ audioBase64, mime })
+    if (!text || this.ended) return
+    console.log(`[call:${this.callId}] you said (desktop STT): ${text.slice(0, 120)}`)
+    this.sendDc({ t: 'transcript', role: 'user', text })
+    await this.onUserUtterance(text)
   }
 
   private onDcMessage(json: string): void {
@@ -426,6 +453,7 @@ class LiveCallSession {
         break
       case 'stt_final':
         if (this.muted || this.hold) return
+        this.lastPhoneSttAt = Date.now()
         console.log(`[call:${this.callId}] you said: ${msg.text.slice(0, 120)}`)
         void this.onUserUtterance(msg.text)
         break

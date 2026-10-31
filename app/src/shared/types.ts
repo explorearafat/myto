@@ -255,6 +255,21 @@ export interface TurnServerConfig {
 export type CallPermissionMode = 'ask' | 'autoReadOnly' | 'autoDev'
 
 /**
+ * Desktop-side speech recognition for calls: the phone's mic audio already
+ * streams to the desktop over WebRTC; when configured, the desktop transcribes
+ * it (an OpenAI-compatible /audio/transcriptions endpoint — e.g. a free Groq
+ * key, whisper-large-v3-turbo) and feeds the text to the agent. This rescues
+ * devices whose Android SpeechRecognizer can't run during a WebRTC call.
+ */
+export interface CallSttConfig {
+  /** Transcription endpoint URL. Empty = desktop STT disabled (phone-only). */
+  endpoint: string
+  apiKey: string
+  /** Model id, e.g. whisper-large-v3-turbo. */
+  model: string
+}
+
+/**
  * Voice-call preferences (Myto Remote). The call system is authenticated by the
  * user's own Firebase session (the desktop and the phone are signed into the same
  * account); these settings govern availability, ring behavior, relay config, and
@@ -276,6 +291,8 @@ export interface CallSettings {
   turn: TurnServerConfig
   /** Command-execution permission tier for call-driven work (see CallPermissionMode). */
   permissionMode: CallPermissionMode
+  /** Desktop-side fallback speech recognition (see {@link CallSttConfig}). */
+  stt: CallSttConfig
   /**
    * The folder calls work in — the agent's sandbox for everything started from
    * a voice call, separate from the main Cowork workspace. Empty = auto: the
@@ -1832,7 +1849,14 @@ export interface CallIceServer {
 
 /** Main → renderer: drive the renderer-hosted WebRTC peer. */
 export type CallPeerControl =
-  | { action: 'init'; callId: string; role: 'offerer' | 'answerer'; iceServers: CallIceServer[] }
+  | {
+      action: 'init'
+      callId: string
+      role: 'offerer' | 'answerer'
+      iceServers: CallIceServer[]
+      /** When true, record the phone's mic track and stream it back for transcription. */
+      sttEnabled: boolean
+    }
   | { action: 'set-remote'; callId: string; description: { type: 'offer' | 'answer'; sdp: string } }
   | { action: 'add-ice'; callId: string; candidate: unknown }
   | { action: 'tts-play'; callId: string; sentenceId: number; mp3Base64: string; sentence: string }
@@ -1853,6 +1877,7 @@ export type CallPeerEvent =
   | { callId: string; kind: 'tts-idle' }
   | { callId: string; kind: 'stats'; rttMs: number; quality: 'direct' | 'relay' | 'unknown' }
   | { callId: string; kind: 'error'; detail: string }
+  | { callId: string; kind: 'stt-audio'; audioBase64: string; mime: string }
 
 /** Main → renderer: call lifecycle status (the header indicator). */
 export type CallStatusEvent =
