@@ -892,6 +892,53 @@ class CallService extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ── Call history management ──────────────────────────────────────────────
+  CollectionReference<Map<String, dynamic>>? _callsRef() {
+    final uid = _uid();
+    if (uid == null) return null;
+    return FirebaseFirestore.instance.collection('users').doc(uid).collection('calls');
+  }
+
+  /// Delete ONE call-history entry (its signals first, then the doc).
+  /// A live call is never deleted.
+  Future<bool> deleteCallEntry(String callId) async {
+    final calls = _callsRef();
+    if (calls == null || callId == _callId) return false;
+    try {
+      final sigs = await calls.doc(callId).collection('signals').get();
+      for (final s in sigs.docs) {
+        await s.reference.delete();
+      }
+      await calls.doc(callId).delete();
+      return true;
+    } on FirebaseException {
+      return false;
+    }
+  }
+
+  /// Delete the ENTIRE call history (every call doc + its signals).
+  /// A live call is never deleted.
+  Future<int> clearCallHistory() async {
+    final calls = _callsRef();
+    if (calls == null) return 0;
+    var n = 0;
+    try {
+      final snap = await calls.get();
+      for (final d in snap.docs) {
+        if (d.id == _callId) continue; // a live call stays
+        final sigs = await d.reference.collection('signals').get();
+        for (final s in sigs.docs) {
+          await s.reference.delete();
+        }
+        await d.reference.delete();
+        n++;
+      }
+    } on FirebaseException {
+      // Best-effort — whatever was deleted stays deleted.
+    }
+    return n;
+  }
+
   void setVoiceRate(String rate) {
     _sendDc(<String, dynamic>{'t': 'voice_rate', 'rate': rate});
   }

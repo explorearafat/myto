@@ -17,6 +17,40 @@ import 'call_screen.dart';
 class CallTab extends StatelessWidget {
   const CallTab({super.key});
 
+  /// "Delete entire call history" from the app bar — confirm, then wipe.
+  Future<void> _confirmClearAll(BuildContext context) async {
+    final palette = context.palette;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: palette.surface,
+        title: const Text('Delete call history?'),
+        content: Text(
+          'Every call record and its notes will be removed from your account. This cannot be undone.',
+          style: TextStyle(fontSize: 13.5, color: palette.muted),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('Keep', style: TextStyle(color: palette.accentText)),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: TeamlyColors.danger),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete all'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+    final n = await CallService.instance.clearCallHistory();
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(n > 0 ? 'Deleted $n call ${n == 1 ? 'record' : 'records'}' : 'No calls to delete')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final service = context.watch<CallService>();
@@ -28,6 +62,13 @@ class CallTab extends StatelessWidget {
       appBar: AppBar(
         title: const Text('Call'),
         backgroundColor: palette.bg,
+        actions: <Widget>[
+          IconButton(
+            tooltip: 'Delete entire call history',
+            icon: const Icon(Icons.delete_sweep_outlined),
+            onPressed: () => _confirmClearAll(context),
+          ),
+        ],
       ),
       body: SafeArea(
         child: ListView(
@@ -235,8 +276,7 @@ class _HistorySection extends StatelessWidget {
               children: <Widget>[
                 for (final doc in docs) _HistoryTile(id: doc.id, data: doc.data()),
               ],
-            );
-          },
+            );          },
         ),
       ],
     );
@@ -268,40 +308,84 @@ class _HistoryTile extends StatelessWidget {
     final when = '${at.day}/${at.month} '
         '${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        color: palette.surface,
-        borderRadius: BorderRadius.circular(TeamlyRadius.sm),
-        border: Border.all(color: palette.border),
-      ),
-      child: Row(
-        children: <Widget>[
-          Icon(icon, size: 19, color: failed ? TeamlyColors.danger : TeamlyColors.greenText),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  entry.summary.isNotEmpty
-                      ? entry.summary
-                      : (outgoing ? 'Called Myto' : 'Myto called you'),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  '${entry.state}${entry.outcome.isEmpty ? '' : ' · ${entry.outcome}'} · $when',
-                  style: TextStyle(fontSize: 11.5, color: palette.muted),
-                ),
-              ],
+    return GestureDetector(
+      onLongPress: () => _confirmDelete(context),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: palette.surface,
+          borderRadius: BorderRadius.circular(TeamlyRadius.sm),
+          border: Border.all(color: palette.border),
+        ),
+        child: Row(
+          children: <Widget>[
+            Icon(icon, size: 19, color: failed ? TeamlyColors.danger : TeamlyColors.greenText),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    entry.summary.isNotEmpty
+                        ? entry.summary
+                        : (outgoing ? 'Called Myto' : 'Myto called you'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${entry.state}${entry.outcome.isEmpty ? '' : ' · ${entry.outcome}'} · $when',
+                    style: TextStyle(fontSize: 11.5, color: palette.muted),
+                  ),
+                ],
+              ),
             ),
+            GestureDetector(
+              onTap: () => _confirmDelete(context),
+              child: Padding(
+                padding: const EdgeInsets.all(6),
+                child: Icon(Icons.close_rounded, size: 16, color: palette.muted),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Long-press (or the ×) → confirm → delete this one record from Firestore.
+  Future<void> _confirmDelete(BuildContext context) async {
+    final palette = context.palette;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: palette.surface,
+        title: const Text('Delete this call?'),
+        content: Text(
+          'This record will be removed from your history.',
+          style: TextStyle(fontSize: 13.5, color: palette.muted),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('Keep', style: TextStyle(color: palette.accentText)),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: TeamlyColors.danger),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
           ),
         ],
       ),
     );
+    if (confirmed != true || !context.mounted) return;
+    final ok = await CallService.instance.deleteCallEntry(id);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(ok ? 'Call record deleted' : 'Could not delete (live call?)')),
+      );
+    }
   }
 }
