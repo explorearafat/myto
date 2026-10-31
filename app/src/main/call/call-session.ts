@@ -25,11 +25,13 @@
  * and the terminal state triggers the callback flow.
  */
 import os from 'node:os'
+import { join } from 'node:path'
+import { mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import type { ApprovalRequest, QuestionRequest } from '../../shared/types'
 import type { CallPeerControl as PeerControl, CallPeerEvent as PeerEvent } from '../../shared/types'
 import type { CallStatusEvent } from '../../shared/types'
-import { getSettings } from '../settings'
+import { getSettings, saveSettings } from '../settings'
 import { decideApproval, answerCallQuestions, cancelStream } from '../provider-ipc'
 import type { CallAuth } from './auth-flow'
 import { setCallActive } from './busy-state'
@@ -52,7 +54,7 @@ import {
   appendAssistantMessage,
   appendUserMessage,
   buildVoiceMessages,
-  callMode,
+
   createCallSession,
   loadHistory,
   runCallTurn,
@@ -542,7 +544,7 @@ class LiveCallSession {
       }
     }
     if (quick.say) this.tts?.say(quick.say)
-    const cwd = resolveCallCwd(settings.cowork.workspaceDir, os.homedir())
+    const cwd = resolveCallCwd(ensureCallWorkspace(), os.homedir())
     const handle = await executeCommand({
       callId: this.callId,
       command: quick.command,
@@ -567,10 +569,10 @@ class LiveCallSession {
 
   /** A long task: run the FULL cowork loop in the background (survives hangup). */
   private startBackgroundTask(prompt: string): void {
-    const settings = getSettings()
-    if (settings.cowork.workspaceDir.trim() === '') {
+    const workspaceDir = ensureCallWorkspace()
+    if (workspaceDir.trim() === '') {
       this.tts?.say(
-        'I can work on a project, but no working folder is set on the desktop yet. Pick one in Myto settings, then call me again.'
+        'I can work on a project, but no working folder could be prepared. Check Myto settings, then call me again.'
       )
       return
     }
@@ -581,7 +583,7 @@ class LiveCallSession {
     this.sendDc({ t: 'task', state: 'accepted', summary: prompt.slice(0, 140) })
     void startTaskFromCall({
       callId: this.callId,
-      workspaceDir: settings.cowork.workspaceDir,
+      workspaceDir,
       prompt,
       events: {
         onDelta: () => {
@@ -616,10 +618,10 @@ class LiveCallSession {
 
   /** One conversational agent turn through the REAL loop. */
   private async runAgentTurn(userText: string): Promise<void> {
-    const settings = getSettings()
-    const mode = callMode()
+    const workspaceDir = ensureCallWorkspace()
+    const mode = workspaceDir.trim() !== '' ? 'cowork' : 'chat'
     if (!this.sessionRow) {
-      this.sessionRow = createCallSession(mode, settings.cowork.workspaceDir, userText.slice(0, 60))
+      this.sessionRow = createCallSession(mode, workspaceDir, userText.slice(0, 60))
     }
     const sessionId = this.sessionRow.sessionId
     const msgId = appendUserMessage(sessionId, userText)
@@ -632,7 +634,7 @@ class LiveCallSession {
       const result = await runCallTurn({
         streamId,
         request: {
-          messages: buildVoiceMessages(loadHistory(sessionId).slice(0, -1), userText),
+          messages: buildVoiceMessages(loadHistory(sessionId).slice(0, -1), userText, workspaceDir),
           mode,
           sessionId,
           afterMsgId: msgId
@@ -753,4 +755,42 @@ class LiveCallSession {
     })
     this.onEnded?.()
   }
+}
+
+/**
+ * The folder a call works in: the dedicated call workspace when set (auto-
+ * persisted to `Documents\Myto Call Work` on first use), else the main Cowork
+ * workspace. Pure part exported for unit tests.
+ */
+export function resolveCallWorkspace(
+  callWorkspaceDir: string,
+  coworkWorkspaceDir: string
+): string {
+  if (callWorkspaceDir.trim() !== '') return callWorkspaceDir.trim()
+  if (coworkWorkspaceDir.trim() !== '') return coworkWorkspaceDir.trim()
+  return ''
+}
+
+/** The auto-persisted default when no folder was ever chosen. */
+export function defaultCallWorkspace(): string {
+  return join(os.homedir(), 'Documents', 'Myto Call Work')
+}
+
+/**
+ * The workspace this call runs in — resolving + creating it once, and
+ * persisting the auto default so the user can see/change it in Settings.
+ */
+export function ensureCallWorkspace(): string {
+  const settings = getSettings()
+  let dir = resolveCallWorkspace(settings.call.callWorkspaceDir, settings.cowork.workspaceDir)
+  if (dir === '') {
+    dir = defaultCallWorkspace()
+    void saveSettings({ ...settings, call: { ...settings.call, callWorkspaceDir: dir } })
+  }
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch (error) {
+    console.error('[call] could not create the call workspace:', error)
+  }
+  return dir
 }

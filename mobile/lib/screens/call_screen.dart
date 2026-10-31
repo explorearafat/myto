@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../services/call/call_service.dart';
+import '../services/call/call_sounds.dart';
 import '../theme.dart';
 import '../widgets/myto_mark.dart';
 
@@ -26,11 +27,15 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
   // → dismiss() → phase idle → postFrameCallback → startCall() again — a
   // phantom call ringing the desktop after the user already hung up.
   bool _autoStartDone = false;
+  // Sound transitions: ringback loops while calling/connecting, the connect
+  // chime plays once on active, everything stops on terminal states.
+  CallPhase? _lastPhase;
 
   late final AnimationController _ring = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1800),
   )..repeat();
+
   late final AnimationController _pulse = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1200),
@@ -40,13 +45,40 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
   void dispose() {
     _ring.dispose();
     _pulse.dispose();
+    CallSounds.instance.stopAll();
     super.dispose();
+  }
+
+  void _syncSounds(CallPhase phase) {
+    if (_lastPhase == phase) return;
+    final wasActive = _lastPhase == CallPhase.active;
+    _lastPhase = phase;
+    switch (phase) {
+      case CallPhase.calling:
+      case CallPhase.connecting:
+      case CallPhase.reconnecting:
+        CallSounds.instance.startRingback();
+        break;
+      case CallPhase.active:
+        CallSounds.instance.stopRingback();
+        if (!wasActive) CallSounds.instance.playConnectChime();
+        break;
+      case CallPhase.incoming:
+        break; // the incoming screen owns its own ringtone
+      case CallPhase.ended:
+      case CallPhase.failed:
+      case CallPhase.declined:
+      case CallPhase.idle:
+        CallSounds.instance.stopAll();
+        break;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final service = context.watch<CallService>();
     final palette = context.palette;
+    _syncSounds(service.phase);
 
     // Kick the call off once, on first entry.
     if (service.phase == CallPhase.idle && !_autoStartDone) {

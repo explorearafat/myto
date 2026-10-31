@@ -1,7 +1,7 @@
 name: sylor
 description: "Myto — a local-first AI coding workspace. The mobile chat companion."
 publish_to: "none"
-version: 0.18.3+32
+version: 0.18.4+33
 
 environment:
   sdk: ">=3.6.0 <4.0.0"
@@ -58,6 +58,11 @@ dependencies:
   # the moment the QR is scanned.
   app_links: ^6.1.0
 
+  # Call sounds: looping ringtone + vibration for incoming callbacks, ringback
+  # while dialing, and a connect chime when the call goes live.
+  audioplayers: ^6.1.0
+  vibration: ^3.1.1
+
   # Incoming-call presentation: a full-screen-intent notification channel that
   # wakes the screen and deep-links into the incoming-call screen, WhatsApp-style.
   flutter_local_notifications: ^18.0.1
@@ -80,9 +85,10 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 
-  # The ten chat agents' mascot portraits (bundled with the app).
+  # The ten chat agents' mascot portraits + the call sound set (bundled).
   assets:
     - assets/agents/chat/
+    - assets/audio/
 
   # The cursive wordmark ("Myto" on the Discover header) — Dancing Script (OFL).
   fonts:

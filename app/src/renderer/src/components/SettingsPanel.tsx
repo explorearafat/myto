@@ -470,6 +470,26 @@ function CallsPane() {
     <div className="divide-y divide-border">
       <PairPhoneCard pairLink={pairLink} qrDataUrl={qrDataUrl} />
       <SettingRow
+        title="Call work folder"
+        description="The folder Myto works in during calls — voice-driven files and tasks land here, separate from your main workspace. When you say “ei folder” on a call, this is where Myto goes. Auto-created on the first call; pick a folder to change it."
+      >
+        <div className="flex flex-col items-end gap-2">
+          <span className="max-w-72 truncate font-mono text-[11.5px] text-muted" title={call.callWorkspaceDir}>
+            {call.callWorkspaceDir || 'Auto: Documents\\Myto Call Work'}
+          </span>
+          <button
+            type="button"
+            onClick={async () => {
+              const picked = await window.myto.cowork.pickWorkspace()
+              if (picked) void setCallSettings({ callWorkspaceDir: picked })
+            }}
+            className="rounded-lg bg-primary px-3.5 py-1.5 text-[12px] font-medium text-bg shadow-sm transition-colors hover:opacity-90"
+          >
+            Choose folder
+          </button>
+        </div>
+      </SettingRow>
+      <SettingRow
         title="Voice calls"
         description="Publish presence and answer calls from the Myto phone app (signed into the same account). Calls are end-to-end WebRTC audio; signaling goes through your own Firestore, owner-only."
       >

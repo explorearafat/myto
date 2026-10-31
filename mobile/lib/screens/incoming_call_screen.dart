@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../services/call/call_service.dart';
+import '../services/call/call_sounds.dart';
 import '../theme.dart';
 import '../widgets/myto_mark.dart';
 
@@ -10,9 +11,28 @@ import '../widgets/myto_mark.dart';
 /// IncomingCallScreen — the WhatsApp-style full-screen ring for a callback
 /// from Myto. Shown as an overlay by HomeShell whenever the service reports an
 /// incoming call (foreground) or the FCM full-screen intent deep-links in.
+/// A custom marimba ringtone loops with a vibration pattern for as long as
+/// this screen is up; accept/decline pops it and the sound stops with it.
 /// ---------------------------------------------------------------------------
-class IncomingCallScreen extends StatelessWidget {
+class IncomingCallScreen extends StatefulWidget {
   const IncomingCallScreen({super.key});
+
+  @override
+  State<IncomingCallScreen> createState() => _IncomingCallScreenState();
+}
+
+class _IncomingCallScreenState extends State<IncomingCallScreen> {
+  @override
+  void initState() {
+    super.initState();
+    CallSounds.instance.startIncomingRing();
+  }
+
+  @override
+  void dispose() {
+    CallSounds.instance.stopIncomingRing();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {

@@ -276,6 +276,13 @@ export interface CallSettings {
   turn: TurnServerConfig
   /** Command-execution permission tier for call-driven work (see CallPermissionMode). */
   permissionMode: CallPermissionMode
+  /**
+   * The folder calls work in — the agent's sandbox for everything started from
+   * a voice call, separate from the main Cowork workspace. Empty = auto: the
+   * first call persists `Documents\Myto Call Work` here. When the user says
+   * "ei folder" / "that folder" on a call, they mean this directory.
+   */
+  callWorkspaceDir: string
   /** Task-completion callback behavior (the "Myto calls you back" flow). */
   callbacks: CallCallbackSettings
 }

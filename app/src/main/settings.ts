@@ -377,6 +377,8 @@ export function normalise(raw: unknown): ProviderSettings {
       )
         ? (call.permissionMode as ProviderSettings['call']['permissionMode'])
         : d.call.permissionMode,
+      callWorkspaceDir:
+        typeof call.callWorkspaceDir === 'string' ? call.callWorkspaceDir : d.call.callWorkspaceDir,
       callbacks: {
         enabled:
           typeof callCallbacks.enabled === 'boolean'

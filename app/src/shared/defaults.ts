@@ -114,6 +114,10 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
       credential: 'openrelayproject'
     },
     permissionMode: 'ask',
+    // Calls work in their OWN folder so voice-driven files never mix with the
+    // main workspace. Empty = auto-persist `Documents\Myto Call Work` on the
+    // first call; the user can point it anywhere from Settings › Calls.
+    callWorkspaceDir: '',
     callbacks: {
       enabled: true,
       retryLimit: 2,

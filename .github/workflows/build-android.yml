@@ -118,12 +118,13 @@ jobs:
       - name: Voice-call permissions (Myto Remote)
         # The Call tab's WebRTC audio needs MODIFY_AUDIO_SETTINGS (speaker routing)
         # and BLUETOOTH_CONNECT (headset routing on Android 12+). WAKE_LOCK keeps the
-        # screen awake on an incoming callback, and USE_FULL_SCREEN_INTENT lets the
-        # `calls` notification channel ring full-screen like a real call. android/ is
+        # screen awake on an incoming callback, USE_FULL_SCREEN_INTENT lets the
+        # `calls` notification channel ring full-screen like a real call, and
+        # VIBRATE drives the incoming-call vibration pattern. android/ is
         # regenerated above; inject idempotently (grep-guarded).
         run: |
           MANIFEST=android/app/src/main/AndroidManifest.xml
-          for PERM in android.permission.MODIFY_AUDIO_SETTINGS android.permission.BLUETOOTH_CONNECT android.permission.WAKE_LOCK android.permission.USE_FULL_SCREEN_INTENT; do
+          for PERM in android.permission.MODIFY_AUDIO_SETTINGS android.permission.BLUETOOTH_CONNECT android.permission.WAKE_LOCK android.permission.USE_FULL_SCREEN_INTENT android.permission.VIBRATE; do
             if grep -q "$PERM" "$MANIFEST"; then
               echo "$PERM already present; skipping"
             else
