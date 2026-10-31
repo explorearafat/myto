@@ -15,7 +15,7 @@ export const LINKS = {
    * URL is unique per release and can never go stale. Bump together with
    * RELEASE.version below.
    */
-  androidApk: 'https://github.com/explorearafat/myto/releases/download/v0.18.4/myto.apk',
+  androidApk: 'https://github.com/explorearafat/myto/releases/download/v0.18.9/myto.apk',
   /** The platform chooser — where the header/footer Download links point. */
   downloadPage: '/download',
   /** The Myto chat — a full chat interface, client-side, that answers questions about Myto. */
@@ -49,7 +49,7 @@ export const LINKS = {
  * new tag ships, or the download page will quietly understate the version.
  */
 export const RELEASE = {
-  version: 'v0.18.4',
+  version: 'v0.18.9',
   date: '30 October 2026',
   size: '278 MB',
 };

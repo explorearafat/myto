@@ -256,16 +256,14 @@ export type CallPermissionMode = 'ask' | 'autoReadOnly' | 'autoDev'
 
 /**
  * Desktop-side speech recognition for calls: the phone's mic audio already
- * streams to the desktop over WebRTC; when configured, the desktop transcribes
- * it (an OpenAI-compatible /audio/transcriptions endpoint — e.g. a free Groq
- * key, whisper-large-v3-turbo) and feeds the text to the agent. This rescues
- * devices whose Android SpeechRecognizer can't run during a WebRTC call.
+ * streams to the desktop over WebRTC; the desktop detects speech (VAD), and
+ * transcribes it through the SAME gateway the chat uses (an audio-capable
+ * model — e.g. a free Gemini via OpenRouter) using the user's existing key.
+ * Zero setup. This rescues devices whose Android SpeechRecognizer can't run
+ * during a WebRTC call.
  */
 export interface CallSttConfig {
-  /** Transcription endpoint URL. Empty = desktop STT disabled (phone-only). */
-  endpoint: string
-  apiKey: string
-  /** Model id, e.g. whisper-large-v3-turbo. */
+  /** Audio-capable model id used for transcription. Empty = desktop STT off. */
   model: string
 }
 

@@ -38,12 +38,17 @@ class DesktopPeerHost {
   private pendingIce: PendingIce[] = []
   private remoteSet = false
   private statsTimer: number | null = null
-  // Desktop-side speech recognition: record the phone's mic track in complete
-  // 4-second WebM segments and hand each to main for transcription. A fresh
-  // recorder per segment keeps every blob independently decodable.
+  // Desktop-side speech recognition: capture the phone's mic track through a
+  // WebAudio tap, detect speech with an energy VAD, and emit each utterance as
+  // a self-contained 16 kHz WAV (downsampled + trimmed) for transcription.
   private sttEnabled = false
-  private sttRecorder: MediaRecorder | null = null
-  private remoteStream: MediaStream | null = null
+  private sttSrc: MediaStreamAudioSourceNode | null = null
+  private sttTap: ScriptProcessorNode | null = null
+  private sttMute: GainNode | null = null
+  private sttBuf: Float32Array[] = []
+  private sttSamples = 0
+  private sttSilence = 0
+  private sttSpeaking = false
 
   start(): void {
     window.myto.call.onPeerControl((msg) => void this.onControl(msg))
@@ -107,9 +112,8 @@ class DesktopPeerHost {
     // locally. When desktop STT is enabled, it's ALSO the transcription feed.
     this.pc.ontrack = (event) => {
       const stream = event.streams[0]
-      if (stream && this.sttEnabled && this.sttRecorder === null) {
-        this.remoteStream = stream
-        this.startSttRecording()
+      if (stream && this.sttEnabled && this.sttTap === null) {
+        this.startSttCapture(stream)
       }
     }
 
@@ -166,43 +170,119 @@ class DesktopPeerHost {
   }
 
   /**
-   * Desktop-side STT capture: record the phone's mic in COMPLETE 4-second
-   * WebM segments (a fresh recorder per segment — with timeslice, only the
-   * first chunk carries the WebM header), base64 each blob to main, and let
-   * the configured transcription endpoint turn it into text.
+   * Desktop-side STT capture: tap the phone's mic stream with a
+   * ScriptProcessorNode, run an energy VAD, and emit each utterance as a
+   * complete 16 kHz WAV (base64) — trimmed to speech + a short tail.
    */
-  private startSttRecording(): void {
-    const stream = this.remoteStream
-    if (!stream || !this.pc || this.pc.connectionState === 'closed') return
+  private startSttCapture(stream: MediaStream): void {
+    const ctx = this.ctx
+    if (!ctx) return
     try {
-      const rec = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' })
-      this.sttRecorder = rec
-      rec.ondataavailable = (e) => {
-        if (e.data.size < 2_000) return // pure silence — skip the round trip
-        const reader = new FileReader()
-        reader.onload = () => {
-          const b64 = String(reader.result).slice(String(reader.result).indexOf(',') + 1)
-          this.emit({ callId: this.callId ?? '', kind: 'stt-audio', audioBase64: b64, mime: e.data.type || 'audio/webm' })
-        }
-        reader.readAsDataURL(e.data)
-      }
-      rec.onstop = () => {
-        this.sttRecorder = null
-        if (this.sttEnabled && this.pc && this.pc.connectionState !== 'closed') {
-          setTimeout(() => this.startSttRecording(), 150)
-        }
-      }
-      rec.start()
-      setTimeout(() => {
-        try {
-          if (rec.state !== 'inactive') rec.stop()
-        } catch {
-          /* already stopped */
-        }
-      }, 4_000)
+      this.sttSrc = ctx.createMediaStreamSource(stream)
+      const tap = ctx.createScriptProcessor(4096, 1, 1)
+      this.sttTap = tap
+      // A zero-gain sink keeps the processor pumping without audible output.
+      this.sttMute = ctx.createGain()
+      this.sttMute.gain.value = 0
+      this.sttSrc.connect(tap)
+      tap.connect(this.sttMute)
+      this.sttMute.connect(ctx.destination)
+      tap.onaudioprocess = (e) => this.onSttAudio(e.inputBuffer.getChannelData(0), ctx.sampleRate)
     } catch (error) {
-      this.emit({ callId: this.callId ?? '', kind: 'error', detail: `stt recorder: ${String(error)}` })
+      this.emit({ callId: this.callId ?? '', kind: 'error', detail: `stt capture: ${String(error)}` })
     }
+  }
+
+  private onSttAudio(samples: Float32Array, sampleRate: number): void {
+    if (!this.sttEnabled) return
+    let sum = 0
+    for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i]
+    const rms = Math.sqrt(sum / samples.length)
+    const TH = 0.012 // speech energy gate (calibrated for phone mics)
+
+    if (!this.sttSpeaking) {
+      if (rms > TH) {
+        this.sttSpeaking = true
+        this.sttBuf = [samples.slice()]
+        this.sttSamples = samples.length
+        this.sttSilence = 0
+      }
+      return
+    }
+
+    this.sttBuf.push(samples.slice())
+    this.sttSamples += samples.length
+    if (rms > TH) this.sttSilence = 0
+    else this.sttSilence += samples.length
+
+    const silenceSec = this.sttSilence / sampleRate
+    const totalSec = this.sttSamples / sampleRate
+    if ((silenceSec > 0.7 && totalSec > 1.0) || totalSec > 12) {
+      this.emitSttSegment(sampleRate)
+    }
+  }
+
+  /** Trim trailing silence, downsample to 16 kHz mono, encode WAV, send to main. */
+  private emitSttSegment(sampleRate: number): void {
+    const buf = this.sttBuf
+    const total = this.sttSamples
+    this.sttBuf = []
+    this.sttSamples = 0
+    this.sttSilence = 0
+    this.sttSpeaking = false
+    if (total < sampleRate * 0.7) return // under 0.7s — not speech worth a round trip
+
+    // Flatten, then trim the trailing silence (keep 150ms of it).
+    const all = new Float32Array(total)
+    let off = 0
+    for (const c of buf) {
+      all.set(c, off)
+      off += c.length
+    }
+    const keep = Math.min(total, total - this.sttSilence + Math.floor(sampleRate * 0.15))
+    const trimmed = all.subarray(0, Math.max(keep, Math.floor(sampleRate * 0.5)))
+
+    // Downsample to ~16 kHz by simple averaging (speech bandwidth only).
+    const factor = Math.max(1, Math.round(sampleRate / 16_000))
+    const outRate = Math.floor(sampleRate / factor)
+    const outN = Math.floor(trimmed.length / factor)
+    const pcm = new Int16Array(outN)
+    for (let i = 0; i < outN; i++) {
+      let acc = 0
+      for (let j = 0; j < factor; j++) acc += trimmed[i * factor + j]
+      const v = acc / factor
+      pcm[i] = Math.max(-32768, Math.min(32767, Math.round(v * 32767)))
+    }
+
+    // Encode a canonical 16-bit PCM mono WAV.
+    const wav = new ArrayBuffer(44 + pcm.length * 2)
+    const view = new DataView(wav)
+    const w = (o: number, s: string): void => {
+      for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i))
+    }
+    w(0, 'RIFF')
+    view.setUint32(4, 36 + pcm.length * 2, true)
+    w(8, 'WAVE')
+    w(12, 'fmt ')
+    view.setUint32(16, 16, true)
+    view.setUint16(20, 1, true)
+    view.setUint16(22, 1, true)
+    view.setUint32(24, outRate, true)
+    view.setUint32(28, outRate * 2, true)
+    view.setUint16(32, 2, true)
+    view.setUint16(34, 16, true)
+    w(36, 'data')
+    view.setUint32(40, pcm.length * 2, true)
+    for (let i = 0; i < pcm.length; i++) view.setInt16(44 + i * 2, pcm[i], true)
+
+    const bytes = new Uint8Array(wav)
+    let bin = ''
+    const CHUNK = 0x8000
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
+    }
+    const b64 = btoa(bin)
+    this.emit({ callId: this.callId ?? '', kind: 'stt-audio', audioBase64: b64, mime: 'audio/wav' })
   }
 
   private async setRemote(description: { type: 'offer' | 'answer'; sdp: string }): Promise<void> {
@@ -336,12 +416,17 @@ class DesktopPeerHost {
     }
     this.sttEnabled = false
     try {
-      this.sttRecorder?.stop()
+      this.sttTap?.disconnect()
+      this.sttSrc?.disconnect()
+      this.sttMute?.disconnect()
     } catch {
-      /* already stopped */
+      /* already torn down */
     }
-    this.sttRecorder = null
-    this.remoteStream = null
+    this.sttTap = null
+    this.sttSrc = null
+    this.sttMute = null
+    this.sttBuf = []
+    this.sttSpeaking = false
     this.stopTts()
     try {
       this.dc?.close()

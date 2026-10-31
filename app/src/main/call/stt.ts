@@ -1,45 +1,90 @@
 /**
- * Desktop-side call speech recognition: POST a WebM/Opus segment of the
- * phone's mic (already streaming here over WebRTC) to any OpenAI-compatible
- * /audio/transcriptions endpoint (Groq's free whisper-large-v3-turbo works
- * well), returning the text. Disabled when no endpoint is configured — the
- * phone's on-device recognizer is always the primary path.
+ * Desktop-side call speech recognition — ZERO setup.
+ *
+ * The phone's mic audio already streams to the desktop over WebRTC. This
+ * module transcribes WAV segments of it through the SAME gateway the chat
+ * uses (settings.gateway: baseUrl + the user's own key), with an
+ * audio-capable model (OpenAI `input_audio` content parts — free Gemini
+ * models on OpenRouter accept them). No extra endpoint, no extra key.
+ *
+ * The phone's on-device recognizer remains primary; this path only speaks up
+ * when the phone's recognizer is silent (see the dedup in call-session).
  */
 import { getSettings } from '../settings'
+import type { GatewayConfig } from '../../shared/types'
 
 export interface SttSegment {
   audioBase64: string
   mime: string
 }
 
-/** Is desktop-side STT configured? */
+/** Is desktop-side STT possible (gateway configured + a model chosen)? */
 export function sttEnabled(): boolean {
-  return getSettings().call.stt.endpoint.trim() !== ''
+  const s = getSettings()
+  return s.gateway.baseUrl.trim() !== '' && s.call.stt.model.trim() !== ''
 }
 
-/** Transcribe one segment; empty string on failure (call keeps flowing). */
+/** Build the transcription request for the user's gateway. */
+export function buildSttRequest(
+  gateway: GatewayConfig,
+  model: string,
+  audioBase64: string
+): { url: string; headers: Record<string, string>; body: Record<string, unknown> } {
+  const base = gateway.baseUrl.trim().replace(/\/+$/, '')
+  const url = base.endsWith('/chat/completions') ? base : `${base}/chat/completions`
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (gateway.apiKey.trim() !== '') {
+    if (gateway.authSchema === 'header' && gateway.authHeaderName.trim()) {
+      headers[gateway.authHeaderName.trim()] = gateway.apiKey.trim()
+    } else if (gateway.authSchema === 'none') {
+      // keyless gateway — nothing to send
+    } else {
+      headers.authorization = `Bearer ${gateway.apiKey.trim()}`
+    }
+  }
+  const body = {
+    model,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: 'Transcribe this audio exactly what was spoken, in the same language. Output ONLY the transcription text — no commentary, no quotes.'
+          },
+          { type: 'input_audio', input_audio: { data: audioBase64, format: 'wav' } }
+        ]
+      }
+    ]
+  }
+  return { url, headers, body }
+}
+
+/** Transcribe one WAV segment; empty string on failure (the call keeps flowing). */
 export async function transcribeSegment(seg: SttSegment): Promise<string> {
-  const { endpoint, apiKey, model } = getSettings().call.stt
-  if (endpoint.trim() === '' || !seg.audioBase64) return ''
+  if (!seg.audioBase64) return ''
+  const s = getSettings()
+  if (!sttEnabled()) return ''
   try {
     const bytes = Buffer.from(seg.audioBase64, 'base64')
-    if (bytes.length < 2_000) return '' // silence/ blip — not worth a round trip
-    const form = new FormData()
-    const ext = seg.mime.includes('ogg') ? 'ogg' : seg.mime.includes('mp4') ? 'm4a' : 'webm'
-    form.append('file', new Blob([bytes], { type: seg.mime }), `segment.${ext}`)
-    form.append('model', model || 'whisper-large-v3-turbo')
-    form.append('response_format', 'json')
-    const res = await fetch(endpoint.trim(), {
+    if (bytes.length < 3_000) return '' // silence blip — not worth a round trip
+    const { url, headers, body } = buildSttRequest(s.gateway, s.call.stt.model, seg.audioBase64)
+    const res = await fetch(url, {
       method: 'POST',
-      headers: apiKey.trim() ? { authorization: `Bearer ${apiKey.trim()}` } : {},
-      body: form,
-      signal: AbortSignal.timeout(15_000)
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20_000)
     })
-    if (!res.ok) throw new Error(`STT endpoint → ${res.status}`)
-    const json = (await res.json()) as { text?: string }
-    return (json.text ?? '').trim()
+    if (!res.ok) throw new Error(`STT model → ${res.status}`)
+    const json = (await res.json()) as {
+      choices?: Array<{ message?: { content?: string } }>
+    }
+    const text = (json.choices?.[0]?.message?.content ?? '')
+      .replace(/^["'\s]+|["'\s]+$/g, '')
+      .trim()
+    return text
   } catch (error) {
-    console.warn('[call] desktop STT failed:', String(error).slice(0, 160))
+    console.warn('[call] desktop STT failed:', String(error).slice(0, 180))
     return ''
   }
 }

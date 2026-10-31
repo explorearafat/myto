@@ -379,8 +379,6 @@ export function normalise(raw: unknown): ProviderSettings {
         ? (call.permissionMode as ProviderSettings['call']['permissionMode'])
         : d.call.permissionMode,
       stt: {
-        endpoint: typeof callStt.endpoint === 'string' ? callStt.endpoint.trim() : d.call.stt.endpoint,
-        apiKey: typeof callStt.apiKey === 'string' ? callStt.apiKey : d.call.stt.apiKey,
         model:
           typeof callStt.model === 'string' && callStt.model.trim()
             ? callStt.model.trim()

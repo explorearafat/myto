@@ -533,34 +533,16 @@ function CallsPane() {
         />
       </SettingRow>
       <SettingRow
-        title="Desktop speech recognition (fallback)"
-        description="If the phone's own voice input fails during calls, the desktop can transcribe the phone's mic audio instead. Paste any OpenAI-compatible /audio/transcriptions endpoint — a FREE Groq key (console.groq.com) with whisper-large-v3-turbo works great. Empty = off (phone recognizer only)."
+        title="Desktop speech recognition (automatic)"
+        description="If the phone's own voice input fails during a call, the desktop transcribes your speech automatically — through the SAME model gateway and key your chat uses, with an audio-capable model. No extra account or key needed. Change the model if your gateway offers a better one."
       >
-        <div className="flex w-72 flex-col gap-2">
-          <input
-            type="text"
-            value={call.stt.endpoint}
-            onChange={(e) => void setCallSettings({ stt: { ...call.stt, endpoint: e.target.value } })}
-            placeholder="https://api.groq.com/openai/v1/audio/transcriptions"
-            className="w-full rounded-lg border border-border bg-bg px-3 py-1.5 text-[12px] text-text outline-none focus:border-primary"
-          />
-          <div className="flex gap-2">
-            <input
-              type="password"
-              value={call.stt.apiKey}
-              onChange={(e) => void setCallSettings({ stt: { ...call.stt, apiKey: e.target.value } })}
-              placeholder="API key"
-              className="w-full rounded-lg border border-border bg-bg px-3 py-1.5 text-[12px] text-text outline-none focus:border-primary"
-            />
-            <input
-              type="text"
-              value={call.stt.model}
-              onChange={(e) => void setCallSettings({ stt: { ...call.stt, model: e.target.value } })}
-              placeholder="model"
-              className="w-32 rounded-lg border border-border bg-bg px-3 py-1.5 text-[12px] text-text outline-none focus:border-primary"
-            />
-          </div>
-        </div>
+        <input
+          type="text"
+          value={call.stt.model}
+          onChange={(e) => void setCallSettings({ stt: { ...call.stt, model: e.target.value } })}
+          placeholder="google/gemini-2.0-flash-exp:free"
+          className="w-72 rounded-lg border border-border bg-bg px-3 py-1.5 text-[12px] text-text outline-none focus:border-primary"
+        />
       </SettingRow>
       <SettingRow
         title="TURN relay"

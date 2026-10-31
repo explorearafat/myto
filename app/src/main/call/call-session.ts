@@ -236,8 +236,11 @@ class LiveCallSession {
   private voiceConfirmations = new Map<string, (text: string) => void>()
   private taskRunning = false
   private taskSummaryLine = ''
-  /** Last time the phone's own recognizer sent speech — desktop STT stays quiet while it's alive. */
-  private lastPhoneSttAt = 0
+  /** Cross-path STT dedup: which side transcribed last, and when. */
+  private lastSttSource: 'phone' | 'desktop' | null = null
+  private lastSttAt = 0
+  /** While set, desktop STT is suppressed — the mic would hear Myto's own voice. */
+  private ttsQuietUntil = 0
 
   constructor(deps: CallSessionDeps, callId: string, _dir: 'm2d' | 'd2m', role: 'offerer' | 'answerer', openingScript?: string) {
     this.deps = deps
@@ -282,10 +285,10 @@ class LiveCallSession {
         callId: this.callId,
         role: this.role,
         iceServers: buildIceServers(turn),
-        // When a desktop STT endpoint is configured, the renderer also streams
-        // the phone's mic audio back in segments so speech still works even if
+        // When a desktop STT model is configured, the renderer also captures
+        // the phone's mic audio (VAD-gated WAV) so speech still works even if
         // the phone's own recognizer can't run during a WebRTC call.
-        sttEnabled: getSettings().call.stt.endpoint.trim() !== ''
+        sttEnabled: sttEnabled()
       })
 
       // Signal exchange loop (fast while negotiating; once the DC is open the
@@ -402,12 +405,14 @@ class LiveCallSession {
       case 'tts-playing':
         if (!this.speaking) {
           this.speaking = true
+          this.ttsQuietUntil = Number.MAX_SAFE_INTEGER // mic would hear Myto
           this.sendDc({ t: 'speaking', on: true })
         }
         break
       case 'tts-idle':
         if (this.speaking) {
           this.speaking = false
+          this.ttsQuietUntil = Date.now() + 1_200 // brief tail so the last word isn't re-heard
           this.sendDc({ t: 'speaking', on: false })
           this.sendDc({ t: 'listening', on: true })
         }
@@ -425,17 +430,24 @@ class LiveCallSession {
   }
 
   /**
-   * Desktop-side speech: a segment of the phone's mic audio came back from the
-   * renderer — transcribe it and treat it exactly like the phone's own
-   * stt_final. Skipped while the phone's recognizer is alive (any stt traffic
-   * in the last 10s) so the two never double-feed the agent.
+   * Desktop-side speech: a WAV segment of the phone's mic came back from the
+   * renderer — transcribe it through the user's gateway and treat it exactly
+   * like the phone's own stt_final.
+   *
+   * Guards: never while TTS is playing or just finished (the phone's mic would
+   * hear MYTO's own voice), and cross-path dedup — if the phone's recognizer
+   * just handled speech, desktop transcription stays quiet, and vice versa,
+   * so the same utterance never becomes two agent turns.
    */
   private async onDesktopStt(audioBase64: string, mime: string): Promise<void> {
     if (this.ended || this.hold || this.muted) return
     if (!sttEnabled()) return
-    if (Date.now() - this.lastPhoneSttAt < 10_000) return // phone STT is alive
+    if (Date.now() < this.ttsQuietUntil) return // Myto is (just was) speaking
+    if (this.lastSttSource === 'phone' && Date.now() - this.lastSttAt < 8_000) return
     const text = await transcribeSegment({ audioBase64, mime })
     if (!text || this.ended) return
+    this.lastSttSource = 'desktop'
+    this.lastSttAt = Date.now()
     console.log(`[call:${this.callId}] you said (desktop STT): ${text.slice(0, 120)}`)
     this.sendDc({ t: 'transcript', role: 'user', text })
     await this.onUserUtterance(text)
@@ -453,7 +465,10 @@ class LiveCallSession {
         break
       case 'stt_final':
         if (this.muted || this.hold) return
-        this.lastPhoneSttAt = Date.now()
+        // Phone STT handled this one — suppress desktop transcription echoes.
+        if (this.lastSttSource === 'desktop' && Date.now() - this.lastSttAt < 8_000) return
+        this.lastSttSource = 'phone'
+        this.lastSttAt = Date.now()
         console.log(`[call:${this.callId}] you said: ${msg.text.slice(0, 120)}`)
         void this.onUserUtterance(msg.text)
         break
