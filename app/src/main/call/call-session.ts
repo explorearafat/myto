@@ -406,6 +406,7 @@ class LiveCallSession {
         break
       case 'stt_final':
         if (this.muted || this.hold) return
+        console.log(`[call:${this.callId}] you said: ${msg.text.slice(0, 120)}`)
         void this.onUserUtterance(msg.text)
         break
       case 'mute':
@@ -650,8 +651,16 @@ class LiveCallSession {
       })
       this.tts?.flush()
       appendAssistantMessage(sessionId, result.text || result.error || '')
+      // The reply must be READABLE even when TTS is degraded — the phone shows
+      // transcript lines as bubbles under the avatar.
+      if (result.text.trim()) {
+        this.sendDc({ t: 'transcript', role: 'myto', text: result.text.slice(0, 500) })
+      }
       if (result.error) {
+        console.warn(`[call:${this.callId}] agent turn error: ${result.error}`)
         this.tts?.say('Sorry, something went wrong on my side. Could you try again?')
+      } else {
+        console.log(`[call:${this.callId}] agent replied (${result.text.length} chars)`)
       }
     } finally {
       this.turnInFlight = false

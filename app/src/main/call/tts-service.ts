@@ -221,7 +221,12 @@ export class TtsService {
       this.cb.onError(
         `edge-tts failed (${this.consecutiveFailures}/${FAILURE_LIMIT}): ${String(error)}`
       )
-      if (this.consecutiveFailures >= FAILURE_LIMIT) this.cb.onFallbackText(sentence)
+      // A 429 is a rate limit — it won't recover mid-call, so degrade NOW
+      // instead of silently dropping the next two sentences.
+      if (String(error).includes('429')) this.consecutiveFailures = FAILURE_LIMIT
+      // A failed sentence would otherwise be silent forever: hand it to the
+      // phone immediately (it speaks the text with its own voice).
+      this.cb.onFallbackText(sentence)
     }
   }
 

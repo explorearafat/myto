@@ -162,6 +162,7 @@ class CallService extends ChangeNotifier {
   bool _everConnected = false;
   bool _incomingShown = false;
   bool _autoCallPending = false;
+  bool _sttBlockedLogged = false;
   bool get autoCallPending => _autoCallPending;
 
   /// A `myto://call` deep link arrived (QR scan from the desktop) — start the
@@ -725,7 +726,13 @@ class CallService extends ChangeNotifier {
         return;
       }
     }
-    if (!_sttWanted || _muted || _hold || _phase != CallPhase.active) return;
+    if (!_sttWanted || _muted || _hold || _phase != CallPhase.active) {
+      if (!_sttBlockedLogged && _sttWanted) {
+        _sttBlockedLogged = true;
+        _log('info', 'voice waiting for the active call (phase: ${_phase.name})');
+      }
+      return;
+    }
     try {
       await _stt.listen(
         onResult: (result) {
@@ -742,32 +749,34 @@ class CallService extends ChangeNotifier {
             _sendDc(<String, dynamic>{'t': 'stt_partial', 'text': words});
           }
         },
-        listenOptions: stt.SpeechListenOptions(
-          partialResults: true,
-          cancelOnError: false,
-          listenMode: stt.ListenMode.dictation,
-          localeId: 'en_IN',
-        ),
-      );
-    } catch (_) {
-      // The en_IN locale may be missing — retry with the device default.
-      try {
-        await _stt.listen(
-          onResult: (result) {
-            final words = result.recognizedWords.trim();
-            if (words.isEmpty) return;
-            if (result.finalResult) {
-              _sendDc(<String, dynamic>{'t': 'stt_final', 'text': words});
-            } else {
-              _sendDc(<String, dynamic>{'t': 'stt_partial', 'text': words});
-            }
-          },
-          listenOptions: stt.SpeechListenOptions(partialResults: true, cancelOnError: false),
+          listenOptions: stt.SpeechListenOptions(
+            partialResults: true,
+            cancelOnError: false,
+            listenMode: stt.ListenMode.dictation,
+            localeId: 'en_IN',
+          ),
         );
+        _log('info', 'listening — speak now');
       } catch (_) {
-        _log('err', 'Speech recognition failed to start.');
+        // The en_IN locale may be missing — retry with the device default.
+        try {
+          await _stt.listen(
+            onResult: (result) {
+              final words = result.recognizedWords.trim();
+              if (words.isEmpty) return;
+              if (result.finalResult) {
+                _sendDc(<String, dynamic>{'t': 'stt_final', 'text': words});
+              } else {
+                _sendDc(<String, dynamic>{'t': 'stt_partial', 'text': words});
+              }
+            },
+            listenOptions: stt.SpeechListenOptions(partialResults: true, cancelOnError: false),
+          );
+          _log('info', 'listening (device locale) — speak now');
+        } catch (e) {
+          _log('err', 'Speech recognition failed to start: $e');
+        }
       }
-    }
   }
 
   void _stopListening() {
