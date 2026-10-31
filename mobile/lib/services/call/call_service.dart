@@ -455,11 +455,20 @@ class CallService extends ChangeNotifier {
 
   Future<void> _createAndSendOffer() async {
     final pc = _pc;
-    if (pc == null) return;
-    final offer = await pc.createOffer(<String, dynamic>{'offerToReceiveAudio': 1});
-    await pc.setLocalDescription(offer);
-    await _pushSignal('offer', offer.sdp ?? '');
-    _log('info', 'offer sent');
+    if (pc == null) {
+      _log('err', 'offer skipped — peer not ready');
+      return;
+    }
+    try {
+      final offer = await pc.createOffer(<String, dynamic>{'offerToReceiveAudio': 1});
+      await pc.setLocalDescription(offer);
+      await _pushSignal('offer', offer.sdp ?? '');
+      _log('info', 'offer sent');
+    } catch (e) {
+      // Never swallow: a failed offer leaves both sides waiting forever, and
+      // this log line is the only trace on the phone.
+      _log('err', 'offer failed: $e');
+    }
   }
 
   void _listenSignals() {
@@ -474,7 +483,7 @@ class CallService extends ChangeNotifier {
         .doc(id)
         .collection('signals')
         .snapshots()
-        .listen((snap) {
+        .listen((snap) async {
       // Desktop signals only, deduped (listener reconnects re-deliver all
       // docs as `added`), and ordered by seq so ICE candidates can never
       // arrive before the answer that must precede them.
@@ -488,10 +497,16 @@ class CallService extends ChangeNotifier {
       }
       incoming.sort((a, b) => ((a.$2['seq'] as num?) ?? 0).compareTo((b.$2['seq'] as num?) ?? 0));
       for (final (_, d) in incoming) {
-        _onDesktopSignal(
-          (d['kind'] as String?) ?? '',
-          (d['payload'] as String?) ?? '',
-        );
+        try {
+          await _onDesktopSignal(
+            (d['kind'] as String?) ?? '',
+            (d['payload'] as String?) ?? '',
+          );
+        } catch (e) {
+          // A throwing signal handler must never die silently — this log is
+          // how the user can tell us where the call stuck.
+          _log('err', 'signal ${(d['kind'] as String?) ?? '?'} failed: $e');
+        }
       }
     });
   }
@@ -515,9 +530,11 @@ class CallService extends ChangeNotifier {
               _endCallLocally(outcome: 'timeout', state: 'failed');
             }
           });
-          // We're the offerer (outgoing) — fire the offer now that ringing ended.
-          final local = await pc.getLocalDescription();
-          if (local == null) await _createAndSendOffer();
+          // We're the offerer (outgoing) — ALWAYS create the offer on accept.
+          // (A getLocalDescription()==null guard here silently skipped the
+          // offer on some devices: flutter_webrtc may return a non-null empty
+          // description before setLocalDescription, leaving both sides hung.)
+          await _createAndSendOffer();
         }
         break;
       case 'offer':
