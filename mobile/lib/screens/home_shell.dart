@@ -10,6 +10,7 @@ import '../theme.dart';
 import '../widgets/teamly/kit.dart';
 import 'agents_screen.dart';
 import 'artifacts_screen.dart';
+import 'call_screen.dart';
 import 'call_tab.dart';
 import 'chat_home_screen.dart';
 import 'discover_screen.dart';
@@ -35,6 +36,7 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   int _tab = 0;
+  bool _autoCallHandled = false;
 
   @override
   void initState() {
@@ -51,6 +53,34 @@ class _HomeShellState extends State<HomeShell> {
     // signed in.
     final user = FirebaseAuth.instance.currentUser;
     if (user != null) CallService.instance.start(user);
+    // Scan-to-pair: a myto://call deep link (QR scan on the desktop) arms the
+    // auto-call; consume it here and dial immediately. The flag may already be
+    // armed if the scan landed while signed-out (listener binds only now).
+    CallService.instance.addListener(_consumeAutoCall);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _consumeAutoCall());
+  }
+
+  /// Pushes the call screen once for a pending QR-scan auto-call, then disarms.
+  /// CallScreen's own mount logic dials — this only opens the screen.
+  void _consumeAutoCall() {
+    final service = CallService.instance;
+    if (!service.autoCallPending || _autoCallHandled) return;
+    if (service.phase != CallPhase.idle) {
+      // A call is already live or winding down — the scan came too late.
+      service.consumeAutoCall();
+      return;
+    }
+    _autoCallHandled = true;
+    service.consumeAutoCall();
+    Navigator.of(context, rootNavigator: true)
+        .push(MaterialPageRoute<void>(builder: (_) => const CallScreen()))
+        .then((_) => _autoCallHandled = false);
+  }
+
+  @override
+  void dispose() {
+    CallService.instance.removeListener(_consumeAutoCall);
+    super.dispose();
   }
 
   void _go(int i) {

@@ -161,6 +161,21 @@ class CallService extends ChangeNotifier {
   Timer? _listenRestartTimer;
   bool _everConnected = false;
   bool _incomingShown = false;
+  bool _autoCallPending = false;
+  bool get autoCallPending => _autoCallPending;
+
+  /// A `myto://call` deep link arrived (QR scan from the desktop) — start the
+  /// call as soon as a screen can show it. Consumed by HomeShell, which pushes
+  /// the CallScreen and clears the flag; pending survives sign-in.
+  void requestAutoCall() {
+    _autoCallPending = true;
+    notifyListeners();
+  }
+
+  void consumeAutoCall() {
+    _autoCallPending = false;
+    notifyListeners();
+  }
 
   /// Called by HomeShell to (re)bind everything to the signed-in user.
   void start(User user) {
@@ -349,16 +364,28 @@ class CallService extends ChangeNotifier {
   // ── WebRTC ───────────────────────────────────────────────────────────────
   Future<void> _setupPeer({required String role}) async {
     await _disposePeer();
+    // Sanitized ICE config, mirroring the desktop's buildIceServers: a turn:
+    // URL without BOTH username and credential makes the peer construction
+    // itself throw — a half-filled TURN must degrade to STUN-only instead.
+    final stunUrls = _turnUrls
+        .where((u) => u.trim().toLowerCase().startsWith('stun:'))
+        .toList();
+    final turnUrls = _turnUrls.where((u) {
+      final s = u.trim().toLowerCase();
+      return s.startsWith('turn:') || s.startsWith('turns:');
+    }).toList();
     final servers = <Map<String, dynamic>>[
-      if (_turnUrls.isNotEmpty)
+      if (stunUrls.isNotEmpty) <String, dynamic>{'urls': stunUrls},
+      if (turnUrls.isNotEmpty && _turnUsername.trim().isNotEmpty && _turnCredential.trim().isNotEmpty)
         <String, dynamic>{
-          'urls': _turnUrls,
-          if (_turnUsername.isNotEmpty) 'username': _turnUsername,
-          if (_turnCredential.isNotEmpty) 'credential': _turnCredential,
-        }
-      else
-        <String, dynamic>{'urls': 'stun:stun.l.google.com:19302'},
+          'urls': turnUrls,
+          'username': _turnUsername.trim(),
+          'credential': _turnCredential.trim(),
+        },
     ];
+    if (servers.isEmpty) {
+      servers.add(<String, dynamic>{'urls': 'stun:stun.l.google.com:19302'});
+    }
     _pc = await createPeerConnection(<String, dynamic>{
       'iceServers': servers,
       'sdpSemantics': 'unified-plan',

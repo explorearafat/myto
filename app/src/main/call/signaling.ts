@@ -183,9 +183,9 @@ export async function pollLiveCalls(
 ): Promise<void> {
   const uid = auth.rest.getUid()
   if (!uid) return
-  const docs = await auth.rest
-    .runQuery(`users/${uid}`, buildLiveCallsQuery())
-    .catch(() => [] as Array<{ id: string; fields: Record<string, unknown> }>)
+  // Errors MUST surface here — a silently failing poll is indistinguishable
+  // from "nobody is calling", which cost us a debugging session already.
+  const docs = await auth.rest.runQuery(`users/${uid}`, buildLiveCallsQuery())
   for (const d of docs) {
     const doc = callDocFrom(d.fields)
     if (doc) onCall(d.id, doc)

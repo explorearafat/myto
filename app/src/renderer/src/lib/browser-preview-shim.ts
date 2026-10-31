@@ -253,7 +253,8 @@ function installShim(): void {
     call: {
       // Voice calls don't run in the browser preview: an inert, signed-out stub.
       authSync: () => Promise.resolve({ uid: null }),
-      getState: () => Promise.resolve({ available: false, activeCallId: null, tasks: [] }),
+      getState: () =>
+        Promise.resolve({ available: false, activeCallId: null, tasks: [], pairLink: '' }),
       onStatus: () => () => undefined,
       onAuthNeeded: () => () => undefined,
       onPeerControl: () => () => undefined,

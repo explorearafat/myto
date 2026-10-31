@@ -206,7 +206,7 @@ export class FirestoreRest {
    */
   async runQuery(parentPath: string, structuredQuery: Record<string, RestValue>): Promise<RestDoc[]> {
     const res = await this.request('POST', `${parentPath}:runQuery`, { structuredQuery })
-    if (res.status !== 200) throw new Error(`call-auth: QUERY ${parentPath} → ${res.status}`)
+    if (res.status !== 200) throw new Error(`call-auth: QUERY ${parentPath} → ${res.status} ${bodyOf(res)}`)
     const rows = res.json as Array<{
       document?: { name?: string; fields?: Record<string, FirestoreValue> }
     }>
@@ -222,7 +222,7 @@ export class FirestoreRest {
   async getDoc(path: string): Promise<RestDoc | null> {
     const res = await this.request('GET', path, undefined)
     if (res.status === 404) return null
-    if (res.status !== 200) throw new Error(`call-auth: GET ${path} → ${res.status}`)
+    if (res.status !== 200) throw new Error(`call-auth: GET ${path} → ${res.status} ${bodyOf(res)}`)
     const json = res.json as { name?: string; fields?: Record<string, FirestoreValue> }
     const name = json.name ?? ''
     const id = name.slice(name.lastIndexOf('/') + 1)
@@ -236,7 +236,7 @@ export class FirestoreRest {
   async setDoc(path: string, fields: Record<string, RestValue>): Promise<void> {
     const body = { fields: mapToFirestore(fields) }
     const res = await this.request('PATCH', path, body)
-    if (res.status !== 200) throw new Error(`call-auth: SET ${path} → ${res.status}`)
+    if (res.status !== 200) throw new Error(`call-auth: SET ${path} → ${res.status} ${bodyOf(res)}`)
   }
 
   /**
@@ -251,14 +251,14 @@ export class FirestoreRest {
     const body = { fields: mapToFirestore(fields) }
     const maskKeys = mask ?? Object.keys(fields)
     const res = await this.request('PATCH', path, body, maskKeys)
-    if (res.status !== 200) throw new Error(`call-auth: PATCH ${path} → ${res.status}`)
+    if (res.status !== 200) throw new Error(`call-auth: PATCH ${path} → ${res.status} ${bodyOf(res)}`)
   }
 
   /** List a collection (documents under the given parent path), newest optional. */
   async listDocs(parent: string, pageSize = 30): Promise<RestDoc[]> {
     const res = await this.request('GET', `${parent}?pageSize=${pageSize}`, undefined)
     if (res.status === 404) return []
-    if (res.status !== 200) throw new Error(`call-auth: LIST ${parent} → ${res.status}`)
+    if (res.status !== 200) throw new Error(`call-auth: LIST ${parent} → ${res.status} ${bodyOf(res)}`)
     const json = res.json as {
       documents?: Array<{ name?: string; fields?: Record<string, FirestoreValue> }>
     }
@@ -286,4 +286,13 @@ function mapToFirestore(fields: Record<string, RestValue>): Record<string, Fires
   const out: Record<string, FirestoreValue> = {}
   for (const [k, v] of Object.entries(fields)) out[k] = toFirestoreValue(v)
   return out
+}
+
+/** Firestore 400s carry the real reason in the body — surface it verbatim. */
+function bodyOf(res: { json: unknown }): string {
+  try {
+    return JSON.stringify(res.json).slice(0, 500)
+  } catch {
+    return ''
+  }
 }

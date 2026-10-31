@@ -70,6 +70,25 @@ jobs:
             echo "Injected myto:// CallbackActivity into $MANIFEST"
           fi
 
+      - name: Register the myto://call scan-to-pair deep link
+        # The desktop's Settings › Calls shows a QR encoding myto://call — the
+        # phone's camera opens the app and instantly places the first call. The
+        # VIEW filter must live INSIDE the main activity so the app itself
+        # opens. The generated manifest spreads <activity> attributes across
+        # lines, so the pattern spans newlines — and the step FAILS if the
+        # injection ever stops matching (a silent no-op here would ship an APK
+        # whose QR scan does nothing).
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          if ! grep -q 'android:host="call"' "$MANIFEST"; then
+            perl -0pi -e 's{(<activity\b[^>]*android:name="\.MainActivity"[^>]*>)}{$1\n                <intent-filter android:label="Myto call"><action android:name="android.intent.action.VIEW" /><category android:name="android.intent.category.DEFAULT" /><category android:name="android.intent.category.BROWSABLE" /><data android:scheme="myto" android:host="call" /></intent-filter>}' "$MANIFEST"
+          fi
+          if ! grep -q 'android:host="call"' "$MANIFEST"; then
+            echo "::error::myto://call intent filter was NOT injected — pattern mismatch"
+            exit 1
+          fi
+          echo "myto://call deep link registered on .MainActivity"
+
       - name: Set the visible app name to "Myto"
         # `flutter create --project-name sylor` stamps android:label="sylor" on <application>,
         # which is the name users see under the launcher icon. The project name must stay "sylor"

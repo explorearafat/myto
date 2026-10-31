@@ -5,7 +5,7 @@
  *  - `users/{uid}/config/desktop`            — the live presence doc the phone
  *    reads to decide whether "Call Myto" can connect (online / busy / offline is
  *    just `lastSeen` freshness + the `busy` flag).
- *  - `users/{uid}/config/desktopDevices/{id}`— the pairing registry written once
+ *  - `users/{uid}/desktopDevices/{id}`      — the pairing registry written once
  *    per device install. The desktop writes itself here; the user can revoke a
  *    device by flipping `revoked` (Settings UI / console) and this install then
  *    stands itself down on the next heartbeat.
@@ -35,6 +35,8 @@ export function isPresenceFresh(doc: DesktopPresenceDoc | null | undefined, now 
 let heartbeatTimer: NodeJS.Timeout | null = null
 let started = false
 let currentDeviceId: string | null = null
+let registered = false
+let heartbeatOkLogged = false
 
 /** The stable per-install device id (persisted once in userData/call-device.json). */
 export function deviceId(userDataDir: string): string {
@@ -84,9 +86,13 @@ export function startPresence(auth: CallAuth, userDataDir: string): void {
     }
     try {
       await auth.rest.setDoc(
-        `users/${uid}/config/desktopDevices/${id}`,
+        `users/${uid}/desktopDevices/${id}`,
         doc as unknown as Record<string, RestValue>
       )
+      if (!registered) {
+        registered = true
+        console.log(`[call] device registered (${id})`)
+      }
     } catch (error) {
       console.error('[call] device registration failed:', error)
     }
@@ -98,7 +104,7 @@ export function startPresence(auth: CallAuth, userDataDir: string): void {
     // A revoked device stands down immediately: presence goes dark and the loop
     // exits. Re-enabling requires re-pairing (Settings › Calls).
     try {
-      const self = await auth.rest.getDoc(`users/${uid}/config/desktopDevices/${id}`)
+      const self = await auth.rest.getDoc(`users/${uid}/desktopDevices/${id}`)
       if (self && self.fields.revoked === true) {
         console.warn('[call] this device has been revoked — going offline')
         stopPresence(auth)
@@ -109,6 +115,19 @@ export function startPresence(auth: CallAuth, userDataDir: string): void {
     }
 
     const s = getSettings().call
+    // Sanitize the TURN block before it reaches the phone: the phone builds its
+    // own peer from THIS config, and a turn: URL without both credentials would
+    // kill its peer connection the same way it once killed the desktop's. A
+    // half-filled TURN degrades to STUN-only here too.
+    const [stunUrls, turnUrls] = [
+      s.turn.urls.filter((u) => u.trim().toLowerCase().startsWith('stun:')),
+      s.turn.urls.filter((u) => {
+        const t = u.trim().toLowerCase()
+        return t.startsWith('turn:') || t.startsWith('turns:')
+      })
+    ]
+    const turnComplete =
+      turnUrls.length > 0 && s.turn.username.trim() !== '' && s.turn.credential.trim() !== ''
     const doc: DesktopPresenceDoc = {
       online: true,
       busy: isBusyForCalls(),
@@ -117,7 +136,11 @@ export function startPresence(auth: CallAuth, userDataDir: string): void {
       platform: 'windows',
       version: app.getVersion(),
       callEnabled: s.enabled,
-      turn: s.turn,
+      turn: {
+        urls: turnComplete ? [...stunUrls, ...turnUrls] : stunUrls.length > 0 ? stunUrls : ['stun:stun.l.google.com:19302'],
+        username: turnComplete ? s.turn.username : '',
+        credential: turnComplete ? s.turn.credential : ''
+      },
       ts: Date.now()
     }
     try {
@@ -125,6 +148,10 @@ export function startPresence(auth: CallAuth, userDataDir: string): void {
         `users/${uid}/config/desktop`,
         doc as unknown as Record<string, RestValue>
       )
+      if (!heartbeatOkLogged) {
+        heartbeatOkLogged = true
+        console.log('[call] presence live — the phone can see this desktop')
+      }
     } catch (error) {
       console.error('[call] presence heartbeat failed:', error)
     }

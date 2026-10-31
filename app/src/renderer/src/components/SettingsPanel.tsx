@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { runSpeedTest, speedVerdict } from '@renderer/lib/speedTest'
 import type { BrowserTarget, OutputStyle, Theme } from '@shared/types'
 import { useAppStore } from '@renderer/store/useAppStore'
@@ -406,6 +406,38 @@ const CALL_PERMISSION_OPTIONS: ReadonlyArray<{ id: 'ask' | 'autoReadOnly' | 'aut
   { id: 'autoDev', label: 'Auto dev' }
 ]
 
+/** Scan-to-pair: the QR opens Myto on the phone and instantly calls this PC. */
+function PairPhoneCard({ pairLink, qrDataUrl }: { pairLink: string; qrDataUrl: string }): ReactNode {
+  if (!pairLink) {
+    return (
+      <SettingRow
+        title="Pair your phone"
+        description="Sign in to Myto first — the pairing QR appears once the desktop knows your account."
+      >
+        <span className="text-[12px] text-muted">Awaiting sign-in…</span>
+      </SettingRow>
+    )
+  }
+  return (
+    <SettingRow
+      title="Pair your phone"
+      description="Scan this with your phone's camera (first time only): Myto opens and calls this PC instantly. After that, calls start normally from the phone's Call tab."
+    >
+      {qrDataUrl ? (
+        <img
+          src={qrDataUrl}
+          alt="Scan with your phone to pair and call this PC"
+          width={132}
+          height={132}
+          className="rounded-lg border border-border bg-white p-1.5"
+        />
+      ) : (
+        <span className="text-[12px] text-muted">Generating…</span>
+      )}
+    </SettingRow>
+  )
+}
+
 /**
  * Myto Remote: the phone calls this PC. Everything sensitive stays gated — the
  * permission tier below controls what the phone may run without confirmation,
@@ -415,9 +447,28 @@ function CallsPane() {
   const call = useAppStore((s) => s.settings.call)
   const setCallSettings = useAppStore((s) => s.setCallSettings)
   const turnText = call.turn.urls.join(', ')
+  const [pairLink, setPairLink] = useState('')
+  const [qrDataUrl, setQrDataUrl] = useState('')
+
+  // The pairing QR: the phone's camera opens Myto via the myto://call deep
+  // link and instantly places the first call to this PC.
+  useEffect(() => {
+    void window.myto.call.getState().then(async (snapshot) => {
+      setPairLink(snapshot.pairLink)
+      if (snapshot.pairLink) {
+        try {
+          const QR = (await import('qrcode')).default
+          setQrDataUrl(await QR.toDataURL(snapshot.pairLink, { width: 180, margin: 1 }))
+        } catch {
+          setQrDataUrl('')
+        }
+      }
+    })
+  }, [])
 
   return (
     <div className="divide-y divide-border">
+      <PairPhoneCard pairLink={pairLink} qrDataUrl={qrDataUrl} />
       <SettingRow
         title="Voice calls"
         description="Publish presence and answer calls from the Myto phone app (signed into the same account). Calls are end-to-end WebRTC audio; signaling goes through your own Firestore, owner-only."

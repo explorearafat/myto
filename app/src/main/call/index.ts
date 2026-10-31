@@ -6,10 +6,11 @@
  * the agent, TTS, execution, callbacks — lives here in main.
  */
 import { BrowserWindow, ipcMain } from 'electron'
+import os from 'node:os'
 import { IpcChannel } from '../../shared/ipc'
 import type { CallPeerControl, CallPeerEvent, CallStatusEvent } from '../../shared/types'
 import { callAuth } from './auth-flow'
-import { startPresence, stopPresence } from './presence'
+import { deviceId, startPresence, stopPresence } from './presence'
 import { CallbackManager } from './callback-manager'
 import { CallSessionManager } from './call-session'
 import { listCallTasks } from './db'
@@ -38,6 +39,7 @@ export function registerCallIpc(userDataDir: string): void {
     const result = callAuth.syncToken(idToken)
     if (result.uid && !bootstrapped) {
       bootstrapped = true
+      console.log(`[call] auth synced — uid ${result.uid}; starting presence + signaling`)
       startPresence(callAuth, userDataDir)
       callbacks = new CallbackManager(callAuth, (event) => {
         console.log('[call] callback event:', event.kind, 'taskId' in event ? event.taskId : '')
@@ -52,22 +54,34 @@ export function registerCallIpc(userDataDir: string): void {
       callbacks.attachSessions(sessions)
       sessions.start()
       callbacks.reconcileAtBoot()
+    } else if (!result.uid) {
+      console.warn('[call] auth sync rejected — token unusable, call system not started')
     }
     return result
   })
 
-  // Late-mounting renderer UI asks for the current snapshot.
-  ipcMain.handle(IpcChannel.CallGetState, () => ({
-    available: callAuth.available(),
-    activeCallId: sessions?.getActiveCallId() ?? null,
-    tasks: listCallTasks(20).map((t) => ({
-      id: t.id,
-      status: t.status,
-      summary: t.summary,
-      prompt: t.prompt,
-      createdAt: t.createdAt
-    }))
-  }))
+  // Late-mounting renderer UI asks for the current snapshot. The pair link is
+  // the QR payload: scanning it with the phone's camera opens Myto via the
+  // myto://call deep link and instantly places the first call.
+  ipcMain.handle(IpcChannel.CallGetState, () => {
+    const uid = callAuth.rest.getUid()
+    const id = deviceId(userDataDir)
+    const pairLink = uid
+      ? `myto://call?desktop=${encodeURIComponent(id)}&name=${encodeURIComponent(os.hostname())}`
+      : ''
+    return {
+      available: callAuth.available(),
+      activeCallId: sessions?.getActiveCallId() ?? null,
+      tasks: listCallTasks(20).map((t) => ({
+        id: t.id,
+        status: t.status,
+        summary: t.summary,
+        prompt: t.prompt,
+        createdAt: t.createdAt
+      })),
+      pairLink
+    }
+  })
 
   // The renderer's WebRTC peer reports back.
   ipcMain.on(IpcChannel.CallPeerEvent, (_event, payload: CallPeerEvent) => {

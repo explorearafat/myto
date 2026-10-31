@@ -65,6 +65,13 @@ service cloud.firestore {
         allow read, write: if signedIn() && request.auth.uid == uid;
       }
 
+      // Paired-desktop registry for voice calls (Myto Remote): the desktop
+      // registers itself here on boot and reads its own entry each heartbeat
+      // to detect revocation. Owner-only, like everything under users/{uid}.
+      match /desktopDevices/{deviceId} {
+        allow read, write: if signedIn() && request.auth.uid == uid;
+      }
+
       // Bring-your-own-key chat config (base URL, API key, models) written by the /authentication
       // page and read by all three clients (see src/shared/byok.ts). Contains the user's own secret
       // API key, so it stays strictly owner-only, like everything else under users/{uid}.

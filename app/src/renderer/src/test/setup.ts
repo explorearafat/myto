@@ -133,7 +133,7 @@ const mytoMock: MytoApi = {
     authSync: vi.fn().mockResolvedValue({ uid: null }),
     getState: vi
       .fn()
-      .mockResolvedValue({ available: false, activeCallId: null, tasks: [] }),
+      .mockResolvedValue({ available: false, activeCallId: null, tasks: [], pairLink: '' }),
     onStatus: vi.fn().mockReturnValue(() => {}),
     onAuthNeeded: vi.fn().mockReturnValue(() => {}),
     onPeerControl: vi.fn().mockReturnValue(() => {}),

@@ -71,3 +71,38 @@ export function looksLikeTask(text: string): boolean {
     text.length > 25
   )
 }
+
+/** Sanitized ICE configuration for a WebRTC peer. */
+export interface IceServerConfig {
+  urls: string[]
+  username?: string
+  credential?: string
+}
+
+/**
+ * Build a SAFE iceServers list from the settings' TURN block. Chromium (and
+ * flutter_webrtc) REJECT the whole peer connection when a `turn:`/`turns:` URL
+ * is present without BOTH a username and a credential — so a half-filled TURN
+ * config must never reach the peer as one mixed array. Stun URLs are kept
+ * regardless; TURN URLs are only kept when the credential pair is complete.
+ * Exported for unit tests — a broken config degrades to STUN-only, never to a
+ * dead call.
+ */
+export function buildIceServers(turn: {
+  urls: string[]
+  username: string
+  credential: string
+}): IceServerConfig[] {
+  const urls = (turn.urls ?? []).filter((u) => typeof u === 'string' && u.trim() !== '')
+  const stun = urls.filter((u) => u.trim().toLowerCase().startsWith('stun:'))
+  const turnUrls = urls.filter((u) => {
+    const s = u.trim().toLowerCase()
+    return s.startsWith('turn:') || s.startsWith('turns:')
+  })
+  const servers: IceServerConfig[] = []
+  if (stun.length > 0) servers.push({ urls: stun })
+  if (turnUrls.length > 0 && turn.username.trim() !== '' && turn.credential.trim() !== '') {
+    servers.push({ urls: turnUrls, username: turn.username.trim(), credential: turn.credential.trim() })
+  }
+  return servers
+}

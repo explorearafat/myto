@@ -1,7 +1,7 @@
 name: sylor
 description: "Myto — a local-first AI coding workspace. The mobile chat companion."
 publish_to: "none"
-version: 0.18.0+29
+version: 0.18.1+30
 
 environment:
   sdk: ">=3.6.0 <4.0.0"
@@ -52,6 +52,11 @@ dependencies:
 
   # Myto Remote voice calls: WebRTC audio + data channel to the desktop agent.
   flutter_webrtc: ^0.12.4
+
+  # Scan-to-pair: the desktop shows a QR encoding myto://call — app_links
+  # receives that deep link (cold start + foreground) so the first call starts
+  # the moment the QR is scanned.
+  app_links: ^6.1.0
 
   # Incoming-call presentation: a full-screen-intent notification channel that
   # wakes the screen and deep-links into the incoming-call screen, WhatsApp-style.

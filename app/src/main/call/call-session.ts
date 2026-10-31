@@ -47,7 +47,7 @@ import {
   NEGOTIATION_POLL_MS
 } from './signaling'
 import { TtsService } from './tts-service'
-import { describeResult, looksLikeTask, matchQuickCommand, yesNo } from './call-text'
+import { buildIceServers, describeResult, looksLikeTask, matchQuickCommand, yesNo } from './call-text'
 import {
   appendAssistantMessage,
   appendUserMessage,
@@ -266,17 +266,14 @@ class LiveCallSession {
       })
       this.tts.start()
 
-      // Spin up the renderer peer with the settings' ICE configuration.
+      // Spin up the renderer peer with the settings' ICE configuration
+      // (sanitized — a half-filled TURN degrades to STUN-only, never kills the call).
       const turn = getSettings().call.turn
       this.deps.sendPeerControl({
         action: 'init',
         callId: this.callId,
         role: this.role,
-        iceServers: [
-          ...(turn.urls.length > 0
-            ? [{ urls: turn.urls, username: turn.username || undefined, credential: turn.credential || undefined }]
-            : [{ urls: ['stun:stun.l.google.com:19302'] }])
-        ]
+        iceServers: buildIceServers(turn)
       })
 
       // Signal exchange loop (fast while negotiating; once the DC is open the
@@ -306,12 +303,14 @@ class LiveCallSession {
   private onMobileSignal(kind: string, payload: string): void {
     if (this.ended) return
     if (kind === 'offer' && this.role === 'answerer') {
+      console.log(`[call:${this.callId}] offer received from phone`)
       this.deps.sendPeerControl({
         action: 'set-remote',
         callId: this.callId,
         description: { type: 'offer', sdp: payload }
       })
     } else if (kind === 'answer' && this.role === 'offerer') {
+      console.log(`[call:${this.callId}] answer received from phone`)
       this.deps.sendPeerControl({
         action: 'set-remote',
         callId: this.callId,
@@ -331,6 +330,7 @@ class LiveCallSession {
     if (event.callId !== this.callId || this.ended) return
     switch (event.kind) {
       case 'local-description':
+        console.log(`[call:${this.callId}] ${event.description.type} created`)
         void pushSignal(this.deps.auth, this.callId, {
           from: 'desktop',
           kind: event.description.type === 'offer' ? 'offer' : 'answer',
@@ -345,6 +345,7 @@ class LiveCallSession {
         }).catch(() => undefined)
         break
       case 'dc-open':
+        console.log(`[call:${this.callId}] data channel open`)
         this.sendDc({ t: 'ready' })
         this.deps.onStatus({ state: 'active', callId: this.callId })
         void patchCallDoc(this.deps.auth, this.callId, { state: 'active' }).catch(() => undefined)
@@ -363,6 +364,7 @@ class LiveCallSession {
         void this.hangup('remote-hangup')
         break
       case 'peer-state':
+        console.log(`[call:${this.callId}] peer state: ${event.state}`)
         if (event.state === 'failed') {
           // Give a phone-side ICE restart a beat, then fail the call.
           setTimeout(() => {

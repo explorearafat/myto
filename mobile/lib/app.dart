@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -10,6 +13,25 @@ import 'services/conversation_store.dart';
 import 'services/studio_store.dart';
 import 'services/team_chat_store.dart';
 import 'theme.dart';
+
+/// Scan-to-pair: the desktop's Settings › Calls shows a QR encoding
+/// `myto://call`. Scanning it with the phone's camera opens (or foregrounds)
+/// the app — this listener catches the link in EVERY state (cold start,
+/// signed-out, signed-in) and arms the auto-call; HomeShell consumes it once
+/// the user is actually in the shell, pushing the CallScreen.
+StreamSubscription<Uri>? _linkSub;
+
+void _bindCallDeepLinks() {
+  final links = AppLinks();
+  // Cold start: the app was launched BY the scan.
+  links.getInitialLink().then((uri) {
+    if (uri?.host == 'call') CallService.instance.requestAutoCall();
+  }).catchError((_) => null);
+  // Warm start: the app was already running when the scan landed.
+  _linkSub ??= links.uriLinkStream.listen((uri) {
+    if (uri.host == 'call') CallService.instance.requestAutoCall();
+  }, onError: (_) {});
+}
 
 class MytoApp extends StatelessWidget {
   const MytoApp({
@@ -52,8 +74,27 @@ class MytoApp extends StatelessWidget {
   }
 }
 
-class _Gate extends StatelessWidget {
+/// The deep-link binding must live above the auth gate so a QR scan that COLD
+/// STARTS the app (even signed-out) is captured; the pending flag survives
+/// until the shell consumes it. Bound once, first build.
+bool _linksBound = false;
+
+class _Gate extends StatefulWidget {
   const _Gate();
+
+  @override
+  State<_Gate> createState() => _GateState();
+}
+
+class _GateState extends State<_Gate> {
+  @override
+  void initState() {
+    super.initState();
+    if (!_linksBound) {
+      _linksBound = true;
+      _bindCallDeepLinks();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

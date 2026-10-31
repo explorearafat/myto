@@ -1869,6 +1869,13 @@ export interface CallSnapshot {
   available: boolean
   activeCallId: string | null
   tasks: CallTaskSummary[]
+  /**
+   * The pairing deep link for this desktop (`myto://call?desktop=…&name=…`).
+   * Rendered as a QR code in Settings › Calls: the phone's camera opens Myto
+   * and instantly places the first call; after that the Call tab works alone.
+   * Empty when not signed in.
+   */
+  pairLink: string
 }
 
 /** Renderer-facing API for the voice-call system. */

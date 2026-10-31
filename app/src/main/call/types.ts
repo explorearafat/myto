@@ -113,7 +113,7 @@ export interface DesktopPresenceDoc {
   ts: number
 }
 
-/** One paired-desktop device registry entry (`users/{uid}/config/desktopDevices/{id}`). */
+/** One paired-desktop device registry entry (`users/{uid}/desktopDevices/{id}`). */
 export interface DesktopDeviceDoc {
   deviceName: string
   platform: 'windows' | 'macos' | 'linux'

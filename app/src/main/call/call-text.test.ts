@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { describeResult, looksLikeTask, matchQuickCommand, yesNo } from './call-text'
+import {
+  buildIceServers,
+  describeResult,
+  looksLikeTask,
+  matchQuickCommand,
+  yesNo
+} from './call-text'
 import { parseDcMessage } from './types'
 
 describe('yesNo', () => {
@@ -58,6 +64,39 @@ describe('describeResult', () => {
   })
   it('reports timeouts', () => {
     expect(describeResult(null, '', true)).toContain('timed out')
+  })
+})
+
+describe('buildIceServers', () => {
+  it('keeps stun urls and drops a half-filled TURN (no dead peer)', () => {
+    const servers = buildIceServers({
+      urls: ['stun:stun.l.google.com:19302', 'turn:relay.example:3478'],
+      username: 'user',
+      credential: ''
+    })
+    expect(servers).toEqual([{ urls: ['stun:stun.l.google.com:19302'] }])
+  })
+
+  it('keeps TURN only when BOTH username and credential are present', () => {
+    const servers = buildIceServers({
+      urls: ['stun:stun.l.google.com:19302', 'turn:relay.example:3478', 'turns:relay.example:5349?transport=tcp'],
+      username: ' user ',
+      credential: 'secret'
+    })
+    expect(servers).toEqual([
+      { urls: ['stun:stun.l.google.com:19302'] },
+      {
+        urls: ['turn:relay.example:3478', 'turns:relay.example:5349?transport=tcp'],
+        username: 'user',
+        credential: 'secret'
+      }
+    ])
+  })
+
+  it('falls back to Google STUN when the config is empty', () => {
+    expect(buildIceServers({ urls: [], username: '', credential: '' })).toEqual([])
+    const onlyTurn = buildIceServers({ urls: ['turn:relay.example:3478'], username: '', credential: '' })
+    expect(onlyTurn).toEqual([])
   })
 })
 
